@@ -258,7 +258,8 @@ degradations! {
         /// host pages: its image is a shadow of its elements tiled in the heap's bytes, where Metal
         /// lays them out.
         ShadowedTexture = "shadowed-texture", Performance,
-            "its texels are copied into an image before each use and back after each write";
+             (over a buffer's bytes but a tracked private buffer's, kept before a write and merged \
+             back after it)";
         /// A texture buffer is viewed through a staging buffer: its texels start where the
         /// device views none (`minTexelBufferOffsetAlignment`).
         StagedTextureBuffer = "staged-texture-buffer", Performance,
@@ -267,9 +268,7 @@ degradations! {
         /// One command writes a buffer's bytes through a shadowed texture or a staged texture
         /// buffer and also another way (`shadow_merge.rs`).
         ShadowMerge = "shadow-merge", Performance,
-            "the shadow's texels are kept in a scratch buffer of three times the texture's bytes \
-             before the command, and after it a dispatch merges the bytes it changed through the \
-             texture into the buffer's: three copies and a dispatch in place of one copy back";
+            "the shadow's texels are kept in a scratch buffer of one to three times the texture's \
         /// A draw's index buffer or indirect arguments start where Vulkan reads neither.
         CopiedDrawBytes = "copied-draw-bytes", Performance,
             "they are copied into a buffer of the command buffer before the pass, and the draw \

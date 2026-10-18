@@ -1130,6 +1130,15 @@ impl OwnBytes {
         }
     }
 
+    /// [`with`](Self::with) while the buffer lies in pages: `None` while it is detached.
+        match &self.lie {
+            Lie::Fixed(fixed) => Some(f(&fixed.pages)),
+            Lie::Host(cell) => match cell.lying() {
+                Lying::Detached(_) => None,
+            },
+        }
+    }
+
     /// Where the bytes lie in the pages the buffer lies in now ([`Shape`]), read without their
     /// `VkBuffer`.
     fn shape(&self) -> Shape {
@@ -1531,11 +1540,21 @@ impl Device {
     /// it with the exit guard's entry points alone (`exit_guard`). Refused as
     /// [`Device::new_buffer`] refuses its length.
     pub(super) fn scratch_buffer(&self, length: u64) -> Result<Buffer, Error> {
+        self.unzeroed_buffer(length, HazardTrackingMode::Untracked)
+    }
+
+    /// [`scratch_buffer`](Device::scratch_buffer) of hazard tracking `tracking`: the tracker
+    /// orders its uses as any buffer's of that mode.
+    pub(super) fn unzeroed_buffer(
+        &self,
+        length: u64,
+        tracking: HazardTrackingMode,
+    ) -> Result<Buffer, Error> {
         const CALL: &str = "new_buffer";
         let modes = Modes::of(ResourceOptions::new(
             StorageMode::Private,
             CpuCacheMode::DefaultCache,
-            HazardTrackingMode::Untracked,
+            tracking,
         ))?;
         let class = buffer_class(CALL, modes)?;
         if length == 0 || length > self.properties().max_buffer_length {
@@ -2186,8 +2205,13 @@ impl Buffer {
     /// a no-copy buffer's ([`Buffer::base`]), and a heap buffer's, which is its heap's.
     pub(super) fn at(&self, offset: u64) -> (vk::Buffer, u64) {
         match &self.0.bytes {
-            Bytes::Own(own) => own.with(|pages| (pages.raw, pages.base + offset)),
-            Bytes::Heap(bytes) => bytes.bytes.at(bytes.offset + offset),
+
+    /// [`Buffer::at`] while the buffer's bytes lie in pages, read with them at once: `None` while
+    /// they are detached (`detach.rs`), when its `VkBuffer` is the device's stand-in, which holds
+    /// none of its bytes.
+    pub(super) fn attached_at(&self, offset: u64) -> Option<(vk::Buffer, u64)> {
+        match &self.0.bytes {
+            Bytes::Heap(bytes) => bytes.bytes.attached_at(bytes.offset + offset),
         }
     }
 

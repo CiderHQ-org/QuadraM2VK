@@ -973,20 +973,33 @@ fast forms record, and each `PrecisionNote`'s rustdoc states its bound.
   it).
   Cost: its texels are copied into an image before each use and back after each write; a render
   pass that loads it as an attachment, takes it in no other way and draws under scissors copies in
-  and back only the texels inside them (`WorkCounts::shadow_texels_copied_in`,
-  `shadow_texels_copied_back`). Where the device is measured to run it faster so
-  (`DriverFact::ShadowCopyBackDispatchFaster`), a copy back of a one-slice texture of 4-, 8- or
-  16-byte texels is a compute dispatch that stores the same bytes
-  (`WorkCounts::shadow_copies_back_dispatched`).
+  only the texels inside them (`WorkCounts::shadow_texels_copied_in`). Over a buffer's bytes that
+  another writer may write while a command buffer runs, the image is kept in a scratch buffer
+  before the first command that writes through it, and each copy back is a dispatch that merges
+  only the words the commands changed, so that writer's writes to the texels they left stay, as on
+  Metal: the CPU's, over a `Shared` or `Managed` buffer's bytes, host pages or the caller's
+  `VkBuffer`, and another queue's commands', over an untracked buffer's. A tracked `Private`
+  buffer's bytes have no such writer (the runtime orders another queue's commands that touch them
+  before or after the command buffer, as Metal does), and are copied back
+  (`shadow_texels_copied_back`), as a command that replaces every texel is. The scratch keeps the
+  rectangle the commands write in, where they bound it and the copies are cut so
+  (`WorkCounts::shadow_texels_kept`).
+  Where the device is measured to run it faster so (`DriverFact::ShadowCopyBackDispatchFaster`), a
+  copy back of a one-slice texture of 4-, 8- or 16-byte texels is a compute dispatch that stores
+  the same bytes (`WorkCounts::shadow_copies_back_dispatched`), and so is a merge's copy of such a
+  texture's image into its scratch buffer before the commands
+  (`WorkCounts::shadow_merge_copies_dispatched`), which on a device measured faster so
+  (`DriverFact::ShadowCopyInDispatchFaster`) also takes the copy in of the same texels before it,
+  storing them in the image through that view (`WorkCounts::shadow_copies_in_dispatched`); after
+  them, a cut merge reads the texels the commands left from the image itself, through an
 - `metal2vulkan-degrade-staged-texture-buffer` (performance). `StagedTextureBuffer`: A texture
   buffer is viewed through a staging buffer: its texels start where the device views none
   (`minTexelBufferOffsetAlignment`). Cost: its texels are copied into a staging buffer before each
   use and back after each write.
 - `metal2vulkan-degrade-shadow-merge` (performance). `ShadowMerge`: One command writes a buffer's
   bytes through a shadowed texture or a staged texture buffer and also another way. Cost: the
-  shadow's texels are kept in a scratch buffer of three times the texture's bytes before the
-  command, and after it a dispatch merges the bytes it changed through the texture into the
-  buffer's: three copies and a dispatch in place of one copy back.
+  buffer's, in place where the texture's bytes start and end in whole words of the buffer: one to
+  three copies and a dispatch in place of one copy back.
 - `metal2vulkan-degrade-copied-draw-bytes` (performance). `CopiedDrawBytes`: A draw's index buffer
   or indirect arguments start where Vulkan reads neither. Cost: they are copied into a buffer of the
   command buffer before the pass, and the draw reads the copy.

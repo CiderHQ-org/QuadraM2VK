@@ -2174,7 +2174,7 @@ impl Device {
         // Where the device copies a shadow back faster by a dispatch, the image takes the
         // integer view the dispatch reads (`shadow_copy_back.rs`).
         let (plan, word) = match shadow_copy_back::dispatches(self) {
-            true => with_word_view(plan, &facts),
+            true => with_word_view(plan, &facts, shadow_copy_back::dispatches_in(self)),
             false => (plan, None),
         };
         let hazard = texels.options().hazard_tracking_mode()?;
@@ -2201,7 +2201,11 @@ impl Device {
         };
         // A view the device does not make leaves the copies back copies. The copies hold it as
         // long as the image, which keeps it through a detach (`Image::own_view`).
-        let words = word.and_then(|(format, words)| {
+        let words = word.and_then(|(format, texel, stores)| {
+            let usage = match stores {
+                true => ImageUsageFlags::SAMPLED | ImageUsageFlags::STORAGE,
+                false => ImageUsageFlags::SAMPLED,
+            };
             let view = image.own_view(&VkView {
                 view_type: ImageViewType::TYPE_2D,
                 format,
@@ -2211,9 +2215,13 @@ impl Device {
                 level_count: 1,
                 base_layer: 0,
                 layer_count: 1,
-                usage: ImageUsageFlags::SAMPLED,
+                usage,
             });
-            view.ok().map(|view| WordView { view, words })
+            view.ok().map(|view| WordView {
+                view,
+                texel,
+                stores,
+            })
         });
         let copies = texels.shadow_copies(image.raw.get(), image.identity, aspects, words)?;
         // Its copies keep its own image, which it presents again once the bytes lie in pages.

@@ -59,6 +59,7 @@ use crate::error::{Error, RuntimeGap};
 use crate::image_plan::plan_image;
 use crate::linear_plan::{BufferLayout, LINEAR_ALIGNMENT};
 use crate::shadow::{ShadowBuffer, ShadowCopies, ShadowSource, ShadowTarget};
+use crate::shadow_merge::ScratchSpares;
 use crate::texture_descriptor::{texture_usage, TextureDescriptor, TextureLayout};
 use crate::tracker::UseRange;
 use crate::view_plan::ViewRecord;
@@ -234,6 +235,8 @@ impl Device {
             },
             tracked: texels.tracked(),
             drops_writes: false,
+            backing: texels.backing(),
+            merge_scratch: ScratchSpares::default(),
         };
         self.degrade(Degradation::ShadowedTexture, || {
             let [width, height, _] = layout.extent;

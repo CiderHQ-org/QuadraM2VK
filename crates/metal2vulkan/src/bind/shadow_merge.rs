@@ -118,7 +118,11 @@ const CURRENT: ResourceSlot = ResourceSlot {
 };
 
 /// A `Block { u32 words[]; }` storage buffer bound at `sym`.
-fn words_buffer(b: &mut ModuleBuilder, sym: ResourceSlot, u32_: TypeId) -> BResult<GlobalId> {
+pub(super) fn words_buffer(
+    b: &mut ModuleBuilder,
+    sym: ResourceSlot,
+    u32_: TypeId,
+) -> BResult<GlobalId> {
     let rta = b.ty(Type::RuntimeArray {
         elem: u32_,
         stride: Some(4),
@@ -131,7 +135,7 @@ fn words_buffer(b: &mut ModuleBuilder, sym: ResourceSlot, u32_: TypeId) -> BResu
     b.resource(sym, StorageClass::StorageBuffer, block)
 }
 
-fn u32_value(f: &mut FunctionBuilder<'_>, v: u32) -> BResult<Value> {
+pub(super) fn u32_value(f: &mut FunctionBuilder<'_>, v: u32) -> BResult<Value> {
     let c = f.u32_const(v)?;
     f.module().const_value(c)
 }
@@ -161,11 +165,6 @@ fn typed_module() -> BResult<TypedModule> {
     let void = b.ty(Type::Void)?;
     let mut f = b.function(void)?;
     let zero = u32_value(&mut f, 0)?;
-    let all = u32_value(&mut f, u32::MAX)?;
-    let mut lanes = Vec::with_capacity(4);
-    for byte in 0..4 {
-        lanes.push(u32_value(&mut f, 0xff << (8 * byte))?);
-    }
     let invocation = f.module().global_value(invocation)?;
     let invocation = f.load(invocation, MemAccess::default())?;
     let i = f.composite_extract(invocation, &[0])?;
@@ -196,20 +195,7 @@ fn typed_module() -> BResult<TypedModule> {
             let word = f.binary(BinOp::IAdd, first_word, row)?;
             let word = f.binary(BinOp::IAdd, word, x)?;
             let at = f.access_chain(current, &[zero, word])?;
-            let now = f.load(at, MemAccess::default())?;
-            // The bytes that differ, each 0xff in the mask.
-            let mut mask = zero;
-            for &lane in &lanes {
-                let bits = f.binary(BinOp::BitwiseAnd, differ, lane)?;
-                let moved = f.binary(BinOp::INotEqual, bits, zero)?;
-                let taken = f.select(moved, lane, zero)?;
-                mask = f.binary(BinOp::BitwiseOr, mask, taken)?;
-            }
-            let others = f.binary(BinOp::BitwiseXor, mask, all)?;
-            let left = f.binary(BinOp::BitwiseAnd, now, others)?;
-            let taken = f.binary(BinOp::BitwiseAnd, after, mask)?;
-            let merged = f.binary(BinOp::BitwiseOr, left, taken)?;
-            f.store(at, merged, MemAccess::default())?;
+            merge_word(f, at, after, differ)?;
             Ok(ArmEnd::FallThrough(Vec::new()))
         });
         f.if_(&mut (), moved, write, None)?;
@@ -228,6 +214,35 @@ fn typed_module() -> BResult<TypedModule> {
         }],
     )?;
     b.finalize()
+}
+
+/// Merge into the current word at `at` the changed word `after`, `differ` its xor with the kept
+/// word (not zero): each byte where they differ becomes `after`'s, and the others keep the
+/// current word's (the module docs).
+pub(super) fn merge_word(
+    f: &mut FunctionBuilder<'_>,
+    at: Value,
+    after: Value,
+    differ: Value,
+) -> BResult<()> {
+    let zero = u32_value(f, 0)?;
+    let all = u32_value(f, u32::MAX)?;
+    let now = f.load(at, MemAccess::default())?;
+    // The bytes that differ, each 0xff in the mask.
+    let mut mask = zero;
+    for byte in 0..4 {
+        let lane = u32_value(f, 0xff << (8 * byte))?;
+        let bits = f.binary(BinOp::BitwiseAnd, differ, lane)?;
+        let moved = f.binary(BinOp::INotEqual, bits, zero)?;
+        let taken = f.select(moved, lane, zero)?;
+        mask = f.binary(BinOp::BitwiseOr, mask, taken)?;
+    }
+    let others = f.binary(BinOp::BitwiseXor, mask, all)?;
+    let left = f.binary(BinOp::BitwiseAnd, now, others)?;
+    let taken = f.binary(BinOp::BitwiseAnd, after, mask)?;
+    let merged = f.binary(BinOp::BitwiseOr, left, taken)?;
+    f.store(at, merged, MemAccess::default())?;
+    Ok(())
 }
 
 /// The fixed binding numbers of the module's symbols.

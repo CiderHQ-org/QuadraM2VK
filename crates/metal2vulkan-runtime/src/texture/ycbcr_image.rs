@@ -15,6 +15,7 @@ use crate::device::lock;
 use crate::error::{internal, Error};
 use crate::image_plan::plan_image;
 use crate::shadow::{ShadowBuffer, ShadowCopies, ShadowSource};
+use crate::shadow_merge::ScratchSpares;
 use crate::texture_descriptor::{TextureDescriptor, TextureLayout};
 use crate::tracker::UseRange;
 use crate::values::ResourceOptions;
@@ -191,6 +192,8 @@ impl Device {
             tracked: texels.tracked(),
             // Metal drops a function's writes to the texture (EV XRR2-ycc1-m4).
             drops_writes: true,
+            backing: texels.backing(),
+            merge_scratch: ScratchSpares::default(),
         };
         Ok(Storage::Shadow {
             image: image.shared(),
@@ -346,6 +349,8 @@ impl Texture {
             },
             tracked: texels.tracked(),
             drops_writes: false,
+            backing: texels.backing(),
+            merge_scratch: ScratchSpares::default(),
         };
         Ok((image, copies))
     }
@@ -475,6 +480,8 @@ impl Texture {
             },
             tracked: texels.tracked(),
             drops_writes: false,
+            backing: texels.backing(),
+            merge_scratch: ScratchSpares::default(),
         };
         let storage = Storage::Shadow {
             image: image.shared(),

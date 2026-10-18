@@ -92,6 +92,16 @@ impl Host {
         self.words().iter().all(|&word| word == value)
     }
 
+    /// Its pages, for a no-copy buffer or a rebind.
+    ///
+    /// # Safety
+    ///
+    /// They outlive every buffer over them, which alone use them while it lives.
+    pub(super) unsafe fn memory(&self) -> HostMemory {
+        // SAFETY: the caller's contract; `BYTES` bytes, allocated in `new` aligned to a page.
+        unsafe { HostMemory::new(self.0) }
+    }
+
     /// Set every word to `value`.
     pub(super) fn fill(&self, value: u32) {
         // SAFETY: as above; no command uses them now.

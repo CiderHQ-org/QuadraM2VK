@@ -61,7 +61,8 @@ use crate::image_plan::plan_image;
 use crate::image_plan::{copies_between, takes_views_of};
 use crate::memory::Placement;
 use crate::resource::{Identity, ResourceKey};
-use crate::shadow::{ImageThrough, ShadowCopies, ShadowSource};
+use crate::shadow::{Backing, ImageThrough, ShadowCopies, ShadowSource};
+use crate::shadow_merge::ScratchSpares;
 use crate::texture::{copy_units, image_error, texture_aspects};
 use crate::texture_descriptor::{TextureDescriptor, TextureLayout};
 use crate::tracker::UseRange;
@@ -478,6 +479,8 @@ impl Device {
                     shadow_range,
                     tracked: identity.tracked,
                     drops_writes: false,
+                    backing: Backing::Image,
+                    merge_scratch: ScratchSpares::default(),
                 };
                 Owner::ViewShadow(Box::new(ViewShadow {
                     placement,

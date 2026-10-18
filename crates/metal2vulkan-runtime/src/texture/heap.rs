@@ -175,7 +175,8 @@ use crate::memory::{Memory, MemoryClass, Placement};
 use crate::metal_level::MetalLevel;
 use crate::release;
 use crate::resource::{Identity, ResourceKey};
-use crate::shadow::{ShadowBuffer, ShadowCopies, ShadowSource, ShadowTarget};
+use crate::shadow::{Backing, ShadowBuffer, ShadowCopies, ShadowSource, ShadowTarget};
+use crate::shadow_merge::ScratchSpares;
 use crate::texture_descriptor::{effective_usage, Creator, TextureLayout, TextureProblem};
 use crate::tracker::UseRange;
 use crate::two_planes;
@@ -2601,6 +2602,8 @@ impl Device {
                 shadow_range,
                 tracked: identity.tracked,
                 drops_writes: false,
+                backing: Backing::of(bytes, false),
+                merge_scratch: ScratchSpares::default(),
             };
             Owner::HeapShadow(Box::new(HeapShadow {
                 placement,
@@ -2687,6 +2690,8 @@ impl Device {
                 shadow_range,
                 tracked: identity.tracked,
                 drops_writes: false,
+                backing: Backing::of(bytes, false),
+                merge_scratch: ScratchSpares::default(),
             };
             Owner::HeapShadow(Box::new(HeapShadow {
                 placement,
@@ -2764,6 +2769,8 @@ impl Device {
                 shadow_range,
                 tracked: identity.tracked,
                 drops_writes: false,
+                backing: Backing::of(bytes, false),
+                merge_scratch: ScratchSpares::default(),
             };
             Owner::HeapShadow(Box::new(HeapShadow {
                 placement,

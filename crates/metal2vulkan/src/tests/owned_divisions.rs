@@ -144,7 +144,19 @@ fn modules() -> Vec<Build> {
             );
         }
     }
-    for words in [1, 2, 4] {
+    for view in bind::ShadowTexelView::ALL {
+        push(
+            format!("shadow_copy_back_module({view:?})"),
+            Box::new(move |d| Ok(bind::shadow_copy_back_module(d, view)?.spirv)),
+        );
+        push(
+            format!("shadow_copy_in_module({view:?})"),
+            Box::new(move |d| Ok(bind::shadow_copy_in_module(d, view)?.spirv)),
+        );
+        push(
+            format!("shadow_merge_image_module({view:?})"),
+            Box::new(move |d| Ok(bind::shadow_merge_image_module(d, view)?.spirv)),
+        );
         push(
             format!("shadow_copy_back_module({words})"),
             Box::new(move |d| Ok(bind::shadow_copy_back_module(d, words)?.spirv)),

@@ -39,8 +39,11 @@ use super::linear_plan::{
 };
 use super::resource::{Identity, ResourceKey};
 use super::rotated::{self, Frame, RotatedCopies};
-use super::shadow::{ShadowBuffer, ShadowCopies, ShadowSource, ShadowStaging, ShadowTarget};
+use super::shadow::{
+    Backing, ShadowBuffer, ShadowCopies, ShadowSource, ShadowStaging, ShadowTarget,
+};
 use super::shadow_copy_back::WordView;
+use super::shadow_merge::ScratchSpares;
 use super::texture::surface_two_planes;
 use super::texture::{IdUse, Texture};
 use super::texture_descriptor::{
@@ -102,6 +105,8 @@ pub(super) struct Texels {
     /// The texture objects over the texels as a texture buffer's (`Storage::Texels`), and the
     /// caller's token for a texture buffer's range (`Device::new_texture_with_range_token`).
     pub(super) objects: ObjectsToken,
+    /// The texels lie in an IOSurface's plane (`Buffer::new_texture_with_iosurface_plane`).
+    surface: bool,
 }
 
 /// A texture's texel buffer views, by format, kind (storage or uniform) and range; destroyed
@@ -636,7 +641,7 @@ impl Buffer {
             let id_use = IdUse::Program(descriptor.placement);
             return self.device().new_rotated_texture(
                 call,
-                [rows, stored].map(|texels| texels.with_options(options)),
+                [rows, stored].map(|texels| texels.with_options(options).over_surface(surface)),
                 descriptor,
                 (&layout, rotation),
                 id_use,
@@ -648,16 +653,18 @@ impl Buffer {
             return Err(Error::DeviceLost);
         }
         if let Some(alpha) = alpha_plane {
-            let texels =
-                Texels::placed(self.clone(), placed, texel_bytes, descriptor).with_options(options);
+            let texels = Texels::placed(self.clone(), placed, texel_bytes, descriptor)
+                .with_options(options)
+                .over_surface(surface);
             let id_use = IdUse::Program(descriptor.placement);
             return self
                 .device()
                 .new_surface_planes_texture(call, texels, descriptor, &layout, id_use, alpha);
         }
         if let Some((planes, span)) = converted {
-            let texels =
-                Texels::placed(self.clone(), placed, texel_bytes, descriptor).with_options(options);
+            let texels = Texels::placed(self.clone(), placed, texel_bytes, descriptor)
+                .with_options(options)
+                .over_surface(surface);
             let id_use = IdUse::Program(descriptor.placement);
             return self.device().new_converted_texture(
                 call,
@@ -672,8 +679,9 @@ impl Buffer {
             let texels = Texels::texture_buffer(self.clone(), placed.gpu, texel_bytes, descriptor)?;
             Ok(texels.texture(descriptor, &layout, IdUse::Program(descriptor.placement)))
         } else {
-            let texels =
-                Texels::placed(self.clone(), placed, texel_bytes, descriptor).with_options(options);
+            let texels = Texels::placed(self.clone(), placed, texel_bytes, descriptor)
+                .with_options(options)
+                .over_surface(surface);
             let id_use = IdUse::Program(descriptor.placement);
             let texture = self
                 .device()
@@ -810,7 +818,8 @@ impl Texture {
                 texels.texel_bytes,
                 &descriptor,
             )
-            .with_options(texels.options);
+            .with_options(texels.options)
+            .over_surface(texels.surface);
             device.new_texture_over_buffer(CALL, over, &descriptor, &layout, IdUse::Runtime)
         })
     }
@@ -909,6 +918,7 @@ impl Texels {
         };
         Texels::new(self.buffer.clone(), layout, self.texel_bytes, &descriptor)
             .with_options(self.options)
+            .over_surface(self.surface)
     }
 
     /// These texels' buffer's bytes `span` as one row of `unit`-byte texels, of these texels'
@@ -928,7 +938,9 @@ impl Texels {
             allow_gpu_optimized_contents: self.allow_gpu_optimized_contents,
             ..TextureDescriptor::default()
         };
-        Texels::new(self.buffer.clone(), layout, unit, &descriptor).with_options(self.options)
+        Texels::new(self.buffer.clone(), layout, unit, &descriptor)
+            .with_options(self.options)
+            .over_surface(self.surface)
     }
 
     /// The attachment twin of `pixel_format` kept with the texels (a texture buffer's, or a
@@ -999,6 +1011,8 @@ impl Texels {
             },
             tracked: self.tracked(),
             drops_writes: false,
+            backing: self.backing(),
+            merge_scratch: ScratchSpares::default(),
         })
     }
 
@@ -1023,6 +1037,11 @@ impl Texels {
     /// These texels as a texture of `options` (its hazard tracking mode resolved) has them.
     fn with_options(self, options: ResourceOptions) -> Texels {
         Texels { options, ..self }
+    }
+
+    /// These texels, in an IOSurface's plane where `surface`.
+    fn over_surface(self, surface: bool) -> Texels {
+        Texels { surface, ..self }
     }
 
     /// Every byte of the buffer the texels lie in, for the GPU or the CPU: from the first to the
@@ -1075,8 +1094,14 @@ impl Texels {
             twins: Mutex::new(HashMap::new()),
             alpha: None,
             objects: ObjectsToken::default(),
+            surface: false,
             buffer,
         }
+    }
+
+    /// What holds the texels' bytes, as the CPU may write them (`shadow::Backing`).
+    pub(super) fn backing(&self) -> Backing {
+        Backing::of(&self.buffer, self.surface)
     }
 
     /// Where the CPU's `replace_region` and `get_bytes` find the texels.
@@ -1142,6 +1167,8 @@ impl Texels {
             shadow_range,
             tracked: texels.tracked(),
             drops_writes: false,
+            backing: texels.backing(),
+            merge_scratch: ScratchSpares::default(),
         };
         texels.staged = Some(Arc::new(copies));
         let (offset, alignment) = (
@@ -1267,6 +1294,8 @@ impl Texels {
             },
             tracked: self.tracked(),
             drops_writes: false,
+            backing: self.backing(),
+            merge_scratch: ScratchSpares::default(),
         })
     }
 

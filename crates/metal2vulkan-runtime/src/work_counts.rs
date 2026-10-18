@@ -8,9 +8,14 @@
 use super::command_buffer::GroupEnd;
 use super::degradation::Degradation;
 use super::device::lock;
+use super::shadow::{Backing, CopyCause, Lost, ShadowCopy, ShadowSource};
 use super::Device;
 use ash::vk;
 use std::sync::atomic::{AtomicU64, Ordering};
+/// The texels of a texture over an IOSurface's plane from which its shadow's copies in count
+/// apart (`WorkCounts::shadow_texels_first_copied_in_large_surfaces`,
+/// `shadow_texels_recopied_in_large_surfaces`): 2^20, which a 1920x1080 framebuffer's exceed.
+const LARGE_SURFACE_TEXELS: u64 = 1 << 20;
 
 /// A device's counters (`DeviceShared::counts`), each only ever added to.
 #[derive(Default)]
@@ -175,8 +180,48 @@ pub(crate) struct Counters {
     shadows_zeroed: AtomicU64,
     shadow_copies: AtomicU64,
     shadow_texels_copied_in: AtomicU64,
+    shadow_texels_first_copied_in: AtomicU64,
+    shadow_texels_first_copied_in_images: AtomicU64,
+    shadow_texels_first_copied_in_private_buffers: AtomicU64,
+    shadow_texels_first_copied_in_mapped_buffers: AtomicU64,
+    shadow_texels_first_copied_in_host_pages: AtomicU64,
+    shadow_texels_first_copied_in_aliased_host_pages: AtomicU64,
+    shadow_texels_first_copied_in_surfaces: AtomicU64,
+    shadow_texels_first_copied_in_large_surfaces: AtomicU64,
+    shadow_texels_first_copied_in_again: AtomicU64,
+    shadow_texels_copied_in_images: AtomicU64,
+    shadow_texels_recopied_beyond_held: AtomicU64,
+    shadow_texels_recopied_after_changes: AtomicU64,
+    shadow_texels_recopied_after_other_shadows: AtomicU64,
+    shadow_texels_recopied_after_two_ways_merges: AtomicU64,
+    shadow_texels_recopied_after_writes: AtomicU64,
+    shadow_texels_recopied_after_writes_within: AtomicU64,
+    shadow_texels_recopied_after_dropped_writes: AtomicU64,
+    shadow_texels_bounded_copied_in: AtomicU64,
+    shadow_texels_recopied_in_images: AtomicU64,
+    shadow_texels_recopied_in_private_buffers: AtomicU64,
+    shadow_texels_recopied_in_mapped_buffers: AtomicU64,
+    shadow_texels_recopied_in_host_pages: AtomicU64,
+    shadow_texels_recopied_in_aliased_host_pages: AtomicU64,
+    shadow_texels_recopied_in_surfaces: AtomicU64,
+    shadow_texels_recopied_in_large_surfaces: AtomicU64,
     shadow_texels_copied_back: AtomicU64,
     shadow_copies_back_dispatched: AtomicU64,
+    shadow_copies_in_dispatched: AtomicU64,
+    shadow_merge_copies_dispatched: AtomicU64,
+    shadow_merge_scratches_reused: AtomicU64,
+    shadow_merge_scratches_zeroed: AtomicU64,
+    shadow_merges_fetched: AtomicU64,
+    shadow_attachment_loads_within: AtomicU64,
+    shadow_attachment_loads_whole: AtomicU64,
+    shadow_attachment_clears: AtomicU64,
+    shadow_attachment_clears_in_part: AtomicU64,
+    shadow_attachment_loads_untouched: AtomicU64,
+    shadow_attachment_tiles_covered: AtomicU64,
+    shadow_attachment_tiles_bounded: AtomicU64,
+    shadows_sharing_truth: AtomicU64,
+    owned_descriptor_pools: AtomicU64,
+    shadow_texels_kept: AtomicU64,
     bounded_shadow_copies: AtomicU64,
     views_through_swizzle: AtomicU64,
     view_shadows: AtomicU64,
@@ -197,6 +242,23 @@ pub(crate) struct Counters {
     pipelines_linked: AtomicU64,
     dispatch_pipelines_pooled: AtomicU64,
     upload_chunks_in_device_memory: AtomicU64,
+
+/// How a render pass took a shadowed texture as a color attachment
+/// (`WorkCounts::shadow_attachment_loads_within` and kin).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ColorTaken {
+    /// Loaded, its copies cut to the rectangle bounding the draws' scissors.
+    LoadedWithin,
+    /// Loaded (or neither loaded nor cleared), its every texel copied in.
+    Loaded,
+    /// Cleared over the whole texture: no copy in.
+    Cleared,
+    /// Cleared over part of the texture: its every texel copied in.
+    ClearedInPart,
+    /// Loaded in a pass that reaches no tile: no copy in or back.
+    Untouched,
+}
+
 /// What a `VkCommandBuffer` the runtime began was for (`WorkCounts::command_buffers_begun` and
 /// its parts, `command_buffers_begun_encoders` and kin).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1135,6 +1197,66 @@ impl Counters {
             .fetch_add(texels_back, Ordering::Relaxed);
     }
 
+    /// An encoder planned `copy`, a copy in of a shadowed texture: its texels
+    /// (`shadow::ShadowCopy::texels_copied_in`) counted by why it is made
+    /// (`shadow::ShadowCopy::cause`, a change of the truth by its reason), by what holds the truth (`shadow::Backing`), apart where
+    /// the truth is an IOSurface's plane under a texture of at least [`LARGE_SURFACE_TEXELS`]
+    /// texels, and apart where the shadow is an image's, copied image to image. Nothing for any
+    /// other step.
+    pub(crate) fn shadow_copy_in_planned<M>(&self, copy: &ShadowCopy<M>) {
+        let Some(cause) = copy.cause else {
+            return;
+        };
+        let texels = copy.texels_copied_in();
+        let add = |counter: &AtomicU64| {
+            counter.fetch_add(texels, Ordering::Relaxed);
+        };
+        let copies = &copy.copies;
+        if matches!(copies.source, ShadowSource::Image { .. }) {
+            add(&self.shadow_texels_copied_in_images);
+        }
+        let large = copies.backing == Backing::Surface && copies.texels() >= LARGE_SURFACE_TEXELS;
+        let first = cause == CopyCause::First;
+        match cause {
+            CopyCause::First => add(&self.shadow_texels_first_copied_in),
+            CopyCause::BeyondHeld => add(&self.shadow_texels_recopied_beyond_held),
+            CopyCause::Changed(lost) => {
+                add(&self.shadow_texels_recopied_after_changes);
+                add(match lost {
+                    Lost::OtherShadow => &self.shadow_texels_recopied_after_other_shadows,
+                    Lost::TwoWays => &self.shadow_texels_recopied_after_two_ways_merges,
+                    Lost::Written => &self.shadow_texels_recopied_after_writes,
+                    Lost::Within => &self.shadow_texels_recopied_after_writes_within,
+                    Lost::Dropped => &self.shadow_texels_recopied_after_dropped_writes,
+                });
+            }
+            CopyCause::Bounded => add(&self.shadow_texels_bounded_copied_in),
+        }
+        add(match (first, copies.backing) {
+            (true, Backing::Image) => &self.shadow_texels_first_copied_in_images,
+            (true, Backing::PrivateBuffer) => &self.shadow_texels_first_copied_in_private_buffers,
+            (true, Backing::MappedBuffer) => &self.shadow_texels_first_copied_in_mapped_buffers,
+            (true, Backing::HostPages) => &self.shadow_texels_first_copied_in_host_pages,
+            (true, Backing::AliasedHostPages) => {
+                &self.shadow_texels_first_copied_in_aliased_host_pages
+            }
+            (true, Backing::Surface) => &self.shadow_texels_first_copied_in_surfaces,
+            (false, Backing::Image) => &self.shadow_texels_recopied_in_images,
+            (false, Backing::PrivateBuffer) => &self.shadow_texels_recopied_in_private_buffers,
+            (false, Backing::MappedBuffer) => &self.shadow_texels_recopied_in_mapped_buffers,
+            (false, Backing::HostPages) => &self.shadow_texels_recopied_in_host_pages,
+            (false, Backing::AliasedHostPages) => {
+                &self.shadow_texels_recopied_in_aliased_host_pages
+            }
+            (false, Backing::Surface) => &self.shadow_texels_recopied_in_surfaces,
+        });
+        match (large, first) {
+            (true, true) => add(&self.shadow_texels_first_copied_in_large_surfaces),
+            (true, false) => add(&self.shadow_texels_recopied_in_large_surfaces),
+            (false, _) => {}
+        }
+    }
+
     /// An encoder planned `n` copies in of the texels only writes within a rectangle changed
     /// since a shadowed texture's copy in (`shadow.rs`, `shadow::Within`).
     pub(crate) fn bounded_shadow_copies_planned(&self, n: usize) {
@@ -1147,6 +1269,88 @@ impl Counters {
     pub(crate) fn shadow_copy_back_dispatched(&self) {
         self.shadow_copies_back_dispatched
             .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// An encoder recorded a merged shadowed texture's copy in and keep as one dispatch
+    /// (`shadow_copy_in.rs`).
+    pub(crate) fn shadow_copy_in_dispatched(&self) {
+        self.shadow_copies_in_dispatched
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// An encoder planned `n` keeps and merges of shadowed textures whose copies of the shadow
+    /// into the merge's scratch are dispatches (`shadow_merge.rs`, `ShadowMerge::dispatches`).
+    pub(crate) fn shadow_merge_copies_dispatched(&self, n: usize) {
+        self.shadow_merge_copies_dispatched
+            .fetch_add(n as u64, Ordering::Relaxed);
+    }
+
+    /// A merge of a shadowed texture took its scratch from its shadow's spares (`shadow_merge.rs`,
+    /// `ScratchSpares`).
+    pub(crate) fn shadow_merge_scratch_reused(&self) {
+        self.shadow_merge_scratches_reused
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A merge of a shadowed texture made its scratch zero (`shadow_merge.rs`): one not cut.
+    pub(crate) fn shadow_merge_scratch_zeroed(&self) {
+        self.shadow_merge_scratches_zeroed
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A merge of a shadowed texture fetches the texels after the commands through its shadow's
+    /// unsigned-integer view (`shadow_merge.rs`).
+    pub(crate) fn shadow_merge_fetched(&self) {
+        self.shadow_merges_fetched.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A render pass took a shadowed texture as a color attachment so (`render/shadows.rs`).
+    pub(crate) fn shadow_color_taken(&self, taken: ColorTaken) {
+        let counter = match taken {
+            ColorTaken::LoadedWithin => &self.shadow_attachment_loads_within,
+            ColorTaken::Loaded => &self.shadow_attachment_loads_whole,
+            ColorTaken::Cleared => &self.shadow_attachment_clears,
+            ColorTaken::ClearedInPart => &self.shadow_attachment_clears_in_part,
+            ColorTaken::Untouched => &self.shadow_attachment_loads_untouched,
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A render pass took a shadowed texture as a color attachment it loads, its copies cut to the
+    /// rectangle bounding its draws' scissors: of the `bounded` 32-pixel tiles that rectangle
+    /// reaches, the rectangles themselves reach `covered` (`render/shadows.rs`,
+    /// `clear_reach::DrawnArea::covered_tiles`).
+    pub(crate) fn shadow_attachment_tiles(&self, covered: u64, bounded: u64) {
+        self.shadow_attachment_tiles_covered
+            .fetch_add(covered, Ordering::Relaxed);
+        self.shadow_attachment_tiles_bounded
+            .fetch_add(bounded, Ordering::Relaxed);
+    }
+
+    /// An ended encoder's first copies in of shadowed textures moved `texels` texels of textures
+    /// an earlier encoder of its command buffer copied in too (`shadow.rs`).
+    pub(crate) fn shadow_texels_first_copied_in_again(&self, texels: u64) {
+        self.shadow_texels_first_copied_in_again
+            .fetch_add(texels, Ordering::Relaxed);
+    }
+
+    /// An ended encoder used `n` shadowed textures whose truth one it used before shares
+    /// (`shadow.rs`).
+    pub(crate) fn shadows_sharing_truth(&self, n: usize) {
+        self.shadows_sharing_truth
+            .fetch_add(n as u64, Ordering::Relaxed);
+    }
+
+    /// A command made a descriptor pool for its dispatches of one of the runtime's own kernels
+    /// (`owned_kernel.rs`).
+    pub(crate) fn owned_descriptor_pool(&self) {
+        self.owned_descriptor_pools.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// An encoder planned keeps of shadowed textures that copy `texels` texels into their merges'
+    /// scratch (`shadow_merge.rs`).
+    pub(crate) fn shadow_texels_kept(&self, texels: u64) {
+        self.shadow_texels_kept.fetch_add(texels, Ordering::Relaxed);
     }
 
     /// A texture view was made the image itself to its bindings, through a swizzle over the
@@ -1997,14 +2201,94 @@ pub struct WorkCounts {
     pub shadows_zeroed: u64,
     /// Copies between a shadowed texture's truth and its shadow that encoders planned
     /// (`shadow.rs`): copies in before a command, copies back after one or as the encoder ends,
-    /// and the keeps and merges of a command that writes the bytes two ways. Each is a command of
-    /// its encoder over the texture's texels.
+    /// and the keeps and merges of a command that writes the bytes two ways or writes through a
+    /// texture that merges back (`shadow_merge.rs`). Each is a command of its encoder over the
+    /// texture's texels.
     pub shadow_copies: u64,
     /// The texels those copies in move from a 2D texture's buffer's bytes to its image (a texture
     /// over a buffer, a no-copy buffer or an IOSurface plane): every texel, or those inside the
     /// rectangle bounding a pass's draws' scissors over an attachment it loads and takes in no
     /// other way.
     pub shadow_texels_copied_in: u64,
+    /// The texels every copy in of an image's shadow moves, image to image (a texture's own
+    /// image's, `texture/usage_shadow.rs`, or a view's, `texture/view_shadow.rs`): each region's,
+    /// or those inside a rectangle where the copy is cut as a buffer's texture's is. Those are not
+    /// among `shadow_texels_copied_in`.
+    pub shadow_texels_copied_in_images: u64,
+    /// The texels each encoder's first copy in of a texture moves: before the first command of the
+    /// encoder that uses it, or the first after work the encoder records apart. Those of a
+    /// buffer's texture are among `shadow_texels_copied_in`, those of an image's shadow among
+    /// `shadow_texels_copied_in_images`. Every other copy in is a later one, counted by why it is
+    /// made (`shadow_texels_recopied_beyond_held`, `shadow_texels_recopied_after_changes`,
+    /// `shadow_texels_bounded_copied_in`, which with this sum to both kinds' copies in). The six
+    /// counts after it split it by what holds the texture's truth.
+    pub shadow_texels_first_copied_in: u64,
+    /// Of `shadow_texels_first_copied_in`, those of a truth that is an image: a texture's own
+    /// (the shadow a binding beyond its usage or a read of its own pass's attachment takes,
+    /// `texture/usage_shadow.rs`), or the one a view presents (`texture/view_shadow.rs`).
+    pub shadow_texels_first_copied_in_images: u64,
+    /// Those of the bytes of a buffer of private or memoryless storage the device made.
+    pub shadow_texels_first_copied_in_private_buffers: u64,
+    /// Those of the bytes of a buffer of shared or managed storage the device made, which the
+    /// CPU maps.
+    pub shadow_texels_first_copied_in_mapped_buffers: u64,
+    /// Those of host pages a no-copy buffer imported (or the memory of the caller's `VkBuffer`)
+    /// that only the shadow's own image is copied from.
+    pub shadow_texels_first_copied_in_host_pages: u64,
+    /// Those of host pages that the texture's own image lies in too (an aliasing image, a
+    /// pitched host image among them).
+    pub shadow_texels_first_copied_in_aliased_host_pages: u64,
+    /// Those of an IOSurface's plane (`Buffer::new_texture_with_iosurface_plane`).
+    pub shadow_texels_first_copied_in_surfaces: u64,
+    /// Of `shadow_texels_first_copied_in_surfaces`, those under a texture of 2^20 texels or more
+    /// (a 1920x1080 framebuffer's among them).
+    pub shadow_texels_first_copied_in_large_surfaces: u64,
+    /// Of `shadow_texels_first_copied_in`, those of a texture an earlier encoder of the same
+    /// command buffer copied in too, counted as each encoder ends (not an indirect command
+    /// buffer's segment): the copies in a shadow kept across a command buffer's encoders could
+    /// leave out, at most.
+    pub shadow_texels_first_copied_in_again: u64,
+    /// The texels later copies in move (not an encoder's first) before a command that needs
+    /// texels outside the rectangle the shadow's last copy in moved (a pass's read at its own
+    /// pixels, then a read anywhere), the truth unchanged outside it or not.
+    pub shadow_texels_recopied_beyond_held: u64,
+    /// The texels later copies in move after the truth changed since the shadow's copy in, other
+    /// than by writes within a rectangle that left it stale there alone. The five counts after it
+    /// split it by the change that came first.
+    pub shadow_texels_recopied_after_changes: u64,
+    /// Of `shadow_texels_recopied_after_changes`, those after a copy back or merge of another
+    /// shadowed texture over the same truth.
+    pub shadow_texels_recopied_after_other_shadows: u64,
+    /// Those after the texture's own merge, after a command that wrote its truth two ways.
+    pub shadow_texels_recopied_after_two_ways_merges: u64,
+    /// Those after a command wrote the truth another way (a pass that clears it, a storage
+    /// write, a copy).
+    pub shadow_texels_recopied_after_writes: u64,
+    /// Those after a render pass instance's writes within a rectangle that left the image stale
+    /// nowhere alone: the attachment has no shadow laid out as this one, or this one was
+    /// written through or kept.
+    pub shadow_texels_recopied_after_writes_within: u64,
+    /// Those after a command wrote through the texture where Metal drops the writes.
+    pub shadow_texels_recopied_after_dropped_writes: u64,
+    /// The texels the copies of `bounded_shadow_copies` move: those inside the rectangle bounding
+    /// where writes within rectangles changed the truth since the shadow's copy in.
+    pub shadow_texels_bounded_copied_in: u64,
+    /// The texels of those later copies in (`shadow_texels_recopied_beyond_held`,
+    /// `shadow_texels_recopied_after_changes` and `shadow_texels_bounded_copied_in` together) of
+    /// a truth that is an image, split by what holds the truth as the first copies are.
+    pub shadow_texels_recopied_in_images: u64,
+    /// Those of the bytes of a buffer of private or memoryless storage the device made.
+    pub shadow_texels_recopied_in_private_buffers: u64,
+    /// Those of the bytes of a buffer of shared or managed storage the device made.
+    pub shadow_texels_recopied_in_mapped_buffers: u64,
+    /// Those of host pages a no-copy buffer imported (or the memory of the caller's `VkBuffer`).
+    pub shadow_texels_recopied_in_host_pages: u64,
+    /// Those of host pages that the texture's own image lies in too.
+    pub shadow_texels_recopied_in_aliased_host_pages: u64,
+    /// Those of an IOSurface's plane.
+    pub shadow_texels_recopied_in_surfaces: u64,
+    /// Of `shadow_texels_recopied_in_surfaces`, those under a texture of 2^20 texels or more.
+    pub shadow_texels_recopied_in_large_surfaces: u64,
     /// The texels those copies back move from a 2D texture's image to its buffer's bytes (a
     /// texture over a buffer, a no-copy buffer or an IOSurface plane): every texel, or those
     /// inside the rectangle bounding a pass's draws' scissors over an attachment it loads.
@@ -2013,6 +2297,64 @@ pub struct WorkCounts {
     /// words, where the device runs one faster than its copy
     /// (`DriverFact::ShadowCopyBackDispatchFaster`): the same bytes either way.
     pub shadow_copies_back_dispatched: u64,
+    /// Of the copies in among `shadow_copies`, those recorded with their texture's keep after
+    /// them (one of `shadow_merge_copies_dispatched`) as one dispatch that stores the texels in
+    /// the shadow and in the merge's scratch, where the device runs them faster so
+    /// (`DriverFact::ShadowCopyInDispatchFaster`): the same bytes either way.
+    pub shadow_copies_in_dispatched: u64,
+    /// Of the keeps and merges among `shadow_copies`, those whose copy of the shadow's texels into
+    /// the merge's scratch is the dispatch a copy back takes, where the device runs one faster
+    /// than its copy (`DriverFact::ShadowCopyBackDispatchFaster`): the same bytes either way.
+    pub shadow_merge_copies_dispatched: u64,
+    /// The merges of shadowed textures whose scratch was a buffer their shadow kept from an
+    /// earlier merge whose command buffers completed (`shadow_merge.rs`): no buffer made.
+    pub shadow_merge_scratches_reused: u64,
+    /// The merges of shadowed textures whose scratch was made zero, as their kernel reads bytes
+    /// no copy writes (those between the texture's rows): a merge not cut to rows of whole words,
+    /// through a copy or of rows that start or end inside a word. A cut merge's copies write
+    /// every byte its kernel reads, so its scratch is not zeroed.
+    pub shadow_merge_scratches_zeroed: u64,
+    /// The merges of shadowed textures that fetch the texels after the commands from the shadow
+    /// through its unsigned-integer view, comparing them with the kept texels, in place of a copy
+    /// of them into the scratch (`shadow_merge.rs`): a cut merge whose shadow has the view.
+    pub shadow_merges_fetched: u64,
+    /// The shadowed textures render passes took as color attachments and loaded, each once a
+    /// pass, whose copies are cut to the rectangle bounding the pass's draws' scissors
+    /// (`render/shadows.rs`): the copy in moves the texels inside it alone, as do the copy back
+    /// or the keep and merge.
+    pub shadow_attachment_loads_within: u64,
+    /// Those loaded whose copies move every texel: the pass's draws are not bounded so, or the
+    /// attachment is not the whole of a one-level, one-slice 2D texture rendered itself. Those
+    /// neither loaded nor cleared are among them.
+    pub shadow_attachment_loads_whole: u64,
+    /// Those cleared over the whole texture: no copy in.
+    pub shadow_attachment_clears: u64,
+    /// Those cleared over part of the texture (a render area smaller than it): every texel
+    /// copied in.
+    pub shadow_attachment_clears_in_part: u64,
+    /// Those loaded in a pass that reaches no tile: no copy in or back.
+    pub shadow_attachment_loads_untouched: u64,
+    /// Of `shadow_attachment_tiles_bounded`, the tiles the pass's draws' scissor rectangles
+    /// themselves reach: what a copy cut to those rectangles' tiles would move, where one cut to
+    /// their bounding rectangle moves all of them.
+    pub shadow_attachment_tiles_covered: u64,
+    /// The 32-pixel tiles (from the render area's origin) the rectangle bounding the draws'
+    /// scissors reaches, for each count of `shadow_attachment_loads_within`.
+    pub shadow_attachment_tiles_bounded: u64,
+    /// The shadowed textures an encoder used whose truth one it used before shares (another
+    /// texture over the same bytes, or a view's shadow of the same image), counted as each
+    /// encoder ends (not an indirect command buffer's segment): each copies its texels in apart.
+    pub shadows_sharing_truth: u64,
+    /// The descriptor pools commands made for their dispatches of the runtime's own kernels
+    /// (`owned_kernel.rs`), one per command: none for a kernel whose set 0 is pushed, on a device
+    /// that pushes descriptor sets (`vkCmdPushDescriptorSet`): the rows copy's, and a shadowed
+    /// texture's copy back's and merges'.
+    pub owned_descriptor_pools: u64,
+    /// The texels the keeps among `shadow_copies` copy from a shadow into their merge's scratch:
+    /// those inside the rectangle the encoder's commands write in, each row widened to whole
+    /// words of the buffer, where the commands bound it and the merge goes in place; every texel
+    /// otherwise.
+    pub shadow_texels_kept: u64,
     /// Of `shadow_copies`, the copies in of the texels inside the rectangle bounding where the
     /// bytes changed since the image's copy in, where only writes inside rectangles of its texels
     /// changed them: a render pass instance's draws into a color attachment it loads, over a
@@ -2355,10 +2697,120 @@ impl Device {
             shadows_zeroed: counters.shadows_zeroed.load(Ordering::Relaxed),
             shadow_copies: counters.shadow_copies.load(Ordering::Relaxed),
             shadow_texels_copied_in: counters.shadow_texels_copied_in.load(Ordering::Relaxed),
+            shadow_texels_first_copied_in: counters
+                .shadow_texels_first_copied_in
+                .load(Ordering::Relaxed),
+            shadow_texels_first_copied_in_images: counters
+                .shadow_texels_first_copied_in_images
+                .load(Ordering::Relaxed),
+            shadow_texels_first_copied_in_private_buffers: counters
+                .shadow_texels_first_copied_in_private_buffers
+                .load(Ordering::Relaxed),
+            shadow_texels_first_copied_in_mapped_buffers: counters
+                .shadow_texels_first_copied_in_mapped_buffers
+                .load(Ordering::Relaxed),
+            shadow_texels_first_copied_in_host_pages: counters
+                .shadow_texels_first_copied_in_host_pages
+                .load(Ordering::Relaxed),
+            shadow_texels_first_copied_in_aliased_host_pages: counters
+                .shadow_texels_first_copied_in_aliased_host_pages
+                .load(Ordering::Relaxed),
+            shadow_texels_first_copied_in_surfaces: counters
+                .shadow_texels_first_copied_in_surfaces
+                .load(Ordering::Relaxed),
+            shadow_texels_first_copied_in_large_surfaces: counters
+                .shadow_texels_first_copied_in_large_surfaces
+                .load(Ordering::Relaxed),
+            shadow_texels_first_copied_in_again: counters
+                .shadow_texels_first_copied_in_again
+                .load(Ordering::Relaxed),
+            shadow_texels_copied_in_images: counters
+                .shadow_texels_copied_in_images
+                .load(Ordering::Relaxed),
+            shadow_texels_recopied_beyond_held: counters
+                .shadow_texels_recopied_beyond_held
+                .load(Ordering::Relaxed),
+            shadow_texels_recopied_after_changes: counters
+                .shadow_texels_recopied_after_changes
+                .load(Ordering::Relaxed),
+            shadow_texels_recopied_after_other_shadows: counters
+                .shadow_texels_recopied_after_other_shadows
+                .load(Ordering::Relaxed),
+            shadow_texels_recopied_after_two_ways_merges: counters
+                .shadow_texels_recopied_after_two_ways_merges
+                .load(Ordering::Relaxed),
+            shadow_texels_recopied_after_writes: counters
+                .shadow_texels_recopied_after_writes
+                .load(Ordering::Relaxed),
+            shadow_texels_recopied_after_writes_within: counters
+                .shadow_texels_recopied_after_writes_within
+                .load(Ordering::Relaxed),
+            shadow_texels_recopied_after_dropped_writes: counters
+                .shadow_texels_recopied_after_dropped_writes
+                .load(Ordering::Relaxed),
+            shadow_texels_bounded_copied_in: counters
+                .shadow_texels_bounded_copied_in
+                .load(Ordering::Relaxed),
+            shadow_texels_recopied_in_images: counters
+                .shadow_texels_recopied_in_images
+                .load(Ordering::Relaxed),
+            shadow_texels_recopied_in_private_buffers: counters
+                .shadow_texels_recopied_in_private_buffers
+                .load(Ordering::Relaxed),
+            shadow_texels_recopied_in_mapped_buffers: counters
+                .shadow_texels_recopied_in_mapped_buffers
+                .load(Ordering::Relaxed),
+            shadow_texels_recopied_in_host_pages: counters
+                .shadow_texels_recopied_in_host_pages
+                .load(Ordering::Relaxed),
+            shadow_texels_recopied_in_aliased_host_pages: counters
+                .shadow_texels_recopied_in_aliased_host_pages
+                .load(Ordering::Relaxed),
+            shadow_texels_recopied_in_surfaces: counters
+                .shadow_texels_recopied_in_surfaces
+                .load(Ordering::Relaxed),
+            shadow_texels_recopied_in_large_surfaces: counters
+                .shadow_texels_recopied_in_large_surfaces
+                .load(Ordering::Relaxed),
             shadow_texels_copied_back: counters.shadow_texels_copied_back.load(Ordering::Relaxed),
             shadow_copies_back_dispatched: counters
                 .shadow_copies_back_dispatched
                 .load(Ordering::Relaxed),
+            shadow_copies_in_dispatched: counters
+                .shadow_copies_in_dispatched
+                .load(Ordering::Relaxed),
+            shadow_merge_copies_dispatched: counters
+                .shadow_merge_copies_dispatched
+                .load(Ordering::Relaxed),
+            shadow_merge_scratches_reused: counters
+                .shadow_merge_scratches_reused
+                .load(Ordering::Relaxed),
+            shadow_merge_scratches_zeroed: counters
+                .shadow_merge_scratches_zeroed
+                .load(Ordering::Relaxed),
+            shadow_merges_fetched: counters.shadow_merges_fetched.load(Ordering::Relaxed),
+            shadow_attachment_loads_within: counters
+                .shadow_attachment_loads_within
+                .load(Ordering::Relaxed),
+            shadow_attachment_loads_whole: counters
+                .shadow_attachment_loads_whole
+                .load(Ordering::Relaxed),
+            shadow_attachment_clears: counters.shadow_attachment_clears.load(Ordering::Relaxed),
+            shadow_attachment_clears_in_part: counters
+                .shadow_attachment_clears_in_part
+                .load(Ordering::Relaxed),
+            shadow_attachment_loads_untouched: counters
+                .shadow_attachment_loads_untouched
+                .load(Ordering::Relaxed),
+            shadow_attachment_tiles_covered: counters
+                .shadow_attachment_tiles_covered
+                .load(Ordering::Relaxed),
+            shadow_attachment_tiles_bounded: counters
+                .shadow_attachment_tiles_bounded
+                .load(Ordering::Relaxed),
+            shadows_sharing_truth: counters.shadows_sharing_truth.load(Ordering::Relaxed),
+            owned_descriptor_pools: counters.owned_descriptor_pools.load(Ordering::Relaxed),
+            shadow_texels_kept: counters.shadow_texels_kept.load(Ordering::Relaxed),
             bounded_shadow_copies: counters.bounded_shadow_copies.load(Ordering::Relaxed),
             replay_logs_kept: counters.replay_logs_kept.load(Ordering::Relaxed),
             replay_log_bytes: counters.replay_log_bytes.load(Ordering::Relaxed),

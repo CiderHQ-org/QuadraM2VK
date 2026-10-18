@@ -280,6 +280,10 @@ impl DontCareLoads {
 /// The most distinct pixel rectangles [`DrawnArea`] keeps; past them it is the whole render area.
 const MOST_RECTS: usize = 1024;
 
+/// The words of a row of tiles in [`DrawnArea::covered_tiles`]: 512 tiles, the 16384 pixels of
+/// the widest render area.
+const ROW_WORDS: usize = 8;
+
 /// The pixels a pass's draws may write, as far as the host bounds them: each draw that draws
 /// writes only inside its viewports' pixels within their scissor rectangles
 /// (`EncoderState::vk_scissors`), so a tile none of those reaches is one Metal's draws do not,
@@ -370,6 +374,40 @@ impl DrawnArea {
             .reduce(|[a0, a1, a2, a3], [b0, b1, b2, b3]| {
                 [a0.min(b0), a1.min(b1), a2.max(b2), a3.max(b3)]
             })
+    }
+
+    /// Of the tiles of [`TILE`] pixels a side, from the render area's origin, that
+    /// [`bounds`](Self::bounds) reaches, how many its rectangles reach, and how many it reaches:
+    /// `None` where it bounds nothing. A count (`WorkCounts::shadow_attachment_tiles_covered`):
+    /// what a copy cut to the rectangles' tiles would leave out of one cut to their bounds.
+    pub(super) fn covered_tiles(&self) -> Option<(u64, u64)> {
+        let [x0, y0, x1, y1] = self.bounds()?;
+        let (tx0, ty0) = (x0 / TILE, y0 / TILE);
+        let (tx1, ty1) = (x1.div_ceil(TILE), y1.div_ceil(TILE));
+        let bounded = u64::from(tx1 - tx0) * u64::from(ty1 - ty0);
+        // A row of tiles in the bits of `ROW_WORDS` words; a wider one, which no render area
+        // has, counts as covered.
+        if (tx1 - tx0) as usize > ROW_WORDS * 64 {
+            return Some((bounded, bounded));
+        }
+        let mut covered = 0;
+        for ty in ty0..ty1 {
+            let (top, bottom) = (ty * TILE, (ty + 1) * TILE);
+            let mut row = [0u64; ROW_WORDS];
+            for &[rx0, ry0, rx1, ry1] in self.rects.iter() {
+                if rx0 >= rx1 || ry0 >= ry1 || ry0 >= bottom || ry1 <= top {
+                    continue;
+                }
+                for tile in rx0 / TILE - tx0..rx1.div_ceil(TILE) - tx0 {
+                    row[(tile / 64) as usize] |= 1 << (tile % 64);
+                }
+            }
+            covered += row
+                .iter()
+                .map(|word| u64::from(word.count_ones()))
+                .sum::<u64>();
+        }
+        Some((covered, bounded))
     }
 
     /// Add `other`'s rectangles: anywhere where it bounds nothing.
@@ -803,6 +841,42 @@ mod tests {
         for rule in [ClearRoute::ThroughHalf, ClearRoute::Straight] {
             assert_eq!(form.clear_texel([0.0; 4], rule), [0; 4], "{rule:?}");
         }
+    }
+
+    /// The tiles the rectangles cover, against those their bounding rectangle reaches, are
+    /// counted in 32-pixel tiles from the origin: two rectangles far apart cover their own
+    /// tiles alone, where their bounds reach every tile between them.
+    #[test]
+    fn covered_tiles_count_the_rectangles_tiles_against_their_bounds() {
+        let rect = |x: i32, y: i32, w: u32, h: u32| vk::Rect2D {
+            offset: vk::Offset2D { x, y },
+            extent: vk::Extent2D {
+                width: w,
+                height: h,
+            },
+        };
+        let cases: [(Vec<vk::Rect2D>, Option<(u64, u64)>); 6] = [
+            (vec![], None),
+            // A 1920x1080 render area's every tile: 60 by 34.
+            (vec![rect(0, 0, 1920, 1080)], Some((2040, 2040))),
+            // Off the grid: tiles 0 to 2 by 0 to 1.
+            (vec![rect(31, 1, 34, 32)], Some((6, 6))),
+            // Two corners at either end of a 1920x1080 area, four tiles each.
+            (
+                vec![rect(0, 0, 64, 64), rect(1856, 1024, 64, 56)],
+                Some((8, 2040)),
+            ),
+            // Overlapping rectangles count each tile once.
+            (vec![rect(0, 0, 96, 32), rect(32, 0, 96, 32)], Some((4, 4))),
+            // An L: the bounds reach the corner the rectangles leave out.
+            (vec![rect(0, 0, 64, 32), rect(0, 32, 32, 32)], Some((3, 4))),
+        ];
+        for (case, (rects, expected)) in cases.iter().enumerate() {
+            let mut area = DrawnArea::default();
+            area.add(rects);
+            assert_eq!(area.covered_tiles(), *expected, "case {case}");
+        }
+        assert_eq!(DrawnArea::unbounded().covered_tiles(), None);
     }
 
     /// The tiles a pass's rectangles reach are the tiles each overlaps, whether one of them

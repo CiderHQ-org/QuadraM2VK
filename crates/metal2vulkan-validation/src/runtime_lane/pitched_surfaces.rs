@@ -63,24 +63,33 @@
 //! finds the texels and each write past the image's bytes in the pages after it; the writes
 //! between rows the keep undid are printed (`FIRST-MOVE-WINDOW`).
 //!
-//! [`textures_of_one_image_over_the_same_bytes_share_it`] makes a texture over the same packed
-//! 1080p pages at each of a few presents, each over a new no-copy buffer: each takes the first
-//! texture's `VkImage` (`WorkCounts::shared_alias_images`), whose move kept the bytes once, and a
-//! texture of another usage makes its own (`SHARED-ALIAS`).
+//! [`a_loaded_color_beside_a_cleared_depth_copies_inside_its_scissor`] draws under a scissor
+//! beside a depth attachment the pass clears and stores, of the color's size and larger, whose
+//! clear then reaches past the render area: the color's copies stay inside the scissor, and its
+//! bytes are a private texture's.
 //!
-//! Printed per layout (`PITCHED-SURFACE`): the form, the images the making counted
-//! (`WorkCounts::pitched_host_images`, `shadowed_textures`), and a shadow's reason. Printed once
+//! [`a_shadowed_color_beside_a_memoryless_scratch_blends_over_part_of_it`] blends over a shadowed
+//! texture beside a memoryless scratch loaded and stored `DontCare`, over a render area smaller
+//! than both: the bytes are a private texture's inside the render area and unchanged past it.
+//!
+//! [`a_pass_s_copies_in_share_their_barriers`] reads several shadowed textures in one pass that
+//! loads another: their copies in share one barrier before and one after, and the pass records
+//! as many pipeline barriers whatever the number of textures it reads.
+//!
 //! (`SHADOW-COPY-BACK`, [`a_pass_copies_in_and_back_only_the_texels_its_scissors_reach`]): whether
 //! a shadow's copy back ran as a dispatch (`WorkCounts::shadow_copies_back_dispatched`).
 
+use super::draw_work::pushes;
 use super::host_memory::{counting, no_copy, not_importable, Mapping, GUEST_PAGE};
-use super::no_copy_textures::{blending, floats, staged};
+use super::memoryless::memoryless_options;
+use super::no_copy_textures::{blending, blending_beside_scratch, floats, rects_beside, staged};
 use super::{validated_device, validated_device_with, Messages, ScratchCache, WAIT};
 use crate::air_library::AirLibrary;
 use crate::gpu::TEST_DEVICE;
 use metal2vulkan::bind::SamplerDescriptor;
-use metal2vulkan::device::{DriverFact, PaddedReadsPolicy};
-use metal2vulkan::metal::{PixelFormat, PrimitiveType, SamplerMinMagFilter, TextureUsage};
+use metal2vulkan::metal::{
+    BarrierScope, PixelFormat, PrimitiveType, RenderStages, SamplerMinMagFilter, TextureUsage,
+};
 use metal2vulkan::pipeline::{ColorAttachmentDescriptor, RenderPipelineDescriptor, StageSource};
 use metal2vulkan::vk::DriverId;
 use metal2vulkan_devtools::{engine_dir, llvm_assemble};
@@ -1507,9 +1516,12 @@ fn a_pass_that_draws_nothing_copies_no_shadow() {
 /// holds the blend inside the scissor, as a private texture of the same texels blended alike
 /// does, and every other byte as it was; a later draw reading every texel of the texture reads
 /// the buffer's, none the image kept from before. Without a scissor, both copies move every
-/// texel. Each copy back is one dispatch on a device that takes it
-/// (`DriverFact::ShadowCopyBackDispatchFaster`), and none elsewhere
-/// (`WorkCounts::shadow_copies_back_dispatched`, printed as `SHADOW-COPY-BACK`).
+/// texel. The CPU may write the `Shared` buffer's bytes, so its texture's copy back is a merge,
+/// which moves no texel back as a copy and dispatches no copy back; its keep moves the texels
+/// inside the scissor alone (`WorkCounts::shadow_texels_kept`). On a device that takes the copy
+/// Neither merge zeroes its scratch (`WorkCounts::shadow_merge_scratches_zeroed`). Where the
+/// device pushes set 0, the keep's and the merge's dispatches push their descriptors and make no
+/// descriptor pool; elsewhere each makes one (`WorkCounts::owned_descriptor_pools`).
 #[test]
 fn a_pass_copies_in_and_back_only_the_texels_its_scissors_reach() {
     let layout = LAYOUTS[0];
@@ -1555,39 +1567,61 @@ fn a_pass_copies_in_and_back_only_the_texels_its_scissors_reach() {
             encoder.end_encoding().unwrap();
             run(&command_buffer);
         };
-        // Each pass's one copy back is a dispatch where the device runs one faster than the copy
-        // (`DriverFact::ShadowCopyBackDispatchFaster`, `WorkCounts::shadow_copies_back_dispatched`),
-        // and a copy everywhere else.
-        let dispatches = device
-            .properties()
-            .driver_facts
-            .contains(&DriverFact::ShadowCopyBackDispatchFaster);
+        // `WorkCounts::shadow_merges_fetched`); both copy everywhere else.
         let moved = || {
             let counts = device.work_counts();
             (
                 counts.shadow_texels_copied_in,
                 counts.shadow_texels_copied_back,
                 counts.shadow_copies_back_dispatched,
+                counts.shadow_merge_copies_dispatched,
+                counts.shadow_texels_kept,
+                counts.shadow_merges_fetched,
+                counts.owned_descriptor_pools,
+                counts.shadow_copies_in_dispatched,
             )
         };
-        let since = |(i, b, d): (u64, u64, u64)| {
-            let (now_in, now_back, now_dispatched) = moved();
-            (now_in - i, now_back - b, now_dispatched - d)
+            let now = moved();
+            (
+                now.0 - before.0,
+                now.1 - before.1,
+                now.2 - before.2,
+                now.3 - before.3,
+                now.4 - before.4,
+                now.5 - before.5,
+                now.6 - before.6,
+                now.7 - before.7,
+            )
         };
-        let dispatched = u64::from(dispatches);
+        // The merge's kernel, and the keep where it is a dispatch, each make a descriptor pool
+        // where the device does not push set 0.
+        let pools = if pushes(&device) { 0 } else { 1 + merged };
+        // The keep's dispatch takes the copy in of the same texels with it, where the device takes
+        let zeroed = device.work_counts().shadow_merge_scratches_zeroed;
         let before = moved();
         draw(&texture, Some(scissor));
         let scissored = since(before);
         println!(
-            "SHADOW-COPY-BACK on {}: a scissored pass dispatched {} of its 1 copy back (the \
-             device {} the dispatch)",
+            "SHADOW-COPY-BACK on {}: a scissored pass dispatched {} copies back and {} of its \
             device.name(),
             scissored.2,
+            scissored.3,
+            scissored.4,
+            scissored.5,
+            scissored.7,
             if dispatches { "takes" } else { "does not take" },
         );
         assert_eq!(
             scissored,
-            (300 * 200, 300 * 200, dispatched),
+            (
+                300 * 200,
+                back(300 * 200),
+                dispatched,
+                merged,
+                300 * 200,
+                fetched,
+                pools,
+            ),
             "a scissored pass"
         );
         draw(&private, Some(scissor));
@@ -1623,8 +1657,23 @@ fn a_pass_copies_in_and_back_only_the_texels_its_scissors_reach() {
         let every = layout.w * layout.h;
         assert_eq!(
             since(before),
-            (every, every, dispatched),
+            (
+                every,
+                back(every),
+                dispatched,
+                merged,
+                every,
+                fetched,
+                pools,
+            ),
             "an unscissored pass"
+        );
+        // Both merges go in place over whole words of each row, so their copies write every byte
+        // their kernels read, and neither zeroes its scratch.
+        assert_eq!(
+            device.work_counts().shadow_merge_scratches_zeroed,
+            zeroed,
+            "merge scratches zeroed"
         );
         drop((texture, buffer, private));
     }
@@ -1635,36 +1684,80 @@ fn a_pass_copies_in_and_back_only_the_texels_its_scissors_reach() {
     );
 }
 
-/// A texture of `layout` over a no-copy buffer, with shader read and write usage, written at every
-/// texel by a fragment function's `write` (`tob_write`): the pages' texels are what a private
-/// texture of the same texels holds after the same writes, and no other byte of the pages changes.
-fn writes_as_metal(layout: Layout) {
+/// A pass that loads a shadowed texture (the browser's padded tile over an ordinary buffer) over
+/// a render area smaller than it, of whole 32-pixel tiles on neither axis, beside a memoryless
+/// `RGBA16Float` scratch of its size loaded and stored `DontCare` (the consumer's guest's shadowed
+/// passes' shape): the buffer holds the blend inside the render area, as a private texture of the
+/// same texels drawn alike does, and every other byte as it was.
+#[test]
+fn a_shadowed_color_beside_a_memoryless_scratch_blends_over_part_of_it() {
+    let layout = LAYOUTS[0];
     let cache = ScratchCache::new().unwrap();
     let messages = Messages::default();
     {
         let device = validated_device(TEST_DEVICE, &messages, cache.path()).unwrap();
         let queue = device.new_command_queue().unwrap();
-        let usage = TextureUsage::SHADER_READ | TextureUsage::SHADER_WRITE;
-        let Some(surface) = surface(&device, &layout, usage, false) else {
-            return;
-        };
-        let mut expected = surface.pages.clone();
-        let texels = rows(&layout, &expected);
+        let len = layout.bpr * layout.h;
+        let buffer = device.new_buffer(len, ResourceOptions::default()).unwrap();
+        let bytes = texels_of(&layout, len as usize, 9);
+        let contents = buffer.contents().unwrap();
+        // SAFETY: a new `Shared` buffer of `len` bytes, which no command uses yet.
+        unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), contents.as_ptr(), bytes.len()) };
         let mut d = TextureDescriptor::texture_2d(layout.pf, layout.w, layout.h, false);
-        d.usage = usage;
-        d.resource_options = ResourceOptions::private();
-        let reference = device.new_texture(&d).unwrap();
-        blit_in(&queue, &layout, &reference, &texels);
-        let writes = reading(&device, layout.pf, "tob_write");
-        drawn(&queue, &layout, &writes, &reference, None);
-        drawn(&queue, &layout, &writes, &surface.texture, None);
-        lay(
-            &layout,
-            &mut expected,
-            &blit_out(&queue, &layout, &reference),
+        d.usage = TextureUsage::RENDER_TARGET | TextureUsage::SHADER_READ;
+        d.resource_options = buffer.resource_options();
+        let texture = buffer.new_texture(&d, 0, layout.bpr).unwrap();
+        // SAFETY: the handle is only compared, while the texture lives.
+        assert!(unsafe { texture.vk_image() }.is_none(), "a shadow");
+        let private = private_with(&queue, &layout, &rows(&layout, &bytes));
+        let mut d =
+            TextureDescriptor::texture_2d(PixelFormat::RGBA16Float, layout.w, layout.h, false);
+        d.usage = TextureUsage::RENDER_TARGET;
+        d.resource_options = memoryless_options();
+        let scratch = device.new_texture(&d).unwrap();
+        let blend = blending_beside_scratch(&device, layout.pf, PixelFormat::RGBA16Float);
+        let corners = staged(&device, &floats([-1.0, -1.0, 1.0, 1.0]));
+        let color = staged(&device, &floats([0.25, 0.5, 0.75, 0.5]));
+        let area = [layout.w - 37, layout.h - 21];
+        assert!(area.iter().all(|side| side % 32 != 0), "tiles cut");
+        let draw = |target: &Texture| {
+            let mut pass = RenderPassDescriptor::new();
+            let attachment = &mut pass.color_attachments[0];
+            attachment.texture = Some(target.clone());
+            attachment.load_action = LoadAction::Load;
+            attachment.store_action = StoreAction::Store;
+            let attachment = &mut pass.color_attachments[1];
+            attachment.texture = Some(scratch.clone());
+            attachment.load_action = LoadAction::DontCare;
+            attachment.store_action = StoreAction::DontCare;
+            [pass.render_target_width, pass.render_target_height] = area;
+            let command_buffer = queue.command_buffer().unwrap();
+            let mut encoder = command_buffer.render_command_encoder(&pass).unwrap();
+            encoder.set_render_pipeline_state(&blend).unwrap();
+            encoder.set_vertex_buffer(Some(&corners), 0, 0).unwrap();
+            encoder.set_fragment_buffer(Some(&color), 0, 0).unwrap();
+            encoder
+                .draw_primitives(PrimitiveType::Triangle, 0, 6, 1, 0)
+                .unwrap();
+            encoder.end_encoding().unwrap();
+            run(&command_buffer);
+        };
+        draw(&texture);
+        draw(&private);
+        let mut expected = bytes.clone();
+        lay(&layout, &mut expected, &blit_out(&queue, &layout, &private));
+        let now = bytes_of(&buffer);
+        let (count, first) = differing(
+            &rows(&layout, &now),
+            &rows(&layout, &expected),
+            layout.texel,
         );
-        surface.check(&layout, "a fragment function's writes", &expected);
-        surface.report(&device, &messages);
+        assert!(
+            count == 0,
+            "{count} texels differ from the private texture's, the first at texel {first:?}"
+        );
+        assert!(now == expected, "the bytes between the rows changed");
+        drop((texture, buffer, private, scratch));
     }
     let messages = messages.take();
     assert!(
@@ -1673,26 +1766,498 @@ fn writes_as_metal(layout: Layout) {
     );
 }
 
-/// One test a layout, each its own process: `$name` runs [`LAYOUTS`]`[$index]`.
-macro_rules! per_layout {
-    ($($name:ident => $index:expr;)*) => {
-        $(
-            #[test]
-            fn $name() {
-                reads_writes_and_renders_as_metal(LAYOUTS[$index]);
+/// A pass's copies in share their barriers (`encoder.rs`'s `ShadowRun`): a pass that loads a
+/// shadowed texture over a `Shared` buffer and draws `n` rectangles, each under its own scissor
+/// reading its own shadowed texture over the same buffer, copies the `n` textures in, and the
+/// loaded texture in and kept (it merges back), before it. The copies in of different textures
+/// share one barrier before them and one after; the keep, which reads the shadow its texture's
+/// copy in wrote, takes a barrier of its own. So the pass records as many pipeline barriers
+/// (`WorkCounts::commands_replayed`) whatever `n`, where a barrier before and one after each copy
+/// grew them by two a texture (counted after a first pass of the shape). The buffer holds each
+/// texture's texels inside its rectangle, as the draws read them, and every other byte as it
+/// was. Printed: `SHADOW-RUN`.
+#[test]
+fn a_pass_s_copies_in_share_their_barriers() {
+    let layout = LAYOUTS[4];
+    assert!(layout.padded(), "{}", layout.name);
+    let most = 4;
+    let stride = (layout.len() as u64).next_multiple_of(4096);
+    let cache = ScratchCache::new().unwrap();
+    let messages = Messages::default();
+    {
+        let device = validated_device(TEST_DEVICE, &messages, cache.path()).unwrap();
+        let queue = device.new_command_queue().unwrap();
+        let len = stride * (most + 1);
+        let buffer = device.new_buffer(len, ResourceOptions::default()).unwrap();
+        let bytes = texels_of(&layout, len as usize, 3);
+        let contents = buffer.contents().unwrap();
+        // SAFETY: a new `Shared` buffer of `len` bytes, which no command uses yet.
+        unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), contents.as_ptr(), bytes.len()) };
+        // The textures each rectangle reads at the buffer's start, the loaded one after them.
+        let texture_at = |at: u64| {
+            let mut d = TextureDescriptor::texture_2d(layout.pf, layout.w, layout.h, false);
+            d.usage = TextureUsage::RENDER_TARGET | TextureUsage::SHADER_READ;
+            d.resource_options = buffer.resource_options();
+            let texture = buffer.new_texture(&d, at, layout.bpr).unwrap();
+            // SAFETY: the handle is only compared, while the texture lives.
+            assert!(unsafe { texture.vk_image() }.is_none(), "a shadow");
+            texture
+        };
+        let read: Vec<Texture> = (0..most).map(|k| texture_at(k * stride)).collect();
+        let loaded = texture_at(most * stride);
+        let reads = reading(&device, layout.pf, "tob_read");
+        let corners = staged(&device, &floats([-1.0, -1.0, 1.0, 1.0]));
+        // Rectangle `k` of `n`: a band of the texture's rows.
+        let band = |k: u64, n: u64| {
+            let rows = layout.h / n;
+            ScissorRect::new(0, k * rows, layout.w, rows)
+        };
+        let pass = |n: u64| {
+            let mut pass = RenderPassDescriptor::new();
+            let attachment = &mut pass.color_attachments[0];
+            attachment.texture = Some(loaded.clone());
+            attachment.load_action = LoadAction::Load;
+            attachment.store_action = StoreAction::Store;
+            let command_buffer = queue.command_buffer().unwrap();
+            let mut encoder = command_buffer.render_command_encoder(&pass).unwrap();
+            encoder.set_render_pipeline_state(&reads).unwrap();
+            encoder.set_vertex_buffer(Some(&corners), 0, 0).unwrap();
+            for (k, texture) in read.iter().take(n as usize).enumerate() {
+                encoder.set_scissor_rect(band(k as u64, n)).unwrap();
+                encoder.set_fragment_texture(Some(texture), 0).unwrap();
+                encoder
+                    .draw_primitives(PrimitiveType::Triangle, 0, 6, 1, 0)
+                    .unwrap();
             }
-        )*
-    };
+            encoder.end_encoding().unwrap();
+            let before = device.work_counts().commands_replayed.cmd_pipeline_barrier;
+            run(&command_buffer);
+            device.work_counts().commands_replayed.cmd_pipeline_barrier - before
+        };
+        // A first pass makes what every pass of the shape needs (the textures' first moves, the
+        // pipelines' sets), then the counted passes.
+        let mut expected = bytes.clone();
+        let mut barriers = Vec::new();
+        for n in [most, 1, most] {
+            barriers.push(pass(n));
+            // Each band of the loaded texture's rows holds its texture's texels there.
+            for k in 0..n {
+                let rect = band(k, n);
+                for y in rect.y..rect.y + rect.height {
+                    let row = (y * layout.bpr) as usize;
+                    let at = (most * stride) as usize + row;
+                    let from = (k * stride) as usize + row;
+                    let width = layout.row() as usize;
+                    let texels = bytes[from..from + width].to_vec();
+                    expected[at..at + width].copy_from_slice(&texels);
+                }
+            }
+            let now = bytes_of(&buffer);
+            let (count, first) = differing(&now, &expected, 1);
+            assert!(
+                count == 0,
+                "after a pass of {n} rectangles {count} bytes differ, the first at {first:?}"
+            );
+        }
+        println!(
+            "SHADOW-RUN on {}: a pass reading 1 shadowed texture recorded {} pipeline barriers, \
+             one reading {most} recorded {}",
+            device.name(),
+            barriers[1],
+            barriers[2],
+        );
+        assert_eq!(
+            barriers[1], barriers[2],
+            "barriers of a pass of 1 and of {most} copies in"
+        );
+        drop((read, loaded, buffer));
+    }
+    let messages = messages.take();
+    assert!(
+        messages.is_empty(),
+        "the validation layer reported: {messages:#?}"
+    );
 }
 
-per_layout! {
-    a_browser_tile_at_5248_byte_rows_reads_writes_and_renders_as_metal => 0;
-    a_tile_at_16_byte_padded_rows_reads_writes_and_renders_as_metal => 1;
-    a_tile_at_256_byte_padded_rows_reads_writes_and_renders_as_metal => 2;
-    a_tile_at_512_byte_padded_rows_reads_writes_and_renders_as_metal => 3;
-    a_small_tile_reads_writes_and_renders_as_metal => 4;
-    a_full_width_strip_reads_writes_and_renders_as_metal => 5;
-    a_narrow_tile_reads_writes_and_renders_as_metal => 6;
+/// A pass that loads a shadowed texture and draws under a scissor beside a depth attachment it
+/// clears and stores, which reaches every tile (`clear_reach::PassReach::Every`), `past` pixels
+/// wider and taller than the color: where that is some, the depth's clear reaches past the render
+/// area to whole tiles and is made before the pass (`clear_reach::ReachClears`,
+/// `WorkCounts::attachment_clears_recorded`). Neither clear writes the color, so the draws alone
+/// write it, inside the scissor, and its copy in and keep move the texels inside the scissor alone
+/// (`WorkCounts::shadow_texels_copied_in`, `shadow_texels_kept`,
+/// `shadow_attachment_loads_within`). The buffer holds the blend inside the scissor, as a private
+/// texture of the same texels drawn alike does, and every other byte as it was.
+fn a_loaded_color_beside_a_cleared_depth_copies_inside_its_scissor(past: u64) {
+    let layout = LAYOUTS[0];
+    let cache = ScratchCache::new().unwrap();
+    let messages = Messages::default();
+    {
+        let device = validated_device(TEST_DEVICE, &messages, cache.path()).unwrap();
+        let queue = device.new_command_queue().unwrap();
+        let len = layout.bpr * layout.h;
+        let buffer = device.new_buffer(len, ResourceOptions::default()).unwrap();
+        let bytes = texels_of(&layout, len as usize, 7);
+        let contents = buffer.contents().unwrap();
+        // SAFETY: a new `Shared` buffer of `len` bytes, which no command uses yet.
+        unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), contents.as_ptr(), bytes.len()) };
+        let mut d = TextureDescriptor::texture_2d(layout.pf, layout.w, layout.h, false);
+        d.usage = TextureUsage::RENDER_TARGET | TextureUsage::SHADER_READ;
+        d.resource_options = buffer.resource_options();
+        let texture = buffer.new_texture(&d, 0, layout.bpr).unwrap();
+        // SAFETY: the handle is only compared, while the texture lives.
+        assert!(unsafe { texture.vk_image() }.is_none(), "a shadow");
+        let private = private_with(&queue, &layout, &rows(&layout, &bytes));
+        // The render area is the color's, 1307 pixels wide, which the depth's clear reaches past
+        // to 1312, a whole number of 32-pixel tiles, where the depth is wider.
+        let mut z = TextureDescriptor::texture_2d(
+            PixelFormat::Depth32Float,
+            layout.w + past,
+            layout.h + past,
+            false,
+        );
+        z.usage = TextureUsage::RENDER_TARGET;
+        z.resource_options = ResourceOptions::private();
+        let depth = device.new_texture(&z).unwrap();
+        let blend = rects_beside(&device, layout.pf, true, Some(PixelFormat::Depth32Float));
+        let corners = staged(&device, &floats([-1.0, -1.0, 1.0, 1.0]));
+        let color = staged(&device, &floats([0.25, 0.5, 0.75, 0.5]));
+        let scissor = ScissorRect::new(100, 40, 300, 200);
+        let draw = |target: &Texture| {
+            let mut pass = RenderPassDescriptor::new();
+            let attachment = &mut pass.color_attachments[0];
+            attachment.texture = Some(target.clone());
+            attachment.load_action = LoadAction::Load;
+            attachment.store_action = StoreAction::Store;
+            pass.depth_attachment.texture = Some(depth.clone());
+            pass.depth_attachment.load_action = LoadAction::Clear;
+            pass.depth_attachment.store_action = StoreAction::Store;
+            let command_buffer = queue.command_buffer().unwrap();
+            let mut encoder = command_buffer.render_command_encoder(&pass).unwrap();
+            encoder.set_render_pipeline_state(&blend).unwrap();
+            encoder.set_scissor_rect(scissor).unwrap();
+            encoder.set_vertex_buffer(Some(&corners), 0, 0).unwrap();
+            encoder.set_fragment_buffer(Some(&color), 0, 0).unwrap();
+            encoder
+                .draw_primitives(PrimitiveType::Triangle, 0, 6, 1, 0)
+                .unwrap();
+            encoder.end_encoding().unwrap();
+            run(&command_buffer);
+        };
+        let moved = || {
+            let counts = device.work_counts();
+            [
+                counts.attachment_clears_recorded,
+                counts.shadow_texels_copied_in,
+                counts.shadow_texels_kept,
+                counts.shadow_attachment_loads_within,
+                counts.shadow_attachment_loads_whole,
+            ]
+        };
+        let before = moved();
+        draw(&texture);
+        let after = moved();
+        let [clears, copied_in, kept, within, whole] =
+            [0, 1, 2, 3, 4].map(|i| after[i] - before[i]);
+        println!(
+            "CLEARED-DEPTH-BOUND on {}: a scissored pass beside a cleared depth {past} pixels \
+             past the color recorded {clears} attachment clears, copied in {copied_in} texels \
+             and kept {kept} ({within} colors loaded within the scissor, {whole} whole)",
+            device.name(),
+        );
+        assert_eq!(
+            clears > 0,
+            past > 0,
+            "the depth's clear past the render area"
+        );
+        assert_eq!(
+            (copied_in, kept, within, whole),
+            (300 * 200, 300 * 200, 1, 0),
+            "the color's copies inside the scissor"
+        );
+        draw(&private);
+        let mut expected = bytes.clone();
+        lay(&layout, &mut expected, &blit_out(&queue, &layout, &private));
+        let now = bytes_of(&buffer);
+        let (count, first) = differing(
+            &rows(&layout, &now),
+            &rows(&layout, &expected),
+            layout.texel,
+        );
+        assert!(
+            count == 0,
+            "{count} texels differ from the private texture's, the first at texel {first:?}"
+        );
+        assert!(now == expected, "the bytes between the rows changed");
+        drop((texture, buffer, private, depth));
+    }
+    let messages = messages.take();
+    assert!(
+        messages.is_empty(),
+        "the validation layer reported: {messages:#?}"
+    );
+}
+
+/// [`a_loaded_color_beside_a_cleared_depth_copies_inside_its_scissor`] beside a depth of the
+/// color's size.
+#[test]
+fn a_loaded_color_beside_a_cleared_depth_of_its_size_copies_inside_its_scissor() {
+    a_loaded_color_beside_a_cleared_depth_copies_inside_its_scissor(0);
+}
+
+/// [`a_loaded_color_beside_a_cleared_depth_copies_inside_its_scissor`] beside a larger depth,
+/// whose clear reaches past the render area.
+#[test]
+fn a_clear_past_the_render_area_leaves_a_loaded_color_s_copies_inside_its_scissor() {
+    a_loaded_color_beside_a_cleared_depth_copies_inside_its_scissor(64);
+}
+
+/// One draw of [`merged_writes_match_metal`]'s: its scissor (none: the whole target), its
+/// viewport (none: the whole target), its color, and a barrier over textures before it, which
+/// splits the pass there.
+#[derive(Clone, Copy)]
+struct Stroke {
+    scissor: Option<ScissorRect>,
+    viewport: Option<[f64; 4]>,
+    color: usize,
+    split: bool,
+}
+
+/// [`Stroke`] under `scissor` alone.
+fn stroke(scissor: (u64, u64, u64, u64), color: usize) -> Stroke {
+    let (x, y, w, h) = scissor;
+    Stroke {
+        scissor: Some(ScissorRect::new(x, y, w, h)),
+        viewport: None,
+        color,
+        split: false,
+    }
+}
+
+/// Passes that load a shadowed texture over a buffer's bytes and draw under scissors that change
+/// from draw to draw, in instances a barrier splits, across encoders and command buffers, with a
+/// viewport and no scissor, under scissors at the right and bottom edges, and through a second
+/// texture over the same bytes between them, leave the bytes as a private texture of the same
+/// texels drawn alike holds them: each merge's keep and merge are cut to the rectangle the
+/// encoder's commands write in (`shadow_merge.rs`), and no write outside it is lost. Over a
+/// `Shared` buffer and over a no-copy buffer's host pages, of `layout`.
+fn merged_writes_match_metal(layout: Layout) {
+    let cache = ScratchCache::new().unwrap();
+    let messages = Messages::default();
+    {
+        let device = validated_device(TEST_DEVICE, &messages, cache.path()).unwrap();
+        let queue = device.new_command_queue().unwrap();
+        let blend = blending(&device, layout.pf);
+        let corners = staged(&device, &floats([-1.0, -1.0, 1.0, 1.0]));
+        let colors = [
+            staged(&device, &floats([0.25, 0.5, 0.75, 0.5])),
+            staged(&device, &floats([0.9, 0.1, 0.3, 0.75])),
+        ];
+        let (w, h) = (layout.w, layout.h);
+        // Each command buffer's passes, each pass's strokes, the second texture's pass marked.
+        // Every scissor lies inside the target, as Metal's validation requires, at fractions of
+        // its size, so each stroke draws over every layout.
+        let passes: Vec<Vec<(bool, Vec<Stroke>)>> = vec![
+            vec![
+                (
+                    false,
+                    vec![
+                        stroke((w / 13, h / 12, w / 4, h / 3), 0),
+                        stroke((w / 2, h / 2, w / 4, h / 4), 1),
+                    ],
+                ),
+                (
+                    false,
+                    vec![
+                        stroke((w / 26, h / 6, w / 5, h / 5), 1),
+                        Stroke {
+                            split: true,
+                            ..stroke((w * 5 / 8, h * 5 / 8, w / 4, h / 5), 0)
+                        },
+                        Stroke {
+                            split: true,
+                            ..stroke((5, h * 5 / 8, w / 9, h / 3), 1)
+                        },
+                    ],
+                ),
+            ],
+            vec![
+                (true, vec![stroke((w / 3, h / 10, w / 4, h / 2), 0)]),
+                (
+                    false,
+                    vec![Stroke {
+                        scissor: None,
+                        viewport: Some([
+                            w as f64 / 4.0,
+                            h as f64 / 5.0,
+                            w as f64 / 3.0,
+                            h as f64 / 4.0,
+                        ]),
+                        color: 1,
+                        split: false,
+                    }],
+                ),
+                (
+                    false,
+                    vec![
+                        stroke((w - 13, h - 7, 13, 7), 0),
+                        stroke((w - 1, 0, 1, h), 1),
+                    ],
+                ),
+                (false, vec![stroke((0, 0, w, h), 0)]),
+            ],
+        ];
+        let encode = |command_buffer: &metal2vulkan_runtime::CommandBuffer,
+                      target: &Texture,
+                      strokes: &[Stroke]| {
+            let mut pass = RenderPassDescriptor::new();
+            let attachment = &mut pass.color_attachments[0];
+            attachment.texture = Some(target.clone());
+            attachment.load_action = LoadAction::Load;
+            attachment.store_action = StoreAction::Store;
+            let mut encoder = command_buffer.render_command_encoder(&pass).unwrap();
+            encoder.set_render_pipeline_state(&blend).unwrap();
+            encoder.set_vertex_buffer(Some(&corners), 0, 0).unwrap();
+            for s in strokes {
+                if s.split {
+                    encoder.memory_barrier_with_scope(
+                        BarrierScope::TEXTURES,
+                        RenderStages::FRAGMENT,
+                        RenderStages::FRAGMENT,
+                    );
+                }
+                let scissor = s.scissor.unwrap_or(ScissorRect::new(0, 0, w, h));
+                assert!(
+                    scissor.width > 0
+                        && scissor.height > 0
+                        && scissor.x + scissor.width <= w
+                        && scissor.y + scissor.height <= h,
+                    "{}: the scissor {scissor:?} lies outside the {w}x{h} target",
+                    layout.name
+                );
+                encoder.set_scissor_rect(scissor).unwrap();
+                let [x, y, vw, vh] = s.viewport.unwrap_or([0.0, 0.0, w as f64, h as f64]);
+                encoder
+                    .set_viewport(Viewport::new(x, y, vw, vh, 0.0, 1.0))
+                    .unwrap();
+                encoder
+                    .set_fragment_buffer(Some(&colors[s.color]), 0, 0)
+                    .unwrap();
+                encoder
+                    .draw_primitives(PrimitiveType::Triangle, 0, 6, 1, 0)
+                    .unwrap();
+            }
+            encoder.end_encoding().unwrap();
+        };
+        // The passes through `first` (and `second`, a texture over the same bytes, where marked),
+        // command buffer by command buffer, waited for at the end.
+        let draw_all = |first: &Texture, second: &Texture| {
+            let mut committed = Vec::new();
+            for buffer_passes in &passes {
+                let command_buffer = queue.command_buffer().unwrap();
+                for (twin, strokes) in buffer_passes {
+                    encode(&command_buffer, if *twin { second } else { first }, strokes);
+                }
+                command_buffer.commit().unwrap();
+                committed.push(command_buffer);
+            }
+            for command_buffer in &committed {
+                command_buffer.wait_until_completed_for(WAIT).unwrap();
+                assert_eq!(command_buffer.error(), None);
+            }
+        };
+        let usage = TextureUsage::RENDER_TARGET | TextureUsage::SHADER_READ;
+        let texture_over = |buffer: &Buffer| {
+            let mut d = TextureDescriptor::texture_2d(layout.pf, w, h, false);
+            d.usage = usage;
+            d.resource_options = buffer.resource_options();
+            buffer.new_texture(&d, 0, layout.bpr).unwrap()
+        };
+        // Over a `Shared` buffer.
+        let len = layout.bpr * h;
+        let buffer = device.new_buffer(len, ResourceOptions::default()).unwrap();
+        let bytes = texels_of(&layout, len as usize, 3);
+        let contents = buffer.contents().unwrap();
+        // SAFETY: a new `Shared` buffer of `len` bytes, which no command uses yet.
+        unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), contents.as_ptr(), bytes.len()) };
+        let (first, second) = (texture_over(&buffer), texture_over(&buffer));
+        // SAFETY: the handle is only compared, while the texture lives.
+        assert!(unsafe { first.vk_image() }.is_none(), "a shadow");
+        let private = private_with(&queue, &layout, &rows(&layout, &bytes));
+        draw_all(&first, &second);
+        draw_all(&private, &private);
+        let mut expected = bytes.clone();
+        lay(&layout, &mut expected, &blit_out(&queue, &layout, &private));
+        let now = bytes_of(&buffer);
+        let (count, at) = differing(
+            &rows(&layout, &now),
+            &rows(&layout, &expected),
+            layout.texel,
+        );
+        assert!(
+            count == 0,
+            "{}, a Shared buffer: {count} texels differ from the private texture's, the first at \
+             texel {at:?}",
+            layout.name
+        );
+        assert!(
+            now == expected,
+            "{}, a Shared buffer: the bytes between the rows changed",
+            layout.name
+        );
+        drop((first, second, buffer, private));
+        // Over a no-copy buffer's host pages.
+        if let Some(surface) = surface(&device, &layout, usage) {
+            let second = surface
+                .buffer
+                .new_texture(
+                    &{
+                        let mut d = TextureDescriptor::texture_2d(layout.pf, w, h, false);
+                        d.usage = usage;
+                        d.resource_options = surface.buffer.resource_options();
+                        d
+                    },
+                    0,
+                    layout.bpr,
+                )
+                .unwrap();
+            let private = private_with(&queue, &layout, &rows(&layout, &surface.pages));
+            draw_all(&surface.texture, &second);
+            draw_all(&private, &private);
+            let mut expected = surface.pages.clone();
+            lay(&layout, &mut expected, &blit_out(&queue, &layout, &private));
+            surface.check(&layout, "passes cut to their scissors", &expected);
+            drop((second, private));
+            surface.report(&device, &messages);
+        }
+    }
+    let messages = messages.take();
+    assert!(
+        messages.is_empty(),
+        "the validation layer reported: {messages:#?}"
+    );
+}
+
+#[test]
+fn merged_writes_match_metal_over_the_browser_tile() {
+    merged_writes_match_metal(LAYOUTS[0]);
+}
+
+#[test]
+fn merged_writes_match_metal_over_a_half_float_tile() {
+    merged_writes_match_metal(LAYOUTS[7]);
+}
+
+#[test]
+fn merged_writes_match_metal_over_a_narrow_tile() {
+    merged_writes_match_metal(LAYOUTS[6]);
+}
+
+/// A texture of `layout` over a no-copy buffer, with shader read and write usage, written at every
+/// texel by a fragment function's `write` (`tob_write`): the pages' texels are what a private
+/// texture of the same texels holds after the same writes, and no other byte of the pages changes.
+fn writes_as_metal(layout: Layout) {
+    let cache = ScratchCache::new().unwrap();
     a_half_float_tile_reads_writes_and_renders_as_metal => 7;
     a_tile_of_510_packed_rows_reads_writes_and_renders_as_metal => 8;
     a_small_tile_of_packed_rows_reads_writes_and_renders_as_metal => 9;

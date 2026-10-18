@@ -48,7 +48,7 @@
 use super::buffer::Buffer;
 use super::encoder::EncoderCore;
 use super::error::{internal, Error};
-use super::owned_kernel::{OwnedKernel, OwnedModule, OwnedSets};
+use super::owned_kernel::{OwnedBinds, OwnedKernel, OwnedModule, OwnedSet};
 use super::render_pass::Target;
 use super::resource::ResourceKey;
 use super::tracker::{Access, Barrier, Use};
@@ -84,9 +84,9 @@ pub(super) struct LinearMerge {
     padding: Option<(u64, u64)>,
     _held: Buffer,
     kernel: OwnedKernel,
-    /// One set per dispatch, each binding its band of the kept part, of the changed part and of
-    /// the surface's bytes.
-    sets: OwnedSets,
+    /// One set 0 per dispatch, each binding its band of the kept part, of the changed part and of
+    /// the surface's bytes; pushed where the kernel's set 0 is pushed (`OwnedBinds`).
+    binds: OwnedBinds,
     dispatches: Vec<Dispatch>,
     /// The keep's uses: a read of the image the pass renders.
     keep_uses: Vec<Use<ResourceKey>>,
@@ -97,7 +97,7 @@ pub(super) struct LinearMerge {
 impl LinearMerge {
     /// The merge of the box `[x0, y0, x1, y1]` (half-open, inside the render area) of the pass
     /// rendering `own`, a bound linear attachment's target, through `backing`, the image its
-    /// texture keeps: its scratch, sets and dispatches on `device`. Refused (internal) for an
+    /// texture keeps: its scratch, binds and dispatches on `device`. Refused (internal) for an
     /// attachment whose rows or their offset are not whole words, whose texel is not 1, 2, 4, 8
     /// or 16 bytes, or whose bands no binding holds, which no device's linear attachment is; and
     /// as `scratch_buffer` refuses the scratch.
@@ -162,7 +162,7 @@ impl LinearMerge {
             return Err(internal("a linear attachment's rows no merge window holds"));
         }
         let mut regions = Vec::with_capacity(layers as usize);
-        let mut ranges = Vec::new();
+        let mut sets = Vec::new();
         let mut dispatches = Vec::new();
         let u32_of = |value: u64| {
             u32::try_from(value).map_err(|_| internal("a linear merge past u32 words"))
@@ -200,11 +200,15 @@ impl LinearMerge {
                 let skip = at - bound;
                 let kept = kept_at + start * row_bytes;
                 let size = count * row_bytes;
-                ranges.push(vec![
-                    (scratch, kept, size),
-                    (scratch, kept + part, size),
-                    (surface, bound, skip + (count - 1) * pitch + row_bytes),
-                ]);
+                sets.push(OwnedSet {
+                    images: Vec::new(),
+                    storage_images: Vec::new(),
+                    buffers: vec![
+                        (scratch, kept, size),
+                        (scratch, kept + part, size),
+                        (surface, bound, skip + (count - 1) * pitch + row_bytes),
+                    ],
+                });
                 let total = count * words;
                 dispatches.push(Dispatch {
                     groups: u32_of(total.div_ceil(local))?,
@@ -219,7 +223,7 @@ impl LinearMerge {
             }
         }
         let kernel = device.owned_kernel(OwnedModule::ShadowMerge)?;
-        let sets = OwnedSets::write(device, &kernel, &ranges)?;
+        let binds = OwnedBinds::new(device, &kernel, &sets)?;
         let levels = backing.level..backing.level + 1;
         let backing_layers = backing.layer..backing.layer + backing.layers.max(1);
         let read = Access::new(
@@ -266,7 +270,7 @@ impl LinearMerge {
             padding,
             _held: held,
             kernel,
-            sets,
+            binds,
             dispatches,
             keep_uses: vec![backing_read.clone()],
             merge_uses: vec![backing_read, surface],
@@ -374,8 +378,8 @@ impl LinearMerge {
                 ..*region
             })
             .collect();
-        // SAFETY: as in `keep_in`; the sets bind bands inside the scratch's parts and the
-        // surface's bytes, and the kernel's push range holds the shape.
+        // SAFETY: as in `keep_in`; the binds name bands inside the scratch's parts and the
+        // surface's bytes, one per dispatch, and the kernel's push range holds the shape.
         unsafe {
             device.cmd_copy_image_to_buffer(
                 raw,
@@ -386,15 +390,8 @@ impl LinearMerge {
             );
             Barrier::everything().record(device, raw);
             device.cmd_bind_pipeline(raw, vk::PipelineBindPoint::COMPUTE, self.kernel.pipeline);
-            for (set, dispatch) in self.sets.sets.iter().zip(&self.dispatches) {
-                device.cmd_bind_descriptor_sets(
-                    raw,
-                    vk::PipelineBindPoint::COMPUTE,
-                    self.kernel.layout,
-                    0,
-                    std::slice::from_ref(set),
-                    &[],
-                );
+            for (index, dispatch) in self.dispatches.iter().enumerate() {
+                self.binds.bind(device, raw, &self.kernel, index);
                 device.cmd_push_constants(
                     raw,
                     self.kernel.layout,
@@ -409,7 +406,7 @@ impl LinearMerge {
 }
 
 /// The greatest common divisor of `a` and `b`.
-fn gcd(mut a: u64, mut b: u64) -> u64 {
+pub(super) fn gcd(mut a: u64, mut b: u64) -> u64 {
     while b != 0 {
         (a, b) = (b, a % b);
     }

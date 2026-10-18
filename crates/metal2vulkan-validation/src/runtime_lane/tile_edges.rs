@@ -10,17 +10,22 @@
 //! - when the pass begins, a loaded attachment's cells past it hold its texel nearest each,
 //!   clamped to its edge, and a cleared one's the clear color;
 //! - a tile function's writes to them are what the pass's next dispatch reads.
+//!
+//! [`a_shadowed_attachment_s_tiles_past_its_render_area_hold_its_texels`] runs a draw and a
+//! dispatch over a render area smaller than a shadowed attachment, whose tiles reach past the area
+//! inside it.
 
+use super::no_copy_textures::{floats, rects, staged};
 use super::tile_states::on_device;
 use super::{buffer_with, read_buffer, WAIT};
 use crate::air_library::AirLibrary;
-use metal2vulkan::metal::{PixelFormat, TextureUsage};
+use metal2vulkan::metal::{PixelFormat, PrimitiveType, TextureUsage};
 use metal2vulkan::pipeline::{StageSource, TileRenderPipelineDescriptor};
 use metal2vulkan_devtools::{engine_dir, llvm_assemble};
 use metal2vulkan_runtime::{
     Buffer, ClearColor, CommandBufferStatus, Device, LoadAction, PipelineOptions, Region,
-    RenderPassDescriptor, RenderPipelineState, ResourceOptions, Size, StoreAction, Texture,
-    TextureDescriptor,
+    RenderPassDescriptor, RenderPipelineState, ResourceOptions, ScissorRect, Size, StoreAction,
+    Texture, TextureDescriptor,
 };
 
 /// The tile's side.
@@ -208,5 +213,104 @@ fn writes_past_the_attachment_last_for_the_pass() {
             let (x, y) = (i as u64 % WIDTH, i as u64 / WIDTH);
             assert_eq!(have, written(y * TILE + x), "texel ({x}, {y})");
         }
+    });
+}
+
+/// The attachment of [`a_shadowed_attachment_s_tiles_past_its_render_area_hold_its_texels`]: its
+/// width and height, and its rows' pitch, padded past their 160 bytes of texels.
+const SHADOWED: [u64; 2] = [40, 40];
+const SHADOWED_ROW: u64 = 176;
+
+/// That pass's render area, one tile across and two down, whose tiles reach past it inside the
+/// attachment, and the scissor rectangle of its draw inside it.
+const AREA: [u64; 2] = [12, 20];
+const SCISSOR: [u64; 4] = [3, 5, 6, 9];
+
+/// The codes of that draw's color `(1, 0.2, 0.6, 1)`.
+const DRAWN: [u8; 4] = [255, 51, 153, 255];
+
+/// A pass that loads a shadowed attachment (a texture over a buffer's padded rows, the runtime's
+/// `shadow.rs`) over a render area smaller than it, of a draw inside the area and then a dispatch
+/// of `cfb_tn_read4`: the dispatch reads, in each cell of the tiles over the area, the drawn color
+/// inside the draw's scissor rectangle and the attachment's texel elsewhere, past the area too,
+/// where the dispatch's stores reach (`render/tile_dispatch.rs`): the shadow's image holds what
+/// the dispatch reads, though the pass's draw reaches a part of it alone. The buffer holds the
+/// drawn color inside the rectangle, and every other byte as it was.
+#[test]
+fn a_shadowed_attachment_s_tiles_past_its_render_area_hold_its_texels() {
+    on_device(|device| {
+        let [w, h] = SHADOWED;
+        let len = SHADOWED_ROW * h;
+        let mut bytes: Vec<u8> = (0..len).map(|i| (i * 7 + 3) as u8).collect();
+        for y in 0..h {
+            for x in 0..w {
+                let at = (y * SHADOWED_ROW + x * 4) as usize;
+                bytes[at..at + 4].copy_from_slice(&texel(x, y));
+            }
+        }
+        let buffer = staged(device, &bytes);
+        let mut d = TextureDescriptor::texture_2d(PixelFormat::RGBA8Unorm, w, h, false);
+        d.usage = TextureUsage::RENDER_TARGET;
+        d.resource_options = buffer.resource_options();
+        let target = buffer.new_texture(&d, 0, SHADOWED_ROW).unwrap();
+        // SAFETY: the handle is only compared, while the texture lives.
+        assert!(unsafe { target.vk_image() }.is_none(), "a shadow");
+        let draw = rects(device, PixelFormat::RGBA8Unorm, false);
+        let read = state(device, "cfb_tn_read4");
+        let corners = staged(device, &floats([-1.0, -1.0, 1.0, 1.0]));
+        let color = staged(device, &floats([1.0, 0.2, 0.6, 1.0]));
+        let out = buffer_with(device, &vec![0xAB; (CELLS * 16) as usize]).unwrap();
+        let mut pass = RenderPassDescriptor::new();
+        pass.color_attachments[0].texture = Some(target.clone());
+        pass.color_attachments[0].load_action = LoadAction::Load;
+        pass.color_attachments[0].store_action = StoreAction::Store;
+        [pass.render_target_width, pass.render_target_height] = AREA;
+        pass.tile_width = TILE;
+        pass.tile_height = TILE;
+        let queue = device.new_command_queue().unwrap();
+        let command_buffer = queue.command_buffer().unwrap();
+        let mut encoder = command_buffer.render_command_encoder(&pass).unwrap();
+        encoder.set_render_pipeline_state(&draw).unwrap();
+        encoder.set_vertex_buffer(Some(&corners), 0, 0).unwrap();
+        encoder.set_fragment_buffer(Some(&color), 0, 0).unwrap();
+        let [x, y, width, height] = SCISSOR;
+        encoder
+            .set_scissor_rect(ScissorRect::new(x, y, width, height))
+            .unwrap();
+        encoder
+            .draw_primitives(PrimitiveType::Triangle, 0, 6, 1, 0)
+            .unwrap();
+        encoder.set_render_pipeline_state(&read).unwrap();
+        encoder.set_tile_buffer(Some(&out), 0, 0).unwrap();
+        encoder
+            .dispatch_threads_per_tile(Size::new(TILE, TILE, 1))
+            .unwrap();
+        encoder.end_encoding().unwrap();
+        command_buffer.commit().unwrap();
+        command_buffer.wait_until_completed_for(WAIT).unwrap();
+        assert_eq!(command_buffer.status(), CommandBufferStatus::Completed);
+        let drawn = |x: u64, y: u64| {
+            (SCISSOR[0]..SCISSOR[0] + SCISSOR[2]).contains(&x)
+                && (SCISSOR[1]..SCISSOR[1] + SCISSOR[3]).contains(&y)
+        };
+        let want = |x: u64, y: u64| if drawn(x, y) { DRAWN } else { texel(x, y) };
+        for (i, have) in codes(&out).into_iter().enumerate() {
+            let (x, y) = (i as u64 % TILE, i as u64 / TILE);
+            assert_eq!(have, want(x, y), "cell ({x}, {y})");
+        }
+        let mut expected = bytes.clone();
+        for y in 0..h {
+            for x in 0..w {
+                let at = (y * SHADOWED_ROW + x * 4) as usize;
+                expected[at..at + 4].copy_from_slice(&want(x, y));
+            }
+        }
+        let contents = buffer.contents().unwrap();
+        let mut now = vec![0u8; len as usize];
+        // SAFETY: the buffer's `len` bytes, which no command uses once the command buffer
+        // completed.
+        unsafe { std::ptr::copy_nonoverlapping(contents.as_ptr(), now.as_mut_ptr(), now.len()) };
+        let differ = (0..now.len()).find(|&i| now[i] != expected[i]);
+        assert_eq!(differ, None, "the first byte of the buffer that differs");
     });
 }

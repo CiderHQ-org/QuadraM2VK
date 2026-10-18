@@ -29,6 +29,7 @@ use super::super::copy_plan::{surface_depth_unit, CopyUnit};
 use super::super::error::{internal, Error, RuntimeGap};
 use super::super::image_plan::{plan_image, ImagePlan};
 use super::super::shadow::{ShadowBuffer, ShadowCopies, ShadowSource, ShadowTarget};
+use super::super::shadow_merge::ScratchSpares;
 use super::super::texture_descriptor::{texture_usage, TextureDescriptor, TextureLayout};
 use super::super::tracker::UseRange;
 use super::super::values::ResourceOptions;
@@ -163,6 +164,8 @@ impl Texture {
                 },
                 tracked: texels.tracked(),
                 drops_writes: false,
+                backing: texels.backing(),
+                merge_scratch: ScratchSpares::default(),
             };
             let storage = Storage::Shadow {
                 image: image.shared(),

@@ -182,6 +182,7 @@ mod scheduler;
 mod shader_cache;
 mod shadow;
 mod shadow_copy_back;
+mod shadow_copy_in;
 mod shadow_merge;
 mod shadow_stencil;
 mod sharing;

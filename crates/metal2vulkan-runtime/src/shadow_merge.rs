@@ -1,49 +1,121 @@
-//! A shadowed texture's writes merged into its buffer's bytes: one command that writes through a
-//! shadowed texture (`shadow.rs`) and also writes the same buffer's bytes another way (through the
-//! buffer, a texture buffer, or another texture over them). A copy back of the shadow would replace
-//! the other write's bytes with the shadow's, where Metal keeps both writes when they touch
-//! different bytes (Metal probe cases `k.two_ways_disjoint` and `k.two_ways_gap`, M3 Max and M4),
-//! so the bytes the command changed through the texture are merged into the buffer's instead:
+//! - **Merged back** (`ShadowCopies::merges_back`: a buffer's bytes but a tracked `Private`
+//!   buffer's): a copy back would write the texels the encoder's commands left with what the copy
+//!   in read, over another writer's writes to them while the command buffer ran (the CPU's, or
+//!   another queue's commands' over an untracked buffer's), where Metal writes only the texels a
+//!   command writes (`shadow.rs`). Merged in place of each copy back.
 //!
 //! - **Kept.** Before the command, after its copies in, the shadow's texels are copied into the
 //!   *kept* part of a scratch buffer, laid out as in the buffer from the texture's first byte.
-//! - **Merged.** After the command (before the encoder's next command, or as it ends), the
-//!   shadow's texels are copied into the *changed* part, and the buffer's bytes from the
-//!   texture's first to its last into the *current* part. One dispatch of the merge kernel then
-//!   takes, in each byte of the current part, the changed part's byte where it differs from the
-//!   kept one, and the current part is copied back into the buffer. A byte the command wrote
-//!   both ways is the texture's where its value changed: Metal leaves such a race unordered.
-//! - **The scratch** is the command's, retained until its command buffer completes: three parts
-//!   of the texture's bytes rounded up to 256, in one buffer where the device's buffers take it
-//!   (else one each), all zero when made, so the bytes between the texture's rows, which no copy
-//!   of the shadow writes, are the same in the kept and changed parts.
+//! - **Merged in place**, where the texture's first byte is a whole word of its buffer, its last
+//!   byte's word lies in the buffer, and the bytes lie in pages when the merge is planned (not
+//!   detached, `detach.rs`): the shadow's texels are copied into the *changed* part, and the merge
+//!   kernel binds the buffer's own bytes as its current buffer, from the texture's first byte
+//!   rounded down to 256 (the largest `minStorageBufferOffsetAlignment`), its first word pushed,
+//!   to its last byte's word. A word whose kept and changed words are equal is neither read nor
+//!   written: the bytes the commands left, those between the rows and those past the last texel
+//!   in its word keep whatever another writer wrote there meanwhile. In a word they changed, each
+//!   byte they changed becomes the texture's, and the others keep the buffer's: another writer's
+//!   write to the word's other bytes during the merge itself is a race the merge does not order.
+//! - **Merged through a copy** elsewhere (a texture's first byte inside a word, through a staging
+//!   buffer, or a last word past its buffer; never recorded over detached bytes): the shadow's
+//!   texels are copied into the *changed* part, and the buffer's bytes from the texture's first to
+//!   its last into the *current* part. One dispatch of the merge kernel then takes, in each byte of
+//!   the current part, the changed part's byte where it differs from the kept one, and the current
+//!   part is copied back into the buffer: another writer's write to the texture's bytes between
+//!   that copy and the copy back is undone (`docs/FAST-PATHS.md`'s known gaps).
+//! - **Cut.** Where a merge after commands that write through the texture goes in place over one
+//!   region's texels, the keep holds the rectangle the encoder's commands write in, where they
+//!   bound it (`ShadowUse::area`: a pass's attachment it loads, inside its draws' scissors), else
+//!   every texel, each row widened to whole words of the buffer. The keep and the changed copy
+//!   move that rectangle's texels, row after row, and the merge binds the buffer's rows it lies
+//!   in, in bands of rows no binding of which passes `maxStorageBufferRange` and no dispatch of
+//!   which passes `maxComputeWorkGroupCount[0]` workgroups, each band's kept rows from a multiple
+//!   of 256 bytes.
+//!   No command since the keep wrote a texel outside it: a later command that writes outside it
+//!   takes the merge of what was kept first, and a keep of the rectangle bounding both
+//!   (`ShadowSync::before`). (`WorkCounts::shadow_texels_kept`.)
+//! - **Fetched.** Where the shadow has its unsigned-integer view (`shadow_copy_back.rs`: on a
+//!   device that runs a copy back faster as a compute dispatch,
+//!   `DriverFact::ShadowCopyBackDispatchFaster`, a one-slice image of 4-, 8- or 16-byte texels
+//!   copied in place), a cut merge copies nothing of the texels the commands left: its kernel
+//!   (`bind::shadow_merge_image_module`) fetches them from the shadow through the view, the same
+//!   words a copy of them would hold, and compares them with the kept part's, so the scratch is
+//!   the kept part alone (`WorkCounts::shadow_merges_fetched`).
+//! - **Dispatched copies.** Where the shadow has that view, the copies of its texels into the
+//!   kept part, and into the changed part where the merge does not fetch, are that dispatch, each
+//!   storing the bytes the copy would (`WorkCounts::shadow_merge_copies_dispatched`). Where the
+//!   view also stores (`DriverFact::ShadowCopyInDispatchFaster`), a cut keep in place whose
+//!   texels the copy in before it moves, and no copy of the shadow between them, takes that copy
+//!   in with it: one dispatch reads the texels' words from the buffer and stores them in the
+//!   shadow, through the view, and in the kept part (`shadow_copy_in.rs`,
+//!   `WorkCounts::shadow_copies_in_dispatched`).
+//! - **The scratch** is the command's, or for a merge in place of a copy back the encoder's, kept
+//!   in again at each keep after a merge (each merge ends with a barrier to everything after it),
+//!   retained until its command buffer completes: one, two or three parts of the texture's bytes
+//!   (a cut's rows) rounded up to 256, in one buffer where the device's buffers take it (else one
 //! - **The kernel** (`bind::shadow_merge_module`, one per device, `owned_kernel.rs`): one
 //!   invocation per 4-byte word, the three parts bound as its kept, changed and current storage
 //!   buffers, in windows of at most `maxStorageBufferRange` bytes and
-//!   `maxComputeWorkGroupCount[0]` groups, one dispatch each.
+//!   `maxComputeWorkGroupCount[0]` groups, one dispatch each; where it fetches
+//!   (`bind::shadow_merge_image_module`, one per texel width), one invocation per texel, the
 //!
-//! It costs the scratch, three copies and the dispatches in place of one copy back, which the
-//! runtime announces once per device (`shadow-merge`, performance).
+//! A byte a command wrote both ways is the texture's where its value changed: Metal leaves such a
 
 use super::buffer::Buffer;
 use super::degradation::Degradation;
+use super::device::lock;
 use super::error::{internal, Error};
-use super::owned_kernel::{OwnedKernel, OwnedModule, OwnedSets};
+use super::linear_merge::gcd;
+use super::owned_kernel::{OwnedBinds, OwnedKernel, OwnedModule, OwnedSet};
 use super::resource::ResourceKey;
-use super::shadow::{ShadowCopies, ShadowSource};
+use super::shadow::{ShadowCopies, ShadowSource, ShadowTarget};
+use super::shadow_copy_back::{self, CopyBack, WordView};
+use super::shadow_copy_in::CopyIn;
 use super::tracker::{Access, Barrier, Use, UseRange};
-use super::values::ResourceOptions;
+use super::values::{HazardTrackingMode, ResourceOptions};
 use super::Device;
 use crate::device::functions::Vk;
 use ash::vk;
 use metal2vulkan::bind::ShadowMergeModule;
 use std::ops::Range;
+use std::sync::{Arc, Mutex};
 
 /// Bytes one workgroup merges: a word per invocation.
 const GROUP_BYTES: u64 = 4 * ShadowMergeModule::LOCAL_SIZE as u64;
 /// What each part of the scratch is rounded up to: a multiple of every
 /// `minStorageBufferOffsetAlignment` and of every texel's size.
 const PART_ALIGNMENT: u64 = 256;
+
+/// The most scratch buffers a shadow keeps for its next merges ([`ScratchSpares`]): one a frame's
+/// command buffer holds while the next frame's is encoded, and one more.
+const KEPT_SCRATCHES: usize = 2;
+
+#[derive(Clone, Default)]
+
+impl ScratchSpares {
+    /// The smallest kept buffer of at least `length` bytes, taken.
+    fn take(&self, length: u64) -> Option<Buffer> {
+        let at = (spares.iter().enumerate())
+            .filter(|(_, buffer)| buffer.length() >= length)
+            .min_by_key(|(_, buffer)| buffer.length())
+            .map(|(at, _)| at)?;
+        Some(spares.swap_remove(at))
+    }
+
+    /// Keep `buffer` for a later merge, the smallest kept going past [`KEPT_SCRATCHES`].
+    fn give(&self, buffer: Buffer) {
+                .min_by_key(|(_, buffer)| buffer.length())
+                .map(|(at, _)| at)
+        drop(gone);
+    }
+}
+
+enum Held {
+    /// One buffer, back to its shadow's spares as the merge goes.
+    Spare(Buffer, ScratchSpares),
+    /// A buffer per part, where the device's buffers take no single one.
+    Apart(Vec<Buffer>),
+}
 
 /// One part of the scratch: its `VkBuffer` and where it starts there.
 #[derive(Clone, Copy)]
@@ -61,28 +133,54 @@ struct Merged {
     first: u64,
 }
 
-/// The scratch and the dispatches of one command's merge (the module docs).
+/// The rectangle of a shadow's texels a merge is cut to (the module docs).
+struct Cut {
+    /// `[x0, y0, x1, y1)`, its rows' first and last bytes whole words of the buffer.
+    area: [u32; 4],
+    /// Whether it is every texel, the cut made for a merge whose commands bound no area: its
+    /// keep holds every texel, as one not cut does.
+    whole: bool,
+    /// The shadow's image, and the copy of the rectangle's texels into a part from its start, row
+    /// after row (`bufferOffset` 0, `bufferRowLength` the rectangle's width).
+    image: vk::Image,
+    region: vk::BufferImageCopy,
+}
+
+/// How a merge reads the shadow's texels after the commands (the module docs).
+enum Changed {
+    /// Copied into the changed part (by the copy back's dispatch where the device runs one faster
+    /// and the shadow takes it, `shadow_copy_back.rs`), which `bind::shadow_merge_module` reads.
+    Copied {
+        part: Part,
+        dispatch: Option<CopyBack>,
+    },
+    /// Fetched from the shadow through its unsigned-integer view by
+    /// `bind::shadow_merge_image_module`: no copy.
+    Fetched,
+}
+
 pub(super) struct ShadowMerge {
     /// The texture's bytes.
     merged: Merged,
-    /// The kept, changed and current parts.
-    parts: [Part; 3],
-    /// The kept part's identity and range, for the tracker: kept before the command, read by the
-    /// merge after it.
-    kept: (ResourceKey, bool, Range<u64>),
-    /// The buffers the parts lie in, held until the command buffer completes.
-    _held: Vec<Buffer>,
+    /// The rectangle the keep, the changed copy and the merge are cut to; `None` for every texel.
+    cut: Option<Cut>,
+    /// The texels the keep copies.
+    texels: u64,
+    /// How the merge reads the texels after the commands.
+    changed: Changed,
+    /// The keep's dispatch, where the device runs a copy back faster as one
+    keep_dispatch: Option<CopyBack>,
+    held: Held,
     kernel: OwnedKernel,
-    /// One set per window, each binding the window of the three parts.
-    sets: OwnedSets,
-    /// Each window's workgroups and words.
-    groups: Vec<(u32, u32)>,
+    /// One set 0 per window, each binding the window of the parts (and the shadow's view, where
+    binds: OwnedBinds,
+    /// Each window's workgroups (along x and y) and push bytes.
+    dispatches: Vec<([u32; 2], [u8; 16])>,
 }
 
 impl ShadowMerge {
-    /// The scratch and the kernel's sets for a merge of the texture of `copies` on `device`,
-    /// announced once per device. Refused as `new_buffer` refuses the scratch.
-    pub(super) fn new(device: &Device, copies: &ShadowCopies) -> Result<ShadowMerge, Error> {
+    /// in place of a copy back; cut to the texels inside `area` (`[x0, y0, x1, y1)`), widened
+    /// to whole words of the buffer, where given and the merge goes in place over one region's
         let (
             ShadowSource::Bytes {
                 buffer, key, bytes, ..
@@ -90,7 +188,7 @@ impl ShadowMerge {
             Some(first),
         ) = (&copies.source, copies.first_byte())
         else {
-            // A command writing an image two ways is refused before (`ShadowSync::before`).
+            // only a buffer's bytes merge back (`ShadowCopies::merges_back`).
             return Err(internal("a merge of an image's shadow"));
         };
         let merged = Merged {
@@ -100,22 +198,74 @@ impl ShadowMerge {
             first,
         };
         let span = merged.bytes.end - merged.bytes.start;
-        let part = span.next_multiple_of(PART_ALIGNMENT);
+        // A window binds the bytes only while they lie in pages: a detached buffer's `VkBuffer` is
+        // the device's stand-in, smaller than any window, and a binding past a buffer's size is
+        // invalid (VUID-VkDescriptorBufferInfo-range-00342). The encoder records nothing of a
+        // command over detached bytes (`EncoderCore::skips`), so their merge, planned through a
+        // copy, whose windows bind the scratch alone, is never recorded.
+        // In place, the merge reads and writes whole words, up to the last byte's word, which
+        // must lie in the buffer's bytes.
+        let rounded = span.next_multiple_of(4);
+        let in_place = copies.merges_back()
+            && first.is_multiple_of(4)
+            && first + rounded <= buffer.end()
+            && merged.buffer != vk::Buffer::null();
+        let limits = &device.properties().description.limits;
+        let range = u64::from(limits.max_storage_buffer_range);
+        let [groups, groups_y] =
+            [0, 1].map(|axis| u64::from(limits.max_compute_work_group_count[axis]));
+        // A merge in place whose commands bound no area is cut to every texel where it can be:
+        // its parts hold the texels row after row, as a cut's do, and need no zero (below). A cut
+        // fetches the texels after the commands through the shadow's unsigned-integer view where
+        // it has one, and the rectangle lies within the kernel's origin and workgroups.
+        let cut = in_place
+            .then(|| cut_of(copies, area))
+            .flatten()
+            .and_then(|(cut, geometry)| {
+                let view = word_view(copies).filter(|_| fetches(&cut, groups, groups_y));
+                let rows = match view {
+                    Some(_) => groups_y,
+                    None => {
+                        groups * u64::from(ShadowMergeModule::LOCAL_SIZE) / (geometry.row_bytes / 4)
+                    }
+                };
+                Some((cut, geometry, geometry.band(range, rows)?, view))
+            });
+        let part = match &cut {
+            Some((_, geometry, ..)) => geometry.rows * geometry.row_bytes,
+            None => rounded,
+        }
+        .next_multiple_of(PART_ALIGNMENT);
+        let fetched = cut.as_ref().and_then(|(.., view)| *view);
+        };
         let options = ResourceOptions::private();
         let place = |buffer: &Buffer, at: u64| {
             let (raw, at) = buffer.at(at);
             Part { raw, at }
         };
+        let length = roles * part;
+        let counts = &device.shared().counts;
         // The kept part is the first `part` bytes of the first buffer either way.
-        let (held, parts) = if 3 * part <= device.properties().max_buffer_length {
-            let one = device.own_buffer(3 * part, options)?;
-            let parts = [0, 1, 2].map(|role| place(&one, role * part));
-            (vec![one], parts)
+            // A cut's copies write every byte of its kept and changed parts the kernel reads (its
+            // rows of whole words, back to back), so its scratch needs no zero: one of the
+            // shadow's spares, else a new one unzeroed. Every other merge's scratch is new and
+            // zero.
+            let spares = copies.merge_scratch.clone();
+            let one = match (&cut, cut.as_ref().and_then(|_| spares.take(length))) {
+                (Some(_), Some(spare)) => {
+                    counts.shadow_merge_scratch_reused();
+                    spare
+                }
+                (Some(_), None) => device.unzeroed_buffer(length, HazardTrackingMode::Default)?,
+                (None, _) => {
+                    counts.shadow_merge_scratch_zeroed();
+                    device.own_buffer(length, options)?
+                }
+            };
+            (Held::Spare(one, spares), placed)
         } else {
-            let [kept, changed, current] = [(); 3].map(|()| device.own_buffer(part, options));
-            let [kept, changed, current] = [kept?, changed?, current?];
-            let parts = [place(&kept, 0), place(&changed, 0), place(&current, 0)];
-            (vec![kept, changed, current], parts)
+            counts.shadow_merge_scratch_zeroed();
+            (Held::Apart(held), placed)
         };
         let kept = {
             let first = held
@@ -124,29 +274,115 @@ impl ShadowMerge {
             let (identity, range) = first.tracked(0..part);
             (identity.key, identity.tracked, range)
         };
-        let limits = &device.properties().description.limits;
-        let window = (u64::from(limits.max_storage_buffer_range) / PART_ALIGNMENT * PART_ALIGNMENT)
-            .min(u64::from(limits.max_compute_work_group_count[0]) * GROUP_BYTES);
-        if window == 0 {
-            return Err(internal(
-                "a device whose storage buffers hold no merge window",
-            ));
+            }
+        };
+        let mut sets = Vec::new();
+        let set = |buffers: Vec<(vk::Buffer, u64, u64)>| OwnedSet {
+            storage_images: Vec::new(),
+            buffers,
+        };
+        if let Some((cut, geometry, band, _)) = &cut {
+            // The rectangle's rows in bands, each band's kept and changed rows from a multiple of
+            // the alignment (`Geometry::band`), its current bytes bound from its first byte
+            // rounded down to it.
+            let Geometry {
+                first,
+                row_bytes,
+                pitch,
+                rows,
+            } = *geometry;
+            let words = row_bytes / 4;
+            let [x0, y0] = [cut.region.image_offset.x, cut.region.image_offset.y].map(|o| o as u32);
+            let width = cut.region.image_extent.width;
+            let mut start = 0;
+            while start < rows {
+                let count = (*band).min(rows - start);
+                let at = first + start * pitch;
+                let bound = at / PART_ALIGNMENT * PART_ALIGNMENT;
+                let skip = at - bound;
+                let size = count * row_bytes;
+                let current_window = (merged.buffer, bound, skip + (count - 1) * pitch + row_bytes);
+                let (row_words, first_word) = (u32_of(pitch / 4)?, u32_of(skip / 4)?);
+                        let changed_window = (changed.raw, changed.at + start * row_bytes, size);
+                        let total = count * words;
+                        let shape = ShadowMergeModule::shape(
+                            u32_of(words)?,
+                            u32_of(total)?,
+                            row_words,
+                            first_word,
+                        );
+                        let local = u64::from(ShadowMergeModule::LOCAL_SIZE);
+                        dispatches.push(([u32_of(total.div_ceil(local))?, 1], shape));
+                    }
+                        let origin = [x0, y0 + u32_of(start)?];
+                        let shape =
+                            ShadowMergeImageModule::shape(origin, width, row_words, first_word);
+                        let groups = ShadowMergeImageModule::groups([width, u32_of(count)?]);
+                        dispatches.push((groups, shape));
+                    }
+                }
+                start += count;
+            }
+        } else {
+            // In place, the current bytes' binding starts up to 255 bytes before each window.
+            let room = match in_place {
+                true => range.saturating_sub(PART_ALIGNMENT),
+                false => range,
+            let window = (room / PART_ALIGNMENT * PART_ALIGNMENT).min(groups * GROUP_BYTES);
+            if window == 0 {
+                return Err(internal(
+                    "a device whose storage buffers hold no merge window",
+                ));
+            }
+            let mut start = 0;
+            // In place, the windows cover the texture's bytes alone, which lie in the buffer;
+            // through a copy, the parts whole.
+            let total = if in_place { rounded } else { part };
+            while start < total {
+                let size = window.min(total - start);
+                let words = u32_of(size / 4)?;
+                let (current_window, first_word) = match current {
+                    Some(current) => ((current.raw, current.at + start, size), 0),
+                    None => {
+                        let at = merged.first + start;
+                        let bound = at / PART_ALIGNMENT * PART_ALIGNMENT;
+                        let skip = at - bound;
+                        ((merged.buffer, bound, skip + size), u32_of(skip / 4)?)
+                    }
+                };
+                let changed =
+                    changed.ok_or_else(|| internal("a merge without its changed part"))?;
+                sets.push(set(vec![
+                    (kept_part.raw, kept_part.at + start, size),
+                    (changed.raw, changed.at + start, size),
+                    current_window,
+                ]));
+                // The window's words, one row of them.
+                let shape = ShadowMergeModule::shape(words, words, 0, first_word);
+                dispatches.push(([words.div_ceil(ShadowMergeModule::LOCAL_SIZE), 1], shape));
+                start += size;
+            }
         }
-        let mut ranges = Vec::new();
-        let mut groups = Vec::new();
-        let mut start = 0;
-        while start < part {
-            let size = window.min(part - start);
-            ranges.push(
-                parts
-                    .iter()
-                    .map(|p| (p.raw, p.at + start, size))
-                    .collect::<Vec<_>>(),
-            );
-            let words =
-                u32::try_from(size / 4).map_err(|_| internal("a merge window past u32 words"))?;
-            groups.push((words.div_ceil(ShadowMergeModule::LOCAL_SIZE), words));
-            start += size;
+        };
+        let binds = OwnedBinds::new(device, &kernel, &sets)?;
+        let cut = cut.map(|(cut, ..)| cut);
+        let changed = match changed {
+            Some(part) => Changed::Copied {
+                part,
+                dispatch: dispatched_out(device, copies, part, cut.as_ref()),
+            },
+            None => {
+                device.shared().counts.shadow_merge_fetched();
+                Changed::Fetched
+            }
+        };
+        let texels = match &cut {
+            Some(Cut { region, .. }) => {
+                let extent = region.image_extent;
+                u64::from(extent.width) * u64::from(extent.height)
+            }
+            None => copies.texels(),
+        };
         }
         let kernel = device.owned_kernel(OwnedModule::ShadowMerge)?;
         let sets = OwnedSets::write(device, &kernel, &ranges)?;
@@ -161,32 +397,160 @@ impl ShadowMerge {
         });
         Ok(ShadowMerge {
             merged,
-            parts,
+            cut,
+            texels,
+            changed,
             kept,
-            _held: held,
+            keep_dispatch,
+            held,
             kernel,
-            sets,
-            groups,
-        })
+            binds,
     }
 
-    /// The uses of keeping the shadow of `copies`: a read of the shadow and a write of the kept
-    /// part.
-    pub(super) fn keep_uses(&self, copies: &ShadowCopies) -> Vec<Use<ResourceKey>> {
-        let (key, tracked, range) = self.kept.clone();
+    /// Whether the keep is a dispatch (`ShadowMerge::keep_dispatch`), which runs in the compute
+    /// stage.
+    pub(super) fn dispatches(&self) -> bool {
+        self.keep_dispatch.is_some()
+    }
+
+    /// The dispatch on `device` that takes the copy in of `region` of the shadow of `copies` (its
+    /// texels in the buffer, as the copy in cuts it, `ShadowCopy::copied_region`) and this
+    /// merge's keep together (`shadow_copy_in.rs`): where the keep is a dispatch of the
+    /// rectangle the merge is cut to, in place, which is the copy in's, and the shadow's view
+    /// stores; `None` where the copy in and the keep stay apart.
+    pub(super) fn keep_in(
+        &self,
+        device: &Device,
+        copies: &ShadowCopies,
+        region: &vk::BufferImageCopy,
+    ) -> Option<CopyIn> {
+            return None;
+        };
+        // Both of the texture's one region, of one slice and level.
+        let same = region.image_offset == cut.region.image_offset
+            && region.image_extent == cut.region.image_extent;
+        if !same {
+            return None;
+        }
+        let view = word_view(copies)?;
+    }
+
+    /// The uses of the dispatch that takes the copy in of the shadow of `copies` and the keep
+    /// ([`keep_in`](Self::keep_in)): a storage read of the texture's bytes, and storage writes of
+    /// the shadow and of the kept part, in the compute stage.
+    pub(super) fn keep_in_uses(&self, copies: &ShadowCopies) -> Vec<Use<ResourceKey>> {
+        let storage = |access| Access::new(vk::PipelineStageFlags2::COMPUTE_SHADER, access);
+        let (truth, range) = copies.truth();
+        let (key, tracked, kept) = self.kept.clone();
         vec![
             Use::reads(
+                truth,
+                copies.tracked,
+                range,
+                storage(vk::AccessFlags2::SHADER_STORAGE_READ),
+            ),
+            Use::writes(
                 copies.shadow_key,
                 copies.tracked,
                 copies.shadow_range.clone(),
-                transfer(vk::AccessFlags2::TRANSFER_READ),
+                storage(vk::AccessFlags2::SHADER_STORAGE_WRITE),
             ),
             Use::writes(
                 key,
                 tracked,
-                UseRange::Bytes(range),
-                transfer(vk::AccessFlags2::TRANSFER_WRITE),
+                storage(vk::AccessFlags2::SHADER_STORAGE_WRITE),
             ),
+        ]
+    }
+
+    /// Whether the merge's copy of the texels after the commands into the changed part is a
+    /// dispatch (none where the merge fetches them).
+    pub(super) fn changed_dispatches(&self) -> bool {
+        matches!(
+            self.changed,
+            Changed::Copied {
+                dispatch: Some(_),
+                ..
+            }
+        )
+    }
+
+    /// The rectangle `[x0, y0, x1, y1)` of the shadow's texels the merge keeps and merges, `None`
+    /// for every texel.
+    pub(super) fn area(&self) -> Option<[u32; 4]> {
+        (self.cut.as_ref())
+            .filter(|cut| !cut.whole)
+            .map(|cut| cut.area)
+    }
+
+    /// The texels each keep copies (`WorkCounts::shadow_texels_kept`).
+    pub(super) fn texels_kept(&self) -> u64 {
+        self.texels
+    }
+
+    /// Record the copy of the shadow of `copies` into `part`: the cut rectangle's texels, row after
+    /// row, or every texel laid out as in the buffer from the texture's first byte.
+    ///
+    /// # Safety
+    ///
+    /// As `record_keep`.
+    unsafe fn record_out(
+        &self,
+        device: &Vk,
+        command_buffer: vk::CommandBuffer,
+        copies: &ShadowCopies,
+        part: Part,
+    ) {
+        // SAFETY: the caller's contract; the part holds the rectangle's texels row after row, or
+        // the texture's bytes.
+        unsafe {
+            match &self.cut {
+                Some(Cut { image, region, .. }) => device.cmd_copy_image_to_buffer(
+                    command_buffer,
+                    *image,
+                    vk::ImageLayout::GENERAL,
+                    part.raw,
+                    &[vk::BufferImageCopy {
+                        buffer_offset: part.at,
+                        ..*region
+                    }],
+                ),
+                None => copies.record_out(device, command_buffer, part.raw, part.at),
+            }
+        }
+    }
+
+    /// The use of the shadow of `copies` by the keep, the changed copy or the merge's fetches: a
+    /// copy's transfer read, or a dispatch's sampled read where `dispatched`.
+    fn shadow_read(copies: &ShadowCopies, dispatched: bool) -> Use<ResourceKey> {
+        let read = match dispatched {
+            true => Access::new(
+                vk::PipelineStageFlags2::COMPUTE_SHADER,
+                vk::AccessFlags2::SHADER_SAMPLED_READ,
+            ),
+            false => transfer(vk::AccessFlags2::TRANSFER_READ),
+        };
+        Use::reads(
+            copies.shadow_key,
+            copies.tracked,
+            copies.shadow_range.clone(),
+            read,
+        )
+    }
+
+    /// The uses of keeping the shadow of `copies`: a read of the shadow and a write of the kept
+    /// part, by a copy or a dispatch.
+    pub(super) fn keep_uses(&self, copies: &ShadowCopies) -> Vec<Use<ResourceKey>> {
+        let (key, tracked, range) = self.kept.clone();
+        let write = match self.dispatches() {
+            true => Access::new(
+                vk::PipelineStageFlags2::COMPUTE_SHADER,
+                vk::AccessFlags2::SHADER_STORAGE_WRITE,
+            ),
+            false => transfer(vk::AccessFlags2::TRANSFER_WRITE),
+        };
+        vec![
+            ShadowMerge::shadow_read(copies, self.dispatches()),
         ]
     }
 
@@ -210,6 +574,11 @@ impl ShadowMerge {
                     vk::AccessFlags2::SHADER_STORAGE_READ,
                 ),
             ),
+        let dispatched = match self.changed {
+            Changed::Copied { ref dispatch, .. } => dispatch.is_some(),
+            Changed::Fetched => true,
+        };
+            ShadowMerge::shadow_read(copies, dispatched),
             Use {
                 key: self.merged.key,
                 tracked: copies.tracked,
@@ -232,16 +601,22 @@ impl ShadowMerge {
         command_buffer: vk::CommandBuffer,
         copies: &ShadowCopies,
     ) {
-        let [kept, _, _] = self.parts;
-        // SAFETY: the caller's contract; the kept part holds the texture's bytes.
-        unsafe { copies.record_out(device, command_buffer, kept.raw, kept.at) };
+        // SAFETY: the caller's contract; the kept part holds the texture's bytes, and the
+        unsafe {
+            }
+        }
     }
 
-    /// Record the merge of the shadow of `copies` into its buffer's bytes (the module docs).
+    /// Record the merge of the shadow of `copies` into its buffer's bytes (the module docs): a
+    /// barrier between the copies of the texels into the changed and current parts, where it has
+    /// them, and its dispatches; and one to everything after them. A merge that fetches the
+    /// texels in place records no copy, and its dispatches follow the commands by the barrier
+    /// every caller records before a copy (the encoder's, from the merge's uses).
     ///
     /// # Safety
     ///
-    /// As `record_keep`, after the keep and the command it surrounds.
+    /// As `record_keep`, after the keep and the command it surrounds, and after a barrier from
+    /// what precedes it.
     pub(super) unsafe fn record_merge(
         &self,
         device: &Vk,
@@ -257,36 +632,31 @@ impl ShadowMerge {
         } = self.merged;
         let span = bytes.end - bytes.start;
         // SAFETY: the caller's contract; each part holds the texture's bytes, and the sets bind
-        // windows inside the parts.
+        // windows inside the parts and, in place, inside the texture's bytes (and the shadow's
+        // view, where the merge fetches its texels).
         unsafe {
-            copies.record_out(device, command_buffer, changed.raw, changed.at);
-            device.cmd_copy_buffer(
-                command_buffer,
-                buffer,
-                current.raw,
-                &[vk::BufferCopy {
-                    src_offset: first,
-                    dst_offset: current.at,
-                    size: span,
-                }],
-            );
-            Barrier::everything().record(device, command_buffer);
+            match &self.changed {
+                Changed::Copied {
+                    dispatch: Some(out),
+                    ..
+                } => out.record(device, command_buffer),
+                Changed::Copied { part, .. } => {
+                    self.record_out(device, command_buffer, copies, *part);
+                }
+                Changed::Fetched => {}
+            }
+            let copied = !matches!(self.changed, Changed::Fetched) || self.current.is_some();
+            if copied {
+                Barrier::everything().record(device, command_buffer);
+            }
             device.cmd_bind_pipeline(
                 command_buffer,
                 vk::PipelineBindPoint::COMPUTE,
                 self.kernel.pipeline,
             );
-            for (set, &(groups, words)) in self.sets.sets.iter().zip(&self.groups) {
-                device.cmd_bind_descriptor_sets(
-                    command_buffer,
-                    vk::PipelineBindPoint::COMPUTE,
-                    self.kernel.layout,
-                    0,
-                    std::slice::from_ref(set),
-                    &[],
-                );
-                // The window's words, one row of them.
-                let shape = ShadowMergeModule::shape(words, words, 0, 0);
+            for (window, (groups, shape)) in self.dispatches.iter().enumerate() {
+                self.binds
+                    .bind(device, command_buffer, &self.kernel, window);
                 device.cmd_push_constants(
                     command_buffer,
                     self.kernel.layout,
@@ -294,21 +664,195 @@ impl ShadowMerge {
                     0,
                     &shape,
                 );
-                device.cmd_dispatch(command_buffer, groups, 1, 1);
+                device.cmd_dispatch(command_buffer, groups[0], groups[1], 1);
             }
             Barrier::everything().record(device, command_buffer);
-            device.cmd_copy_buffer(
-                command_buffer,
-                current.raw,
-                buffer,
-                &[vk::BufferCopy {
-                    src_offset: current.at,
-                    dst_offset: first,
-                    size: span,
-                }],
-            );
+}
+
+impl Drop for ShadowMerge {
+    /// Its scratch goes back to its shadow's spares: the merge goes once the command buffers that
+    /// recorded it completed, which retain it.
+    fn drop(&mut self) {
         }
     }
+}
+
+/// The shadow's unsigned-integer view of `copies`, where it has one (`shadow_copy_back.rs`): a
+/// one-region image of 4-, 8- or 16-byte texels copied in place.
+fn word_view(copies: &ShadowCopies) -> Option<WordView> {
+    match &copies.source {
+        ShadowSource::Bytes {
+            target: ShadowTarget::Image {
+                words: Some(words), ..
+            },
+            ..
+        } => Some(*words),
+        _ => None,
+    }
+}
+
+/// Whether `bind::shadow_merge_image_module` takes the rectangle of `cut`: its first texel's
+/// coordinates and its last row's below 65536 (the shape's origin), and its row's workgroups
+/// within `groups` (`maxComputeWorkGroupCount[0]`); its rows go in bands of at most
+/// `groups_y` (`maxComputeWorkGroupCount[1]`).
+fn fetches(cut: &Cut, groups: u64, groups_y: u64) -> bool {
+    let (offset, extent) = (cut.region.image_offset, cut.region.image_extent);
+    let row_groups = u64::from(ShadowMergeImageModule::groups([extent.width, 1])[0]);
+    let below = |o: i32, n: u32| u64::from(o as u32) + u64::from(n) <= 1 << 16;
+    below(offset.x, 1) && below(offset.y, extent.height) && row_groups <= groups && groups_y > 0
+}
+
+/// The dispatch on `device` that stores the shadow of `copies` into `part`, as its copy out
+/// (`ShadowMerge::record_out`) would: the texels of `cut` row after row, or every texel laid
+/// out as in the buffer from the texture's first byte; where `device` runs a copy back faster as
+/// a dispatch and the shadow is a one-region image copied in place with its integer view
+/// (`shadow_copy_back.rs`); `None` where the part does not fit one (a copy takes it).
+fn dispatched_out(
+    device: &Device,
+    copies: &ShadowCopies,
+    part: Part,
+    cut: Option<&Cut>,
+) -> Option<CopyBack> {
+    if !shadow_copy_back::dispatches(device) {
+        return None;
+    }
+    let ShadowSource::Bytes {
+        target:
+            ShadowTarget::Image {
+                regions,
+                staging: None,
+                words: Some(words),
+                ..
+            },
+        ..
+    } = &copies.source
+    else {
+        return None;
+    };
+    let [region] = regions.as_slice() else {
+        return None;
+    };
+    let region = cut.map_or(region, |cut| &cut.region);
+    let region = vk::BufferImageCopy {
+        buffer_offset: part.at,
+        ..*region
+    };
+    CopyBack::new(device, *words, part.raw, &region)
+}
+
+/// Where a cut rectangle's rows lie in the buffer's `VkBuffer`.
+#[derive(Clone, Copy)]
+struct Geometry {
+    /// Its first byte, a whole word.
+    first: u64,
+    /// The bytes of each of its rows (whole words), their pitch in the buffer (whole words), and
+    /// its rows.
+    row_bytes: u64,
+    pitch: u64,
+    rows: u64,
+}
+
+impl Geometry {
+    /// The rows of each band of the merge: all of them where one binding of each part and of the
+    /// current bytes stays within `range` (`maxStorageBufferRange`) and one dispatch takes at most
+    /// `dispatched` rows (as the device's workgroup counts bound its kernel), else the most that
+    /// do in a whole number of steps, so each band's kept and changed rows start at a multiple of
+    /// the alignment; `None` where not one row fits.
+    fn band(&self, range: u64, dispatched: u64) -> Option<u64> {
+        let Geometry {
+            row_bytes,
+            pitch,
+            rows,
+            ..
+        } = *self;
+        let step = PART_ALIGNMENT / gcd(row_bytes, PART_ALIGNMENT);
+        let by_current = match range.checked_sub(PART_ALIGNMENT + row_bytes) {
+            Some(rest) => rest / pitch + 1,
+            None => 0,
+        };
+        let most = rows.min(by_current).min(range / row_bytes).min(dispatched);
+        let band = match most == rows {
+            true => rows,
+            false => most / step * step,
+        };
+        (band > 0).then_some(band)
+    }
+}
+
+/// The cut of `copies`'s shadow to the texels inside `area` (`[x0, y0, x1, y1)`; `None` every
+/// texel), each row widened to whole words of the buffer, and where its rows lie: for one region
+/// of one slice over the buffer's bytes in place, whose rows' pitch is whole words and whose
+/// texels inside `area` take whole words from the first of a row to the last; `None` otherwise,
+/// or where `area` holds no texel.
+fn cut_of(copies: &ShadowCopies, area: Option<[u32; 4]>) -> Option<(Cut, Geometry)> {
+    let [x0, y0, x1, y1] = area.unwrap_or([0, 0, u32::MAX, u32::MAX]);
+    let ShadowSource::Bytes {
+        target:
+            ShadowTarget::Image {
+                image,
+                regions,
+                staging: None,
+                texel: Some(texel),
+                ..
+            },
+        ..
+    } = &copies.source
+    else {
+        return None;
+    };
+    let [region] = regions.as_slice() else {
+        return None;
+    };
+    let extent = region.image_extent;
+    if extent.depth != 1 || region.image_subresource.layer_count != 1 {
+        return None;
+    }
+    let row = match region.buffer_row_length {
+        0 => extent.width,
+        row => row,
+    };
+    let pitch = u64::from(row) * texel;
+    // The texels of a whole number of words: a row's first texel's byte a whole word, as the
+    // texture's first byte and its pitch are.
+    let step = (4 / gcd(*texel, 4)) as u32;
+    let x0 = x0 / step * step;
+    let x1 = x1.min(extent.width).next_multiple_of(step);
+    let y1 = y1.min(extent.height);
+    if x1 > extent.width || x0 >= x1 || y0 >= y1 || !pitch.is_multiple_of(4) {
+        return None;
+    }
+    let first = region.buffer_offset + (u64::from(y0) * u64::from(row) + u64::from(x0)) * texel;
+    let geometry = Geometry {
+        first,
+        row_bytes: u64::from(x1 - x0) * texel,
+        pitch,
+        rows: u64::from(y1 - y0),
+    };
+    if !first.is_multiple_of(4) || !geometry.row_bytes.is_multiple_of(4) {
+        return None;
+    }
+    let cut = Cut {
+        area: [x0, y0, x1, y1],
+        whole: area.is_none(),
+        image: *image,
+        region: vk::BufferImageCopy {
+            buffer_offset: 0,
+            buffer_row_length: x1 - x0,
+            buffer_image_height: y1 - y0,
+            image_subresource: region.image_subresource,
+            image_offset: vk::Offset3D {
+                x: region.image_offset.x + x0 as i32,
+                y: region.image_offset.y + y0 as i32,
+                z: region.image_offset.z,
+            },
+            image_extent: vk::Extent3D {
+                width: x1 - x0,
+                height: y1 - y0,
+                depth: 1,
+            },
+        },
+    };
+    Some((cut, geometry))
 }
 
 fn transfer(access: vk::AccessFlags2) -> Access {

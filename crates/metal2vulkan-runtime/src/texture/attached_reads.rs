@@ -40,16 +40,16 @@
 //!   (`WorkCounts::attachment_reads_through_copies`, the shadow served or not), and so does each
 //!   copy (`WorkCounts::shadow_copies`). It is exact and announces nothing.
 //! - **Only what the instances drew.** A copy after the pass's first instance, of a buffer's
-//!   bytes, where the instances since the last copy changed them only by their draws into a
-//!   color attachment the pass loads (the encoder's load, single-sampled, resolved nowhere,
-//!   rendered in place, the whole of a one-level, one-slice texture), moves only the texels
-//!   inside the rectangle bounding those instances' draws' scissors: a draw changes no texel
-//!   outside its scissors, and the load and store write back what they read
-//!   (`render/shadows.rs`). Every other texel of the shadow holds the bytes from the last copy
-//!   (`shadow.rs`, `WorkCounts::bounded_shadow_copies`). Any other write of the bytes (a clear,
-//!   a `DontCare` load, a resolve, a stand-in, a storage write, a tile dispatch, an execution, a
-//!   rasterization-rate map), a texture's image as the truth, and the first copy of each
-//!   encoder copy every texel.
+//!   bytes or of an image's one level and slice, where the instances since the last copy changed
+//!   them only by their draws into a color attachment the pass loads (the encoder's load,
+//!   single-sampled, resolved nowhere, rendered in place, the whole of a one-level, one-slice
+//!   texture), moves only the texels inside the rectangle bounding those instances' draws'
+//!   scissors: a draw changes no texel outside its scissors, and the load and store write back
+//!   what they read (`render/shadows.rs`). Every other texel of the shadow holds the truth's from
+//!   the last copy (`shadow.rs`, `WorkCounts::bounded_shadow_copies`). Any other write of the
+//!   truth (a clear, a `DontCare` load, a resolve, a stand-in, a storage write, a tile dispatch,
+//!   an execution, a rasterization-rate map), an image's several levels or slices as the truth,
+//!   and the first copy of each encoder copy every texel.
 //! - **Only what a draw reads at its own pixels.** A draw every binding of whose texture is a
 //!   fragment slot its function reads at the fragment's own pixel alone
 //!   (`StageModule::own_pixel_textures`: an `OpImageFetch` at level 0 of Metal's saturating

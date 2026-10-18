@@ -292,6 +292,7 @@ impl RenderCommandEncoder {
             std::iter::once((&instance.shadows, bound)),
             &self.layout,
             (true, area.map(|area| (area, &loaded[..]))),
+            area.is_some().then_some(&self.drawn),
         )?;
         Ok(planned.into_iter().next().unwrap_or_default())
     }
@@ -332,8 +333,9 @@ impl RenderCommandEncoder {
 }
 
 /// Record `instance`, kept (the module docs), into the pass's command buffer after the render
-/// pass instance before it: that one's end, a barrier from everything before, `copies` (each
-/// followed by a barrier), the steps its draws take before it, its render pass instance's begin
+/// pass instance before it: that one's end, a barrier from everything before, `copies` (one run
+/// of them, `EncoderCore::held_shadow_copies`, followed by a barrier), the steps its draws take
+/// before it, its render pass instance's begin
 /// in `objects` (a render pass compatible with its draws' pipelines, and the pass's
 /// framebuffer), and its commands, recorded through `bound`, the record of what the command
 /// buffer bound.

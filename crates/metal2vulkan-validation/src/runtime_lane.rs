@@ -225,6 +225,8 @@ mod argument_linear_samples;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
 mod astc_textures;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
+mod attachment_read_costs;
+#[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
 mod attachment_reads;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
 mod attachmentless;

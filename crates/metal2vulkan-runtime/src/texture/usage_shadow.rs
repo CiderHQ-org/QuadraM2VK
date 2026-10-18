@@ -285,12 +285,16 @@ impl Texture {
                 descriptor.resource_options =
                     ResourceOptions::new(StorageMode::Private, CpuCacheMode::DefaultCache, hazard);
                 let image = device.new_image(plan, &layout, &descriptor, hazard)?;
-                let copies = texels.shadow_copies(
+                let mut copies = texels.shadow_copies(
                     image.raw.get(),
                     image.identity,
                     texture_aspects(image.plan()),
                     None,
                 )?;
+                // The texture's own image lies in the bytes too where it aliases them.
+                if matches!(self.0.storage, Storage::Alias { .. }) {
+                    copies.backing = copies.backing.aliased();
+                }
                 (
                     image.shared(),
                     Arc::new(copies),

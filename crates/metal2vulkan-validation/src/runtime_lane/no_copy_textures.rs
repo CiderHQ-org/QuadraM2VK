@@ -52,7 +52,9 @@ use super::host_memory::{counting, no_copy, not_importable, Mapping, GUEST_PAGE}
 use super::{validated_device, validated_device_with, Messages, ScratchCache, WAIT};
 use crate::air_library::AirLibrary;
 use crate::gpu::TEST_DEVICE;
-use metal2vulkan::metal::{BlendFactor, PixelFormat, PrimitiveType, TextureType, TextureUsage};
+use metal2vulkan::metal::{
+    BlendFactor, ColorWriteMask, PixelFormat, PrimitiveType, TextureType, TextureUsage,
+};
 use metal2vulkan::pipeline::{ColorAttachmentDescriptor, RenderPipelineDescriptor, StageSource};
 use metal2vulkan::vk::DriverId;
 use metal2vulkan_devtools::llvm_assemble;
@@ -696,6 +698,35 @@ pub(super) fn rects_beside(
     blends: bool,
     beside: Option<PixelFormat>,
 ) -> RenderPipelineState {
+    let mut d = rects_descriptor(device, pf, blends);
+    match beside {
+        Some(PixelFormat::Depth32Float) => d.depth_format = beside,
+        Some(_) => d.stencil_format = beside,
+        None => {}
+    }
+    device
+        .new_render_pipeline_state(&d, &PipelineOptions::default())
+        .unwrap()
+}
+
+/// [`blending`]'s pipeline for a pass whose color 1 is a scratch of `scratch`'s format, which it
+/// leaves alone under an empty write mask.
+pub(super) fn blending_beside_scratch(
+    device: &Device,
+    pf: PixelFormat,
+    scratch: PixelFormat,
+) -> RenderPipelineState {
+    let mut d = rects_descriptor(device, pf, true);
+    let mut color = ColorAttachmentDescriptor::new(scratch);
+    color.write_mask = ColorWriteMask::NONE;
+    d.color_attachments[1] = Some(color);
+    device
+        .new_render_pipeline_state(&d, &PipelineOptions::default())
+        .unwrap()
+}
+
+/// [`rects`]'s pipeline descriptor.
+fn rects_descriptor(device: &Device, pf: PixelFormat, blends: bool) -> RenderPipelineDescriptor {
     let ll = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/public/engine/tob_renders.ll");
     let library = device
         .new_library_with_air(&llvm_assemble(&ll).unwrap())
@@ -717,14 +748,7 @@ pub(super) fn rects_beside(
     color.source_alpha_blend_factor = BlendFactor::One;
     color.destination_alpha_blend_factor = BlendFactor::Zero;
     d.color_attachments[0] = Some(color);
-    match beside {
-        Some(PixelFormat::Depth32Float) => d.depth_format = beside,
-        Some(_) => d.stencil_format = beside,
-        None => {}
-    }
-    device
-        .new_render_pipeline_state(&d, &PipelineOptions::default())
-        .unwrap()
+    d
 }
 
 /// The bytes of four `f32`s, as a shader reads them.

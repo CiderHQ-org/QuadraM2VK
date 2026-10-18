@@ -12,18 +12,25 @@
 //!   the index rewrite one per `RewriteProgram` and `RewritePhase` (closed enums of a few).
 //! - **Descriptor sets** ([`OwnedSets`]): one pool per command, holding one set per dispatch, each
 //!   written with the command's image views and buffer ranges; the command buffer retains it
-//!   until it completes.
+//!   until it completes (`WorkCounts::owned_descriptor_pools`). A kernel whose set 0 is a push
+//!   descriptor set's ([`OwnedKernel::pushed`]) takes no pool: each dispatch pushes its
+//!   descriptors as it records ([`OwnedBinds`], which binds either way by that field alone).
+//!   Vulkan forbids a set from such a layout ("Each element of `pSetLayouts` must not have been
+//!   created with `VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT` set",
+//!   `VkDescriptorSetAllocateInfo`), so `OwnedSets` refuses its kernel (internal).
 
+use super::binding::{self, Info, SetWrite};
 use super::device::lock;
 use super::error::{internal, vulkan, Error};
 use super::exit_guard;
 use super::release;
 use super::texture::decoded_twin::TwinDecode;
 use super::Device;
+use crate::device::functions::Vk;
 use crate::shader_cache::driver::Making;
 use ash::vk;
 use metal2vulkan::bind::{
-    BlockDecode, CompressedBlit, MipmapFilterKernel, RewritePhase, RewriteProgram,
+    CompressedBlit, MipmapFilterKernel, RewritePhase, RewriteProgram, ShadowTexelView,
     TessellationScanKernel, TexelWords, YCbCrOutput,
 };
 use metal2vulkan::metal::format::ExtendedRange;
@@ -58,11 +65,20 @@ pub(super) enum OwnedModule {
     /// pass that renders over it, and the pass's words merged back into the depth after it
     /// (`signed_depth.rs`).
     DepthMagnitude,
-    /// `bind::shadow_copy_back_module` of one texel width (1, 2 or 4 words): a shadowed
+    /// `bind::shadow_copy_back_module` of one view of a texel (`ShadowTexelView`): a shadowed
     /// texture's texels stored back into its buffer's rows by a dispatch, where the device copies
     /// back faster so (`shadow_copy_back.rs`). Its shadow's unsigned-integer view is its sampled
     /// image.
-    ShadowCopyBack(u32),
+    ShadowCopyBack(ShadowTexelView),
+    /// `bind::shadow_merge_image_module` of one view of a texel (`ShadowTexelView`): a shadowed
+    /// texture's writes merged into its buffer's bytes, reading its shadow's texels through its
+    /// unsigned-integer view, its sampled image (`shadow_merge.rs`).
+    ShadowMergeImage(ShadowTexelView),
+    /// `bind::shadow_copy_in_module` of one view of a texel (`ShadowTexelView`): a merged
+    /// shadowed texture's texels copied in from its buffer's rows and kept in its merge's scratch
+    /// by one dispatch (`shadow_copy_in.rs`). Its shadow's unsigned-integer view is its storage
+    /// image.
+    ShadowCopyIn(ShadowTexelView),
     /// `bind::mipmap_filter_module` of one kernel: a level of a mipmap chain from the level
     /// above it, as Metal's filter computes it (`mipmap_filter.rs`); a kernel that fetches the
     /// first level binds its sampled view first. Needs `shaderInt64`: a device without it fails
@@ -141,15 +157,28 @@ impl OwnedModule {
     fn images(self) -> u32 {
         match self {
             OwnedModule::MipmapFilter(kernel) => u32::from(kernel.fetches()),
-            OwnedModule::ShadowCopyBack(_) => 1,
+            OwnedModule::ShadowCopyBack(_) | OwnedModule::ShadowMergeImage(_) => 1,
             _ => 0,
         }
     }
 
+    /// copy's and a shadowed texture's copies' and merges', on a device with
+    /// `VK_KHR_push_descriptor`, so their commands make no pool on the encoding thread
+    /// (`row_copies.rs`, `shadow_copy_back.rs`, `shadow_copy_in.rs`, `shadow_merge.rs`).
+        matches!(
+            self,
+            OwnedModule::RowsCopy
+                | OwnedModule::ShadowCopyBack(_)
+                | OwnedModule::ShadowCopyIn(_)
+                | OwnedModule::ShadowMerge
+                | OwnedModule::ShadowMergeImage(_)
+        ) && device.shared().vk().push_descriptor().is_some()
     /// The module's storage-image bindings, which come after its sampled images.
     fn storage_images(self) -> u32 {
         match self {
-            OwnedModule::YCbCrConvert(_) | OwnedModule::YCbCrWrite => 1,
+            OwnedModule::YCbCrConvert(_)
+            | OwnedModule::YCbCrWrite
+            | OwnedModule::ShadowCopyIn(_) => 1,
             OwnedModule::ExtendedShadowLoad(_) => 2,
             _ => 0,
         }
@@ -206,12 +235,26 @@ impl OwnedModule {
                 let push_bytes = metal2vulkan::bind::DepthMagnitudeModule::PUSH_BYTES;
                 Ok((module.spirv.to_vec(), 2, push_bytes))
             }
-            OwnedModule::ShadowCopyBack(words) => {
+            OwnedModule::ShadowCopyBack(view) => {
                 let module =
-                    metal2vulkan::bind::shadow_copy_back_module(device.compile_device(), words)
+                    metal2vulkan::bind::shadow_copy_back_module(device.compile_device(), view)
                         .map_err(Error::Compile)?;
                 let push_bytes = metal2vulkan::bind::ShadowCopyBackModule::PUSH_BYTES;
                 Ok((module.spirv.to_vec(), 1, push_bytes))
+            }
+            OwnedModule::ShadowMergeImage(view) => {
+                let module =
+                    metal2vulkan::bind::shadow_merge_image_module(device.compile_device(), view)
+                        .map_err(Error::Compile)?;
+                let push_bytes = metal2vulkan::bind::ShadowMergeImageModule::PUSH_BYTES;
+                Ok((module.spirv.to_vec(), 2, push_bytes))
+            }
+            OwnedModule::ShadowCopyIn(view) => {
+                let module =
+                    metal2vulkan::bind::shadow_copy_in_module(device.compile_device(), view)
+                        .map_err(Error::Compile)?;
+                let push_bytes = metal2vulkan::bind::ShadowCopyInModule::PUSH_BYTES;
+                Ok((module.spirv.to_vec(), 2, push_bytes))
             }
             OwnedModule::MipmapFilter(kernel) => {
                 let module =
@@ -366,7 +409,9 @@ pub(super) struct OwnedKernels {
     flat_dispatch: Option<OwnedKernel>,
     shadow_merge: Option<OwnedKernel>,
     depth_magnitude: Option<OwnedKernel>,
-    shadow_copy_backs: HashMap<u32, OwnedKernel>,
+    shadow_copy_backs: HashMap<ShadowTexelView, OwnedKernel>,
+    shadow_merge_images: HashMap<ShadowTexelView, OwnedKernel>,
+    shadow_copy_ins: HashMap<ShadowTexelView, OwnedKernel>,
     mipmap_filters: HashMap<MipmapFilterKernel, OwnedKernel>,
     mesh_scan: Option<OwnedKernel>,
     plane_words: Option<OwnedKernel>,
@@ -417,6 +462,8 @@ impl OwnedKernels {
         .into_iter()
         .flatten()
         .chain(self.shadow_copy_backs.values().copied())
+        .chain(self.shadow_merge_images.values().copied())
+        .chain(self.shadow_copy_ins.values().copied())
         .chain(self.mipmap_filters.values().copied())
         .chain(self.index_rewrites.values().copied())
         .chain(self.ycbcr_converts.values().copied())
@@ -433,7 +480,9 @@ impl OwnedKernels {
     /// The kernel of `which`, where the device has made it.
     fn get(&mut self, which: OwnedModule) -> Option<OwnedKernel> {
         match which {
-            OwnedModule::ShadowCopyBack(words) => self.shadow_copy_backs.get(&words).copied(),
+            OwnedModule::ShadowCopyBack(view) => self.shadow_copy_backs.get(&view).copied(),
+            OwnedModule::ShadowMergeImage(view) => self.shadow_merge_images.get(&view).copied(),
+            OwnedModule::ShadowCopyIn(view) => self.shadow_copy_ins.get(&view).copied(),
             OwnedModule::MipmapFilter(kernel) => self.mipmap_filters.get(&kernel).copied(),
             OwnedModule::IndexRewrite(program, phase) => {
                 self.index_rewrites.get(&(program, phase)).copied()
@@ -453,8 +502,14 @@ impl OwnedKernels {
     /// Keep `kernel`, the kernel of `which`.
     fn put(&mut self, which: OwnedModule, kernel: OwnedKernel) {
         match which {
-            OwnedModule::ShadowCopyBack(words) => {
-                self.shadow_copy_backs.insert(words, kernel);
+            OwnedModule::ShadowCopyBack(view) => {
+                self.shadow_copy_backs.insert(view, kernel);
+            }
+            OwnedModule::ShadowMergeImage(view) => {
+                self.shadow_merge_images.insert(view, kernel);
+            }
+            OwnedModule::ShadowCopyIn(view) => {
+                self.shadow_copy_ins.insert(view, kernel);
             }
             OwnedModule::MipmapFilter(key) => {
                 self.mipmap_filters.insert(key, kernel);
@@ -488,6 +543,8 @@ impl OwnedKernels {
         }
     }
 
+    /// The slot of a kernel the device makes once (none for the shadow copy back's, the image
+    /// merge's, the shadow copy in's, the mipmap filter's, the index rewrite's, the YCbCr conversion's, the unused bits', the compressed
     /// blit's, the extended shadow load's, the twin decode's or the tessellation scan's, one
     /// per key).
     fn slot(&mut self, which: OwnedModule) -> Option<&mut Option<OwnedKernel>> {
@@ -501,6 +558,8 @@ impl OwnedKernels {
             OwnedModule::ShadowMerge => &mut self.shadow_merge,
             OwnedModule::DepthMagnitude => &mut self.depth_magnitude,
             OwnedModule::ShadowCopyBack(_)
+            | OwnedModule::ShadowMergeImage(_)
+            | OwnedModule::ShadowCopyIn(_)
             | OwnedModule::MipmapFilter(_)
             | OwnedModule::IndexRewrite(..)
             | OwnedModule::YCbCrConvert(_)
@@ -690,7 +749,9 @@ impl OwnedSets {
     }
 
     /// One set per entry of `sets`, of the kernel at its index in `kernels`, each written with
-    /// its entry's views and then its buffer ranges, in binding order.
+    /// its entry's views and then its buffer ranges, in binding order. Refused (internal) for a
+    /// kernel whose set 0 is pushed, which no set is allocated from (the module docs): its
+    /// dispatches bind through [`OwnedBinds`].
     pub(super) fn write_each(
         device: &Device,
         kernels: &[OwnedKernel],
@@ -707,6 +768,9 @@ impl OwnedSets {
             || count == 0
         {
             return Err(internal("owned sets that do not match their kernel"));
+        }
+        if kernels.iter().any(|kernel| kernel.pushed) {
+            return Err(internal("owned sets of a kernel whose set 0 is pushed"));
         }
         let total = |of: fn(&OwnedKernel) -> u32| {
             kernels
@@ -734,6 +798,7 @@ impl OwnedSets {
             .pool_sizes(&sizes);
         // SAFETY: `info` and its array are live for the call.
         let pool = unsafe { raw.create_descriptor_pool(&info, None) }.map_err(vulkan)?;
+        device.shared().counts.owned_descriptor_pool();
         let mut owned = OwnedSets {
             device: device.clone(),
             pool,
@@ -808,5 +873,115 @@ impl OwnedSets {
         // written is live (the caller's command retains them).
         unsafe { raw.update_descriptor_sets(&writes, &[]) };
         Ok(owned)
+    }
+}
+
+/// How one command's dispatches of a kernel bind set 0 (the module docs): pushed as each
+/// records where the kernel's set 0 is a push descriptor set's ([`OwnedKernel::pushed`]), so the
+/// command makes no pool; else one set per dispatch from a pool of their own ([`OwnedSets`]),
+/// which the command buffer retains with the command until it completes.
+pub(super) enum OwnedBinds {
+    /// Each dispatch's writes, in binding order, pushed by the push command of the checked
+    /// functions it records with (`Vk::push_descriptor`).
+    Pushed(Vec<Vec<SetWrite>>),
+    /// One set per dispatch.
+    Sets(OwnedSets),
+}
+
+impl OwnedBinds {
+    /// The binds of `kernel`'s dispatches on `device`, one per entry of `sets`: each its entry's
+    /// sampled images, storage images (each in the `GENERAL` layout) and storage buffers, in
+    /// binding order.
+    pub(super) fn new(
+        device: &Device,
+        kernel: &OwnedKernel,
+        sets: &[OwnedSet],
+    ) -> Result<OwnedBinds, Error> {
+        if !kernel.pushed {
+            let kernels = vec![*kernel; sets.len()];
+            return OwnedSets::write_each(device, &kernels, sets).map(OwnedBinds::Sets);
+        }
+        let image = |view: &vk::ImageView| {
+            Info::Image(vk::DescriptorImageInfo {
+                sampler: vk::Sampler::null(),
+                image_view: *view,
+                image_layout: vk::ImageLayout::GENERAL,
+            })
+        };
+        let mut pushed = Vec::with_capacity(sets.len());
+        for set in sets {
+            if set.images.len() != kernel.images as usize
+                || set.storage_images.len() != kernel.storage_images as usize
+                || set.buffers.len() != kernel.buffers as usize
+            {
+                return Err(internal("owned binds that do not match their kernel"));
+            }
+            let images = set
+                .images
+                .iter()
+                .map(|view| (vk::DescriptorType::SAMPLED_IMAGE, image(view)));
+            let storage = set
+                .storage_images
+                .iter()
+                .map(|view| (vk::DescriptorType::STORAGE_IMAGE, image(view)));
+            let buffers = set.buffers.iter().map(|&(buffer, offset, range)| {
+                let info = vk::DescriptorBufferInfo {
+                    buffer,
+                    offset,
+                    range,
+                };
+                (vk::DescriptorType::STORAGE_BUFFER, Info::Buffer(info))
+            });
+            let writes = (0..)
+                .zip(images.chain(storage).chain(buffers))
+                .map(|(binding, (ty, info))| SetWrite {
+                    binding,
+                    element: 0,
+                    ty,
+                    info,
+                })
+                .collect();
+            pushed.push(writes);
+        }
+        Ok(OwnedBinds::Pushed(pushed))
+    }
+
+    /// Bind dispatch `index`'s set 0 of `kernel` into `command_buffer`, whose compute pipeline is
+    /// `kernel`'s.
+    ///
+    /// # Safety
+    ///
+    /// `command_buffer` is recording on the device of `device`, which made `kernel`; every view
+    /// and buffer the binds name is live until it completes, and `index` names one of them.
+    pub(super) unsafe fn bind(
+        &self,
+        device: &Vk,
+        command_buffer: vk::CommandBuffer,
+        kernel: &OwnedKernel,
+        index: usize,
+    ) {
+        let point = vk::PipelineBindPoint::COMPUTE;
+        // SAFETY: the caller's contract.
+        unsafe {
+            match (self, device.push_descriptor()) {
+                (OwnedBinds::Pushed(writes), Some(push)) => {
+                    binding::push_set(push, command_buffer, point, kernel.layout, &writes[index]);
+                }
+                // A kernel made pushed on a device that pushes (`OwnedKernel::pushed`), so not
+                // reached: a push binds nothing here.
+                (OwnedBinds::Pushed(_), None) => {}
+                (OwnedBinds::Sets(sets), _) => {
+                    let set = std::slice::from_ref(&sets.sets[index]);
+                    device.cmd_bind_descriptor_sets(
+                        command_buffer,
+                        point,
+                        kernel.layout,
+                        0,
+                        set,
+                        &[],
+                    );
+                }
+            }
+        }
     }
 }

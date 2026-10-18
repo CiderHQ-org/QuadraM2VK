@@ -69,8 +69,12 @@
 //! [`flat_dispatch_module`], which reads its arguments on the device ([`FlatIndirect`]). Where one
 //! command writes a buffer's bytes through a texture copied in and out of them and also another
 //! way, [`shadow_merge_module`] merges the bytes the texture changed into the buffer's in place of
-//! the copy back, and where a device copies a shadow back faster by a dispatch,
-//! [`shadow_copy_back_module`] stores its texels' words at their rows. A render pass that loads a
+//! the copy back ([`shadow_merge_image_module`] reading the shadow's texels through its
+//! dispatch, [`shadow_copy_back_module`] stores its texels' words at their rows, and
+//! [`shadow_copy_in_module`] copies a merged texture's texels in and keeps them with one dispatch.
+//! A copy of many
+//! equal rows between two buffers is one dispatch of [`rows_copy_module`] where a copy's region
+//! per row costs more. A render pass that loads a
 //! 32-bit float depth holding a value Vulkan's depth test compares otherwise than Metal's (a
 //! negative value or a NaN, whose magnitude Metal compares) renders over its stand-in, written
 //! before the pass and merged back after it by [`depth_magnitude_module`]. A blit between a buffer
@@ -156,7 +160,9 @@ pub(crate) mod rotate_texels;
 pub(crate) mod sample_interleave;
 pub(crate) mod sample_planes;
 pub(crate) mod shadow_copy_back;
+pub(crate) mod shadow_copy_in;
 pub(crate) mod shadow_merge;
+pub(crate) mod shadow_merge_image;
 pub(crate) mod state;
 pub(crate) mod status;
 pub(crate) mod table;
@@ -279,7 +285,8 @@ pub use sample_interleave::{
 pub use sample_planes::{
     planes_merge_modules, planes_split_module, PlanesCopy, PlanesMergeModules, PlanesSplitModule,
 };
-pub use shadow_copy_back::{shadow_copy_back_module, ShadowCopyBackModule};
+pub use shadow_copy_back::{shadow_copy_back_module, ShadowCopyBackModule, ShadowTexelView};
+pub use shadow_copy_in::{shadow_copy_in_module, ShadowCopyInModule};
 pub use shadow_merge::{shadow_merge_module, ShadowMergeModule};
 pub use status::{
     ExecutionStatus, MeshRecordsFault, ReplayFaults, StatusBits, StatusReport, StatusWord,

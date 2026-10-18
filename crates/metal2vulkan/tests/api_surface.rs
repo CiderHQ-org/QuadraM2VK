@@ -611,8 +611,13 @@ surface! {
         struct VisibilityResolveModule N;
         fn shadow_copy_back_module;
         struct ShadowCopyBackModule N;
+        enum ShadowTexelView E;
+        fn shadow_copy_in_module;
+        struct ShadowCopyInModule N;
         fn shadow_merge_module;
         struct ShadowMergeModule N;
+        fn shadow_merge_image_module;
+        struct ShadowMergeImageModule N;
         fn depth_magnitude_module;
         struct DepthMagnitudeModule N;
         fn unused_bits_module;

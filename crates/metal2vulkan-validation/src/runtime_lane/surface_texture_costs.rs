@@ -22,6 +22,7 @@
 //! and 90th percentile of the host's time making the buffer, making the texture and releasing
 //! both, per texture; per frame, the encoding and the commit-to-completion wall time and the
 //! process's CPU time; and the device's work counts per frame that the path moves (dma-buf images
+//! submissions, shadows' copies and the texels their copies in and back move, the merges'
 //! scratches reused and zeroed, the merges that fetched their texels, the command buffers begun by
 //! what for, the render pass begins and secondary executions replayed, and the passes whose first
 //! instance recorded inline).
@@ -29,7 +30,8 @@
 //! [`surface_texture_cost_parts`] takes the frame apart over anonymous pages: the textures' making
 //! around an empty command buffer, the passes that store, the passes that store `DontCare`, the
 //! passes that draw and store, the blits, and both, so a shadow's copies in and back show apart
-//! from the rest (`SURFTEX-PART`).
+//! from the rest (`SURFTEX-PART`), then over `Private` buffers: a shadow over the pages, which the
+//! CPU may write, is merged back, and one over a tracked `Private` buffer's bytes copied back.
 //!
 //! [`shadow_copy_costs`] times a shadow's copies alone, and the same bytes moved between other
 //! memories, to tell the image's tiling from the pages' memory (`SURFTEX-COPY`).
@@ -163,6 +165,15 @@ fn plane_texture(buffer: &Buffer, width: u64, height: u64, bpr: u64) -> Texture 
         .unwrap()
 }
 
+/// A texture `width`x`height` with rows `bpr` bytes apart over the `Private` `buffer`'s first
+/// byte, as [`plane_texture`]'s is used.
+fn private_texture(buffer: &Buffer, width: u64, height: u64, bpr: u64) -> Texture {
+    let mut d = TextureDescriptor::texture_2d(PixelFormat::BGRA8Unorm, width, height, false);
+    d.usage = TextureUsage::RENDER_TARGET | TextureUsage::SHADER_READ;
+    d.resource_options = ResourceOptions::private();
+    buffer.new_texture(&d, 0, bpr).unwrap()
+}
+
 /// Whether `texture`'s texels are its own image over the buffer's memory: aliased, not shadowed.
 fn aliased(texture: &Texture) -> bool {
     // SAFETY: the handle is only compared, while the texture lives.
@@ -283,6 +294,7 @@ fn counts_per_frame(before: &WorkCounts, after: &WorkCounts, frames: usize) -> S
          recalled {:.2}), dma-buf images {:.2}, dma-buf image fallbacks {:.2}, dma-buf imports \
          {:.2}, images started on the host {:.2}, internal submissions {:.2}, staging submissions \
          {:.2}, shadow copies {:.2} (texels copied in {:.0}, back {:.0}; copies back dispatched \
+         {:.2}; keeps and merges dispatched {:.2}, texels kept {:.0}; merge scratches reused \
          {:.2}, zeroed {:.2}; merges fetched {:.2}); command buffers begun {:.2} (encoders' own \
          {:.2}, segments {:.2}, draws' secondaries {:.2}, batches' {:.2}, barriers kept {:.2}, \
          internal {:.2}), render pass begins replayed {:.2}, secondaries executed {:.2}, passes \
@@ -323,28 +335,20 @@ fn counts_per_frame(before: &WorkCounts, after: &WorkCounts, frames: usize) -> S
             after.shadow_copies_back_dispatched,
             before.shadow_copies_back_dispatched
         ),
-    )
-}
-
-/// What the driver answers for a `B8G8R8A8_UNORM` image of `DRM_FORMAT_MOD_LINEAR` tiling made for
-/// host allocations, at each usage the runtime may ask of a surface's texture: whether it makes
-/// one, and whether it imports host memory for it (`SURFTEX-QUERY`).
-fn print_host_modifier_queries(device: &Device) {
-    // SAFETY: read while the device lives; nothing is made.
-    let raw = unsafe { device.raw() };
-    let sampled = vk::ImageUsageFlags::SAMPLED
-        | vk::ImageUsageFlags::TRANSFER_SRC
-        | vk::ImageUsageFlags::TRANSFER_DST;
-    for (name, usage) in [
-        ("sampled", sampled),
-        (
-            "sampled+color",
-            sampled | vk::ImageUsageFlags::COLOR_ATTACHMENT,
+        per(
+            after.shadow_merge_copies_dispatched,
+            before.shadow_merge_copies_dispatched
         ),
-        (
-            "sampled+color+storage",
-            sampled | vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::STORAGE,
+        per(after.shadow_texels_kept, before.shadow_texels_kept),
+        per(
+            after.shadow_merge_scratches_reused,
+            before.shadow_merge_scratches_reused
         ),
+        per(
+            after.shadow_merge_scratches_zeroed,
+            before.shadow_merge_scratches_zeroed
+        ),
+        per(after.shadow_merges_fetched, before.shadow_merges_fetched),
         per(after.command_buffers_begun, before.command_buffers_begun),
         per(
             after.command_buffers_begun_encoders,
@@ -534,12 +538,13 @@ fn surface_texture_costs() {
 /// [`LAYOUTS`] each frame, taken apart ([`Part`]): the textures made and released around an empty
 /// command buffer, the passes that store, the passes that store `DontCare`, the passes that draw a
 /// rectangle and store (also under a scissor of the left half), the blits, and both;
-/// then the same over the packed layouts alone, which no shadow is made beside. Where a texture is
-/// a shadow, the passes that store less the empty frame are its copies in and back and the pass,
-/// the passes that do not store less the empty frame its copies in and the pass; the blits read
-/// the bytes either way. Printed per set and part (`SURFTEX-PART`): the textures' forms, the
-/// medians and 90th percentiles of each one's making (its buffer and texture), of the frame's
-/// release, encoding, commit to completion and process CPU time, and the work counts per frame.
+/// then the same over the packed layouts alone, which no shadow is made beside; then over every
+/// layout again, each texture over a `Private` buffer of the layout's bytes made once, a new
+/// texture over it each frame. Where a texture is a shadow, the passes that store less the empty
+/// frame are its copies in and back and the pass, the passes that do not store less the empty
+/// frame its copies in and the pass; the blits read the bytes either way. A shadow over the pages
+/// is kept and merged back in place of a copy back, and one over a tracked `Private` buffer's
+/// bytes copied back. Printed per set and part (`SURFTEX-PART`): the
 #[test]
 #[ignore = "a release-mode measurement: run by name"]
 fn surface_texture_cost_parts() {
@@ -568,6 +573,14 @@ fn surface_texture_cost_parts() {
         .iter()
         .map(|&len| Surface::Anonymous(Mapping::anonymous(len)))
         .collect();
+    let private_buffers: Vec<Buffer> = lens
+        .iter()
+        .map(|&len| {
+            device
+                .new_buffer(len as u64, ResourceOptions::private())
+                .unwrap()
+        })
+        .collect();
     // Every layout, then the packed ones alone (rows one after another, no texture a shadow).
     let every: Vec<usize> = (0..LAYOUTS.len()).collect();
     let packed: Vec<usize> = every
@@ -586,7 +599,12 @@ fn surface_texture_cost_parts() {
     ];
     let drawing = Drawing::new(&device);
     let drawing = Some(&drawing);
-    for (set, chosen) in [("every layout", &every), ("packed layouts", &packed)] {
+    let sets = [
+        ("every layout", &every, false),
+        ("packed layouts", &packed, false),
+        ("every layout over Private buffers", &every, true),
+    ];
+    for (set, chosen, over_private) in sets {
         let privates: Vec<Texture> = chosen.iter().map(|&i| privates[i].clone()).collect();
         for part in parts {
             let mut forms = Vec::new();
@@ -603,8 +621,18 @@ fn surface_texture_cost_parts() {
                 for (at, &index) in chosen.iter().enumerate() {
                     let (_, w, h, bpr) = LAYOUTS[index];
                     let began = Instant::now();
-                    let buffer = surfaces[index].buffer(&device, lens[index], None);
-                    let texture = plane_texture(&buffer, w, h, bpr);
+                    let (buffer, texture) = match over_private {
+                        false => {
+                            let buffer = surfaces[index].buffer(&device, lens[index], None);
+                            let texture = plane_texture(&buffer, w, h, bpr);
+                            (buffer, texture)
+                        }
+                        true => {
+                            let buffer = private_buffers[index].clone();
+                            let texture = private_texture(&buffer, w, h, bpr);
+                            (buffer, texture)
+                        }
+                    };
                     if k >= WARM {
                         makes[at].push(since(began));
                     }
@@ -654,7 +682,7 @@ fn surface_texture_cost_parts() {
             );
         }
     }
-    drop(surfaces);
+    drop((surfaces, private_buffers));
     let notices = super::degrade_notices::counts(&messages.take_notices());
     println!("SURFTEX-NOTICES on {}: {notices:?}", device.name());
 }

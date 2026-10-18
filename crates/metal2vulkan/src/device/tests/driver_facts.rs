@@ -527,6 +527,7 @@ const BC7: DriverFact = DriverFact::Bc7BlockDecodeIsMetals;
 const SCARCE_POOLS: DriverFact = DriverFact::TimestampPoolsAreCounterSampleBuffers;
 const ONE_OF_METALS: DriverFact = DriverFact::DontCareStoreIsOneOfMetals;
 const COPY_BACK: DriverFact = DriverFact::ShadowCopyBackDispatchFaster;
+const COPY_IN: DriverFact = DriverFact::ShadowCopyInDispatchFaster;
 const LINEAR_UNINITIALIZED: DriverFact = DriverFact::LinearTilingFeaturesUninitialized;
 const STALL: DriverFact = DriverFact::SemaphoreOperationsStallSubmits;
 const SAMPLED_HIZ: DriverFact = DriverFact::SampledDepthKeepsHiZ;
@@ -552,6 +553,8 @@ const TILE_STORE: DriverFact = DriverFact::TileStoreIsMetals;
 /// first sparse resource waits for every queue; BC6H decodes as Metal's on the 780M, the RPL-P,
 /// lavapipe 26.0.8, both MoltenVK GPUs and the RTX 5080 Laptop GPU, and BC7 on the same but
 /// lavapipe; `DONT_CARE` keeps one of Metal's two answers on the 780M, the RPL-S and the RPL-P; a
+/// shadow's copy back runs faster as a dispatch on the RPL-S and the RPL-P, and a merged shadow's
+/// copy in with its keep on the RPL-S alone, and a copy of rows
 /// linear-tiling attachment features uninitialized; NVIDIA's stalls a submission per thousand
 /// profile is an unmeasured identity and takes its driver's defects alone: the GTX 1060
 /// (580.178.04) and the RTX 5080 desktop GPU (another GPU at 615.71.09) NVIDIA's custom-position
@@ -607,7 +610,8 @@ fn the_committed_profiles_drivers_have_their_facts() {
         ),
         (
             "intel-uhd770-rpls-anv",
-            vec![ZERO, HIDE, HOST, FETCH, WHOLE, SPARSE_WAIT, ONE_OF_METALS],
+                COPY_BACK,
+                COPY_IN,
         ),
         (
             "moltenvk-m3",

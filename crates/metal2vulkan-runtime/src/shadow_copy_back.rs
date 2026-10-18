@@ -6,10 +6,17 @@
 //! `vkCmdCopyImageToBuffer` on every device. On a device measured to run that copy slower than a
 //! dispatch that stores the same words, the shadow of a one-level, one-slice 2D texture whose
 //! texel is 4, 8 or 16 bytes, copied in place, is made `MUTABLE_FORMAT` with the unsigned-integer
-//! format of its texel's width listed and sampled usage ([`with_word_view`]), and its copies back
-//! are one dispatch of `bind::shadow_copy_back_module` each: invocation `(x, y)` fetches texel
-//! `(x0 + x, y0 + y)` through that view and stores its words at the texel's place in the buffer
-//! ([`CopyBack`]). The copies in stay copies.
+//! format of its texel's width listed (`R32_UINT`, `R32G32_UINT` or `R32G32B32A32_UINT`), and
+//! sampled usage ([`with_word_view`]), and its copies back are one dispatch of
+//! `bind::shadow_copy_back_module` each: invocation `(x, y)` fetches texel `(x0 + x, y0 + y)`
+//! through that view and stores its words at the texel's place in the buffer ([`CopyBack`]). A
+//! merge's copy of such a shadow into its scratch before the commands, which stores the same
+//! texels laid out the same way, is such a dispatch too, and the merge after them fetches the
+//! texels the commands left through the view rather than copy them out (`shadow_merge.rs`). On a
+//! device also measured to take a merged texture's copy in and its keep faster as one dispatch
+//! (`DriverFact::ShadowCopyInDispatchFaster`), the view stores too, and the copy in of the
+//! texels a keep keeps, right before it, is that dispatch (`shadow_copy_in.rs`); the other copies
+//! in stay copies.
 //!
 //! **Exact.** The dispatch writes the bytes the copy writes and no other: the texels inside the
 //! copy's region (every texel, or the rectangle a pass's scissors bound, `ShadowCopy::area`), each
@@ -18,8 +25,17 @@
 //! locations irrespective of the format, with only the interpretation of the bit pattern
 //! changing" (`VkImageViewCreateInfo`): the texel's format and its unsigned-integer twin of its
 //! width share a compatibility class, and the twin's components are unconverted unsigned
-//! integers, so the words a fetch returns are the texel's bytes in memory order, which the copy
-//! writes.
+//! integers, so the components a fetch returns are the texel's bytes in memory order (a 4-byte
+//! texel's word through `R32_UINT`, its four bytes through `R8G8B8A8_UINT`, which the kernel
+//! packs into its word; a wider texel's words), which the copy writes.
+//!
+//! **Storage usage.** Only on a device with `DriverFact::ShadowCopyInDispatchFaster`, where it
+//! stores the view's format, and but for a shadow of a single 32-bit channel's format
+//! (`R32_UINT`, `R32_SINT`, `R32_SFLOAT`) whose image has no storage usage of its own; a 4-byte
+//! texel's view is then `R8G8B8A8_UINT`. Storage usage beside a 32-bit single-channel format, the
+//! image's own or a listed view's, may cost the image its compression where the device keeps
+//! atomics apart from it (Mesa's ANV on gfx12.0 then makes the image without its aux surface, so
+//! its clears are not fast). Such a shadow's copy in and keep stay two (`shadow_copy_in.rs`).
 //!
 //! **Synchronization.** The dispatch's uses are a sampled read of the shadow and a storage write
 //! of the buffer's bytes in `COMPUTE_SHADER`, which the encoder's tracker orders as any command's
@@ -34,10 +50,11 @@
 //! does not make: each copies back as before, the exact form every device takes.
 
 use super::image_plan::{compatible, ImageFacts, ImagePlan};
-use super::owned_kernel::{OwnedKernel, OwnedModule, OwnedSet, OwnedSets};
+use super::owned_kernel::{OwnedBinds, OwnedKernel, OwnedModule, OwnedSet};
 use super::Device;
+use crate::device::functions::Vk;
 use ash::vk;
-use metal2vulkan::bind::ShadowCopyBackModule;
+use metal2vulkan::bind::{ShadowCopyBackModule, ShadowTexelView};
 use metal2vulkan::device::DriverFact;
 use metal2vulkan::vk::{Format, FormatFeatureFlags2, ImageCreateFlags, ImageUsageFlags};
 
@@ -48,8 +65,11 @@ use metal2vulkan::vk::{Format, FormatFeatureFlags2, ImageCreateFlags, ImageUsage
 #[derive(Clone, Copy, Debug)]
 pub(super) struct WordView {
     pub(super) view: vk::ImageView,
-    /// The texel's 4-byte words: 1, 2 or 4.
-    pub(super) words: u32,
+    /// Its format, as the kernels read it (its texel's words: 1, 2 or 4).
+    pub(super) texel: ShadowTexelView,
+    /// Whether the view is also a storage image, through which a merged texture's copy in and
+    /// keep dispatch (`shadow_copy_in.rs`): the module's storage usage.
+    pub(super) stores: bool,
 }
 
 /// Whether `device`'s shadows copy back by dispatch (the module docs).
@@ -60,41 +80,67 @@ pub(super) fn dispatches(device: &Device) -> bool {
         .contains(&DriverFact::ShadowCopyBackDispatchFaster)
 }
 
-/// The unsigned-integer format of a texel `bytes` wide that a [`WordView`] takes, and its words.
-pub(super) fn word_format(bytes: u32) -> Option<(Format, u32)> {
-    match bytes {
-        4 => Some((Format::R32_UINT, 1)),
-        8 => Some((Format::R32G32_UINT, 2)),
-        16 => Some((Format::R32G32B32A32_UINT, 4)),
+/// Whether `device` takes a merged texture's copy in and its keep as one dispatch, its shadows'
+/// views storing (the module's storage usage).
+pub(super) fn dispatches_in(device: &Device) -> bool {
+    device
+        .properties()
+        .driver_facts
+        .contains(&DriverFact::ShadowCopyInDispatchFaster)
+}
+
+/// The unsigned-integer format of a texel `bytes` wide that a [`WordView`] takes, and the view as
+/// the kernels read it: a 4-byte texel's bytes where the view `stores`, else its word.
+pub(super) fn word_format(bytes: u32, stores: bool) -> Option<(Format, ShadowTexelView)> {
+    match (bytes, stores) {
+        (4, true) => Some((Format::R8G8B8A8_UINT, ShadowTexelView::R8G8B8A8Uint)),
+        (4, false) => Some((Format::R32_UINT, ShadowTexelView::R32Uint)),
+        (8, _) => Some((Format::R32G32_UINT, ShadowTexelView::R32G32Uint)),
+        (16, _) => Some((Format::R32G32B32A32_UINT, ShadowTexelView::R32G32B32A32Uint)),
         _ => None,
     }
 }
 
 /// `plan`, a shadow's image, made to take its [`WordView`]: `MUTABLE_FORMAT`, with the
 /// unsigned-integer format of its texel's width listed beside its own (or none listed where it
-/// takes any compatible format), and sampled usage (`EXTENDED_USAGE` where its own format is not
-/// sampled); with that format and its words. `None`, `plan` unchanged, for a one-level,
-/// one-slice 2D color image's texel of another width, a compressed block, or a device that does
-/// not sample the integer format.
+/// takes any compatible format), sampled usage, and, where `stores_in` (the device's
+/// [`dispatches_in`]), storage usage where the device stores the integer format and the image has
+/// it already or its own format is not a single 32-bit channel (the module's storage usage;
+/// `EXTENDED_USAGE` where its own format takes either not); with that format, the view and
+/// whether it stores. `None`, `plan` unchanged, for a one-level, one-slice 2D color image's texel
+/// of another width, a compressed block, or a device that does not sample the integer format.
 pub(super) fn with_word_view(
     mut plan: ImagePlan,
     facts: &ImageFacts<'_>,
-) -> (ImagePlan, Option<(Format, u32)>) {
+    stores_in: bool,
+) -> (ImagePlan, Option<(Format, ShadowTexelView, bool)>) {
     let single = plan.levels == 1 && plan.layers == 1 && plan.extent[2] == 1;
+    let single_channel_word = matches!(
+        plan.format,
+        Format::R32_UINT | Format::R32_SINT | Format::R32_SFLOAT
+    );
+    let storing =
+        stores_in && (plan.usage.contains(ImageUsageFlags::STORAGE) || !single_channel_word);
     let word = plan
         .format
         .block()
-        .and_then(|block| word_format(block.size));
+        .and_then(|block| word_format(block.size, storing));
     let sampled = FormatFeatureFlags2::SAMPLED_IMAGE;
-    let Some((format, words)) = word.filter(|&(format, _)| {
+    let Some((format, texel)) = word.filter(|&(format, _)| {
         single && compatible(plan.format, format, false) && facts.optimal(format).contains(sampled)
     }) else {
         return (plan, None);
     };
-    if !facts.optimal(plan.format).contains(sampled) {
+    let storage = FormatFeatureFlags2::STORAGE_IMAGE;
+    let stores = storing && facts.optimal(format).contains(storage);
+    let own = facts.optimal(plan.format);
+    if !own.contains(sampled) || (stores && !own.contains(storage)) {
         plan.flags |= ImageCreateFlags::EXTENDED_USAGE;
     }
     plan.usage |= ImageUsageFlags::SAMPLED;
+    if stores {
+        plan.usage |= ImageUsageFlags::STORAGE;
+    }
     let any_format =
         plan.flags.contains(ImageCreateFlags::MUTABLE_FORMAT) && plan.view_formats.is_empty();
     plan.flags |= ImageCreateFlags::MUTABLE_FORMAT;
@@ -106,15 +152,16 @@ pub(super) fn with_word_view(
             plan.view_formats.push(format);
         }
     }
-    (plan, Some((format, words)))
+    (plan, Some((format, texel, stores)))
 }
 
-/// One copy back's dispatch (the module docs): the kernel of its texel's width, its set (the
-/// shadow's view and the buffer's bytes from the region's first texel, as they lie now), its
-/// shape and its workgroups. The command buffer retains it until it completes.
+/// One copy back's dispatch (the module docs): the kernel of its texel's width, its set 0 (the
+/// shadow's view and the buffer's bytes from the region's first texel, as they lie now; pushed
+/// where the device pushes, `OwnedBinds`), its shape and its workgroups. The command buffer
+/// retains it until it completes.
 pub(super) struct CopyBack {
     kernel: OwnedKernel,
-    sets: OwnedSets,
+    binds: OwnedBinds,
     shape: [u8; 16],
     groups: [u32; 2],
 }
@@ -133,7 +180,7 @@ impl CopyBack {
             return None;
         }
         let limits = &device.properties().description.limits;
-        let texel = 4 * u64::from(words.words);
+        let texel = 4 * u64::from(words.texel.words());
         let extent = region.image_extent;
         let (width, height) = (extent.width, extent.height);
         let row = match region.buffer_row_length {
@@ -164,17 +211,17 @@ impl CopyBack {
         let row_words = (row_bytes / 4) as u32;
         let first_word = ((first - offset) / 4) as u32;
         let kernel = device
-            .owned_kernel(OwnedModule::ShadowCopyBack(words.words))
+            .owned_kernel(OwnedModule::ShadowCopyBack(words.texel))
             .ok()?;
         let set = OwnedSet {
             images: vec![words.view],
             storage_images: Vec::new(),
             buffers: vec![(buffer, offset, range)],
         };
-        let sets = OwnedSets::write_each(device, &[kernel], &[set]).ok()?;
+        let binds = OwnedBinds::new(device, &kernel, &[set]).ok()?;
         Some(CopyBack {
             kernel,
-            sets,
+            binds,
             shape: ShadowCopyBackModule::shape([x0, y0], width, row_words, first_word),
             groups,
         })
@@ -186,7 +233,7 @@ impl CopyBack {
     ///
     /// `command_buffer` is recording, outside a render pass; the shadow, its view and the buffer
     /// are live until it completes, and the shadow is in the `GENERAL` layout.
-    pub(super) unsafe fn record(&self, device: &ash::Device, command_buffer: vk::CommandBuffer) {
+    pub(super) unsafe fn record(&self, device: &Vk, command_buffer: vk::CommandBuffer) {
         // SAFETY: the caller's contract; the set binds the view and the bytes the region's
         // texels lie in, and the shape and workgroups stay inside both (checked in `new`).
         unsafe {
@@ -195,14 +242,7 @@ impl CopyBack {
                 vk::PipelineBindPoint::COMPUTE,
                 self.kernel.pipeline,
             );
-            device.cmd_bind_descriptor_sets(
-                command_buffer,
-                vk::PipelineBindPoint::COMPUTE,
-                self.kernel.layout,
-                0,
-                &self.sets.sets,
-                &[],
-            );
+            self.binds.bind(device, command_buffer, &self.kernel, 0);
             device.cmd_push_constants(
                 command_buffer,
                 self.kernel.layout,

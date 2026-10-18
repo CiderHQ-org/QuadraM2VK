@@ -521,10 +521,6 @@ fn a_rebind_gives_every_texture_its_pages_again() {
 fn a_texture_made_while_detached_writes_its_pages_once_they_are_given_again() {
     on_device(|device| {
         let query = QueryRead::new(device);
-        let dispatches = device
-            .properties()
-            .driver_facts
-            .contains(&DriverFact::ShadowCopyBackDispatchFaster);
         let before = device.work_counts().shadow_copies_back_dispatched;
         for over in [Over::Buffer, Over::Heap] {
             let Some((bytes, texture)) = detached_texture(device, &query, (over, Made::While))

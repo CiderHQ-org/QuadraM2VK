@@ -41,7 +41,8 @@ use super::replay::Replay;
 use super::residency::Residency;
 use super::resource::ResourceKey;
 use super::retained::Retained;
-use super::shadow::{ShadowCopy, ShadowSync, ShadowUse, Step, Within};
+use super::shadow::{CopyCause, ShadowCopy, ShadowSync, ShadowUse, Step, Within};
+use super::shadow_copy_in::CopyIn;
 use super::shadow_merge::ShadowMerge;
 use super::sparse::encoder::SparseUpdate;
 use super::texture::decoded_twin::TwinWrite;
@@ -207,6 +208,9 @@ pub(super) struct EncoderCore {
     /// open, so a use at that place of the same key, named only where that one was, is kept and
     /// named already.
     touched: Vec<(ResourceKey, bool)>,
+    /// Its first copies in of shadowed textures, each copy's texture and texels: `end` notes them
+    /// in the command buffer (`WorkCounts::shadow_texels_first_copied_in_again`).
+    first_copies: Vec<(ResourceKey, u64)>,
     /// The heaps its commands used through what the encoder made resident; `end` hands them,
     /// and those of `keys`, to the command buffer, whose commit marks them used.
     heaps: Vec<Heap>,
@@ -321,6 +325,7 @@ impl EncoderCore {
             shadows: ShadowSync::default(),
             keys: BTreeSet::new(),
             touched: Vec::new(),
+            first_copies: Vec::new(),
             heaps: Vec::new(),
             holds: Holds::new(command_buffer.device()),
             taken: Taken::default(),
@@ -396,6 +401,7 @@ impl EncoderCore {
             shadows: ShadowSync::default(),
             keys: BTreeSet::new(),
             touched: Vec::new(),
+            first_copies: Vec::new(),
             heaps: Vec::new(),
             holds: Holds::new(command_buffer.device()),
             taken: Taken::default(),
@@ -962,30 +968,63 @@ impl EncoderCore {
         let device = self.device().clone();
         let aliased = self.aliased(uses);
         let uses = aliased.as_deref().unwrap_or(uses);
-        let copies = self.shadows.before(shadows, uses, |copies| {
-            ShadowMerge::new(&device, copies).map(Arc::new)
-        })?;
+            .shadows
+            .before(shadows, uses, |copies, two_ways, area| {
         self.count_shadow_copies(&copies);
         for copy in &copies {
             if let Step::Keep(merge) = &copy.step {
                 self.retain(Arc::clone(merge));
+            }
+            if copy.cause == Some(CopyCause::First) {
+                (self.first_copies).push((copy.copies.shadow_key, copy.texels_copied_in()));
             }
         }
         Ok(copies)
     }
 
     /// Count shadowed textures' `copies` as planned (`WorkCounts::shadow_copies`), the texels
-    /// their copies in and back of buffers' textures' images move, and those copies in of what
-    /// changed within a rectangle alone (`WorkCounts::bounded_shadow_copies`).
+    /// their copies in and back of buffers' textures' images move, each copy in's texels by why
+    /// it is made and what holds its truth (`WorkCounts::shadow_texels_first_copied_in` and kin),
+    /// those copies in of what changed within a rectangle alone
+    /// (`WorkCounts::bounded_shadow_copies`), and the keeps and merges whose copies of the shadow
+    /// into the scratch dispatch (`WorkCounts::shadow_merge_copies_dispatched`), and the texels the
+    /// keeps copy (`WorkCounts::shadow_texels_kept`).
     fn count_shadow_copies(&self, copies: &[ShadowCopy]) {
         let texels_in = copies.iter().map(ShadowCopy::texels_in).sum();
         let texels_back = copies.iter().map(ShadowCopy::texels_back).sum();
         let counts = &self.device().shared().counts;
         counts.shadow_copies_planned(copies.len(), texels_in, texels_back);
-        let bounded = copies.iter().filter(|copy| copy.bounded).count();
+        for copy in copies {
+            counts.shadow_copy_in_planned(copy);
+        }
+        let bounded = (copies.iter())
+            .filter(|copy| copy.cause == Some(CopyCause::Bounded))
+            .count();
         if bounded > 0 {
             counts.bounded_shadow_copies_planned(bounded);
         }
+        let dispatched = copies
+            .iter()
+            .filter(|copy| match &copy.step {
+                Step::Keep(merge) => merge.dispatches(),
+                Step::Merge(merge) => merge.changed_dispatches(),
+                Step::Into | Step::Back => false,
+            })
+            .count();
+        if dispatched > 0 {
+            counts.shadow_merge_copies_dispatched(dispatched);
+        }
+        let kept: u64 = copies
+            .iter()
+            .filter_map(|copy| match &copy.step {
+                Step::Keep(merge) => Some(merge.texels_kept()),
+                _ => None,
+            })
+            .sum();
+        if kept > 0 {
+            counts.shadow_texels_kept(kept);
+        }
+    }
     }
 
     /// Note a recorded command that used the shadowed textures `shadows` and had `uses`, and
@@ -1013,13 +1052,37 @@ impl EncoderCore {
     }
 
     /// Record shadowed textures' `copies` as commands of the encoder: ordered as any command
-    /// is, in an encoder Metal orders; with a barrier from everything before and one to
-    /// everything after each copy, in one whose commands Metal leaves unordered. A copy back the
-    /// device runs faster as a dispatch is that dispatch (`shadow_copy_back.rs`), which the
-    /// command buffer retains until it completes.
+    /// is, in an encoder Metal orders; in one whose commands Metal leaves unordered, as one run
+    /// ([`ShadowRun`]) between a barrier from everything before its first copy and one to
+    /// everything after its last. A copy back the device runs faster as a dispatch is that
+    /// dispatch (`shadow_copy_back.rs`), a merged texture's copy in and its keep are one dispatch
+    /// at the copy in where the device takes it (`shadow_copy_in.rs`), and the rows a copy back
+    /// moves out of a staging buffer are a copy of rows (`row_copies.rs`); the command buffer
+    /// retains each until it completes.
     pub(super) fn shadow_copies(&mut self, copies: &[ShadowCopy]) {
         let device = self.device().clone();
-        for copy in copies {
+        let mut run = ShadowRun::default();
+        // The keeps a dispatch at their copy in took, which record nothing.
+        let mut taken = Vec::new();
+        for (i, copy) in copies.iter().enumerate() {
+            if taken.contains(&i) {
+                continue;
+            }
+            if let Some((keep, both, uses)) = keep_with_copy_in(&device, copies, i) {
+                taken.push(keep);
+                let record = |device: &Vk, raw: vk::CommandBuffer| {
+                    // SAFETY: the encoder's command buffer is recording outside a render pass;
+                    // its commands retain the shadowed texture (and its view), the merge's scratch
+                    // and the dispatch until it completes, and every image rests in the `GENERAL`
+                    // layout.
+                    unsafe { both.record(device, raw) }
+                };
+                let stages = vk::PipelineStageFlags2::COMPUTE_SHADER;
+                self.shadow_command(&mut run, (stages, &uses, false), record);
+                device.shared().counts.shadow_copy_in_dispatched();
+                self.retain(both);
+                continue;
+            }
             // A shadow takes the view a dispatch reads on a device that dispatches alone.
             let dispatched = copy.dispatched(&device);
             let (stages, uses) = match &dispatched {
@@ -1037,29 +1100,45 @@ impl EncoderCore {
                 // SAFETY: as above.
                 None => unsafe { copy.record(device, raw) },
             };
-            if self.uses.ordered() {
-                self.command(stages, &uses, record);
-            } else {
-                // A copy of a detached buffer's bytes records nothing, nor does what follows.
-                if self.skips(uses.iter().map(|used| used.key)) {
-                    continue;
-                }
-                self.barrier(Barrier::everything());
-                let Some(raw) = self.recording() else {
-                    continue;
-                };
-                record(device.shared().vk(), raw);
-                self.barrier(Barrier::everything());
-                let aliased = self.aliased(&uses);
-                self.uses
-                    .record(stages, aliased.as_deref().unwrap_or(&uses), None);
-                self.touch(&uses);
-            }
+            self.shadow_command(&mut run, (stages, &uses, copy.writes_truth()), record);
             if let Some(back) = dispatched {
                 device.shared().counts.shadow_copy_back_dispatched();
                 self.retain(back);
             }
+        if run.recorded() {
+            self.barrier(Barrier::everything());
         }
+    }
+
+    /// Record one shadowed texture's copy, of `uses` in `stages`, writing its truth where
+    /// `writes_truth`, by `record`: as any command in an encoder Metal orders, else in `run`,
+    /// after a barrier from everything before where the run takes one ([`ShadowRun::before`]).
+    /// A copy of a detached buffer's bytes records nothing, nor does what follows
+    /// ([`skips`](Self::skips)).
+    fn shadow_command(
+        &mut self,
+        run: &mut ShadowRun,
+        (stages, uses, writes_truth): (vk::PipelineStageFlags2, &[Use<ResourceKey>], bool),
+        record: impl FnOnce(&Vk, vk::CommandBuffer),
+    ) {
+        if self.uses.ordered() {
+            self.command(stages, uses, record);
+            return;
+        }
+        if self.skips(uses.iter().map(|used| used.key)) {
+            return;
+        }
+        let aliased = self.aliased(uses);
+        let tracked = aliased.as_deref().unwrap_or(uses);
+        if run.before(tracked, writes_truth) {
+            self.barrier(Barrier::everything());
+        }
+        let Some(raw) = self.recording() else {
+            return;
+        };
+        record(self.device().shared().vk(), raw);
+        self.uses.record(stages, tracked, None);
+        self.touch(uses);
     }
 
     /// The `VkCommandBuffer` a render pass holds ([`hold_pass`](Self::hold_pass)), until its
@@ -1070,9 +1149,10 @@ impl EncoderCore {
 
     /// Record shadowed textures' `copies` into the command buffer a render pass holds
     /// ([`hold_pass`](Self::hold_pass)), between two of its render pass instances, as the pass's
-    /// end records them there (`render/inline_splits.rs`): each with a barrier from everything
-    /// before and one to everything after, its uses the encoder's, an unordered one's. A copy of a
-    /// detached buffer's bytes records nothing, nor does what follows ([`skips`](Self::skips)).
+    /// end records them there (`render/inline_splits.rs`): as one run ([`ShadowRun`]) after the
+    /// barrier from everything before that the caller records at the instance's end, with one
+    /// to everything after its last copy; their uses the encoder's, an unordered one's. A copy of
+    /// a detached buffer's bytes records nothing, nor does what follows ([`skips`](Self::skips)).
     /// Nothing where no pass holds one.
     pub(super) fn held_shadow_copies(&mut self, copies: &[ShadowCopy]) {
         let Some(held) = self.pass else {
@@ -1080,24 +1160,29 @@ impl EncoderCore {
         };
         let device = self.device().clone();
         let raw = device.shared().vk();
+        let mut run = ShadowRun::after_barrier();
         for copy in copies {
             let uses = copy.uses();
             if self.skips(uses.iter().map(|used| used.key)) {
                 continue;
             }
+            let aliased = self.aliased(&uses);
+            let tracked = aliased.as_deref().unwrap_or(&uses);
+            let before = run.before(tracked, copy.writes_truth());
             // SAFETY: the held command buffer is recording outside a render pass instance (the
             // caller ended the one before), and only this encoder records it; its commands retain
             // the shadowed textures (and their views) until it completes, and every image rests
             // in the `GENERAL` layout.
             unsafe {
-                Barrier::everything().record(raw, held);
-                copy.record(raw, held);
-                Barrier::everything().record(raw, held);
+                if before {
+                    Barrier::everything().record(raw, held);
+                }
             }
-            let aliased = self.aliased(&uses);
-            self.uses
-                .record(copy.stages(), aliased.as_deref().unwrap_or(&uses), None);
+            self.uses.record(stages, tracked, None);
             self.touch(&uses);
+        if run.recorded() {
+            // SAFETY: as above.
+            unsafe { Barrier::everything().record(raw, held) };
         }
     }
 
@@ -1238,6 +1323,10 @@ impl EncoderCore {
             }
             Some(log)
         });
+        let sharing = self.shadows.sharing_truth();
+        if sharing > 0 {
+            self.device().shared().counts.shadows_sharing_truth(sharing);
+        }
         let copies = self.shadows.finish();
         self.count_shadow_copies(&copies);
         self.shadow_copies(&copies);
@@ -1257,6 +1346,7 @@ impl EncoderCore {
             retained,
             executions,
             keys,
+            first_copies,
             mut heaps,
             holds,
             taken,
@@ -1274,6 +1364,13 @@ impl EncoderCore {
             .among(keys.iter().copied());
         heaps.extend(keyed);
         let mut state = open.command_buffer.state();
+        if !first_copies.is_empty() {
+            let again = state.shadows_copied_in(&first_copies);
+            if again > 0 {
+                (open.command_buffer.device().shared().counts)
+                    .shadow_texels_first_copied_in_again(again);
+            }
+        }
         state.use_heaps(heaps);
         let encoder = state.encoder_ended(kind, keys, residency, taken);
         state.encoder_holds(encoder, uses.held().to_vec());
@@ -1474,4 +1571,106 @@ impl EncoderCore {
             faults: ReplayFaults::default(),
         })
     }
+}
+
+/// A run of shadowed textures' copies in an encoder whose commands Metal leaves unordered
+/// (`EncoderCore::shadow_copies`, `held_shadow_copies`): one barrier from everything before its
+/// first copy and one to everything after its last order the run against the encoder's other
+/// commands, as a barrier around each copy did, a global barrier's first scope being every
+/// command before it and its second every command after. Inside the run a copy goes after a
+/// barrier only where it needs one:
+///
+/// - **Writes of the truth.** A copy back or a merge writes the texture's truth: a buffer's bytes
+///   (another key's too, where buffers over the same memory are not one key,
+///   `host_aliases.rs`) or a texture's image. It takes a barrier before it and one after it, as
+///   every copy did.
+/// - **The others** (copies in and keeps) write only memory the runtime made for the texture
+///   alone: its shadow, a merge's scratch or kept image, each of a key of its own. One goes after
+///   a barrier where a use of it and a use of a copy since the last barrier name the same key
+///   (aliases added) over ranges that share memory, and one of the two writes it: the tracker's
+///   rule for two commands that must run in order. Copies in of different textures (reads of
+///   their truths, writes of their own shadows) run together; a keep after the copy in of its
+///   texture (the shadow written, then read) takes its barrier.
+///
+/// Every image rests in `GENERAL`, so no barrier the run leaves out carried a layout transition.
+#[derive(Default)]
+struct ShadowRun {
+    /// The uses of the copies since the run's last barrier (aliases added); `None` before its
+    /// first.
+    since: Option<Vec<Use<ResourceKey>>>,
+    /// Whether the last copy wrote its truth: the next copy takes a barrier.
+    fenced: bool,
+    /// Whether a copy was recorded in the run.
+    recorded: bool,
+}
+
+impl ShadowRun {
+    /// A run whose first copy follows a barrier from everything before, which the caller records.
+    fn after_barrier() -> ShadowRun {
+        ShadowRun {
+            since: Some(Vec::new()),
+            fenced: false,
+            recorded: false,
+        }
+    }
+
+    /// Whether the next copy, of `uses` (aliases added), writing its truth where `writes_truth`,
+    /// goes after a barrier (the type's rules); noted as recorded.
+    fn before(&mut self, uses: &[Use<ResourceKey>], writes_truth: bool) -> bool {
+        let barrier = match &self.since {
+            None => true,
+            Some(since) => self.fenced || writes_truth || meets(since, uses),
+        };
+        let since = self.since.get_or_insert_with(Vec::new);
+        if barrier {
+            since.clear();
+        }
+        since.extend(uses.iter().cloned());
+        self.fenced = writes_truth;
+        self.recorded = true;
+        barrier
+    }
+
+    /// Whether a copy was recorded in the run, which then takes a barrier to everything after.
+    fn recorded(&self) -> bool {
+        self.recorded
+    }
+}
+
+/// Whether a use of `later` and one of `earlier` name the same key over ranges that share memory,
+/// and one of the two writes it.
+fn meets(earlier: &[Use<ResourceKey>], later: &[Use<ResourceKey>]) -> bool {
+    later.iter().any(|used| {
+        earlier.iter().any(|before| {
+            before.key == used.key
+                && before.range.overlaps(&used.range)
+                && !(before.write.is_empty() && used.write.is_empty())
+        })
+    })
+}
+
+/// The dispatch that takes the copy in at `copies[i]` and its texture's keep after it together
+/// (`ShadowMerge::keep_in`, `shadow_copy_in.rs`), where `device` takes one: the keep's place in
+/// `copies`, the dispatch and its uses. The copies between them are of other textures' shadows,
+/// so the keep's texels are the copy in's wherever it is recorded. `None` where the two stay
+/// apart.
+fn keep_with_copy_in(
+    device: &Device,
+    copies: &[ShadowCopy],
+    i: usize,
+) -> Option<(usize, CopyIn, Vec<Use<ResourceKey>>)> {
+    let copy = &copies[i];
+    let region = copy.copied_region()?;
+    let shadow = copy.copies.shadow_key;
+    let (j, merge) = copies
+        .iter()
+        .enumerate()
+        .skip(i + 1)
+        .find(|(_, later)| later.copies.shadow_key == shadow)
+        .and_then(|(j, later)| match &later.step {
+            Step::Keep(merge) => Some((j, merge)),
+            _ => None,
+        })?;
+    let both = merge.keep_in(device, &copy.copies, &region)?;
+    Some((j, both, merge.keep_in_uses(&copy.copies)))
 }

@@ -352,9 +352,12 @@ impl RenderCommandEncoder {
     /// costs no more than the split would: both forms are exact, so the draw takes the cheaper. The
     /// snapshot draw costs [`SNAPSHOT_PIXEL_COST`] for each color at each pixel the draw covers,
     /// which its Vulkan scissors bound (`EncoderState::vk_scissors`: each viewport's pixels within
-    /// its scissor rectangle, inside the render area); the split's copy reads and writes each
-    /// color's every texel of the rendered level, its format's bytes each. The split's pass break
-    /// (each attachment stored and loaded again) is left out, which errs toward the split. The
+    /// its scissor rectangle, inside the render area); the split's copy is weighed as reading and
+    /// writing each color's every texel of the rendered level, its format's bytes each, an upper
+    /// bound: a copy of a one-level, one-slice texture's image moves only the texels around the
+    /// draw's scissors, or those the instances before changed (`ShadowCopies::cuts`), which errs
+    /// toward the snapshot. The split's pass break (each attachment stored and loaded again) is
+    /// left out, which errs toward the split. The
     /// draw's pixels for every color (the scissors' pixels times the colors), the colors' pixels,
     /// and their bytes; it takes the snapshot where the first times [`SNAPSHOT_PIXEL_COST`] is at
     /// most the last.

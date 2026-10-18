@@ -169,10 +169,30 @@ recorded here.
   texture keeps, the buffer's texels copied in first (`dont-care-stand-in`), so the buffer keeps its
   bytes as Metal's does: about 10 µs a pass on the Iris Xe (ANV). A pass that clears and stores
   `DontCare` costs no more, and one that stores renders in place.
-- **The interlocked pass on the M4 under macOS 27.** MoltenVK gives the M3 Max and the M4 one device
-  identity on macOS 27, so both split a pass the pixel interlock would split
-  (`DriverFact::InterlockedPassSplitNoSlower`), about a quarter faster on the M3 Max; the M4 runs
-  that pass about 8% faster kept whole.
+- **A shadow over bytes another writer may write is merged back, not copied back.** Metal writes
+  only the texels a command writes, and another writer writing bytes no command touches while a
+  command buffer runs is valid under its contract. On an M3 Max under macOS 27.0.1, a CPU write to
+  a texel no command touched, made 6 to 23 ms into a kernel's 58 to 68 ms run that wrote another
+  texel of a texture over a `Shared` or `Managed` buffer, stayed every time; so did another
+  queue's fill of such a texel of an untracked `Private` buffer, run inside a kernel's or a render
+  pass's 61 ms run (5 times of 6; the sixth ran after it). Another queue's fill of a tracked
+  buffer ran after the kernel or the pass ended, every time, as the runtime's tracker orders it.
+  So a shadow over the bytes of a `Shared` or `Managed` buffer, host pages, the caller's
+  `VkBuffer` or an untracked buffer is kept after its copy in, and the bytes the commands changed
+  texture's image into a buffer and a merge, in place of one copy back, each cut to the rectangle
+  the commands write in where they bound it. A tracked `Private` buffer's, which no other writer
+  writes while the command buffer runs, is copied back. Where the copy back is a dispatch
+  (`DriverFact::ShadowCopyBackDispatchFaster`: ANV, whose `vkCmdCopyImageToBuffer` is slow), so is
+  the first copy, and the merge reads the texels the commands left from the image through an
+  unsigned-integer view in place of the second. Where the copy in and the first copy are also one
+  dispatch (`DriverFact::ShadowCopyInDispatchFaster`, measured faster on the UHD 770 of RPL-S
+  alone), that dispatch reads the texels from the buffer once and stores them in the image and in
+  the scratch: on the UHD 770 a 1920x1080 pass that loads took 1.43 ms of GPU time against
+  1.64-1.67 ms, twelve 17.2 ms against 20.0 ms, a clearing pass 0.89 against 1.04 ms; on the Iris
+  (`surface_texture_costs::surface_texture_cost_parts`, four shadowed textures a frame, 1,582,016
+  texels), over anonymous pages, merged back, passes that draw took 5.0-5.4 ms a frame from commit
+  to completion, and under scissors (790,448 texels) 3.6-3.9 ms; over tracked `Private` buffers,
+  copied back, 3.1 ms and 2.2-2.4 ms.
 - **Emulated tessellation's scan.** On a device without `tessellationShader` a patch draw first
   runs a one-workgroup scan that places each patch's triangles in Metal's order, patch after
   patch: about 6-60 ms of GPU time per 10,000-patch draw at factors 4 to 64 on the Radeon 780M and
@@ -303,22 +323,19 @@ driver's. Each is open work.
   each timed command buffer writes: on an M4 a bare barrier took 14.7 µs alone and 167.8 µs with
   them. `DeviceOptions::gpu_times_from_host` (off by default, announced) answers GPU times from the
   host clock and spares them.
-- **A shadow's copy back after a pass that draws covers every texel inside the draws' scissors**,
-  where Metal's store writes back only the 32x32 tiles a draw's primitives touch. A CPU write during
-  the pass to an undrawn texel in an untouched tile inside the scissors can be undone where Metal
-  keeps it: the host does not know which tiles the primitives touch. No copy reaches the bytes
-  between rows.
-- **A CPU write to a texture's bytes while the host keeps them across the image's first move is
-  undone.** An image over a no-copy buffer's host pages starts `UNDEFINED`
-  (`VUID-VkImageCreateInfo-pNext-01443`), and its first move may read and write all the memory
-  bound to it, so the host keeps those bytes (`texture/first_move.rs`, `device/submit.rs`): once
-  the submissions before have completed, it reads them through the host pointer, submits the moves
-  alone, waits, and writes back those that differ. A CPU write to them in between, within one
-  submission's round trip of the commit that makes the move, is undone, once per image
-  (`texture/shared_alias.rs`); Metal keeps it, and never writes the bytes between a texture's rows.
-  No byte outside them is read or written (`runtime_lane::pitched_surfaces`:
-  `a_texture_s_first_move_keeps_the_bytes_it_lies_over`,
-  `a_cpu_write_during_a_texture_s_first_move_stays_outside_its_bytes`).
+- **A shadow's copy back covers every texel it moves, where no merge serves it**: an image's
+  shadow (a view of a layout the device's views do not reinterpret), a turned texture's and a
+  two-plane one's. After a pass that draws, that is every texel inside the draws' scissors, where
+  Metal's store writes back only the 32x32 tiles a draw's primitives touch: another writer's write
+  during the pass to an undrawn texel in an untouched tile there can be undone where Metal keeps
+  it. A shadow over a buffer's bytes another writer may write is merged back instead, only the
+  words the commands changed (`shadow.rs`), and no write reaches the bytes between rows; a tracked
+  `Private` buffer's, whose bytes no other writer writes during the pass, is copied back.
+- **A merge through a copy rewrites the texture's bytes it did not change**: where the texture's
+  first byte is not a whole word of its buffer, its bytes go through a staging buffer, or its last
+  word runs past the buffer, the merge copies the bytes from the texture's first to its last into
+  its scratch, merges there, and copies them back (`shadow_merge.rs`). Another writer's write to
+  them between the two copies is undone.
 - **A cold pipeline making on NVIDIA grows with a module's sampling sites.** NVIDIA's compiler takes
   about 1 s for macOS 26's largest CoreAnimation fragment (210,033 words) on the RTX 5080 Laptop
   GPU, once per cold cache; states that share the module then take 13 to 16 ms, and a warm cache

@@ -1322,13 +1322,44 @@ pub enum DriverFact {
     /// 1307x512 `BGRA8Unorm` tile over guest pages with rows of 5248 bytes, 60 frames, three rounds
     /// within 3 us of each other): a pass that loads, draws and stores took 1319 us of GPU time with
     /// the copy back and 972 us with the dispatch, one half-scissored 742 and 575 us, and one that
-    /// stores nothing (the mutable shadow's cost alone) 500 and 513 us. On a driver with it a shadowed
-    /// texture's copy back is such a dispatch (`shadow_copy_back.rs` in the runtime), its shadow made
-    /// `MUTABLE_FORMAT` with that view: the same bytes either way, as Vulkan states a compatible view
-    /// reads a texel's bits unchanged. Measured no faster, so not listed: RADV, Mesa 26.2.4 on the
-    /// Radeon 780M (whose passes over a mutable shadow took 84 to 150 us longer a frame), and NVIDIA's
+    /// stores nothing (the mutable shadow's cost alone) 500 and 513 us. On the UHD 770 of RPL-S (a
+    /// pass a frame over a 1920x1080 `BGRA8Unorm` shadow over anonymous pages, six rounds, GPU time
+    /// the rounds' median), a pass that loads, draws and stores took 1.68 ms with the dispatches
+    /// against 1.81 ms with the copies, one that clears 1.04 against 1.14 ms, and one drawn in a
+    /// centred region of half the width and height 446 against 476 us. The driver's copy cost, so
+    /// the row names no GPU: it holds on each measured identity of ANV at the release. On a driver
+    /// with it a shadowed texture's copy back is such a dispatch (`shadow_copy_back.rs` in the
+    /// runtime), and so is a merge's copy of the shadow into its scratch before the commands
+    /// (`shadow_merge.rs`), its shadow made `MUTABLE_FORMAT` with that view, through which the
+    /// merge reads the texels the commands left: the same bytes either way, as Vulkan states a
+    /// compatible view reads a texel's bits unchanged. Measured no faster, so not listed: RADV,
+    /// Mesa 26.2.4 on the Radeon 780M (whose passes over a mutable shadow took 84 to 150 us longer
+    /// a frame) and 26.0.8 on the Radeon 780M and the Radeon RX 7900 XTX (where a merge reading a
+    /// mutable shadow's texels through the view in place of a copy of them saved 6% and 2% of a
+    /// 1920x1080 pass that loads, and a pass that clears took 75% and 0% more), and NVIDIA's
     /// 615.71.09 on the RTX 5080 Laptop GPU.
     ShadowCopyBackDispatchFaster,
+    /// A cost fact (the module docs), on a driver with [`DriverFact::ShadowCopyBackDispatchFaster`]:
+    /// the GPU runs a merged shadowed texture's copy in (`vkCmdCopyBufferToImage`) and its keep (the
+    /// copy back's dispatch into the merge's scratch) slower than one dispatch that reads the
+    /// texels' words from the buffer once and stores them in the shadow, through a storage view of
+    /// it, and in the scratch, with the shadow's 4-byte texels viewed as `R8G8B8A8_UINT` (whose
+    /// storage usage keeps the image compressed on ANV, where `R32_UINT` beside storage usage makes
+    /// gfx12.0 drop its aux surface). Measured on ANV, Mesa 26.2.4 (one pass a frame, or twelve in
+    /// one command buffer, over a 1920x1080 `BGRA8Unorm` shadow over anonymous pages, 1000 frames,
+    /// GPU time a frame, two rounds each): on the UHD 770 of RPL-S, a pass that loads, draws and
+    /// stores took 1427 us against 1643 to 1665 us with the copy back's fact alone, twelve such
+    /// passes 17.2 ms against 20.0 ms, and one that clears 891 against 1042 us. On the Iris Xe of
+    /// RPL-P it was measured no faster, so not listed: twelve such passes took 9.3 to 15.8 ms
+    /// against 9.3 to 15.3 ms with the copy back's fact alone, slower in six of seven alternating
+    /// rounds (median 5% more), one pass 3.05 against 3.48 ms, one that clears 0.40 to 1.29
+    /// against 0.61 to 1.20 ms; and the `R8G8B8A8_UINT` view without the dispatch took longer
+    /// still there (twelve passes 10.0 to 13.3 ms, a clearing pass 0.89 to 1.67 ms). On a device
+    /// with it a merged texture's copy in and keep of the same rectangle are that dispatch
+    /// (`shadow_copy_in.rs` in the runtime), and its shadow's view also stores (`shadow_copy_back.rs`
+    /// in the runtime): the same bytes either way, as Vulkan states a compatible view reads and
+    /// stores a texel's bits unchanged.
+    ShadowCopyInDispatchFaster,
     /// The driver answers a format's linear-tiling attachment features from memory it has not
     /// yet initialized, so they differ between instances of one process: MoltenVK 1.4.1 builds
     /// its format table in `MVKPhysicalDevice`'s member initializers, where
@@ -2323,6 +2354,18 @@ pub(crate) const MEASURED: &[Measured<DriverFact>] = &[
         fact: DriverFact::ShadowCopyBackDispatchFaster,
         driver: DriverId::INTEL_OPEN_SOURCE_MESA,
         vendor: Some(INTEL_VENDOR_ID),
+        device: None,
+        first: mesa(26, 2, 4),
+        last: mesa(26, 2, 4),
+    },
+    Measured {
+        fact: DriverFact::ShadowCopyInDispatchFaster,
+        driver: DriverId::INTEL_OPEN_SOURCE_MESA,
+        vendor: Some(INTEL_VENDOR_ID),
+        device: Some(INTEL_UHD_770_RPL_S),
+        first: mesa(26, 2, 4),
+        last: mesa(26, 2, 4),
+    },
     Measured {
         fact: DriverFact::SampledDepthKeepsHiZ,
         driver: DriverId::INTEL_OPEN_SOURCE_MESA,

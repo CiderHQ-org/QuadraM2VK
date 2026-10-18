@@ -473,6 +473,8 @@ pub(super) struct State {
     /// state made without `supportIndirectCommandBuffers`): as it commits, they run nothing, and
     /// it completes with `CommandBufferError::PageFault`.
     faulted: BTreeSet<usize>,
+    /// The shadowed textures its ended encoders copied in first (`shadow.rs`), each once.
+    shadows_copied_in: Vec<ResourceKey>,
     /// The pools of its commands' set 0 (`descriptor_arena.rs`), given back or released with
     /// the uploads.
     pub(super) descriptors: DescriptorArena,
@@ -959,6 +961,21 @@ impl State {
         self.fails_from.get_or_insert((encoder, error));
     }
 
+    /// Note the shadowed textures an ended encoder copied in first, each copy's texture and
+    /// texels: the texels of those an earlier encoder of the command buffer copied in too.
+    pub(super) fn shadows_copied_in(&mut self, copies: &[(ResourceKey, u64)]) -> u64 {
+        let earlier = self.shadows_copied_in.len();
+        let mut again = 0;
+        for &(key, texels) in copies {
+            if self.shadows_copied_in[..earlier].contains(&key) {
+                again += texels;
+            } else if !self.shadows_copied_in.contains(&key) {
+                self.shadows_copied_in.push(key);
+            }
+        }
+        again
+    }
+
     /// Metal's GPU faults ended encoder `encoder` (`faulted`).
     pub(super) fn fault(&mut self, encoder: usize) {
         self.faulted.insert(encoder);
@@ -1340,6 +1357,7 @@ impl CommandBuffer {
                 unlisted_argument_samplers: false,
                 fails_from: None,
                 faulted: BTreeSet::new(),
+                shadows_copied_in: Vec::new(),
                 descriptors: DescriptorArena::default(),
                 status_words: None,
                 capture_tallies: Vec::new(),

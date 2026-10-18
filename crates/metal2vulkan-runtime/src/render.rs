@@ -4351,17 +4351,23 @@ impl RenderCommandEncoder {
                 order.extend(after.map(|dispatch| (&dispatch.shadows, None, true)));
             }
             let reached = reach != clear_reach::PassReach::Nothing;
-            // Where nothing but the draws writes the loaded colors: no reach clear before the
-            // pass.
-            let drawn_bounds = match (reach, &reach_clears) {
-                (clear_reach::PassReach::Draws, None) => drawn.bounds(),
-                _ => None,
+            // A pass whose draws reach tiles changes the colors the encoder set to load inside
+            // its draws' scissors alone (`render/shadows.rs`), whichever tiles it reaches: one
+            // that reaches every tile (an attachment it clears and stores) loads and stores
+            // their other texels as they were. A clear before the pass leaves them alone too: a
+            // reach clear clears only attachments whose load is `Clear`, a `DontCare` load turned
+            // into one among them (`clear_reach::ReachClears`), and no load the encoder set to
+            // `Load` turns into `Clear`.
+            let drawn_bounds = match reach {
+                clear_reach::PassReach::Draws | clear_reach::PassReach::Every => drawn.bounds(),
+                clear_reach::PassReach::Nothing => None,
             };
             let planned = shadows::plan(
                 &mut core,
                 order.iter().map(|&(s, bound, _)| (s, bound)),
                 &layout,
                 (reached, drawn_bounds.map(|area| (area, loaded_colors))),
+                drawn_bounds.is_some().then_some(&drawn),
             )?;
             let (mut planned_copies, mut dispatch_copies) = (Vec::new(), Vec::new());
             for (&(_, _, of_dispatch), copies) in order.iter().zip(planned) {

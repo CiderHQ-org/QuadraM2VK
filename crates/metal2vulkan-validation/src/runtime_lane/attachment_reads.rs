@@ -26,21 +26,21 @@
 //! - [`a_chain_of_barriers_copies_in_only_what_each_instance_drew`]: [`CHAIN`] steps after A, each
 //!   a fill of one pixel through a one-pixel scissor, a memory barrier, and draw C through a
 //!   one-pixel scissor at the pixel that samples it: every C draws its fill's red, every other
-//!   pixel keeps its red, the answers of a copy of every texel before each instance. Over a
-//!   buffer, each copy after the first takes only the rectangle bounding the pixels the instance
-//!   before it drew (`bounded_shadow_copies`, `shadow_texels_copied_in`); the texture of its own
-//!   image copies every texel.
+//!   pixel keeps its red, the answers of a copy of every texel before each instance. Each copy
+//!   after the first takes only the rectangle bounding the pixels the instance before it drew
+//!   (`bounded_shadow_copies`; `shadow_texels_copied_in` over a buffer,
+//!   `shadow_texels_copied_in_images` for the texture of its own image).
 //! - [`own_pixel_reads_copy_in_only_around_their_scissors`]: [`OWN_STEPS`] steps after A, each a
 //!   fill of one pixel through a one-pixel scissor (corners and edges among them), a memory
 //!   barrier, and draw C (`tob_read`, `t.read(uint2(in.position.xy))`) through a one-pixel
 //!   scissor at that pixel, then one more at the first step's pixel: every C draws its fill's red.
-//!   Over a buffer, each C reads at its own pixel alone (`own_pixel_reads`), and each copy in
-//!   moves at most the 3x3 texels around its pixel. A C the device reads through a snapshot
+//!   Each C reads at its own pixel alone (`own_pixel_reads`), and each copy in moves at most the
+//!   3x3 texels around its pixel. A C the device reads through a snapshot
 //!   inside its instance (`snapshot_reads.rs`, `reading_draws_snapshotted`) takes neither a split
 //!   nor a copy, and answers the same.
 //! - [`an_own_pixel_read_without_a_barrier_reads_the_texels_from_before_the_pass`]: with no
 //!   barrier, `tob_read` over A's block draws the red from before the pass (probe `selfsample`),
-//!   its copy over a buffer the texels around the block alone.
+//!   its copy the texels around the block alone.
 //! - [`a_pass_that_samples_no_attachment_copies_nothing`]: A, then `tob_read` of another texture:
 //!   no read through a copy, split, own-pixel read or shadow copy.
 
@@ -213,7 +213,9 @@ pub(super) fn red(bytes: &[u8], x: u64, y: u64) -> u8 {
 /// What the pass moved of the counts: its draws' splits for attachment reads, their reads
 /// through snapshots inside their instances, their reads through copies, the encoders' shadow
 /// copies, of those the copies in of what changed within a rectangle alone, the texels the copies
-/// in moved, and whether the pass rendered the target through a copied stand-in.
+/// in of buffers' textures moved and those of images' shadows, the texels the encoder's first
+/// copy in moved of a truth that is an image and of one in a mapped buffer, and whether the pass
+/// rendered the target through a copied stand-in.
 struct Moved {
     splits: u64,
     snapshotted: u64,
@@ -221,6 +223,8 @@ struct Moved {
     copies: u64,
     bounded: u64,
     texels_in: u64,
+    texels_in_images: u64,
+    first: [u64; 2],
     apart: bool,
 }
 
@@ -232,6 +236,14 @@ fn moved(before: &WorkCounts, after: &WorkCounts) -> Moved {
         copies: after.shadow_copies - before.shadow_copies,
         bounded: after.bounded_shadow_copies - before.bounded_shadow_copies,
         texels_in: after.shadow_texels_copied_in - before.shadow_texels_copied_in,
+        texels_in_images: after.shadow_texels_copied_in_images
+            - before.shadow_texels_copied_in_images,
+        first: [
+            after.shadow_texels_first_copied_in_images
+                - before.shadow_texels_first_copied_in_images,
+            after.shadow_texels_first_copied_in_mapped_buffers
+                - before.shadow_texels_first_copied_in_mapped_buffers,
+        ],
         apart: after.linear_passes_through_copies > before.linear_passes_through_copies,
     }
 }
@@ -244,13 +256,16 @@ fn moved(before: &WorkCounts, after: &WorkCounts) -> Moved {
 fn check(name: &str, moved: &Moved, barriers: u64) {
     eprintln!(
         "attachment reads, {name}, barriers {barriers}: splits {}, snapshotted {}, reads through \
-         copies {}, shadow copies {} (bounded {}, texels in {}), through a stand-in {}",
+         copies {}, shadow copies {} (bounded {}, texels in {} and {} of images, first in \
+         {:?}), through a stand-in {}",
         moved.splits,
         moved.snapshotted,
         moved.reads,
         moved.copies,
         moved.bounded,
         moved.texels_in,
+        moved.texels_in_images,
+        moved.first,
         moved.apart
     );
     if moved.apart {
@@ -268,6 +283,15 @@ fn check(name: &str, moved: &Moved, barriers: u64) {
     if moved.snapshotted < barriers.max(1) {
         assert!(moved.reads >= 1, "{name}: the draw read no copy");
         assert!(moved.copies >= 1, "{name}: no copy was taken");
+        // The encoder's first copy in, counted by what holds the target's texels: its own image,
+        // or the shared buffer's bytes.
+        let [images, mapped] = moved.first;
+        let own = name.starts_with("its own image");
+        assert_eq!(
+            (images > 0, mapped > 0),
+            (own, !own),
+            "{name}: the first copy's texels counted by the truth's backing"
+        );
     }
 }
 
@@ -382,20 +406,17 @@ fn own_pixel_reads_copy_in_only_around_their_scissors() {
                 count,
                 "{name}: each C read the copy or a snapshot"
             );
-            // Over a buffer: each copy in of at most the 3x3 texels around a C's pixel, and a
-            // shadowed attachment's own copy in at most every texel more. The image's shadow
-            // takes every texel (`ShadowCopies::cuts`).
-            if name == "over a buffer" {
-                assert_eq!(own, moved.reads, "{name}: own-pixel reads");
-                let most = SIDE * SIDE + 9 * count;
-                assert!(
-                    moved.texels_in <= most,
-                    "{name}: {} texels copied in, past {most}",
-                    moved.texels_in
-                );
-            } else {
-                assert_eq!(own, 0, "{name}: own-pixel reads");
-            }
+            // Each copy in of at most the 3x3 texels around a C's pixel (`ShadowCopies::cuts`),
+            // and over a buffer a shadowed attachment's own copy in at most every texel more.
+            assert_eq!(own, moved.reads, "{name}: own-pixel reads");
+            let (texels, most) = match name == "over a buffer" {
+                true => (moved.texels_in, SIDE * SIDE + 9 * count),
+                false => (moved.texels_in_images, 9 * count),
+            };
+            assert!(
+                texels <= most,
+                "{name}: {texels} texels copied in, past {most}"
+            );
         }
     });
 }
@@ -428,12 +449,13 @@ fn an_own_pixel_read_without_a_barrier_reads_the_texels_from_before_the_pass() {
             check(name, &moved, 0);
             let own = after.own_pixel_reads - counted.own_pixel_reads;
             eprintln!("own-pixel reads, {name}: {own}");
-            if !moved.apart && name == "over a buffer" {
+            if !moved.apart {
                 assert_eq!(own, 1, "{name}: own-pixel reads");
-                // The full scissor, the whole target: its copy every texel at most, and a
-                // shadowed attachment's own every texel more.
+                // The full scissor, the whole target: its copy every texel at most, and over a
+                // buffer a shadowed attachment's own every texel more.
                 let most = 2 * SIDE * SIDE;
-                assert!(moved.texels_in <= most, "{name}: {}", moved.texels_in);
+                let texels = moved.texels_in + moved.texels_in_images;
+                assert!(texels <= most, "{name}: {texels}");
             }
         }
     });
@@ -767,20 +789,18 @@ fn a_chain_of_barriers_copies_in_only_what_each_instance_drew() {
                 continue;
             }
             assert_eq!(moved.reads, CHAIN, "{name}: each C read the copy");
-            // Over a buffer: the first copy of every texel, then only what each instance drew.
-            // The image's shadow takes every texel (`ShadowCopies::cuts`).
-            if name == "over a buffer" {
-                assert_eq!(moved.bounded, CHAIN - 1, "{name}: bounded copies");
-                // A shadowed attachment's own copy in takes at most every texel more.
-                let most = 2 * SIDE * SIDE + chain_texels();
-                assert!(
-                    moved.texels_in <= most,
-                    "{name}: {} texels copied in, past {most}",
-                    moved.texels_in
-                );
-            } else {
-                assert_eq!(moved.bounded, 0, "{name}: bounded copies");
-            }
+            // The first copy of every texel, then only what each instance drew
+            // (`ShadowCopies::cuts`); over a buffer, a shadowed attachment's own copy in takes at
+            // most every texel more.
+            assert_eq!(moved.bounded, CHAIN - 1, "{name}: bounded copies");
+            let (texels, most) = match name == "over a buffer" {
+                true => (moved.texels_in, 2 * SIDE * SIDE + chain_texels()),
+                false => (moved.texels_in_images, SIDE * SIDE + chain_texels()),
+            };
+            assert!(
+                texels <= most,
+                "{name}: {texels} texels copied in, past {most}"
+            );
         }
     });
 }

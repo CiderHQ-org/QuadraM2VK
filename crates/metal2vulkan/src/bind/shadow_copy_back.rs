@@ -10,16 +10,20 @@
 //! compatible formats will have the same mapping between texel coordinates and memory locations
 //! irrespective of the format, with only the interpretation of the bit pattern changing"
 //! (`VkImageViewCreateInfo`), and an unsigned-integer view returns its components' bits
-//! unconverted, so the words a fetch returns are the texel's bytes as the copy writes them.
+//! unconverted, so the words a fetch returns are the texel's bytes as the copy writes them. The
+//! view is the consumer's choice of [`ShadowTexelView`]: a 4-byte texel's `R32_UINT` view returns
+//! its word, and its `R8G8B8A8_UINT` view its bytes in memory order (byte `i` in component `i`),
+//! which the kernel packs into the word (byte `i` at bits `8i` onward, [`fetched_words`]); a
+//! wider texel's is the 32-bit unsigned format of its width, whose components are its words.
 //!
-//! **The module** (one per texel width: 1, 2 or 4 words). One `GLCompute` entry `main` with local
+//! **The module** (one per view, [`ShadowTexelView`]). One `GLCompute` entry `main` with local
 //! size ([`ShadowCopyBackModule::LOCAL_SIZE`], 1, 1), [`ShadowCopyBackModule::PUSH_BYTES`] of
 //! `COMPUTE` push constants at offset 0 (the region's shape, [`ShadowCopyBackModule::shape`]),
 //! and in set 0:
 //!
 //! | Binding | Resource |
 //! |---|---|
-//! | [`ShadowCopyBackModule::IMAGE_BINDING`] | the shadow's sampled view of `R32_UINT`, `R32G32_UINT` or `R32G32B32A32_UINT`, the format of the texel's width, in the `GENERAL` layout |
+//! | [`ShadowCopyBackModule::IMAGE_BINDING`] | the shadow's sampled view of the module's format ([`ShadowTexelView`]), in the `GENERAL` layout |
 //! | [`ShadowCopyBackModule::BYTES_BINDING`] | a storage buffer over the buffer's bytes, a whole number of 4-byte words |
 //!
 //! The shape's words, in order: `origin`, the region's first texel `x0` in its low 16 bits and
@@ -52,7 +56,52 @@ use crate::spirv::ir::{
     LayoutRule, MemAccess, StorageClass, Type, TypedModule,
 };
 
-/// The crate-owned copy-back module of one texel width on one device, validated like any output.
+/// The unsigned-integer view of a shadow that its kernels read its texels through, and a copy in
+/// stores them through ([`shadow_copy_back_module`], `shadow_merge_image_module`,
+/// word's or its bytes'. Every one shares the texel's compatibility class, so a view of any
+/// reads and stores the texel's bits unconverted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum ShadowTexelView {
+    /// `R32_UINT`: a 4-byte texel's word, in component 0.
+    R32Uint,
+    /// `R8G8B8A8_UINT`: a 4-byte texel's bytes, byte `i` in component `i`.
+    R8G8B8A8Uint,
+    /// `R32G32_UINT`: an 8-byte texel's words.
+    R32G32Uint,
+    /// `R32G32B32A32_UINT`: a 16-byte texel's words.
+    R32G32B32A32Uint,
+}
+
+impl ShadowTexelView {
+    /// Every view.
+    pub const ALL: [ShadowTexelView; 4] = [
+        ShadowTexelView::R32Uint,
+        ShadowTexelView::R8G8B8A8Uint,
+        ShadowTexelView::R32G32Uint,
+        ShadowTexelView::R32G32B32A32Uint,
+    ];
+
+    /// The texel's 4-byte words: 1, 2 or 4.
+    pub fn words(self) -> u32 {
+        match self {
+            ShadowTexelView::R32Uint | ShadowTexelView::R8G8B8A8Uint => 1,
+            ShadowTexelView::R32G32Uint => 2,
+            ShadowTexelView::R32G32B32A32Uint => 4,
+        }
+    }
+
+    /// The view's storage image format, as a copy in declares it.
+    pub(crate) fn storage_format(self) -> crate::spv::ImageFormat {
+        match self {
+            ShadowTexelView::R32Uint => crate::spv::ImageFormat::R32ui,
+            ShadowTexelView::R8G8B8A8Uint => crate::spv::ImageFormat::Rgba8ui,
+            ShadowTexelView::R32G32Uint => crate::spv::ImageFormat::Rg32ui,
+            ShadowTexelView::R32G32B32A32Uint => crate::spv::ImageFormat::Rgba32ui,
+        }
+    }
+}
+
+/// The crate-owned copy-back module of one view on one device, validated like any output.
 #[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ShadowCopyBackModule {
@@ -128,11 +177,64 @@ fn u32_value(f: &mut FunctionBuilder<'_>, v: u32) -> BResult<Value> {
     f.module().const_value(c)
 }
 
-/// The copy-back module of texels `words` words wide (1, 2 or 4) as a typed module, before
-/// serialization: the module [`shadow_copy_back_module`] serializes, which the CPU interpreter
-/// runs. Its bindings are the symbols `IMAGE` and `BYTES`, and its push field the shape, a
-/// `uvec4` (the module docs).
-fn typed_module(words: u32) -> BResult<TypedModule> {
+/// The words of a texel that a fetch through the shadow's `view` returned (`texel`, a `uvec4`):
+/// an `R8G8B8A8_UINT` view's components, its bytes, packed into one word (byte `i` at bits `8i`
+/// onward); another view's components, its words (the module docs).
+pub(super) fn fetched_words(
+    f: &mut FunctionBuilder<'_>,
+    texel: Value,
+    view: ShadowTexelView,
+) -> BResult<Vec<Value>> {
+    if view != ShadowTexelView::R8G8B8A8Uint {
+        return (0..view.words())
+            .map(|lane| f.composite_extract(texel, &[lane]))
+            .collect();
+    }
+    let mut word = f.composite_extract(texel, &[0])?;
+    for lane in 1..4u32 {
+        let byte = f.composite_extract(texel, &[lane])?;
+        let shift = u32_value(f, 8 * lane)?;
+        let byte = f.binary(BinOp::ShiftLeftLogical, byte, shift)?;
+        word = f.binary(BinOp::BitwiseOr, word, byte)?;
+    }
+    Ok(vec![word])
+}
+
+/// The `uvec4` a store of a texel of `words` (its words, in memory order) through the shadow's
+/// `view` takes, as [`fetched_words`] reads it back: an `R8G8B8A8_UINT` view's bytes, one a
+/// component; another view's words, zero in the components it lacks.
+pub(super) fn stored_texel(
+    f: &mut FunctionBuilder<'_>,
+    uvec4: TypeId,
+    view: ShadowTexelView,
+    words: &[Value],
+) -> BResult<Value> {
+    let zero = u32_value(f, 0)?;
+    let components = match (view, words) {
+        (ShadowTexelView::R8G8B8A8Uint, [word]) => {
+            let byte = u32_value(f, 0xff)?;
+            let mut bytes = Vec::with_capacity(4);
+            for lane in 0..4u32 {
+                let shift = u32_value(f, 8 * lane)?;
+                let shifted = f.binary(BinOp::ShiftRightLogical, *word, shift)?;
+                bytes.push(f.binary(BinOp::BitwiseAnd, shifted, byte)?);
+            }
+            bytes
+        }
+        _ => {
+            let mut lanes = words.to_vec();
+            lanes.resize(4, zero);
+            lanes
+        }
+    };
+    f.composite_construct(uvec4, &components)
+}
+
+/// The copy-back module of `view` as a typed module, before serialization: the module
+/// [`shadow_copy_back_module`] serializes, which the CPU interpreter runs. Its bindings are the
+/// symbols `IMAGE` and `BYTES`, and its push field the shape, a `uvec4` (the module docs).
+fn typed_module(view: ShadowTexelView) -> BResult<TypedModule> {
+    let words = view.words();
     let mut b = ModuleBuilder::new();
     let u32_ = b.ty(Type::Int {
         width: 32,
@@ -143,7 +245,7 @@ fn typed_module(words: u32) -> BResult<TypedModule> {
     let uvec4 = b.ty(Type::Vector { elem: u32_, len: 4 })?;
     let m_shape = b.push_member(SHAPE, uvec4, 0)?;
     let push = b.push_global()?;
-    let view = b.ty(Type::Image(ImageType {
+    let image_type = b.ty(Type::Image(ImageType {
         sampled_type: u32_,
         dim: Dim::D2,
         depth: false,
@@ -152,7 +254,7 @@ fn typed_module(words: u32) -> BResult<TypedModule> {
         usage: ImageUsage::Sampled,
         format: crate::spv::ImageFormat::Unknown,
     }))?;
-    let image = b.resource(IMAGE, StorageClass::UniformConstant, view)?;
+    let image = b.resource(IMAGE, StorageClass::UniformConstant, image_type)?;
     let bytes = words_buffer(&mut b, BYTES, u32_)?;
     let invocation = b.builtin(crate::spv::BuiltIn::GlobalInvocationId, IoDir::Input, uvec3)?;
     let void = b.ty(Type::Void)?;
@@ -192,12 +294,12 @@ fn typed_module(words: u32) -> BResult<TypedModule> {
             ..ImageOperands::default()
         };
         let texel = f.fetch(image, coord, &ops)?;
+        let texel = fetched_words(f, texel, view)?;
         let row = f.binary(BinOp::IMul, y, row_words)?;
         let column = f.binary(BinOp::IMul, x, n)?;
         let at = f.binary(BinOp::IAdd, first_word, row)?;
         let at = f.binary(BinOp::IAdd, at, column)?;
-        for (lane, &index) in lanes.iter().enumerate() {
-            let word = f.composite_extract(texel, &[lane as u32])?;
+        for (&word, &index) in texel.iter().zip(&lanes) {
             let place = f.binary(BinOp::IAdd, at, index)?;
             let to = f.access_chain(bytes, &[zero, place])?;
             f.store(to, word, MemAccess::default())?;
@@ -229,22 +331,15 @@ fn binding_of(sym: &Symbol) -> Option<u32> {
     }
 }
 
-/// The copy-back module of `device` for texels `texel_words` 4-byte words wide (1, 2 or 4; an
-/// internal error for another width): built with the typed builder, checked by the owned
-/// verifier against the device's profile (requirements included), serialized, and numbered with
-/// the fixed bindings of [`ShadowCopyBackModule`].
+/// The copy-back module of `device` reading texels through `view`: built with the typed builder,
+/// checked by the owned verifier against the device's profile (requirements included),
+/// serialized, and numbered with the fixed bindings of [`ShadowCopyBackModule`].
 pub fn shadow_copy_back_module(
     device: &Device,
-    texel_words: u32,
+    view: ShadowTexelView,
 ) -> Result<ShadowCopyBackModule, Error> {
-    if !matches!(texel_words, 1 | 2 | 4) {
-        return Err(Error::Internal(InternalError::new(
-            InternalKind::Invariant,
-            format!("a shadow copy back of texels {texel_words} words wide"),
-        )));
-    }
     let profile = device.profile();
-    let m = typed_module(texel_words)?;
+    let m = typed_module(view)?;
     let mut meter = Meter::new(&Budget::default());
     crate::spirv::verify::verify(&m, profile, &mut meter)?;
     let r = crate::spirv::serialize::serialize(m)?;
@@ -263,29 +358,38 @@ pub fn shadow_copy_back_module(
 
 #[cfg(test)]
 mod tests {
-    use super::{typed_module, ShadowCopyBackModule, BYTES, IMAGE};
+    use super::{typed_module, ShadowCopyBackModule, ShadowTexelView, BYTES, IMAGE};
     use crate::spirv::interp::{run_with_images, Buffer, Config, Image, Order, Resources};
     use crate::spirv::testing::{assert_valid, committed_profiles};
 
     #[test]
     fn the_copy_back_kernels_are_valid_on_every_committed_profile() {
         for (_, p) in committed_profiles().expect("profiles") {
-            for words in [1, 2, 4] {
-                assert_valid(typed_module(words).expect("module"), &p);
+            for view in ShadowTexelView::ALL {
+                assert_valid(typed_module(view).expect("module"), &p);
             }
         }
     }
 
-    /// A `[width, height]` image of texels `words` words wide, texel `(x, y)`'s word `i`
-    /// `0x0100_0000 · (i + 1) + 0x1000 · y + x`, as a view of the width's format returns it
-    /// (the components a view lacks 0, and alpha 1).
-    fn image([width, height]: [u32; 2], words: u32) -> Image {
+    /// A `[width, height]` image of texels whose word `i` at `(x, y)` is
+    /// `0x0100_0000 · (i + 1) + 0x1000 · y + x`, as `view` returns it: an `R8G8B8A8_UINT` view's
+    /// components its word's bytes, another view's its words (the components a view lacks 0, and
+    /// alpha 1).
+    fn image([width, height]: [u32; 2], view: ShadowTexelView) -> Image {
         let mut image = Image::new(IMAGE, [width, height, 1], 1, 1, 1);
         for y in 0..height {
             for x in 0..width {
+                let word = |i: u32| 0x0100_0000 * (i + 1) + 0x1000 * y + x;
                 let mut texel = [0, 0, 0, 1];
-                for (i, c) in texel.iter_mut().enumerate().take(words as usize) {
-                    *c = 0x0100_0000 * (i as u32 + 1) + 0x1000 * y + x;
+                match view {
+                    ShadowTexelView::R8G8B8A8Uint => {
+                        texel = word(0).to_le_bytes().map(u32::from);
+                    }
+                    _ => {
+                        for (i, c) in texel.iter_mut().enumerate().take(view.words() as usize) {
+                            *c = word(i as u32);
+                        }
+                    }
                 }
                 image.texels[(y * width + x) as usize] = texel;
             }
@@ -294,16 +398,16 @@ mod tests {
     }
 
     /// The buffer's bytes after one dispatch over `region` (`[x0, y0, width, height]`) of the
-    /// `extent` image of texels `words` words wide into `bytes` words, rows `row_words` apart
-    /// from `first_word`, in both invocation orders.
+    /// `extent` image read through `view` into `bytes` words, rows `row_words` apart from
+    /// `first_word`, in both invocation orders.
     fn copied_back(
         extent: [u32; 2],
-        words: u32,
+        view: ShadowTexelView,
         region: [u32; 4],
         (row_words, first_word): (u32, u32),
         bytes: &[u32],
     ) -> Vec<u32> {
-        let m = typed_module(words).expect("module");
+        let m = typed_module(view).expect("module");
         let [x0, y0, width, height] = region;
         let shape = ShadowCopyBackModule::shape([x0, y0], width, row_words, first_word);
         let mut out = Vec::new();
@@ -323,9 +427,9 @@ mod tests {
                 workgroups: [gx, gy, 1],
                 ..Config::default()
             };
-            let images = vec![image(extent, words)];
+            let images = vec![image(extent, view)];
             let (outcome, images) = run_with_images(&m, &cfg, res, images).expect("run");
-            assert_eq!(images[0], image(extent, words), "the view is only read");
+            assert_eq!(images[0], image(extent, view), "the view is only read");
             let words: Vec<u32> = outcome.buffers[0]
                 .as_chunks::<4>()
                 .0
@@ -340,10 +444,11 @@ mod tests {
 
     /// Every texel of a region lands at its row's place as its words, and every word between the
     /// rows, before the first texel and past the last keeps the buffer's own (a padded row's
-    /// bytes, and a scissor's outside): one, two and four words a texel, across workgroups.
+    /// bytes, and a scissor's outside): through every view, across workgroups.
     #[test]
     fn a_region_lands_at_its_rows_and_no_other_word_changes() {
-        for words in [1u32, 2, 4] {
+        for view in ShadowTexelView::ALL {
+            let words = view.words();
             let extent = [90, 7];
             // The region's rows 5 + 70 · words words apart, from word 3.
             let region = [10, 2, 70, 4];
@@ -351,7 +456,7 @@ mod tests {
             let first_word = 3;
             let len = (first_word + 4 * row_words + 2) as usize;
             let bytes: Vec<u32> = (0..len as u32).map(|i| 0xa5a5_0000 | i).collect();
-            let got = copied_back(extent, words, region, (row_words, first_word), &bytes);
+            let got = copied_back(extent, view, region, (row_words, first_word), &bytes);
             let mut want = bytes.clone();
             for y in 0..4 {
                 for x in 0..70 {
@@ -362,7 +467,7 @@ mod tests {
                     }
                 }
             }
-            assert_eq!(got, want, "{words} words a texel");
+            assert_eq!(got, want, "{view:?}");
         }
     }
 
@@ -372,18 +477,20 @@ mod tests {
         let extent = [300, 260];
         let region = [290, 257, 3, 2];
         let bytes = vec![0u32; 8];
-        let got = copied_back(extent, 1, region, (4, 1), &bytes);
-        let texel = |x: u32, y: u32| 0x0100_0000 + 0x1000 * y + x;
-        let want = vec![
-            0,
-            texel(290, 257),
-            texel(291, 257),
-            texel(292, 257),
-            0,
-            texel(290, 258),
-            texel(291, 258),
-            texel(292, 258),
-        ];
-        assert_eq!(got, want);
+        for view in [ShadowTexelView::R32Uint, ShadowTexelView::R8G8B8A8Uint] {
+            let got = copied_back(extent, view, region, (4, 1), &bytes);
+            let texel = |x: u32, y: u32| 0x0100_0000 + 0x1000 * y + x;
+            let want = vec![
+                0,
+                texel(290, 257),
+                texel(291, 257),
+                texel(292, 257),
+                0,
+                texel(290, 258),
+                texel(291, 258),
+                texel(292, 258),
+            ];
+            assert_eq!(got, want, "{view:?}");
+        }
     }
 }
