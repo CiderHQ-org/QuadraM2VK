@@ -669,6 +669,80 @@ fn a_view_past_one_udmabuf_s_limits_is_assembled_from_chunks() {
     });
 }
 
+/// [`every_other_page`]'s 64 pages, each its own mapping, as a consumer's view of a surface's
+/// scattered pages: a no-copy buffer over them all asks the kernel about each of the 64 mappings
+/// for their write permission before its import (`WorkCounts::host_mappings_queried`), refused or
+/// not. A second buffer over the same bytes, made while the first lives, lies in its import and
+/// asks about none, its source uncalled, and the GPU reads the CPU's bytes through it. A buffer
+/// over the first half of the bytes, not the same range, makes its own import and asks about its
+/// 32 mappings.
+#[test]
+fn a_buffer_that_lies_in_a_live_import_asks_about_no_mapping() {
+    const TEST: &str = "dma-buf joined import";
+    const RUNS: usize = 64;
+    if !udmabuf_openable(TEST) {
+        return;
+    }
+    on_device(|device| {
+        let page = host_page();
+        let queue = device.new_command_queue().unwrap();
+        let (ram, view, expected) = every_other_page(RUNS);
+        let length = RUNS * page;
+        let queried = || device.work_counts().host_mappings_queried;
+        let before = queried();
+        let calls = Calls::default();
+        let first = no_copy(device, &view, 0, length, ram.source(&view, &calls));
+        let asked = queried() - before;
+        assert_eq!(
+            asked, RUNS as u64,
+            "{TEST}: the first buffer's mappings asked"
+        );
+        let first = match (imports_dma_buf(device), first) {
+            (_, Ok(first)) => first,
+            (None, Err(error)) => {
+                eprintln!("{TEST}: on {}: {error:?}", device.name());
+                return;
+            }
+            (Some(_), Err(error)) => panic!("{TEST}: {error:?}"),
+        };
+        let before = queried();
+        let joined = Calls::default();
+        let second = no_copy(device, &view, 0, length, ram.source(&view, &joined)).unwrap();
+        assert_eq!(
+            queried() - before,
+            0,
+            "{TEST}: the second buffer's mappings asked"
+        );
+        let joined = joined.lock().unwrap().clone();
+        assert!(joined.is_empty(), "{TEST}: the second's source: {joined:?}");
+        assert!(
+            gpu_read(&queue, &second, 0..length as u64) == expected,
+            "{TEST}: the GPU's read through the second buffer"
+        );
+        let before = queried();
+        let half = no_copy(
+            device,
+            &view,
+            0,
+            length / 2,
+            ram.source(&view, &Calls::default()),
+        );
+        assert_eq!(
+            queried() - before,
+            RUNS as u64 / 2,
+            "{TEST}: the half's mappings asked ({:?})",
+            half.as_ref().err()
+        );
+        eprintln!(
+            "{TEST}: on {}: {RUNS} mappings asked for the first buffer, none for the second",
+            device.name()
+        );
+        drop(half);
+        drop(second);
+        drop(first);
+    });
+}
+
 /// The refusals: memfd memory with no source is refused typed where the device refuses its
 /// pointer (RADV), as before; a source that fails keeps that refusal, called once; chunks that do
 /// not cover the pages, and a chunk whose descriptor is no dma-buf (the memfd itself), are the

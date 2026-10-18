@@ -73,6 +73,8 @@ mod heap_tiled_blocks;
 mod heap_usage;
 mod held_depth;
 mod host_aliases;
+#[cfg(any(m2v_gpu, m2v_cpu_icd))]
+mod host_import_counts;
 mod host_memory;
 #[cfg(all(any(m2v_gpu, m2v_cpu_icd), target_os = "linux"))]
 mod host_residency;
@@ -119,6 +121,8 @@ mod pipeline_wait_order;
 #[cfg(unix)]
 mod pitch_refusals;
 mod pixel_format_info;
+#[cfg(all(any(m2v_gpu, m2v_cpu_icd), target_os = "linux"))]
+mod pointer_residency;
 mod private_properties;
 mod queue;
 mod range;

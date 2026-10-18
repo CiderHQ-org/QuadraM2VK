@@ -486,7 +486,7 @@ impl EncoderCore {
     ) -> Result<(vk::Buffer, u64), Error> {
         let (at, hold) = buffer.blit_at(offset)?;
         if let Some(hold) = hold {
-            self.retain_shared(hold);
+            self.taken.hold_import(hold);
         }
         self.retain_shared(buffer.held());
         Ok(at)

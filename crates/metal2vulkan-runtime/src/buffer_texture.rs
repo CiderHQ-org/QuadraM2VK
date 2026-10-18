@@ -24,7 +24,7 @@
 
 use super::address::ObjectsToken;
 use super::apple_only::AppleOnly;
-use super::buffer::Buffer;
+use super::buffer::{Buffer, ReadApart};
 use super::chroma_pairs;
 use super::copy_plan::{surface_depth_unit, CopyProblem, CopyUnit, HostLayout, ImageRegion};
 use super::degradation::Degradation;
@@ -974,7 +974,7 @@ impl Texels {
         extent: [u32; 2],
     ) -> Result<ShadowCopies, Error> {
         let layout = &self.layout;
-        let (buffer, at) = self.buffer.at(layout.offset);
+        let (buffer, at) = self.buffer.at_for(layout.offset, ReadApart::Texture);
         let staging = self.staging(layout, at)?;
         let frame = Frame {
             rotation,
@@ -1144,7 +1144,7 @@ impl Texels {
             offset: placed.offset - placed.offset % LINEAR_ALIGNMENT,
             ..placed
         };
-        let (raw, at) = texels.buffer.at(texels.shader.offset);
+        let (raw, at) = (texels.buffer).at_for(texels.shader.offset, ReadApart::Texture);
         let device = texels.buffer.device();
         let limits = device.compile_device().profile().limits();
         if at.is_multiple_of(limits.min_texel_buffer_offset_alignment.max(1)) {
@@ -1199,7 +1199,7 @@ impl Texels {
     fn viewed(&self) -> (vk::Buffer, u64) {
         match self.staged.as_deref().and_then(ShadowCopies::target) {
             Some(ShadowTarget::Buffer(staging)) => (staging.raw(), staging.into.dst_offset),
-            _ => self.buffer.at(self.shader.offset),
+            _ => (self.buffer).at_for(self.shader.offset, ReadApart::Texture),
         }
     }
 
@@ -1231,7 +1231,7 @@ impl Texels {
         words: Option<WordView>,
     ) -> Result<ShadowCopies, Error> {
         let layout = &self.layout;
-        let (buffer, at) = self.buffer.at(layout.offset);
+        let (buffer, at) = self.buffer.at_for(layout.offset, ReadApart::Texture);
         // Vulkan copies a depth or stencil aspect at multiples of 4 bytes only.
         let depth = vk::ImageAspectFlags::DEPTH | vk::ImageAspectFlags::STENCIL;
         let align = match aspects.intersects(depth) {

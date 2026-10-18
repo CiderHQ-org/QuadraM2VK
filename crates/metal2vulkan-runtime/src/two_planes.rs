@@ -272,7 +272,8 @@ impl BlitCommandEncoder {
             max_groups: limits.max_compute_work_group_count[0],
             max_scratch: MAX_SCRATCH,
         };
-        let (raw_buffer, base) = buffer.at(0);
+        // Read as a blit's (`host_residency.rs`): the command buffer holds the import.
+        let (raw_buffer, base) = self.core().blit_at(buffer, 0)?;
         let bands = bands(region.size, layout, base, &band_limits)
             .ok_or(Error::Unsupported(unmeasured(pf)))?;
         let align = band_limits.align;

@@ -32,7 +32,7 @@
 
 use super::address_map::SamplerMaps;
 use super::binding::bound_sampler;
-use super::buffer::Buffer;
+use super::buffer::{Buffer, ReadApart};
 use super::device::lock;
 use super::device::Device;
 use super::encoder::EncoderCore;
@@ -359,12 +359,15 @@ fn bound_buffer(
     if offset > buffer.length() {
         return None;
     }
-    let base = buffer.base();
+    // The Metal address first, which keeps a no-copy buffer's import for good, then where the
+    // buffer lies, in one look.
+    let gpu_address = buffer.exposed_address(ReadApart::Binding).0;
+    let (base, device_address) = buffer.base_and_device_address(ReadApart::Binding);
     Some(BoundBuffer::Buffer {
         length: base + buffer.length(),
         offset: base + offset,
-        gpu_address: buffer.gpu_address().0 - base,
-        device_address: buffer.device_address().map(|address| address - base),
+        gpu_address: gpu_address - base,
+        device_address: device_address.map(|address| address - base),
         attribute_stride,
     })
 }
@@ -1079,6 +1082,9 @@ impl ArgumentTable {
                 }),
             }
         };
+        // Each slot read whole once: a kept slot against its value, then the slots not kept,
+        // each of which reads nothing. A read of a no-copy buffer is a look at where it lies
+        // (`WorkCounts::no_copy_lies_read`), one a slot here as in the refresh.
         for (&index, bound) in &kept.buffers {
             let whole = buffer(index);
             assert!(
@@ -1086,13 +1092,14 @@ impl ArgumentTable {
                 "{DIFFERS}: {stage:?} buffer {index} kept as {bound:?}, read whole as {whole:?}"
             );
         }
-        for &index in self.buffers.keys().chain(self.bytes.keys()) {
-            if let Some(whole) = buffer(index) {
-                assert!(
-                    kept.buffers.contains_key(&index),
-                    "{DIFFERS}: {stage:?} buffer {index} not kept, read whole as {whole:?}"
-                );
-            }
+        let not_kept = (self.buffers.keys().chain(self.bytes.keys()))
+            .filter(|&&index| !kept.buffers.contains_key(&index));
+        for &index in not_kept {
+            let whole = buffer(index);
+            assert!(
+                whole.is_none(),
+                "{DIFFERS}: {stage:?} buffer {index} not kept, read whole as {whole:?}"
+            );
         }
         for (&index, bound) in &kept.textures {
             let whole = self.textures.get(&index).map(bound_texture);

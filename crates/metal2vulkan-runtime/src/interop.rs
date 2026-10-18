@@ -18,6 +18,7 @@
 //!   refuses what it can tell is no binary semaphore of the device: a null handle, and its own
 //!   timeline semaphores (events' and queues'). Every other contract is the caller's.
 
+use super::buffer::ReadApart;
 use super::device::relay::By;
 use super::event::EventRef;
 use super::texture::wrapped::Wrapped;
@@ -151,7 +152,7 @@ impl Buffer {
     /// The `VkBuffer` stays the runtime's: the caller does not destroy it, and uses it only while
     /// the buffer lives, ordered against the runtime's work on it.
     pub unsafe fn vk_buffer(&self) -> (vk::Buffer, u64) {
-        self.at(0)
+        self.at_for(0, ReadApart::VkBuffer)
     }
 }
 

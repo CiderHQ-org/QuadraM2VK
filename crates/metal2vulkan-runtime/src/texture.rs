@@ -5540,6 +5540,18 @@ impl Texture {
         }
     }
 
+    /// The key of the buffer whose bytes the texture's images and texel views lie in or are
+    /// copied from ([`memory`](Self::memory)): the buffer it is over, or its heap's own buffer
+    /// (a view's too). A rebind or a detach of those bytes remakes them, and no other texture's
+    /// (`heap_sets::renew_over`). `None` for a texture in memory of its own or of a sparse heap.
+    pub(super) fn bytes_key(&self) -> Option<ResourceKey> {
+        match self.memory() {
+            TextureMemory::Heap(heap) => heap.bytes().map(|bytes| bytes.identity().key),
+            TextureMemory::Buffer(buffer) => Some(buffer.identity().key),
+            TextureMemory::Own(_) => None,
+        }
+    }
+
     /// Another reference to the texture, which a command buffer holds it by
     /// (`EncoderCore::retain_shared`).
     pub(super) fn held(&self) -> Arc<dyn Any + Send + Sync> {

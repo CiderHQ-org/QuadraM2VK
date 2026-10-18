@@ -16,11 +16,12 @@
 //! - the pages a release keeps across a remap of the buffer's addresses;
 //! - that a buffer whose Metal address was handed out stays imported;
 //! - that a buffer past the descriptors the device keeps (capped through
-//!   `Device::cap_kept_host_import_fds`) is made and stays imported.
+//!   `Device::cap_kept_host_import_fds`) is made and stays imported, counted while it lives
+//!   (`host_imports_kept_for_fds`).
 //!
-//! A device that imports the pointer (NVIDIA, lavapipe) keeps the import and counts none of it;
-//! each test says so and passes. Where `/dev/udmabuf` cannot be opened each test says so and
-//! passes without running.
+//! A device that imports the pointer (NVIDIA, lavapipe, ANV) runs none of it: each test says so
+//! and passes, and `tests/pointer_residency.rs` checks the residency of pointer imports. Where
+//! `/dev/udmabuf` cannot be opened each test says so and passes without running.
 //!
 //! A device test: compiled only under the validation crate's GPU safety cfgs (`m2v_gpu`,
 //! `m2v_cpu_icd`), on Linux, on the kind of device the cfg selects.
@@ -69,7 +70,7 @@ const UDMABUF_CREATE: u64 =
     (1 << 30) | ((size_of::<Create>() as u64) << 16) | ((b'u' as u64) << 8) | 0x42;
 
 /// The host's page size.
-fn host_page() -> usize {
+pub(super) fn host_page() -> usize {
     // SAFETY: `sysconf` reads a system constant.
     let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
     usize::try_from(page).expect("a page size")
@@ -109,10 +110,10 @@ fn udmabuf(memfd: &OwnedFd, offset: u64, size: u64) -> std::io::Result<OwnedFd> 
 }
 
 /// A scratch directory for the device's shader cache, removed when dropped.
-struct Scratch(PathBuf);
+pub(super) struct Scratch(pub(super) PathBuf);
 
 impl Scratch {
-    fn new() -> Scratch {
+    pub(super) fn new() -> Scratch {
         static NEXT: AtomicUsize = AtomicUsize::new(0);
         let path = std::env::temp_dir().join(format!(
             "m2v-host-residency-{}-{}",
@@ -132,7 +133,7 @@ impl Drop for Scratch {
 
 /// The device the cfg selects: a CPU device under `m2v_cpu_icd`, else a GPU, its shader cache
 /// in `cache`.
-fn device(cache: &Path) -> Device {
+pub(super) fn device(cache: &Path) -> Device {
     let options = DeviceOptions {
         kinds: match cfg!(m2v_cpu_icd) {
             true => vec![DeviceKind::Cpu],
@@ -163,7 +164,7 @@ fn on_device(name: &str, test: impl FnOnce(&Device)) {
 
 /// Guest RAM: a `memfd` sealed against growing and shrinking, and a view of `len` of its bytes, a
 /// shared mapping from a file offset that [`Ram::remap`] changes.
-struct Ram {
+pub(super) struct Ram {
     fd: OwnedFd,
     at: NonNull<u8>,
     len: usize,
@@ -173,7 +174,7 @@ struct Ram {
 
 impl Ram {
     /// A file of `file_len` bytes, its view of `len` bytes from `file_at`.
-    fn new(file_len: usize, file_at: usize, len: usize) -> Ram {
+    pub(super) fn new(file_len: usize, file_at: usize, len: usize) -> Ram {
         // SAFETY: a new anonymous file, owned at once, then sized and sealed.
         let fd = unsafe {
             let fd = libc::memfd_create(
@@ -210,7 +211,7 @@ impl Ram {
     }
 
     /// The view's address `offset` bytes in.
-    fn pointer(&self, offset: usize) -> NonNull<u8> {
+    pub(super) fn pointer(&self, offset: usize) -> NonNull<u8> {
         assert!(offset < self.len);
         // SAFETY: inside the view.
         unsafe { NonNull::new_unchecked(self.at.as_ptr().add(offset)) }
@@ -218,7 +219,7 @@ impl Ram {
 
     /// Map the file from `file_at` over the view, in place of the pages there (`mmap` with
     /// `MAP_FIXED`), as a guest remaps the RAM at those addresses.
-    fn remap(&self, file_at: usize) {
+    pub(super) fn remap(&self, file_at: usize) {
         // SAFETY: the view's own range, mapped again.
         let mapped = unsafe {
             libc::mmap(
@@ -235,7 +236,7 @@ impl Ram {
     }
 
     /// Write `bytes` into the file at `offset`, not through the view.
-    fn write_file(&self, offset: usize, bytes: &[u8]) {
+    pub(super) fn write_file(&self, offset: usize, bytes: &[u8]) {
         // SAFETY: `bytes` is readable for its length.
         let written = unsafe {
             libc::pwrite(
@@ -249,7 +250,7 @@ impl Ram {
     }
 
     /// The file's `len` bytes from `offset`, not through the view.
-    fn read_file(&self, offset: usize, len: usize) -> Vec<u8> {
+    pub(super) fn read_file(&self, offset: usize, len: usize) -> Vec<u8> {
         let mut bytes = vec![0; len];
         // SAFETY: `bytes` is writable for its length.
         let read = unsafe {
@@ -265,7 +266,7 @@ impl Ram {
     }
 
     /// The view's bytes.
-    fn view(&self) -> Vec<u8> {
+    pub(super) fn view(&self) -> Vec<u8> {
         // SAFETY: the view's bytes; each test orders the CPU's and the GPU's accesses.
         unsafe { std::slice::from_raw_parts(self.at.as_ptr(), self.len).to_vec() }
     }
@@ -300,7 +301,7 @@ impl Drop for Ram {
 }
 
 /// Bytes `i % 251` from `start`.
-fn counting(len: usize, start: usize) -> Vec<u8> {
+pub(super) fn counting(len: usize, start: usize) -> Vec<u8> {
     (start..start + len).map(|i| (i % 251) as u8).collect()
 }
 
@@ -328,7 +329,7 @@ fn no_copy(
     let chunks = device.work_counts().dma_buf_imports - before;
     if chunks == 0 {
         eprintln!(
-            "{test}: on {}: the pointer imported, which the device keeps",
+            "{test}: on {}: the pointer imported (`tests/pointer_residency.rs`)",
             device.name()
         );
     }
@@ -344,7 +345,11 @@ fn run(command_buffer: &crate::CommandBuffer) {
 
 /// `buffer`'s first `length` bytes, read back by a blit, and how long the blit's call took to
 /// encode (with an import again, where the device released the buffer's).
-fn gpu_read(queue: &CommandQueue, buffer: &Buffer, length: usize) -> (Vec<u8>, Duration) {
+pub(super) fn gpu_read(
+    queue: &CommandQueue,
+    buffer: &Buffer,
+    length: usize,
+) -> (Vec<u8>, Duration) {
     let device = queue.device();
     let copy = device
         .new_buffer(length as u64, ResourceOptions::shared())
@@ -364,12 +369,17 @@ fn gpu_read(queue: &CommandQueue, buffer: &Buffer, length: usize) -> (Vec<u8>, D
 }
 
 /// `buffer`'s first `length` bytes, read back by a blit.
-fn read(queue: &CommandQueue, buffer: &Buffer, length: usize) -> Vec<u8> {
+pub(super) fn read(queue: &CommandQueue, buffer: &Buffer, length: usize) -> Vec<u8> {
     gpu_read(queue, buffer, length).0
 }
 
 /// Fill `range` of `buffer` with `value` by a blit.
-fn gpu_fill(queue: &CommandQueue, buffer: &Buffer, range: std::ops::Range<u64>, value: u8) {
+pub(super) fn gpu_fill(
+    queue: &CommandQueue,
+    buffer: &Buffer,
+    range: std::ops::Range<u64>,
+    value: u8,
+) {
     let command_buffer = queue.command_buffer().unwrap();
     let mut blit = command_buffer.blit_command_encoder().unwrap();
     blit.fill_buffer(buffer, range, value).unwrap();
@@ -379,7 +389,7 @@ fn gpu_fill(queue: &CommandQueue, buffer: &Buffer, range: std::ops::Range<u64>, 
 
 /// Release `count` idle imports through the hook, retried until the command buffers that read
 /// them let go (each at its completion, on the device's handler thread), within [`SETTLE`].
-fn release(test: &str, device: &Device, count: usize) {
+pub(super) fn release(test: &str, device: &Device, count: usize) {
     let start = Instant::now();
     let mut released = 0;
     while released < count {
@@ -394,7 +404,7 @@ fn release(test: &str, device: &Device, count: usize) {
 }
 
 /// The device's counts once `settled` holds of them, within [`SETTLE`].
-fn counts_once(
+pub(super) fn counts_once(
     test: &str,
     device: &Device,
     what: &str,
@@ -412,7 +422,7 @@ fn counts_once(
 }
 
 /// The residency counts of `counts`: released, imported again, resident, descriptors kept.
-fn residency(counts: &WorkCounts) -> (u64, u64, u64, u64) {
+pub(super) fn residency(counts: &WorkCounts) -> (u64, u64, u64, u64) {
     (
         counts.host_imports_released,
         counts.host_imports_reimported,
@@ -431,7 +441,8 @@ fn residency(counts: &WorkCounts) -> (u64, u64, u64, u64) {
 /// - released again, its Metal address handed out imports it again at once and for good,
 ///   closing the descriptors kept, and the hook releases it no more.
 ///
-/// Where the device imports the pointer, the hook releases nothing and the counts stay 0.
+/// Where the device imports the pointer, the hook releases nothing and the counts stay 0 unless the
+/// driver's pointer imports follow their address (`tests/pointer_residency.rs`).
 #[test]
 fn an_idle_dma_buf_import_is_released_and_imported_again_at_its_next_blit() {
     const TEST: &str = "dma-buf residency";
@@ -446,8 +457,10 @@ fn an_idle_dma_buf_import_is_released_and_imported_again_at_its_next_blit() {
         let (buffer, chunks) = no_copy(TEST, device, &ram, (0, len), &calls);
         assert!(read(&queue, &buffer, len) == first, "{TEST}");
         if chunks == 0 {
-            assert_eq!(device.release_idle_host_imports(), 0, "{TEST}");
-            assert_eq!(residency(&device.work_counts()), (0, 0, 0, 0), "{TEST}");
+            if !super::pointer_residency::follows(device) {
+                assert_eq!(device.release_idle_host_imports(), 0, "{TEST}");
+                assert_eq!(residency(&device.work_counts()), (0, 0, 0, 0), "{TEST}");
+            }
             return;
         }
         let imported = device.work_counts();
@@ -625,9 +638,10 @@ fn the_residency_thread_releases_an_idle_import_after_its_window() {
 /// With the device's kept descriptors capped at one (`Device::cap_kept_host_import_fds`), no-copy
 /// buffers over the file's pages 0 and 1, of one dma-buf each where the device imports dma-bufs:
 /// the first keeps its descriptor; the second, past the cap, is made and imported as any other and
-/// keeps none, so it stays imported: the hook releases the first alone, blits read both buffers'
-/// bytes, and the second is never imported again. Once the first is dropped its descriptor is
-/// closed, and a third buffer keeps one again.
+/// keeps none, so it stays imported, counted (`WorkCounts::host_imports_kept_for_fds`): the hook
+/// releases the first alone, blits read both buffers' bytes, and the second is never imported
+/// again. Once the first is dropped its descriptor is closed, and a third buffer keeps one again.
+/// Once the second is dropped, the count falls back.
 #[test]
 fn a_buffer_past_the_kept_descriptors_stays_imported() {
     const TEST: &str = "dma-buf residency past the cap";
@@ -646,12 +660,21 @@ fn a_buffer_past_the_kept_descriptors_stays_imported() {
             return;
         }
         assert_eq!(chunks, 1, "{TEST}: one dma-buf a page");
+        assert_eq!(
+            device.work_counts().host_imports_kept_for_fds,
+            0,
+            "{TEST}: the first kept"
+        );
         let (past, _) = no_copy(TEST, device, &ram, (page, page), &calls);
         let counts = device.work_counts();
         assert_eq!(
             residency(&counts),
             (0, 0, 1, 1),
             "{TEST}: the second past the cap"
+        );
+        assert_eq!(
+            counts.host_imports_kept_for_fds, 1,
+            "{TEST}: the second kept imported for the cap"
         );
         assert!(read(&queue, &kept, page) == page_0, "{TEST}");
         assert!(read(&queue, &past, page) == page_1, "{TEST}");
@@ -674,9 +697,16 @@ fn a_buffer_past_the_kept_descriptors_stays_imported() {
         let (third, _) = no_copy(TEST, device, &ram, (0, page), &calls);
         let counts = device.work_counts();
         assert_eq!(residency(&counts), (1, 1, 1, 1), "{TEST}: the third kept");
+        assert_eq!(
+            counts.host_imports_kept_for_fds, 1,
+            "{TEST}: the second still kept imported"
+        );
         assert!(read(&queue, &third, page) == page_0, "{TEST}");
         drop(third);
         drop(past);
+        counts_once(TEST, device, "the second's import freed", |counts| {
+            counts.host_imports_kept_for_fds == 0
+        });
         eprintln!(
             "{TEST}: on {}: the buffer past the cap stayed imported",
             device.name()

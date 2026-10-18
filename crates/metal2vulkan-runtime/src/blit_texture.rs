@@ -1565,7 +1565,7 @@ impl BlitCommandEncoder {
                             &image_unit,
                             &layout,
                             buffer.length(),
-                            buffer.at(0).1,
+                            buffer.start(),
                             into_texture,
                         )
                         .map_err(copy_problem)?;
@@ -1592,11 +1592,9 @@ impl BlitCommandEncoder {
         destination: &Buffer,
         copy: &RowsCopy,
     ) -> Result<(), Error> {
-        let ((src, src_base), (dst, dst_base)) = (source.at(0), destination.at(0));
-        let uses = [
-            reads(source, copy.src_span.clone()),
-            writes(destination, copy.dst_span.clone()),
-        ];
+        // Read as a blit's (`host_residency.rs`): the command buffer holds the imports.
+        let (src, src_base) = self.core().blit_at(source, 0)?;
+        let (dst, dst_base) = self.core().blit_at(destination, 0)?;
         // One buffer's bytes, or two no-copy buffers' made over the same bytes, which lie in one
         // import (`host_aliases.rs`): one `VkBuffer` from one byte 0.
         if (src, src_base) == (dst, dst_base) && copy.meets() {

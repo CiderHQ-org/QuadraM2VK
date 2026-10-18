@@ -30,6 +30,11 @@
 //!   them after the rebind would be neither order. A command buffer committed with commands the
 //!   runtime records only once earlier work completed (executions of an indirect command buffer
 //!   the GPU writes) counts as uncommitted until it completed.
+//! - **The new pages' import.** New memory that is the bytes a live no-copy buffer was made over,
+//!   of its memory class, lies in that buffer's import, as a buffer made over them does
+//!   (`host_aliases.rs`): the rebind imports nothing, pins no page and asks the kernel about no
+//!   mapping (`WorkCounts::host_mappings_queried`). A heap's, and a buffer's with a texture's
+//!   aliasing image over its bytes, import their new memory themselves.
 //! - **The deallocators.** The old range's runs once every command buffer first submitted
 //!   before the rebind that used it completed (at the rebind where none holds it: a command
 //!   buffer not yet submitted holds its pages weakly); the new range's at the next rebind's turn,
@@ -495,6 +500,15 @@ impl Submitting<'_> {
                 retained.push(Box::new(pages));
             }
         }
+        // A blit's objects of a releasable import, held until it completes. Gone only with their
+        // import, as a rebind or a detach replaced its buffer's pages, which a pin above found
+        // moved: the recording that named them runs nothing.
+        for hold in taken.imports.drain(..) {
+            match hold.retained() {
+                Some(held) => retained.push(held),
+                None => found.moved = true,
+            }
+        }
         // `cell` and `now` drop here, under the lock: never the last hold of anything (above).
         found
     }
@@ -595,6 +609,8 @@ pub(super) enum Pinned {
 #[derive(Default)]
 pub(super) struct Taken {
     pins: Vec<(ResourceKey, Pinned)>,
+    /// The objects of releasable imports its blits took ([`ImportHold`]).
+    imports: Vec<ImportHold>,
     named: BTreeSet<ResourceKey>,
     resolved: Vec<ResidentRange>,
     /// A command named a detached buffer, and the encoder recorded nothing from it on
@@ -602,7 +618,50 @@ pub(super) struct Taken {
     dead: bool,
 }
 
+/// The objects of a releasable import a blit's command took (`Buffer::blit_at`,
+/// `host_residency.rs`): held while its encoder records, weakly from the commit until the command
+/// buffer's first submission, as its pages are, then until it completes. Held weakly, they keep
+/// the device's residency from releasing them (the committed recording names their `VkBuffer`),
+/// but not the import from going with its buffer's pages (a rebind, a detach), as Metal holds
+/// nothing of a command buffer not yet submitted: their free, and the deallocator after it, run
+/// in that call, and the recording that named them never runs (its pin of the pages moved).
+pub(super) enum ImportHold {
+    #[cfg(unix)]
+    Held(Arc<Imported>),
+    #[cfg(unix)]
+    Waiting(Weak<Imported>),
+}
+
+impl ImportHold {
+    /// Held weakly from now on.
+    fn wait(&mut self) {
+        match self {
+            #[cfg(unix)]
+            ImportHold::Held(held) => *self = ImportHold::Waiting(Arc::downgrade(held)),
+            #[cfg(unix)]
+            ImportHold::Waiting(_) => {}
+        }
+    }
+
+    /// The objects, held until the command buffer completes: `None` where they went.
+    fn retained(self) -> Option<Box<dyn Any + Send + Sync>> {
+        match self {
+            #[cfg(unix)]
+            ImportHold::Held(held) => Some(Box::new(held)),
+            #[cfg(unix)]
+            ImportHold::Waiting(held) => held
+                .upgrade()
+                .map(|held| Box::new(held) as Box<dyn Any + Send + Sync>),
+        }
+    }
+}
+
 impl Taken {
+    /// Note `hold`, the objects of a releasable import a blit took.
+    pub(super) fn hold_import(&mut self, hold: ImportHold) {
+        self.imports.push(hold);
+    }
+
     /// Note `pinned`, what a command took of the buffer of `key`.
     pub(super) fn pin(&mut self, key: ResourceKey, pinned: Pinned) {
         self.pins.push((key, pinned));
@@ -667,6 +726,9 @@ impl Taken {
                 *pinned = Pinned::Waiting(Arc::downgrade(pages));
             }
         }
+        for hold in &mut self.imports {
+            hold.wait();
+        }
     }
 
     /// Its named keys and resolved ranges let go, once judged (`Submitting::submit`).
@@ -686,6 +748,7 @@ impl Taken {
             Pinned::Detached => None,
         });
         retained.extend(live.map(|pages| Box::new(pages) as Box<dyn Any + Send + Sync>));
+        retained.extend(self.imports.drain(..).filter_map(ImportHold::retained));
         self.named.clear();
         self.resolved.clear();
     }

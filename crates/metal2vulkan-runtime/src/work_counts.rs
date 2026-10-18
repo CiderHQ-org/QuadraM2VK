@@ -5,6 +5,7 @@
 //! resident one by one on MoltenVK; and the completion waits that missed their wake, which a test
 //! holds to none. Not part of the API.
 
+use super::buffer::{KeptBecause, ReadApart};
 use super::command_buffer::GroupEnd;
 use super::degradation::Degradation;
 use super::device::lock;
@@ -71,6 +72,7 @@ pub(crate) struct Counters {
     stand_in_bytes: AtomicU64,
     stale_detached_reaches: AtomicU64,
     detached_storage_reaches: AtomicU64,
+    heap_slots_rewritten: AtomicU64,
     heap_textures_tiled: AtomicU64,
     heap_texture_lossless_layouts: AtomicU64,
     heap_texture_block_compressed_layouts: AtomicU64,
@@ -130,6 +132,7 @@ pub(crate) struct Counters {
     argument_samplers_taken: AtomicU64,
     bind_views_worked_out: AtomicU64,
     stage_tables_read: AtomicU64,
+    no_copy_lies_read: AtomicU64,
     commands_noted_as_before: AtomicU64,
     draws_settled: AtomicU64,
     depth16_sided_draws: AtomicU64,
@@ -156,6 +159,7 @@ pub(crate) struct Counters {
     host_deallocators_delayed: AtomicU64,
     host_keep_alives_kept: AtomicU64,
     host_keep_alives_covered: AtomicU64,
+    host_mappings_queried: AtomicU64,
     dma_buf_imports: AtomicU64,
     dma_buf_memories_live: AtomicU64,
     dma_buf_image_memories_live: AtomicU64,
@@ -164,6 +168,19 @@ pub(crate) struct Counters {
     host_imports_resident: AtomicU64,
     host_imports_lost: AtomicU64,
     host_import_fds_kept: AtomicU64,
+    host_imports_kept_for_fds: AtomicU64,
+    host_imports_used: AtomicU64,
+    host_imports_read_apart: AtomicU64,
+    host_imports_read_apart_by: [AtomicU64; ReadApart::COUNT],
+    host_imports_kept_by: [AtomicU64; KeptBecause::COUNT],
+    host_imports_rebound_unlisted: AtomicU64,
+    host_rebind_imports_made: AtomicU64,
+    host_rebind_imports_covered: AtomicU64,
+    host_remaps_reported: AtomicU64,
+    host_remaps_over_imports: AtomicU64,
+    host_imports_remapped: AtomicU64,
+    host_pointer_imports_made: AtomicU64,
+    host_pointer_import_bytes_made: AtomicU64,
     dma_buf_sparse_buffers: AtomicU64,
     dma_buf_images: AtomicU64,
     dma_buf_image_fallbacks: AtomicU64,
@@ -861,6 +878,12 @@ impl Counters {
         self.stage_tables_read.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// A look at where a no-copy buffer's bytes lie, which takes its pages' lock
+    /// (`buffer::HostCell`).
+    pub(crate) fn no_copy_lie_read(&self) {
+        self.no_copy_lies_read.fetch_add(1, Ordering::Relaxed);
+    }
+
     /// A draw's uses were noted already: the last command its encoder noted had them
     /// (`noted_apart.rs`).
     pub(crate) fn command_noted_as_before(&self) {
@@ -1030,6 +1053,17 @@ impl Counters {
             .fetch_add(1, Ordering::Relaxed);
     }
 
+    /// The kernel was asked about `mappings` of the process's mappings, for their write
+    /// permission, before an import of host pages (`host_memory.rs`'s `refuse_unwritable`, which
+    /// asks only on Linux).
+    #[cfg(target_os = "linux")]
+    pub(crate) fn host_mappings_queried(&self, mappings: u64) {
+        if mappings > 0 {
+            self.host_mappings_queried
+                .fetch_add(mappings, Ordering::Relaxed);
+        }
+    }
+
     /// `chunks` chunks of host pages a caller's source made were imported as dma-buf memory, and
     /// a buffer bound in them, where the device refused the pages' pointer (`dma_buf.rs`).
     pub(crate) fn dma_buf_imported(&self, chunks: usize) {
@@ -1074,6 +1108,77 @@ impl Counters {
         };
     }
 
+    /// A committed command buffer's commands use `count` host imports (`Buffer::distinct_host_imports`).
+    pub(crate) fn commit_used_host_imports(&self, count: u64) {
+        self.host_imports_used.fetch_add(count, Ordering::Relaxed);
+    }
+
+    /// A live host import was first read other than by a blit (`read_apart`), or such an import
+    /// went.
+    pub(crate) fn host_import_read_apart(&self, read_apart: bool) {
+        match read_apart {
+            true => self.host_imports_read_apart.fetch_add(1, Ordering::Relaxed),
+            false => self.host_imports_read_apart.fetch_sub(1, Ordering::Relaxed),
+        };
+    }
+
+    /// A live host import was first read apart for `reason` (`read_apart`), or such an import
+    /// went.
+    pub(crate) fn host_import_read_apart_for(&self, reason: ReadApart, read_apart: bool) {
+        let gauge = &self.host_imports_read_apart_by[reason as usize];
+        match read_apart {
+            true => gauge.fetch_add(1, Ordering::Relaxed),
+            false => gauge.fetch_sub(1, Ordering::Relaxed),
+        };
+    }
+
+    /// A rebind's import that no live buffers' table listed yet was made (`unlisted`), or was
+    /// first listed, or went unlisted.
+    pub(crate) fn host_import_rebound_unlisted(&self, unlisted: bool) {
+        let gauge = &self.host_imports_rebound_unlisted;
+        match unlisted {
+            true => gauge.fetch_add(1, Ordering::Relaxed),
+            false => gauge.fetch_sub(1, Ordering::Relaxed),
+        };
+    }
+
+    /// A rebind imported its new pages, where bytes buffers over host pages lay over already held
+    /// them (`covered`) or not.
+    pub(crate) fn host_rebind_import_made(&self, covered: bool) {
+        self.host_rebind_imports_made
+            .fetch_add(1, Ordering::Relaxed);
+        if covered {
+            (self.host_rebind_imports_covered).fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// The caller reported a remap of host addresses (`Device::host_range_remapped`) whose pages
+    /// `imports` live imports have a page among.
+    pub(crate) fn host_range_remapped(&self, imports: usize) {
+        self.host_remaps_reported.fetch_add(1, Ordering::Relaxed);
+        if imports > 0 {
+            self.host_remaps_over_imports
+                .fetch_add(1, Ordering::Relaxed);
+            (self.host_imports_remapped).fetch_add(imports as u64, Ordering::Relaxed);
+        }
+    }
+
+    /// The device imported `bytes` of host pages by their pointer (`Memory::import_host`).
+    pub(crate) fn host_pointer_import_made(&self, bytes: u64) {
+        (self.host_pointer_imports_made).fetch_add(1, Ordering::Relaxed);
+        (self.host_pointer_import_bytes_made).fetch_add(bytes, Ordering::Relaxed);
+    }
+
+    /// A host import the device never releases while idle, for `because`, was made (`kept`), or
+    /// went.
+    pub(crate) fn host_import_kept(&self, because: KeptBecause, kept: bool) {
+        let gauge = &self.host_imports_kept_by[because as usize];
+        match kept {
+            true => gauge.fetch_add(1, Ordering::Relaxed),
+            false => gauge.fetch_sub(1, Ordering::Relaxed),
+        };
+    }
+
     /// A read found a released import that the device could not import again: the device is
     /// lost.
     pub(crate) fn host_import_lost(&self) {
@@ -1093,6 +1198,19 @@ impl Counters {
     pub(crate) fn host_import_fds_closed(&self, count: u64) {
         self.host_import_fds_kept
             .fetch_sub(count, Ordering::Relaxed);
+    }
+
+    /// A no-copy buffer's own import of dma-bufs is kept imported from now on, as the
+    /// descriptors to import it again did not fit (`kept`), or such an import went.
+    pub(crate) fn host_import_kept_for_fds(&self, kept: bool) {
+        match kept {
+            true => self
+                .host_imports_kept_for_fds
+                .fetch_add(1, Ordering::Relaxed),
+            false => self
+                .host_imports_kept_for_fds
+                .fetch_sub(1, Ordering::Relaxed),
+        };
     }
 
     /// A no-copy buffer's (or heap's, or rebind's) `VkBuffer` was assembled from several chunks'
@@ -1469,6 +1587,14 @@ impl Counters {
             .fetch_add(1, Ordering::Relaxed);
     }
 
+    /// `count` texture slots of the device's heap were written again whatever changed
+    /// (`heap_sets::renew_over`, `heap_sets::renew`).
+    pub(crate) fn heap_slots_rewritten(&self, count: usize) {
+        if count > 0 {
+            (self.heap_slots_rewritten).fetch_add(count as u64, Ordering::Relaxed);
+        }
+    }
+
     /// A texture in a heap over host pages was made tiled as Metal lays it out
     /// (`texture/heap_tiled.rs`).
     pub(crate) fn heap_texture_tiled(&self) {
@@ -1722,6 +1848,15 @@ pub struct WorkCounts {
     /// Textures of storage usage over detached bytes that a later commit could reach unnamed,
     /// each counted once (`Degradation::DetachedStorageKeepsWrites`).
     pub detached_storage_reaches: u64,
+    /// Texture slots of the device's heap (its texture table and heap sets) written again by a
+    /// rebind or a detach of host pages, or by a change of storage form: for a rebind or a
+    /// detach, one for each live texture whose images or texel views lie in those bytes (in a
+    /// no-copy heap or over one of its buffers, for the heap's), and none for any other texture.
+    pub heap_slots_rewritten: u64,
+    /// Uses of a buffer over host pages that looked up by address the ranges of host bytes their
+    /// bytes meet (`host_aliases.rs`): a use of a range met by no more ranges than the classes of
+    /// length that lookup visits reads those its range keeps instead.
+    pub host_range_lookups: u64,
     /// Textures made in heaps over host pages laid out as Metal tiles them, each a shadow of its
     /// elements in the heap's bytes (`texture/heap_tiled.rs`).
     pub heap_textures_tiled: u64,
@@ -1990,6 +2125,11 @@ pub struct WorkCounts {
     /// interface, with the same samplers' address-mode maps, while no no-copy buffer was rebound
     /// or detached (`live_bind::ReadFrom`).
     pub stage_tables_read: u64,
+    /// Looks at where a no-copy buffer's bytes lie, each of which takes its pages' lock
+    /// (`buffer::HostCell`): a draw's read of a table binding one takes one for the binding, its
+    /// base and device address read together (`argument_table::bound_buffer`), and a descriptor
+    /// written for it one for its `VkBuffer` and its space's start (`Buffer::space`).
+    pub no_copy_lies_read: u64,
     /// Draws whose uses their encoder did not note again: the last command it noted had the same
     /// uses, with the same uses of host aliases added, into the same part, with the same images
     /// held in their attachment layout, and none of them reached through the resident set alone
@@ -2112,6 +2252,13 @@ pub struct WorkCounts {
     /// import of its pages stays mapped without them: another no-copy buffer made over the same
     /// bytes lies in it, or it keeps another's keep-alive already.
     pub host_keep_alives_covered: u64,
+    /// The process's mappings the kernel was asked about, for their write permission, before a
+    /// no-copy buffer's, heap's or rebind's own import of host pages, on Linux (one `PROCMAP_QUERY`
+    /// each, or one line of `/proc/self/maps` where the kernel predates the query): one per mapping
+    /// the import's pages lie in, a view of scattered pages one per run, at each such import. A
+    /// buffer made over the same bytes as a live one, which lies in its import, asks about none.
+    /// None off Linux.
+    pub host_mappings_queried: u64,
     /// Chunks of host pages imported as dma-buf memory from a caller's source
     /// (`HostMemory::with_dma_buf`), where the device refused the pages' pointer: no-copy
     /// buffers', heaps' and rebinds' alike, one per chunk. None where every pointer was imported.
@@ -2140,6 +2287,86 @@ pub struct WorkCounts {
     /// The descriptors of dma-bufs the device keeps open now to import released imports again: at
     /// most a quarter of the process's descriptor limit.
     pub host_import_fds_kept: u64,
+    /// The live no-copy buffers' own imports of dma-bufs that the device would release while idle
+    /// but keeps imported, as the descriptors to import them again did not fit: past the quarter
+    /// of the process's `RLIMIT_NOFILE` soft limit the devices keep, or the host gave no duplicate.
+    /// Each stays in every kernel submission's list while it lives. A soft limit raised at startup
+    /// (`setrlimit`; the runtime reads it once, at the process's first such import) lets more go;
+    /// the runtime never changes the limit.
+    pub host_imports_kept_for_fds: u64,
+    /// The host imports each committed command buffer's commands use (a binding, a blit's operand,
+    /// `use_resource`, a texture over the bytes), each import counted once per command buffer
+    /// however many of its buffers lie in it, summed over command buffers: its change over a frame,
+    /// against `host_imports_live`, is how many of the imports every kernel submission lists the
+    /// frame's commands name. Counted at the commit, on the committing thread.
+    pub host_imports_used: u64,
+    /// The live host imports some read other than a blit's took (their Metal address or
+    /// `VkBuffer` handed out, a binding, a texture over the bytes, a second buffer lying in the
+    /// import): those a release while idle could never take, as the device keeps a releasable
+    /// import for good after such a read. Of imports of any kind.
+    pub host_imports_read_apart: u64,
+    /// Of those, the ones whose buffer's Metal address was handed out: `gpu_address` (a heap's
+    /// over the import's bytes too), or written for the caller into an argument buffer or an
+    /// indirect command buffer. Each of these six counts an import once for its reason, so an
+    /// import read apart for several reasons counts in each.
+    pub host_imports_read_apart_address: u64,
+    /// Of those, the ones whose buffer's `VkBuffer` was handed out (`Buffer::vk_buffer`).
+    pub host_imports_read_apart_vk_buffer: u64,
+    /// Of those, the ones a command read other than by a blit's copy: a binding (a buffer
+    /// argument, a vertex or index buffer, an argument table's entry, `use_resource`), and the
+    /// copies of a texture over the bytes that a command reads it through.
+    pub host_imports_read_apart_binding: u64,
+    /// Of those, the ones a texture over the bytes was made over: an image bound to the import's
+    /// memory, or a texel view or a shadow's copies over its `VkBuffer`.
+    pub host_imports_read_apart_texture: u64,
+    /// Of those, the ones a second no-copy buffer lies in (`host_aliases.rs`), or that a buffer
+    /// made over the same host memory shares its range with (`BufferDescriptor::range_of`).
+    pub host_imports_read_apart_second_buffer: u64,
+    /// Of those, the releasable ones kept imported because the host could start no thread to
+    /// release them.
+    pub host_imports_read_apart_unreleased: u64,
+    /// The caller's reports of host addresses whose pages it replaced
+    /// (`Device::host_range_remapped`), whatever lies over them.
+    pub host_remaps_reported: u64,
+    /// Of those, the reports with a page of a live host import among the addresses, rounded out
+    /// to the import's unit: a driver's import by pointer (ANV's userptr on i915) over a page
+    /// replaced takes its pages anew, all of them, at its next submission.
+    pub host_remaps_over_imports: u64,
+    /// The live host imports those reports touched, summed over the reports: each a range of
+    /// bytes no-copy buffers or a no-copy heap lie over (two imports only where buffers of two
+    /// memory classes lie over the same bytes).
+    pub host_imports_remapped: u64,
+    /// The host imports the device made by pointer (`VK_EXT_external_memory_host`): no-copy
+    /// buffers', heaps', rebinds' and releasable ones' made again. A driver takes an import's
+    /// pages at its first submission (ANV's userptr on i915).
+    pub host_pointer_imports_made: u64,
+    /// Their bytes: whole pages, rounded out to the import's unit.
+    pub host_pointer_import_bytes_made: u64,
+    /// The live host imports the device never releases while idle as a heap's own import (a
+    /// no-copy heap's). With the next three and `host_imports_kept_for_fds`, they are every live
+    /// no-copy import the device keeps imported whatever reads it.
+    pub host_imports_kept_of_heap: u64,
+    /// The live host imports a rebind gave a buffer (`rebind.rs`): never released while idle.
+    pub host_imports_kept_rebound: u64,
+    /// Of those, the ones no live buffers' table listed yet (`live_buffers.rs`): no command
+    /// buffer committed since the rebind used a buffer lying in them, so no command reaches them
+    /// unnamed, as Metal reaches a rebound buffer only once a command buffer used it again.
+    pub host_imports_rebound_unlisted: u64,
+    /// The imports rebinds made of their new pages (`Device::rebind_host_pages`): not those that
+    /// lie in the import of a live buffer made over the same bytes (`host_aliases.rs`).
+    pub host_rebind_imports_made: u64,
+    /// Of those, the ones whose pages, rounded out to the import's unit, lay within the bytes,
+    /// rounded out likewise, that a buffer over host pages lay over already (a no-copy buffer
+    /// made or rebound there, the rebound buffer itself included, or a no-copy heap's own
+    /// buffer): an import alive then held each of their pages.
+    pub host_rebind_imports_covered: u64,
+    /// The live no-copy buffers' imports of host pages by their pointer, never released while
+    /// idle as the device's driver is not measured to read the pages mapped at the pointer at
+    /// each submission (`DriverFact::PointerImportsFollowTheirAddress`), or off Unix.
+    pub host_imports_kept_pointer: u64,
+    /// The live no-copy buffers' imports the device would release while idle, but keeps, as it
+    /// could make no stand-in buffer for a read of a released one.
+    pub host_imports_kept_no_stand_in: u64,
     /// Of those buffers, heaps and rebinds, the ones whose `VkBuffer` is a sparse buffer
     /// assembled from several chunks.
     pub dma_buf_sparse_buffers: u64,
@@ -2452,6 +2679,12 @@ impl Device {
         let counters = &self.shared().counts;
         let group_end = |end: GroupEnd| counters.group_ends[end as usize].load(Ordering::Relaxed);
         let pending = |bucket: usize| counters.batches_by_pending[bucket].load(Ordering::Relaxed);
+        let read_apart = |reason: ReadApart| {
+            counters.host_imports_read_apart_by[reason as usize].load(Ordering::Relaxed)
+        };
+        let kept = |because: KeptBecause| {
+            counters.host_imports_kept_by[because as usize].load(Ordering::Relaxed)
+        };
         let begun =
             |what: Begun| counters.command_buffers_begun_by[what as usize].load(Ordering::Relaxed);
         let (allocated, census, (parked, waiting), (made, freed)) = {
@@ -2537,6 +2770,8 @@ impl Device {
             stand_in_bytes: counters.stand_in_bytes.load(Ordering::Relaxed),
             stale_detached_reaches: counters.stale_detached_reaches.load(Ordering::Relaxed),
             detached_storage_reaches: counters.detached_storage_reaches.load(Ordering::Relaxed),
+            heap_slots_rewritten: counters.heap_slots_rewritten.load(Ordering::Relaxed),
+            host_range_lookups: self.shared().aliases.range_lookups(),
             heap_textures_tiled: counters.heap_textures_tiled.load(Ordering::Relaxed),
             heap_texture_lossless_layouts: counters
                 .heap_texture_lossless_layouts
@@ -2620,6 +2855,7 @@ impl Device {
             argument_samplers_taken: counters.argument_samplers_taken.load(Ordering::Relaxed),
             bind_views_worked_out: counters.bind_views_worked_out.load(Ordering::Relaxed),
             stage_tables_read: counters.stage_tables_read.load(Ordering::Relaxed),
+            no_copy_lies_read: counters.no_copy_lies_read.load(Ordering::Relaxed),
             commands_noted_as_before: counters.commands_noted_as_before.load(Ordering::Relaxed),
             draws_settled: counters.draws_settled.load(Ordering::Relaxed),
             depth16_sided_draws: counters.depth16_sided_draws.load(Ordering::Relaxed),
@@ -2655,6 +2891,7 @@ impl Device {
             host_deallocators_delayed: counters.host_deallocators_delayed.load(Ordering::Relaxed),
             host_keep_alives_kept: counters.host_keep_alives_kept.load(Ordering::Relaxed),
             host_keep_alives_covered: counters.host_keep_alives_covered.load(Ordering::Relaxed),
+            host_mappings_queried: counters.host_mappings_queried.load(Ordering::Relaxed),
             dma_buf_imports: counters.dma_buf_imports.load(Ordering::Relaxed),
             dma_buf_memories_live: counters.dma_buf_memories_live.load(Ordering::Relaxed),
             dma_buf_image_memories_live: counters
@@ -2663,8 +2900,35 @@ impl Device {
             host_imports_released: counters.host_imports_released.load(Ordering::Relaxed),
             host_imports_reimported: counters.host_imports_reimported.load(Ordering::Relaxed),
             host_imports_resident: counters.host_imports_resident.load(Ordering::Relaxed),
+            host_imports_used: counters.host_imports_used.load(Ordering::Relaxed),
+            host_imports_read_apart: counters.host_imports_read_apart.load(Ordering::Relaxed),
+            host_imports_read_apart_address: read_apart(ReadApart::Address),
+            host_imports_read_apart_vk_buffer: read_apart(ReadApart::VkBuffer),
+            host_imports_read_apart_binding: read_apart(ReadApart::Binding),
+            host_imports_read_apart_texture: read_apart(ReadApart::Texture),
+            host_imports_read_apart_second_buffer: read_apart(ReadApart::SecondBuffer),
+            host_imports_read_apart_unreleased: read_apart(ReadApart::Unreleased),
+            host_imports_kept_of_heap: kept(KeptBecause::Heap),
+            host_imports_kept_rebound: kept(KeptBecause::Rebind),
+            host_imports_kept_pointer: kept(KeptBecause::Pointer),
+            host_imports_kept_no_stand_in: kept(KeptBecause::NoStandIn),
+            host_imports_rebound_unlisted: counters
+                .host_imports_rebound_unlisted
+                .load(Ordering::Relaxed),
+            host_rebind_imports_made: counters.host_rebind_imports_made.load(Ordering::Relaxed),
+            host_rebind_imports_covered: counters
+                .host_rebind_imports_covered
+                .load(Ordering::Relaxed),
+            host_remaps_reported: counters.host_remaps_reported.load(Ordering::Relaxed),
+            host_remaps_over_imports: counters.host_remaps_over_imports.load(Ordering::Relaxed),
+            host_imports_remapped: counters.host_imports_remapped.load(Ordering::Relaxed),
+            host_pointer_imports_made: counters.host_pointer_imports_made.load(Ordering::Relaxed),
+            host_pointer_import_bytes_made: counters
+                .host_pointer_import_bytes_made
+                .load(Ordering::Relaxed),
             host_imports_lost: counters.host_imports_lost.load(Ordering::Relaxed),
             host_import_fds_kept: counters.host_import_fds_kept.load(Ordering::Relaxed),
+            host_imports_kept_for_fds: counters.host_imports_kept_for_fds.load(Ordering::Relaxed),
             dma_buf_sparse_buffers: counters.dma_buf_sparse_buffers.load(Ordering::Relaxed),
             dma_buf_images: counters.dma_buf_images.load(Ordering::Relaxed),
             dma_buf_image_fallbacks: counters.dma_buf_image_fallbacks.load(Ordering::Relaxed),

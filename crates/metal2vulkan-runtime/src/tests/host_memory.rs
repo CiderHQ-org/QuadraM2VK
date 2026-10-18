@@ -235,28 +235,45 @@ fn only_pages_mapped_writable_without_a_gap_are_importable() {
         "not a mapping line",
         "8000-9000 rw-p 00000000 00:00 0",
     ]);
+    // The answer, and how many mappings it judged.
+    let judged = |lines: Vec<String>, start: u64, end: u64| {
+        let mut asked = 0;
+        (writable(lines, start, end, &mut asked), asked)
+    };
     // Inside one mapping, and across two adjacent writable ones (private and shared).
-    assert!(writable(lines.clone(), 0x1000, 0x3000));
-    assert!(writable(lines.clone(), 0x2000, 0x5000));
+    assert_eq!(judged(lines.clone(), 0x1000, 0x3000), (true, 1));
+    assert_eq!(judged(lines.clone(), 0x2000, 0x5000), (true, 2));
     // A read-only page, alone or at the end of a range.
-    assert!(!writable(lines.clone(), 0x5000, 0x6000));
-    assert!(!writable(lines.clone(), 0x4000, 0x6000));
+    assert_eq!(judged(lines.clone(), 0x5000, 0x6000), (false, 1));
+    assert_eq!(judged(lines.clone(), 0x4000, 0x6000), (false, 2));
     // A gap (0x6000-0x7000 is unmapped), and pages past the last mapping.
-    assert!(!writable(lines.clone(), 0x6000, 0x7000));
-    assert!(!writable(lines.clone(), 0x7000, 0xa000));
+    assert_eq!(judged(lines.clone(), 0x6000, 0x7000), (false, 1));
+    assert_eq!(judged(lines.clone(), 0x7000, 0xa000), (false, 2));
     // A line that does not parse is skipped.
-    assert!(writable(lines.clone(), 0x7000, 0x9000));
+    assert_eq!(judged(lines.clone(), 0x7000, 0x9000), (true, 2));
     // Nothing mapped at all.
-    assert!(!writable(Vec::new(), 0x1000, 0x2000));
+    assert_eq!(judged(Vec::new(), 0x1000, 0x2000), (false, 0));
+}
+
+/// The mapping queries go through one file the process keeps open (`host_memory::kept_maps`),
+/// opened once, whose answers follow the mappings as they are at each query (the test below).
+#[cfg(target_os = "linux")]
+#[test]
+fn the_mapping_queries_keep_one_file_open() {
+    use crate::host_memory::kept_maps;
+    let first = kept_maps().expect("/proc/self/maps opens");
+    let again = kept_maps().expect("/proc/self/maps opens");
+    assert!(std::sync::Arc::ptr_eq(&first, &again));
 }
 
 /// The check reads this process's own mappings: a fresh page is importable until it is made
-/// read-only, and a page no longer mapped is not.
+/// read-only, and a page no longer mapped is not, through the kept file's queries as they are now.
 #[cfg(target_os = "linux")]
 #[test]
 fn this_process_s_read_only_and_unmapped_pages_are_refused() {
     use crate::error::Error;
     use crate::host_memory::refuse_unwritable;
+    use crate::work_counts::Counters;
     let page = host_page().unwrap();
     let len = page as usize;
     // SAFETY: a fresh private mapping, unmapped below.
@@ -282,13 +299,14 @@ fn this_process_s_read_only_and_unmapped_pages_are_refused() {
         }
         _ => false,
     };
-    assert_eq!(refuse_unwritable(&window), Ok(()));
+    let counts = Counters::default();
+    assert_eq!(refuse_unwritable(&window, &counts), Ok(()));
     // SAFETY: the mapping is this test's.
     assert_eq!(unsafe { libc::mprotect(at, len, libc::PROT_READ) }, 0);
-    assert!(refused(refuse_unwritable(&window)));
+    assert!(refused(refuse_unwritable(&window, &counts)));
     // SAFETY: as above.
     assert_eq!(unsafe { libc::munmap(at, len) }, 0);
-    assert!(refused(refuse_unwritable(&window)));
+    assert!(refused(refuse_unwritable(&window, &counts)));
 }
 
 /// The kernel's answer for a window (`PROCMAP_QUERY`) is the maps lines' answer, over one
@@ -409,7 +427,7 @@ fn window_answers<const N: usize>(windows: &[(u64, u64); N]) -> [(bool, Option<b
     std::array::from_fn(|i| {
         let (start, end) = windows[i];
         let queried = (answers[i] & 1 != 0).then_some(answers[i] & 2 != 0);
-        (writable(lines.iter().cloned(), start, end), queried)
+        (writable(lines.iter().cloned(), start, end, &mut 0), queried)
     })
 }
 
@@ -446,10 +464,12 @@ fn send_window_answers<const N: usize>(sink: i32, windows: &[(u64, u64); N]) -> 
     }
     // SAFETY: `fd` is the file just opened, which the `File` owns from here.
     let maps = unsafe { std::fs::File::from_raw_fd(fd) };
-    let answers = windows.map(|(start, end)| match queried_writable(&maps, start, end) {
-        None => 0,
-        Some(writable) => 1 | (u8::from(writable) << 1),
-    });
+    let answers = windows.map(
+        |(start, end)| match queried_writable(&maps, start, end, &mut 0) {
+            None => 0,
+            Some(writable) => 1 | (u8::from(writable) << 1),
+        },
+    );
     if !send(&answers) {
         return 3;
     }

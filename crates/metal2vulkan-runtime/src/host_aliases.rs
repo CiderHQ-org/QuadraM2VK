@@ -21,16 +21,10 @@
 //!   one resource to the driver, where the tracker's barriers are not all the ordering there is.
 //!   MoltenVK records no barrier between blits and leaves their order to Metal's hazard
 //!   tracking, which is by `MTLBuffer`: two imports were two, and a blit's write through one
-//!   raced a read through the other in one encoder and in one command buffer (EV
-//!   `IOS-alane2-mvk4`, an M4: mixed texels); one import is one `MTLBuffer`, which Metal orders.
-//!   Each buffer stays its own Metal object, with its own Metal addresses, object ID, key, pages
-//!   hold and release: a command buffer lists and holds, and marks reached unnamed
-//!   (`live_buffers.rs`), the buffers its commands use, not their memory, as Metal marks them
-//!   (EV `IOS-pairreach1-m4`); its deallocator runs once nothing holds its pages, as an import
-//!   of its own would let it, while the import lives on in the buffers that still lie in it, and
-//!   its keep-alive goes then too, since those buffers keep the same bytes mapped (`buffer.rs`'s
-//!   `HostPages`). Copies between two such buffers are copies within one `VkBuffer`, moved as
-//!   within one buffer (`blit.rs`, `blit_texture.rs`).
+//!   moved as within one buffer (`blit.rs`, `blit_texture.rs`). A buffer rebound onto the bytes a
+//!   live buffer was made over, of the class of its import, lies in that import too, joining no key
+//!   (`Device::rebind_host_pages`; a heap's own buffer, and bytes with a texture's aliasing image
+//!   over them, import their own).
 //! - **Ownership stays the buffer's.** The added uses are hazard tracking's alone: what a command
 //!   holds and lists (`EncoderCore::touch`, rebind holds, `used_resources`) is named by the
 //!   command's own uses, each buffer by its own key.
@@ -55,8 +49,11 @@
 //!   use of a key's bytes carries a use of its range's key and of the key of each other range those
 //!   bytes overlap, clipped to them ([`HostAliases::augment`]). So two keys over overlapping bytes
 //!   are ordered where they overlap, whatever made them, at a cost of one lookup a use while no two
-//!   ranges meet, and of one use added per range met otherwise. A remap reported keeps a placement:
-//!   it orders more than the pages need, never less. A heap's own buffer is placed as a buffer is.
+//!   ranges meet, and of one use added per range met otherwise. Each range keeps the ranges that
+//!   meet it, so a use reads them there rather than looking them up by address, but where they
+//!   outnumber the classes of length that lookup visits ([`Placements::sharing`]). A remap
+//!   reported keeps a placement: it orders more than the pages need, never less. A heap's own
+//!   buffer is placed as a buffer is.
 //! - **Same address, same pages.** Sharing an import assumes the pages at the bytes' addresses
 //!   are the ones the import holds: Metal's `newBufferWithBytesNoCopy:` wires the pages at the
 //!   address when it makes each buffer, so a buffer made after the caller replaced the pages
@@ -68,10 +65,11 @@
 //!   remap). Without the call, a buffer over the same bytes as a live one lies in its import, and
 //!   so over the pages that were there when that one was made.
 //! - **Cheap, from anywhere.** The call sits on the caller's unmap path, at each release of a
-//!   buffer's pages and over whole reservations of several GiB: with no memory noted it returns
-//!   without the lock, and otherwise it finds the memories with a byte in the range by address
-//!   ([`Memories`]), never reading them all, and ends them without reading their buffers' notes
-//!   ([`Over`]). The lock is a leaf: nothing else is locked, and no buffer, pages hold or
+//!   buffer's pages and over whole reservations of several GiB: with no memory noted and no
+//!   bytes placed it returns without the lock, and otherwise it finds the memories with a byte in
+//!   the range by address ([`Memories`]), never reading them all, and ends them without reading
+//!   their buffers' notes ([`Over`]); the placed ranges it touches it counts by the same lookup
+//!   (`WorkCounts::host_imports_remapped`). The lock is a leaf: nothing else is locked, and no buffer, pages hold or
 //!   deallocator is dropped, while it is held (the imports noted are weak), so the call may be
 //!   made from any thread, a deallocator's among them.
 
@@ -81,6 +79,7 @@ use super::key_hash::KeyMap;
 use super::memory::MemoryClass;
 use super::resource::ResourceKey;
 use super::tracker::{Use, UseRange};
+use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
@@ -101,6 +100,9 @@ pub(super) struct HostAliases<I = HostImport> {
     crowded: AtomicBool,
     /// How many memories are noted: with none, a reported remap has none to end.
     noted: AtomicUsize,
+    /// How many ranges of bytes keys lie over ([`Placements`]): with none and no memory noted, a
+    /// reported remap meets nothing.
+    placed: AtomicUsize,
     /// How many times the buffers that joined a memory or the placements changed: while it
     /// stands, [`augment`](Self::augment) gives the same uses for the same uses
     /// (`noted_apart.rs`). Each change counts once it is made, under the lock.
@@ -114,6 +116,7 @@ impl<I> Default for HostAliases<I> {
             any: AtomicBool::new(false),
             crowded: AtomicBool::new(false),
             noted: AtomicUsize::new(0),
+            placed: AtomicUsize::new(0),
             version: AtomicU64::new(0),
             inner: Mutex::new(Inner {
                 made_over: KeyMap::default(),
@@ -249,12 +252,20 @@ impl<I> HostAliases<I> {
     /// (`Device::host_range_remapped`): every live buffer made over memory with a byte among
     /// them leaves it, as a rebound buffer does ([`HostAliases::leave`]), keeping its pages, its
     /// import and the key it joined, so that a later buffer over any of those addresses neither
-    /// lies in an import made before nor joins their key. With no memory noted it returns at
-    /// once; else it ends the memories the lookup by address finds
+    /// lies in an import made before nor joins their key. With no memory noted and no bytes
+    /// placed it returns at once; else it ends the memories the lookup by address finds
     /// ([`Memories::overlapping`]).
-    pub(super) fn remapped(&self, start: u64, end: u64) {
-        if start >= end || self.noted.load(Ordering::Relaxed) == 0 {
-            return;
+    ///
+    /// Returns how many ranges of bytes buffers over host pages lie over now ([`Placements`]:
+    /// each an import, two only where buffers of two memory classes lie over the same bytes)
+    /// have a page among those `start..end` covers, rounded out to `unit` bytes, the import's
+    /// unit: the imports whose pages the replacement touches, which a driver's import by pointer
+    /// takes anew at its next submission (`WorkCounts::host_imports_remapped`).
+    pub(super) fn remapped(&self, start: u64, end: u64, unit: u64) -> usize {
+        if start >= end
+            || (self.noted.load(Ordering::Relaxed) == 0 && self.placed.load(Ordering::Relaxed) == 0)
+        {
+            return 0;
         }
         let mut inner = lock(&self.inner);
         let ended: Vec<(u64, u64)> = inner.memories.overlapping(start, end).collect();
@@ -262,6 +273,34 @@ impl<I> HostAliases<I> {
             inner.memories.remove(memory);
         }
         self.noted.store(inner.memories.len(), Ordering::Relaxed);
+        // An import's pages are its bytes rounded out to the unit: one has a page the remap
+        // covers exactly when its bytes meet the remap's range rounded out to the unit.
+        let unit = unit.max(1);
+        let from = start - start % unit;
+        let to = end.div_ceil(unit).saturating_mul(unit);
+        inner.placements.ranges.overlapping(from, to).count()
+    }
+
+    /// Whether the bytes `start..end`, rounded out to `unit` bytes, the import's unit, lie within
+    /// the bytes some buffer over host pages lies over now ([`Placements`]: each an import's),
+    /// rounded out likewise: an import alive now holds each of their pages
+    /// (`WorkCounts::host_rebind_imports_covered`).
+    pub(super) fn covered(&self, start: u64, end: u64, unit: u64) -> bool {
+        if start >= end || self.placed.load(Ordering::Relaxed) == 0 {
+            return false;
+        }
+        let unit = unit.max(1);
+        let from = start - start % unit;
+        let to = end.div_ceil(unit).saturating_mul(unit);
+        let inner = lock(&self.inner);
+        let mut ranges = inner.placements.ranges.overlapping(from, to);
+        ranges.any(|(at, length)| {
+            let end = at
+                .saturating_add(length)
+                .div_ceil(unit)
+                .saturating_mul(unit);
+            at - at % unit <= from && to <= end
+        })
     }
 
     /// The buffer of `key` is gone.
@@ -278,6 +317,7 @@ impl<I> HostAliases<I> {
         inner.placements.unplace(key);
         self.crowded
             .store(inner.placements.crowded(), Ordering::Relaxed);
+        (self.placed).store(inner.placements.ranges.len(), Ordering::Relaxed);
         self.changed();
     }
 
@@ -291,6 +331,7 @@ impl<I> HostAliases<I> {
         inner.placements.place(key, at);
         self.crowded
             .store(inner.placements.crowded(), Ordering::Relaxed);
+        (self.placed).store(inner.placements.ranges.len(), Ordering::Relaxed);
         self.changed();
     }
 
@@ -300,6 +341,7 @@ impl<I> HostAliases<I> {
         inner.placements.unplace(key);
         self.crowded
             .store(inner.placements.crowded(), Ordering::Relaxed);
+        (self.placed).store(inner.placements.ranges.len(), Ordering::Relaxed);
         self.changed();
     }
 
@@ -315,6 +357,11 @@ impl<I> HostAliases<I> {
     pub(super) fn version(&self) -> u64 {
         self.version.load(Ordering::Relaxed)
     }
+
+    /// How many uses looked the ranges their bytes meet up by address
+    /// (`WorkCounts::host_range_lookups`, [`Placements::sharing`]).
+    pub(super) fn range_lookups(&self) -> u64 {
+        lock(&self.inner).placements.looked_up.get()
     }
 
     /// `uses` and, for each use of a buffer that joined a memory, a use of the memory's key of
@@ -341,6 +388,7 @@ impl<I> HostAliases<I> {
             return false;
         }
         let inner = lock(&self.inner);
+        let aliases = joined.then_some(&*inner.aliases);
         let placements = crowded.then_some(&inner.placements);
         augmented(aliases, placements, uses, all)
     }
@@ -365,21 +413,27 @@ fn release<I>(memories: &mut Memories<Memory<I>>, over: Over) {
 /// and `placements`, into `all`, empty: the uses added follow `uses`, which go in at the first.
 /// Whether any was added.
 pub(super) fn augmented(
-    aliases: &KeyMap<ResourceKey, Alias>,
+    aliases: Option<&KeyMap<ResourceKey, Alias>>,
     placements: Option<&Placements>,
     uses: &[Use<ResourceKey>],
     all: &mut Vec<Use<ResourceKey>>,
 ) -> bool {
+    let mut add = |added: Use<ResourceKey>| {
         if all.is_empty() {
             all.reserve(2 * uses.len());
+            all.extend_from_slice(uses);
         }
+        all.push(added);
+    };
     for used in uses {
         let UseRange::Bytes(bytes) = &used.range else {
             continue;
         };
-        let joined = aliases.get(&used.key).map(|alias| alias.key);
+        let joined = aliases
+            .and_then(|aliases| aliases.get(&used.key))
+            .map(|alias| alias.key);
         if let Some(key) = joined {
-            added.push(Use {
+            add(Use {
                 key,
                 ..used.clone()
             });
@@ -390,7 +444,7 @@ pub(super) fn augmented(
         placements.sharing(used.key, bytes, |key, range| {
             // The memory's key carries the same bytes already.
             if Some(key) != joined || range != *bytes {
-                added.push(Use {
+                add(Use {
                     key,
                     range: UseRange::Bytes(range),
                     ..used.clone()
@@ -412,6 +466,8 @@ pub(super) struct Placements {
     ranges: Memories<Placed>,
     /// How many ranges are crowded ([`Placed::crowded`]).
     crowded: usize,
+    /// How many uses looked the ranges their bytes meet up by address ([`Placements::sharing`]).
+    looked_up: Cell<u64>,
 }
 
 /// A range of host bytes keys lie over.
@@ -422,16 +478,41 @@ struct Placed {
     keys: usize,
     /// Whether its key lies over it still.
     first: bool,
-    /// How many other ranges meet it (share a byte with it).
-    met: usize,
+    /// The other ranges that meet it (share a byte with it), each with its key (a range's key
+    /// is its own while it lives), in the order the lookup by address finds them ([`seat`]).
+    meets: Vec<((u64, u64), ResourceKey)>,
 }
 
 impl Placed {
     /// Whether a use of a key over it takes another: a second key lies there, its key went, or
     /// another range meets it.
     fn crowded(&self) -> bool {
-        self.keys > 1 || !self.first || self.met > 0
+        self.keys > 1 || !self.first || !self.meets.is_empty()
     }
+
+    /// The range over `at`, whose key is `key`, meets it from now on.
+    fn meet(&mut self, at: (u64, u64), key: ResourceKey) {
+        let index = self
+            .meets
+            .partition_point(|&(other, _)| seat(other) < seat(at));
+        self.meets.insert(index, (at, key));
+    }
+
+    /// The range over `at` meets it no longer.
+    fn part(&mut self, at: (u64, u64)) {
+        let index = self
+            .meets
+            .partition_point(|&(other, _)| seat(other) < seat(at));
+        if self.meets.get(index).is_some_and(|&(other, _)| other == at) {
+            self.meets.remove(index);
+        }
+    }
+}
+
+/// Where the lookup by address finds the range over `at` among others ([`Memories::candidates`]):
+/// by class of length, then by first byte and length.
+fn seat(at: (u64, u64)) -> (usize, u64, u64) {
+    (class(at.1), at.0, at.1)
 }
 
 impl Placements {
@@ -454,18 +535,20 @@ impl Placements {
         }
         let end = at.0.saturating_add(at.1);
         let met: Vec<(u64, u64)> = self.ranges.overlapping(at.0, end).collect();
-        for &other in &met {
+        let mut meets = Vec::with_capacity(met.len());
+        for other in met {
             if let Some(range) = self.ranges.get_mut(other) {
                 let was = range.crowded();
-                range.met += 1;
+                range.meet(at, key);
                 self.crowded += usize::from(!was && range.crowded());
+                meets.push((other, range.key));
             }
         }
         let range = Placed {
             key,
             keys: 1,
             first: true,
-            met: met.len(),
+            meets,
         };
         self.crowded += usize::from(range.crowded());
         self.ranges.get_or_insert_with(at, || range);
@@ -490,13 +573,13 @@ impl Placements {
             return;
         }
         self.crowded -= usize::from(was);
-        self.ranges.remove(at);
-        let end = at.0.saturating_add(at.1);
-        let met: Vec<(u64, u64)> = self.ranges.overlapping(at.0, end).collect();
-        for other in met {
+        let Some(gone) = self.ranges.remove(at) else {
+            return;
+        };
+        for (other, _) in gone.meets {
             if let Some(range) = self.ranges.get_mut(other) {
                 let was = range.crowded();
-                range.met -= 1;
+                range.part(at);
                 self.crowded -= usize::from(was && !range.crowded());
             }
         }
@@ -504,7 +587,12 @@ impl Placements {
 
     /// For a use of `bytes` of `key` (counted from its first byte), each other key those bytes
     /// share, and the bytes of it they are (counted from its range's first byte), to `each`: its
-    /// own range's key where another, and each other range's the bytes meet, clipped to it.
+    /// own range's key where another, and each other range's the bytes meet, clipped to it, in
+    /// the order the lookup by address finds them. The ranges the bytes may meet are those that
+    /// meet the key's own range, which it keeps: they are read from there while no more than the
+    /// classes of length the lookup by address visits (a range query each, where a kept range is
+    /// a comparison); a use of a range met by more, as one over many others' bytes is, looks up
+    /// those its bytes meet (`WorkCounts::host_range_lookups`).
     pub(super) fn sharing(
         &self,
         key: ResourceKey,
@@ -523,23 +611,32 @@ impl Placements {
         if own.key != key {
             each(own.key, bytes.clone());
         }
-        if own.met == 0 {
+        if own.meets.is_empty() {
             return;
         }
         // The host bytes the use covers, within the key's own.
         let start = at.0.saturating_add(bytes.start.min(at.1));
         let end = at.0.saturating_add(bytes.end.min(at.1));
+        let mut clipped = |other: (u64, u64), key: ResourceKey| {
+            let from = start.max(other.0);
+            let to = end.min(other.0.saturating_add(other.1));
+            if from < to {
+                each(key, from - other.0..to - other.0);
+            }
+        };
+        if own.meets.len() <= self.ranges.held_classes() {
+            for &(other, key) in &own.meets {
+                clipped(other, key);
+            }
+            return;
+        }
+        self.looked_up.set(self.looked_up.get() + 1);
         for other in self.ranges.overlapping(start, end) {
             if other == at {
                 continue;
             }
-            let Some(range) = self.ranges.get(other) else {
-                continue;
-            };
-            let from = start.max(other.0);
-            let to = end.min(other.0.saturating_add(other.1));
-            if from < to {
-                each(range.key, from - other.0..to - other.0);
+            if let Some(range) = self.ranges.get(other) {
+                clipped(other, range.key);
             }
         }
     }
@@ -547,13 +644,16 @@ impl Placements {
 
 /// Values by the host bytes they are over (their first byte's address and their length), found
 /// by address: the memories a remap ends. Each class of length (`class`) is ordered by first
-/// byte, so the lookup of those with a byte in a range reads, in each class, the values whose
-/// first byte lies from the class's longest length before the range to its end
+/// byte, so the lookup of those with a byte in a range reads, in each class that holds a value,
+/// the values whose first byte lies from the class's longest length before the range to its end
 /// ([`Memories::candidates`]): the ones it finds, and of the class only those over the one
-/// address half its longest length before the range, which end before it.
+/// address half its longest length before the range, which end before it. The classes that hold
+/// none it does not visit.
 pub(super) struct Memories<T> {
     /// The values by class of length, each by first byte's address and length.
     classes: Vec<BTreeMap<(u64, u64), T>>,
+    /// The classes that hold a value, bit `class` each.
+    held: u128,
     /// How many values there are.
     len: usize,
 }
@@ -561,6 +661,10 @@ pub(super) struct Memories<T> {
 /// The classes of length: one for each power of two from 2 a `u64` length may reach, and one
 /// for the lengths of 0 and 1.
 const CLASSES: usize = u64::BITS as usize + 1;
+const _: () = assert!(
+    CLASSES <= u128::BITS as usize,
+    "a class a bit of `Memories::held`"
+);
 
 /// The class of `length`: the least `b` with `length <= 2^b` (so its lengths are past the class
 /// below's longest).
@@ -580,6 +684,7 @@ impl<T> Default for Memories<T> {
     fn default() -> Self {
         Memories {
             classes: (0..CLASSES).map(|_| BTreeMap::new()).collect(),
+            held: 0,
             len: 0,
         }
     }
@@ -607,32 +712,48 @@ impl<T> Memories<T> {
         memory: (u64, u64),
         make: impl FnOnce() -> T,
     ) -> &mut T {
-        let by = &mut self.classes[class(memory.1)];
+        let class = class(memory.1);
+        let by = &mut self.classes[class];
         if !by.contains_key(&memory) {
             self.len += 1;
+            self.held |= 1 << class;
         }
         by.entry(memory).or_insert_with(make)
     }
 
     /// Remove the value over `memory`.
     pub(super) fn remove(&mut self, memory: (u64, u64)) -> Option<T> {
-        let removed = self.classes[class(memory.1)].remove(&memory);
+        let class = class(memory.1);
+        let by = &mut self.classes[class];
+        let removed = by.remove(&memory);
         self.len -= usize::from(removed.is_some());
+        if by.is_empty() {
+            self.held &= !(1 << class);
+        }
         removed
     }
 
     /// The memories the lookup of those with a byte in `start..end` reads (the type's docs): of
-    /// each class, those whose first byte lies from its longest length before `start` to `end`.
+    /// each class that holds a value, those whose first byte lies from its longest length before
+    /// `start` to `end`.
     pub(super) fn candidates(&self, start: u64, end: u64) -> impl Iterator<Item = (u64, u64)> + '_ {
-        self.classes
-            .iter()
-            .enumerate()
-            .filter(|(_, by)| !by.is_empty())
-            .flat_map(move |(class, by)| {
-                let from = start.saturating_sub(longest(class) - 1);
-                by.range((from, 0)..(end.max(from), 0))
-                    .map(|(&memory, _)| memory)
-            })
+        let mut held = self.held;
+        let classes = std::iter::from_fn(move || {
+            let class = (held != 0).then(|| held.trailing_zeros() as usize)?;
+            held &= held - 1;
+            Some(class)
+        });
+        classes.flat_map(move |class| {
+            let from = start.saturating_sub(longest(class) - 1);
+            self.classes[class]
+                .range((from, 0)..(end.max(from), 0))
+                .map(|(&memory, _)| memory)
+        })
+    }
+
+    /// How many classes hold a value: those the lookup visits.
+    pub(super) fn held_classes(&self) -> usize {
+        self.held.count_ones() as usize
     }
 
     /// The memories with a byte in `start..end`.

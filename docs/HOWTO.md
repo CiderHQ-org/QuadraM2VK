@@ -183,69 +183,44 @@ rebind that cannot make the image again is refused (`NotImplemented(RebindTextur
 `dma_buf_image_fallbacks` count what the route did.
 
 RADV lists every memory a device imported in every kernel submission, and amdgpu's work for a
-submission grows with each entry, whether a command uses it or not. So the runtime releases a
-no-copy buffer's import of dma-bufs that only blits have read (copies and fills of the buffer,
-copies between it and a texture) and no pending command buffer holds, once it has stayed idle for
-its window (2 seconds at first, doubled at each import again, up to 64 seconds), and imports it
-again at the buffer's next blit, on the thread that encodes it, which pays that time. The new
-import comes from the same dma-bufs, never from the source, so the buffer keeps the pages it was
-made over even after `host_range_remapped`. Nothing of Metal's observes the release: the buffer's
-bytes, its Metal address and its pages stay, and the CPU's writes made meanwhile are read. The
-runtime holds a duplicate descriptor of each released chunk, within a quarter of the process's
-`RLIMIT_NOFILE` soft limit (an import past it stays imported), and changes no limit: where many
-no-copy buffers stand at once, raise the soft limit toward the hard one at startup (`setrlimit`),
-as QEMU does. A buffer stays imported for good once its Metal address is handed out
-(`gpu_address`, a binding, an argument buffer or table, an indirect command buffer,
-`use_resource`), its `VkBuffer` is read, a texture is made over its bytes, or a second buffer lies
-in its import; so do a heap's and a rebind's imports and memory imported by its pointer. A blit
-whose released buffer the device cannot import again (out of memory) is refused.
-`WorkCounts::host_imports_released`, `host_imports_reimported`, `host_imports_resident` and
-`host_import_fds_kept` count it.
+submission grows with each entry, whether a command uses it or not; ANV on i915 lists every memory
+in every execbuffer too, a pointer import (an i915 userptr) costing about three times an ordinary
+buffer object. So the runtime releases a no-copy buffer's own import that only blits have read
+(copies and fills of the buffer, copies between it and a texture) and no pending command buffer
+holds, once it has stayed idle for its window (2 seconds at first, doubled at each import again, up
+to 64 seconds), and imports it again at the buffer's next blit, on the thread that encodes it,
+which pays that time. Nothing of Metal's observes the release: the buffer's bytes, its Metal
+address and its pages stay, and the CPU's writes made meanwhile are read. Two kinds of import are
+released:
 
-A texture over a buffer's bytes is an image over them where its rows lie one after another
-(`bytes_per_row` is its texels' bytes, or it has one row; an array's slices likewise) and the
-image holds no byte past its texels. A texture whose rows lie with bytes between them, as a guest
-browser's padded surfaces' do, is one only where it only reads (no `RenderTarget`, `ShaderWrite`,
-`ShaderAtomic` or block-write usage; `Unknown` usage counts as all of them), under the default
-`padded_reads = PaddedReadsPolicy::Alias`; otherwise it is a shadow (`shadowed-texture`) on every
-device but MoltenVK, whose image is a Metal texture over the buffer. An image at that pitch holds
-the bytes between the rows in its subresource (`VkSubresourceLayout`: "size includes any extra
-memory that is required based on rowPitch"), and Vulkan lets two kinds of operation write them,
-where Metal leaves them as the program writes them. The image's layout transitions "may perform
-read and write accesses on all memory bound to the image subresource range", and every image takes
-one, its first move from the layout it is made in, before any use; the runtime's images take no
-other. A render pass's load and store operations "read and write back any memory locations within
-the image subresource bound for that attachment" (lavapipe writes back the bytes its 4-texel blocks
-reach past a row, a signaling NaN's bits quieted). No query of the device's states otherwise. So a
-texture that renders or that a shader writes is a shadow, and one that only reads keeps the bytes
-between its rows across its first move (the host keeps the bytes the image is bound to through
-it, so a CPU write between its rows meanwhile is undone, once per image; docs/API.md section 1,
-docs/FAST-PATHS.md's known gaps); `padded_reads = PaddedReadsPolicy::Shadow`, which
-`DevicePolicy::exact_answers()` selects, makes it a shadow too. To keep a surface that renders
-aliased, lay its rows packed.
+- An import of dma-bufs. The new import comes from the same dma-bufs, never from the source, so the
+  buffer keeps the pages it was made over even after `host_range_remapped`. The runtime holds a
+  duplicate descriptor of each released chunk, within a quarter of the process's `RLIMIT_NOFILE`
+  soft limit, read once at the process's first such import (an import past it stays imported,
+  counted by `WorkCounts::host_imports_kept_for_fds`), and changes no limit: where many no-copy
+  buffers stand at once, raise the soft limit toward the hard one at startup (`setrlimit`), as QEMU
+  does.
+  A blit whose released buffer the device cannot import again (out of memory) is refused.
+- An import of the pointer, on a driver whose pointer imports follow their address
+  (`DriverFact::PointerImportsFollowTheirAddress`: ANV, Mesa 26.2.4 on the Iris Xe of Raptor
 
-Over pages imported by their pointer, such a texture aliases them where the device lays an image's
-rows at the texture's `bytes_per_row`: the driver's own linear image, or, where that lays its rows
-otherwise, a `DRM_FORMAT_MOD_LINEAR` image at that pitch, which the driver may refuse (and which
-the runtime makes of no depth or stencil format, as it makes no image over a dma-buf of one: Vulkan
-has no query of where such a format's memory plane lies). Measured
-(`runtime_lane::surface_texture_costs::pitch_classes`, nine formats, four usages, rows padded by
-each power of two from 16 to 4096 bytes):
+A buffer stays imported for good once its Metal address is handed out (`gpu_address`, a binding, an
+argument buffer or table, an indirect command buffer, `use_resource`), its `VkBuffer` is read, a
+texture is made over its bytes, or a second buffer lies in its import; so do a heap's and a
+rebind's imports. `WorkCounts::host_imports_released`, `host_imports_reimported`,
+`host_imports_resident` and `host_import_fds_kept` count it. For imports of either kind,
+`host_imports_read_apart` counts the live ones that a read other than a blit's keeps for good (the
+`host_imports_read_apart_*` gauges by reason: the Metal address, the `VkBuffer`, a binding, a
+texture, a second buffer, no releasing thread), the `host_imports_kept_*` gauges the live ones kept
+whatever reads them, by cause (a heap's, a rebind's, a pointer import on an unmeasured driver, no
+stand-in, and `host_imports_kept_for_fds`), and `host_imports_used` the imports each committed
+command buffer's commands use, summed over command buffers; against `host_imports_live` they show
+how many of the listed imports a workload's commands name. Of a rebind's imports,
+`host_imports_rebound_unlisted` counts the live ones no command buffer committed since the rebind
+used (no command reaches them unnamed yet), `host_rebind_imports_made` those rebinds made, and
+`host_rebind_imports_covered` those whose pages lay within bytes a buffer over host pages lay over
+already.
 
-- ANV (Mesa 26.2.4) packs its own rows tight and takes every pitch asked.
-- NVIDIA (615.71.09) aligns its own rows to 128 bytes and takes any larger pitch for a texture it
-  samples or writes, in `BGRA8Unorm`, `RGBA8Unorm`, `RGB10A2Unorm`, `RGBA16Float`, `R8Unorm` and
-  `RG8Unorm`; not for a render target, and not in `R16Float`, `R32Float` or `RGBA32Float`, whose
-  `DRM_FORMAT_MOD_LINEAR` tiling it gives no sampling or transfers.
-- RADV (Mesa 26.2.4) aligns its own rows to 256 bytes, refuses a pitch that is not a multiple of
-  256, and asks a dedicated allocation of an image at any other, so it takes no pitch but its own.
-
-The own rows' alignments are as measured for `BGRA8Unorm`. Elsewhere the texture is a shadow
-(`shadowed-texture`): a `BGRA8Unorm` surface with packed rows takes the driver's own linear image
-on RADV where its texels' bytes are a multiple of 256, and on NVIDIA where they are a multiple of
-128 (their own rows' alignments).
-`WorkCounts::pitched_host_images` and `pitched_host_image_refusals` count the images at Metal's
-pitch made and refused.
 
 ## 7. Check the integration
 

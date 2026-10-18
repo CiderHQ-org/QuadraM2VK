@@ -21,14 +21,17 @@
 //!   alignment above the host page whose rounding would take pages the range does not touch, an
 //!   offset in the pages that misses the buffer's memory alignment, no memory type both allow, or
 //!   a driver that refuses the pointer.
-//! - **Pages the process cannot write** are refused typed on Linux, before the import
+//! - **Pages the process cannot write** are refused typed on Linux, before the buffer's own import
 //!   ([`refuse_unwritable`] asks the kernel for the process's own mappings over the window, with
-//!   `PROCMAP_QUERY` on `/proc/self/maps`, or reads that file's lines where the kernel predates
-//!   the query, Linux 6.11). Linux drivers pin
-//!   user pages for writing: NVIDIA failed a read-only page as out of device memory, RADV refused
-//!   it, and ANV imported it and lost the device at the GPU's first read. lavapipe read one, so
-//!   there the rule refuses a little more than the driver would. On macOS, MoltenVK hands the
-//!   range to Metal, which reads read-only pages, so there is no check.
+//!   `PROCMAP_QUERY` on `/proc/self/maps`, a file kept open for them (`kept_maps`), or reads
+//!   that file's lines where the kernel predates the query, Linux 6.11;
+//!   `WorkCounts::host_mappings_queried`). A buffer that lies in a live
+//!   import of the same bytes (`host_aliases.rs`) asks nothing: it pins no page, that import's
+//!   making asked for the same window, and [`HostMemory::new`]'s contract keeps imported pages
+//!   writable. Linux drivers pin user pages for writing: NVIDIA failed a read-only page as out of
+//!   device memory, RADV refused it, and ANV imported it and lost the device at the GPU's first
+//!   read. lavapipe read one, so there the rule refuses a little more than the driver would. On
+//!   macOS, MoltenVK hands the range to Metal, which reads read-only pages, so there is no check.
 //! - **What drivers answered**. Private anonymous memory was imported on every venue measured. RADV
 //!   refused shared memory typed: anonymous shared memory, and any mapping of a file, a shared
 //!   memory object or a `memfd` among them (QEMU's `memory-backend-memfd,share=on` guest RAM). It
@@ -42,8 +45,8 @@
 //!   takes by its pointer is made exactly as before, with no call more.
 //! - **When**. The pages are imported when the buffer is made, on every platform, as Metal wires
 //!   them then: the GPU uses the pages mapped at the pointer when the buffer was made, whatever is
-//!   mapped there later, and memory the device cannot import is refused by the call that makes the
-//!   buffer, as Metal answers nil there. The import costs work per page there: on macOS MoltenVK's
+//!   mapped there later, but on a driver whose pointer imports follow their address
+//!   there. The import costs work per page there: on macOS MoltenVK's
 //!   `newBufferWithBytesNoCopy:` and its residency set's commit, about 11 to 20 ms per GiB (an M4,
 //!   an M3 Max); Metal makes the buffer at once and pays at the first command using it (24 to 88 ms
 //!   per GiB). The runtime once deferred the macOS import to the buffer's first GPU use, which
@@ -85,6 +88,7 @@ use super::error::{vulkan, Error};
 use super::exit_guard;
 use super::loader_word::LoaderWord;
 use super::program_objects::ProgramObject;
+use super::work_counts::Counters;
 use ash::vk;
 use metal2vulkan::device::{EnableSet, VkExtension};
 use metal2vulkan::error::{Feature, Unsupported};
@@ -179,12 +183,16 @@ impl HostMemory {
     /// while idle, because RADV lists every import in every submission. The release frees its
     /// `VkBuffer` and memory and keeps the chunks open: the runtime keeps a duplicate descriptor of
     /// each, within a quarter of the process's `RLIMIT_NOFILE` soft limit. The next blit imports
-    /// them again, on the thread that encodes it, which costs time then. Only a buffer that blits
-    /// alone have read is released. One whose `gpu_address` or `VkBuffer` was handed out, or with a
-    /// texture over its bytes, stays imported. Nothing of Metal's observes the release: the bytes,
-    /// the address and the pages stay, the CPU's writes made meanwhile are read, and the source is
-    /// not called again. A blit that finds the device unable to import the chunks again (out of
-    /// memory) is refused.
+    /// them again, on the thread that encodes it, which costs time then. A buffer whose
+    /// descriptors pass that quarter (read once, at the process's first such import) stays
+    /// imported, in every kernel submission's list (`WorkCounts::host_imports_kept_for_fds` counts
+    /// them). The runtime never changes the limit: a program that makes many no-copy buffers at
+    /// once raises its soft limit toward the hard one at startup (`setrlimit`), as QEMU does. Only
+    /// a buffer that blits alone have read is released. One whose `gpu_address` or `VkBuffer` was
+    /// handed out, or with a texture over its bytes, stays imported. Nothing of Metal's observes
+    /// the release: the bytes, the address and the pages stay, the CPU's writes made meanwhile are
+    /// read, and the source is not called again. A blit that finds the device unable to import the
+    /// chunks again (out of memory) is refused.
     ///
     /// # Safety
     ///
@@ -389,15 +397,22 @@ pub(super) fn import_refused(error: vk::Result) -> Error {
 }
 
 /// Refuse the window's pages, typed, unless the process maps every one of them writable: Linux
-/// drivers pin imported pages for writing. The kernel answers for the mappings over the window
-/// ([`queried_writable`]) at each call, so a page remapped or reprotected since an earlier import
-/// is judged as it is now; a kernel without the query (before Linux 6.11) has the lines of
-/// `/proc/self/maps` read up to the window instead ([`writable`]), which cost about 4.5 ms per
-/// import in a process of 34,000 mappings. When the file cannot be opened, every import is
-/// refused as not implemented here.
+/// drivers pin imported pages for writing. Asked by each call that imports the pages itself, not
+/// by a buffer that lies in a live import of them. The kernel answers for the mappings over the
+/// window ([`queried_writable`]) at each call, so a page remapped or reprotected since an earlier
+/// import is judged as it is now: one query per mapping, so its cost grows with the mappings over
+/// the window (a view of scattered pages maps each run apart). The queries go through the file
+/// the process keeps open ([`kept_maps`]). A kernel without the query (before Linux 6.11) has the
+/// lines of `/proc/self/maps` read up to the window instead ([`writable`]), from a file opened for
+/// the reading, which cost about 4.5 ms per import in a process of 34,000 mappings. Each mapping
+/// asked is counted in `counts` (`WorkCounts::host_mappings_queried`). When the file cannot be
+/// opened, every import is refused as not implemented here.
 #[cfg(target_os = "linux")]
-pub(super) fn refuse_unwritable(window: &ImportWindow) -> Result<(), Error> {
-    match host_writable(window.start, window.start + window.size) {
+pub(super) fn refuse_unwritable(window: &ImportWindow, counts: &Counters) -> Result<(), Error> {
+    let mut asked = 0;
+    let answer = mappings_writable(window.start, window.start + window.size, &mut asked);
+    counts.host_mappings_queried(asked);
+    match answer {
         Some(true) => Ok(()),
         Some(false) => Err(not_importable()),
         None => Err(Error::Unsupported(Unsupported::not_implemented(
@@ -411,83 +426,36 @@ pub(super) fn refuse_unwritable(window: &ImportWindow) -> Result<(), Error> {
 /// of `/proc/self/maps` where the kernel predates the query ([`writable`]); `None` when that file
 /// cannot be opened.
 #[cfg(target_os = "linux")]
-pub(crate) fn host_writable(start: u64, end: u64) -> Option<bool> {
+fn mappings_writable(start: u64, end: u64, asked: &mut u64) -> Option<bool> {
     use std::io::BufRead;
+    let maps = kept_maps()?;
+    if let Some(writable) = queried_writable(&maps, start, end, asked) {
+        return Some(writable);
+    }
+    // The lines are read from a file of their own: reading moves its position, which the kept
+    // one's queries share among threads.
     let maps = std::fs::File::open("/proc/self/maps").ok()?;
-    Some(match queried_writable(&maps, start, end) {
-        Some(writable) => writable,
-        None => {
-            let lines = std::io::BufReader::new(maps).lines().map_while(Result::ok);
-            writable(lines, start, end)
-        }
-    })
+    let lines = std::io::BufReader::new(maps).lines().map_while(Result::ok);
+    Some(writable(lines, start, end, asked))
 }
 
-/// Whether the process maps `[start, end)` without a gap, each page with write permission, as the
-/// kernel answers now: on Apple's systems the current protection of each region of the task's map
-/// over it (`mach_vm_region`, `VM_REGION_BASIC_INFO_64`); `None` where the kernel fails the query
-/// otherwise than for a missing region.
-#[cfg(target_vendor = "apple")]
-pub(crate) fn host_writable(start: u64, end: u64) -> Option<bool> {
-    /// `VM_REGION_BASIC_INFO_COUNT_64`: the `int`s of `vm_region_basic_info_data_64_t` (of
-    /// `<mach/vm_region.h>`, under its `#pragma pack(4)`), whose first is the region's current
-    /// protection.
-    const BASIC_INFO_COUNT_64: usize = 9;
-    /// `VM_REGION_BASIC_INFO_64`.
-    const BASIC_INFO_64: i32 = 9;
-    /// `KERN_INVALID_ADDRESS`: no region at or above the address.
-    const INVALID_ADDRESS: i32 = 1;
-    /// `VM_PROT_WRITE`.
-    const PROT_WRITE: i32 = 0x02;
-    unsafe extern "C" {
-        /// The task's own port, `mach_task_self()`'s answer (`<mach/mach_init.h>`).
-        static mach_task_self_: u32;
-        fn mach_vm_region(
-            task: u32,
-            address: *mut u64,
-            size: *mut u64,
-            flavor: i32,
-            info: *mut i32,
-            count: *mut u32,
-            object_name: *mut u32,
-        ) -> i32;
+/// This process's `/proc/self/maps`, opened once for [`queried_writable`] and kept with the id of
+/// the process that opened it, or opened again (`None` where it cannot be): each `PROCMAP_QUERY`
+/// answers from the process's mappings as they are at the call, so a file kept open reads the same
+/// answers as one opened for the call, without the opening, which cost each import about as much
+/// as its queries (an import over 57 mappings, the consumer's guest pages). A process forked
+/// since holds the file of its parent's mappings, so one of another id opens its own.
+#[cfg(target_os = "linux")]
+pub(super) fn kept_maps() -> Option<std::sync::Arc<std::fs::File>> {
+    static KEPT: Mutex<Option<(u32, std::sync::Arc<std::fs::File>)>> = Mutex::new(None);
+    let process = std::process::id();
+    let mut kept = lock(&KEPT);
+    if let Some((_, maps)) = kept.as_ref().filter(|(opener, _)| *opener == process) {
+        return Some(std::sync::Arc::clone(maps));
     }
-    let mut covered = start;
-    while covered < end {
-        let (mut address, mut size) = (covered, 0u64);
-        let mut info = [0i32; BASIC_INFO_COUNT_64];
-        let mut count = BASIC_INFO_COUNT_64 as u32;
-        let mut object_name = 0u32;
-        // SAFETY: `mach_task_self_` is set as the task starts and only read after; every pointer
-        // is to a local of the type and size the call reads and writes; `count` holds `info`'s
-        // size in `int`s.
-        let result = unsafe {
-            mach_vm_region(
-                mach_task_self_,
-                &mut address,
-                &mut size,
-                BASIC_INFO_64,
-                info.as_mut_ptr(),
-                &mut count,
-                &mut object_name,
-            )
-        };
-        if result != 0 {
-            return (result == INVALID_ADDRESS).then_some(false);
-        }
-        // The call answers the region at the address, or the first above it: a gap.
-        if address > covered || info[0] & PROT_WRITE == 0 {
-            return Some(false);
-        }
-        covered = address.saturating_add(size);
-    }
-    Some(true)
-}
-
-/// No answer on other systems.
-#[cfg(not(any(target_os = "linux", target_vendor = "apple")))]
-pub(crate) fn host_writable(_start: u64, _end: u64) -> Option<bool> {
-    None
+    let maps = std::sync::Arc::new(std::fs::File::open("/proc/self/maps").ok()?);
+    *kept = Some((process, std::sync::Arc::clone(&maps)));
+    Some(maps)
 }
 
 /// `struct procmap_query` of Linux's `include/uapi/linux/fs.h` (Linux 6.11): the argument of
@@ -528,14 +496,20 @@ const PROCMAP_QUERY_VMA_WRITABLE: u64 = 0x02;
 
 /// Whether the process maps `[start, end)` without a gap, each mapping with write permission, as
 /// the kernel answers `PROCMAP_QUERY` on `maps` (this process's `/proc/self/maps`): one query per
-/// mapping the window touches, each for the mapping covering the first address not yet covered.
-/// `None` where the kernel does not answer the query (before Linux 6.11, `ENOTTY`) or fails it
-/// otherwise; a missing mapping (`ENOENT`) is an answer, not writable.
+/// mapping the window touches, each for the mapping covering the first address not yet covered,
+/// and each added to `asked`. `None` where the kernel does not answer the query (before Linux
+/// 6.11, `ENOTTY`) or fails it otherwise; a missing mapping (`ENOENT`) is an answer, not writable.
 #[cfg(target_os = "linux")]
-pub(super) fn queried_writable(maps: &std::fs::File, start: u64, end: u64) -> Option<bool> {
+pub(super) fn queried_writable(
+    maps: &std::fs::File,
+    start: u64,
+    end: u64,
+    asked: &mut u64,
+) -> Option<bool> {
     use std::os::fd::AsRawFd;
     let mut covered = start;
     while covered < end {
+        *asked += 1;
         let mut query = ProcmapQuery {
             size: std::mem::size_of::<ProcmapQuery>() as u64,
             query_addr: covered,
@@ -569,15 +543,21 @@ pub(super) fn queried_writable(maps: &std::fs::File, start: u64, end: u64) -> Op
 /// Refuse the window's pages unless the process can write them: no check off Linux (MoltenVK
 /// hands the range to Metal, which reads read-only pages).
 #[cfg(not(target_os = "linux"))]
-pub(super) fn refuse_unwritable(_window: &ImportWindow) -> Result<(), Error> {
+pub(super) fn refuse_unwritable(_window: &ImportWindow, _counts: &Counters) -> Result<(), Error> {
     Ok(())
 }
 
 /// Whether the mappings of `maps` (lines of `/proc/<pid>/maps`, in address order) cover
-/// `[start, end)` without a gap, each with write permission. Reading stops at the first line past
-/// `end`; a line that does not parse is skipped.
+/// `[start, end)` without a gap, each with write permission, adding to `asked` each mapping it
+/// judged (one ending past the address it reached). Reading stops at the first line past `end`; a
+/// line that does not parse is skipped.
 #[cfg(target_os = "linux")]
-pub(super) fn writable(maps: impl IntoIterator<Item = String>, start: u64, end: u64) -> bool {
+pub(super) fn writable(
+    maps: impl IntoIterator<Item = String>,
+    start: u64,
+    end: u64,
+    asked: &mut u64,
+) -> bool {
     let mut covered = start;
     for line in maps {
         if covered >= end {
@@ -589,6 +569,7 @@ pub(super) fn writable(maps: impl IntoIterator<Item = String>, start: u64, end: 
         if to <= covered {
             continue;
         }
+        *asked += 1;
         if from > covered || !write {
             return false;
         }

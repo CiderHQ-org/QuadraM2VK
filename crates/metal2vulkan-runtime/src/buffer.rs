@@ -35,7 +35,7 @@ use super::host_memory::{KeepAlive, Release};
 use super::host_residency::{Again, Imported, Residency};
 use super::memory::{Mapped, MemoryClass, Placement, BLOCK_BYTES};
 use super::program_objects::ProgramObject;
-use super::rebind::Unexact;
+use super::rebind::{ImportHold, Unexact};
 use super::resource::{Identity, ObjectId, ResourceKey};
 use super::texture::first_move::Filled;
 use super::texture::shared_alias::SharedImages;
@@ -48,8 +48,7 @@ use metal2vulkan::bind::ResidentRange;
 use std::any::Any;
 use std::ops::Range;
 use std::ptr::NonNull;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock, Weak};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 
 /// A Metal buffer (`MTLBuffer`). Cheap to clone (a retain); `Send + Sync`. Two handles are equal
 /// when they are the same buffer.
@@ -149,9 +148,14 @@ pub(super) struct HostCell {
     /// and in it), which a detach makes present stand-ins (`detach.rs`), and the textures being
     /// made over them, which a detach refuses while one is.
     textures: Mutex<TexturesOver>,
-    /// The buffer's Metal address was handed out (`Buffer::gpu_address`): its import is kept
-    /// imported for good (`host_residency.rs`), and the call need not look again.
-    exposed: AtomicBool,
+    /// The reasons the buffer's Metal address was handed out for (`Buffer::gpu_address`,
+    /// `Buffer::exposed_address`), a bit each ([`ReadApart`]): once any is, its import is kept
+    /// imported for good (`host_residency.rs`), and a call for a reason noted need not look
+    /// again.
+    exposed: AtomicU8,
+    /// The device whose work counts each look at its pages adds to
+    /// (`WorkCounts::no_copy_lies_read`).
+    device: Device,
 }
 
 /// The textures over a buffer's host pages ([`HostCell`]): their images, which a detach makes
@@ -298,7 +302,7 @@ impl Detached {
             return Err(internal("a detached buffer's stand-in placed in a heap"));
         };
         let old = from.import.shape;
-        let pages = own.with(|pages| {
+        let pages = own.with(ReadApart::Binding, |pages| {
             let placement = &pages.memory.placement;
             Pages {
                 raw: pages.raw,
@@ -326,9 +330,11 @@ impl Detached {
     }
 }
 
+            pages.let_go_by_buffer();
 impl HostCell {
     /// The pages the buffer lies in now; `None` while it is detached.
     pub(super) fn current(&self) -> Option<Arc<HostPages>> {
+        self.device.shared().counts.no_copy_lie_read();
         match &*lock(&self.pages) {
             Lying::In(pages) => Some(Arc::clone(pages)),
             Lying::Detached(_) => None,
@@ -337,6 +343,7 @@ impl HostCell {
 
     /// Where the buffer lies now.
     pub(super) fn lying(&self) -> Lying {
+        self.device.shared().counts.no_copy_lie_read();
         lock(&self.pages).clone()
     }
 
@@ -367,8 +374,20 @@ impl HostCell {
         }
     }
 
-    /// Lie `lying` from now on: where the buffer lay.
+    /// Lie `lying` from now on: where the buffer lay, which the caller lets go of. Counted in
+    /// [`host_cells_moved`]: a buffer binding that reads where it lies (its base, its device
+    /// address) may change.
     pub(super) fn replace(&self, lying: Lying) -> Lying {
+        let lay = {
+            let mut pages = lock(&self.pages);
+            let lay = std::mem::replace(&mut *pages, lying);
+            HOST_CELLS_MOVED.fetch_add(1, Ordering::AcqRel);
+            lay
+        };
+        // The replays that hold the pages it lay in go first, so the caller lets go of them last,
+        // as it would without them (`HostPages::let_go_by_buffer`).
+        if let Lying::In(pages) = &lay {
+            pages.let_go_by_buffer();
         lay
     }
 
@@ -433,6 +452,7 @@ pub(super) struct ListedPages(Arc<HostPages>);
 impl ListedPages {
     fn new(pages: Arc<HostPages>) -> ListedPages {
         pages.listed.fetch_add(1, Ordering::AcqRel);
+        pages.import.note_listed();
         ListedPages(pages)
     }
 }
@@ -522,6 +542,12 @@ pub(super) struct HostPages {
     release: OnceLock<Release>,
     /// The live buffers' tables' holds on them ([`ListedPages`]).
     listed: AtomicUsize,
+    /// commands took, held from its commit until they are replayed, each counted until it is
+    /// gone ([`let_go_by_replay`](Self::let_go_by_replay)), so the count outlives them.
+    replay_holds: Arc<AtomicUsize>,
+    /// Their buffer let go of them: its release, rebind or detach (pages lie in one buffer,
+    /// once) ([`let_go_by_buffer`](Self::let_go_by_buffer)).
+    let_go: AtomicBool,
 }
 
 impl HostPages {
@@ -529,13 +555,45 @@ impl HostPages {
     fn new(import: Arc<HostImport>) -> HostPages {
         if import.lying.fetch_add(1, Ordering::AcqRel) > 0 {
             // Another buffer lies in it: imported for good (`host_residency.rs`).
-            import.expose();
+            import.expose(ReadApart::SecondBuffer);
         }
         HostPages {
             parked: Mutex::new(Vec::new()),
             import,
             release: OnceLock::new(),
             listed: AtomicUsize::new(0),
+            replay_holds: Arc::new(AtomicUsize::new(0)),
+            let_go: AtomicBool::new(false),
+    /// A command buffer's replays hold them from now on (`recorder`): counted before its commit
+    /// reads whether their buffer let go of them ([`let_go_by_buffer`](Self::let_go_by_buffer)).
+        self.replay_holds.fetch_add(1, Ordering::SeqCst);
+    /// A command buffer's replays let go of `pages`: the pages, where that hold was their last.
+    /// Counted out only once the hold is gone, so their buffer's let-go that finds no hold
+    /// finds no replay letting go of one either ([`let_go_by_buffer`](Self::let_go_by_buffer)).
+    pub(super) fn let_go_by_replay(pages: Arc<HostPages>) -> Option<HostPages> {
+        let holds = Arc::clone(&pages.replay_holds);
+        let last = Arc::into_inner(pages);
+        holds.fetch_sub(1, Ordering::AcqRel);
+        last
+    /// Whether their buffer let go of them ([`let_go_by_buffer`](Self::let_go_by_buffer)): read
+    /// by a commit after its replays' holds on them are counted and its replays queued.
+    pub(super) fn buffer_let_go(&self) -> bool {
+        self.let_go.load(Ordering::SeqCst)
+    /// Their buffer lets go of them (its release, rebind or detach), the caller still holding
+    /// them: where command buffers' replays hold them, every replay waiting runs first, on this
+    /// thread, so the replays let go of them before the caller does, and their deallocator runs
+    /// at the call that lets go of them last, as it does with commands recorded as they are
+    /// encoded (`recorder`). Nothing where none holds them.
+    ///
+    /// Against a commit on another thread whose replays come to hold them, each marks its side
+    /// and then reads the other's, sequentially consistent, so at least one sees the other:
+    /// this finds the commit's hold, and its replays, queued before the commit read the mark,
+    /// and replays them here; or the commit finds the mark and replays them itself, letting go
+    /// of the pages where it lets go of them without a recorder (`Replays::commit`).
+    fn let_go_by_buffer(&self) {
+        self.let_go.store(true, Ordering::SeqCst);
+        if self.replay_holds.load(Ordering::SeqCst) == 0 {
+            recorder.settle_all(shared.vk());
         }
     }
 
@@ -547,7 +605,7 @@ impl HostPages {
     /// Their memory and where the bytes start in it (a heap's textures bind images there): a
     /// read that keeps the import imported for good (`host_residency.rs`).
     pub(super) fn memory(&self) -> (vk::DeviceMemory, u64) {
-        let pages = self.import.pages();
+        let pages = self.import.pages(ReadApart::Texture);
         let placement = &pages.memory.placement;
         (placement.memory, placement.offset + pages.offset)
     }
@@ -581,7 +639,7 @@ impl HostPages {
     /// the import imported for good (`host_residency.rs`).
     #[cfg(unix)]
     pub(super) fn dma_buf(&self) -> Option<(Arc<crate::dma_buf::DmaBufPages>, u64, u32)> {
-        let pages = self.import.pages();
+        let pages = self.import.pages(ReadApart::Texture);
         let placement = &pages.memory.placement;
         let imports = Arc::clone(placement.dma_buf_pages()?);
         let start = (placement.mapped?.as_ptr() as u64).checked_add(pages.offset)?;
@@ -631,6 +689,12 @@ impl HostPages {
         });
     }
 
+    /// (`recorder`, [`HeldByReplay`]): never as a rule, as their buffer's let-go and each commit
+    /// whose replays hold them agree on which replays them first
+    /// ([`let_go_by_buffer`](Self::let_go_by_buffer)). Were it to, they would have gone at that
+    /// let-go or at the commit, where their deallocator or keep-alive ran; they go now, after
+    /// the replay, announced once per device (`Degradation::HostDeallocatorDelayed`). Nothing
+    /// where neither is left to run.
     /// Run `release`'s deallocator now, at Metal's moment, the caller's `keep_alive` keeping the
     /// pages mapped until the import is freed: the import keeps it, unless it keeps another's
     /// already, or `others` (another buffer lies in the import, whose own contract keeps the same
@@ -684,6 +748,16 @@ pub(super) struct HostImport {
     objects: Objects,
     /// The [`HostPages`] lying in it.
     lying: AtomicUsize,
+    /// The reads other than a blit's that took it, a bit each ([`HostImport::note_read_apart`]):
+    /// counted in `WorkCounts::host_imports_read_apart` and the gauge of each reason while it
+    /// lives.
+    read_apart: AtomicU8,
+    /// Why the device never releases it while idle, for an import it keeps: counted in that
+    /// reason's `WorkCounts` gauge while it lives. `None` for a releasable one.
+    kept_because: Option<KeptBecause>,
+    /// A rebind's import that no live buffers' table listed yet ([`ListedPages`]): counted in
+    /// `WorkCounts::host_imports_rebound_unlisted` until one does or it goes.
+    unlisted: AtomicBool,
     /// The keep-alive of the pages that went while it lived with none other lying in it, dropped
     /// once it is freed: it keeps the bytes mapped for every buffer made over them, since all were
     /// made over the same bytes, so a later one's keep-alive is dropped as its pages go
@@ -748,6 +822,67 @@ impl Shape {
     }
 }
 
+/// Why a read other than a blit's took a host import ([`HostImport::note_read_apart`]), each
+/// counted once per import in its `WorkCounts::host_imports_read_apart_*` gauge while the import
+/// lives.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ReadApart {
+    /// The buffer's Metal address handed out: `gpu_address`, or written for the caller.
+    Address,
+    /// The buffer's `VkBuffer` handed out (`Buffer::vk_buffer`).
+    VkBuffer,
+    /// A command's read other than a blit's copy: a binding, `use_resource`, or a copy of a
+    /// texture over the bytes.
+    Binding,
+    /// A texture over the bytes: an image bound to the memory, or a texel view over the
+    /// `VkBuffer`.
+    Texture,
+    /// A second buffer lying in the import, or sharing its buffer's range.
+    SecondBuffer,
+    /// No thread to release it while idle (`host_residency.rs`).
+    Unreleased,
+}
+
+impl ReadApart {
+    /// How many reasons there are.
+    pub(crate) const COUNT: usize = 6;
+    const ALL: [ReadApart; ReadApart::COUNT] = [
+        ReadApart::Address,
+        ReadApart::VkBuffer,
+        ReadApart::Binding,
+        ReadApart::Texture,
+        ReadApart::SecondBuffer,
+        ReadApart::Unreleased,
+    ];
+
+    /// Its bit in [`HostImport::read_apart`].
+    fn bit(self) -> u8 {
+        1 << self as u8
+    }
+}
+
+/// Why the device keeps a host import imported whatever reads it, never releasing it while idle
+/// (`host_residency.rs`), each counted in its `WorkCounts::host_imports_kept_*` gauge while the
+/// import lives. Imports of dma-bufs kept as their descriptors did not fit count apart
+/// (`WorkCounts::host_imports_kept_for_fds`), as pointer imports here.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum KeptBecause {
+    /// A heap's own import.
+    Heap,
+    /// A rebind's import (`rebind.rs`).
+    Rebind,
+    /// An import by pointer on a device whose driver is not measured to follow the pointer
+    /// (`DriverFact::PointerImportsFollowTheirAddress`), or off Unix.
+    Pointer,
+    /// No stand-in buffer for a read of a released one.
+    NoStandIn,
+}
+
+impl KeptBecause {
+    /// How many reasons there are.
+    pub(crate) const COUNT: usize = 4;
+}
+
 /// A host import's `VkBuffer` and memory.
 enum Objects {
     /// Imported until the import goes.
@@ -784,13 +919,24 @@ impl std::ops::Deref for ImportPages<'_> {
 }
 
 impl HostImport {
-    /// The import of `pages`, no pages lying in it yet.
-    fn new(device: &Device, pages: Pages) -> HostImport {
+    /// The import of `pages`, no pages lying in it yet, which the device keeps imported for
+    /// `because` (`None`: an import of dma-bufs whose descriptors did not fit, counted as such).
+    fn new(device: &Device, pages: Pages, because: Option<KeptBecause>) -> HostImport {
+        if let Some(because) = because {
+            device.shared().counts.host_import_kept(because, true);
+        }
+        let unlisted = because == Some(KeptBecause::Rebind);
+        if unlisted {
+            device.shared().counts.host_import_rebound_unlisted(true);
+        }
         HostImport {
             device: device.clone(),
             shape: Shape::of(&pages),
             objects: Objects::Fixed(pages),
             lying: AtomicUsize::new(0),
+            read_apart: AtomicU8::new(0),
+            kept_because: because,
+            unlisted: AtomicBool::new(unlisted),
             kept: Mutex::new(None),
             after_free: Mutex::new(Vec::new()),
             shared: SharedImages::default(),
@@ -811,9 +957,19 @@ impl HostImport {
             shape: Shape::of(&pages),
             objects: Objects::Releasable(Residency::new(device, pages, again, stand_in)),
             lying: AtomicUsize::new(0),
+            read_apart: AtomicU8::new(0),
+            kept_because: None,
+            unlisted: AtomicBool::new(false),
             kept: Mutex::new(None),
             after_free: Mutex::new(Vec::new()),
-            shared: SharedImages::default(),
+        }
+    }
+
+    /// A live buffers' table listed pages lying in it ([`ListedPages`]): a rebind's import is
+    /// listed from now on (`WorkCounts::host_imports_rebound_unlisted`). A load once listed.
+    fn note_listed(&self) {
+        if self.unlisted.load(Ordering::Relaxed) && self.unlisted.swap(false, Ordering::Relaxed) {
+            (self.device.shared().counts).host_import_rebound_unlisted(false);
         }
     }
 
@@ -826,13 +982,12 @@ impl HostImport {
         }
     }
 
-    /// Its `VkBuffer` and memory for a read other than a blit's, which keeps a releasable import
-    /// imported for good from then on (`host_residency.rs`). Released, it is imported again
+    /// Its `VkBuffer` and memory for a read other than a blit's, for `reason`, which keeps a
+    /// releasable import imported for good from then on (`host_residency.rs`). Released, it is imported again
     /// first; where the device cannot, the device is lost (its work no longer runs) and the read
     /// takes the device's stand-in.
-    pub(super) fn pages(&self) -> ImportPages<'_> {
-        match &self.objects {
-            Objects::Fixed(pages) => ImportPages::Fixed(pages),
+    pub(super) fn pages(&self, reason: ReadApart) -> ImportPages<'_> {
+        self.note_read_apart(reason);
             #[cfg(unix)]
             Objects::Releasable(residency) => match residency.exposed() {
                 Some(held) => ImportPages::Held(held),
@@ -847,17 +1002,13 @@ impl HostImport {
     }
 
     /// Its `VkBuffer` and memory for a blit's command (`Buffer::blit_at`), imported again where
-    /// released, with what the command buffer holds of them until it completed: nothing of an
+    /// released, with what the command buffer holds of them (`rebind::ImportHold`): nothing of an
     /// import that keeps them. Refused where the device cannot import them again.
-    pub(super) fn blit_pages(
-        &self,
-    ) -> Result<(ImportPages<'_>, Option<Arc<dyn Any + Send + Sync>>), Error> {
-        match &self.objects {
-            Objects::Fixed(pages) => Ok((ImportPages::Fixed(pages), None)),
+    pub(super) fn blit_pages(&self) -> Result<(ImportPages<'_>, Option<ImportHold>), Error> {
             #[cfg(unix)]
             Objects::Releasable(residency) => {
                 let held = residency.for_blit()?;
-                let hold: Arc<dyn Any + Send + Sync> = Arc::clone(&held) as _;
+                let hold = ImportHold::Held(Arc::clone(&held));
                 Ok((ImportPages::Held(held), Some(hold)))
             }
         }
@@ -873,19 +1024,35 @@ impl HostImport {
         }
     }
 
-    /// Keep it imported for good from now on (`host_residency.rs`): whether it was ever
-    /// released, so a range of it noted before may be stale.
-    pub(super) fn expose(&self) -> bool {
-        match &self.objects {
+    /// Keep it imported for good from now on, for `reason` (`host_residency.rs`): whether it was
+    /// ever released, so a range of it noted before may be stale.
+    pub(super) fn expose(&self, reason: ReadApart) -> bool {
+        self.note_read_apart(reason);
             Objects::Fixed(_) => false,
             #[cfg(unix)]
             Objects::Releasable(residency) => residency.expose(),
         }
     }
 
-    /// The shared images of textures over its bytes (`texture/shared_alias.rs`).
-    pub(super) fn shared_images(&self) -> &SharedImages {
-        &self.shared
+    /// Note a read other than a blit's, for `reason` ([`HostImport::pages`],
+    /// [`HostImport::expose`]): the reads after which the device's residency keeps a releasable
+    /// import for good (`host_residency.rs`), noted for an import of any kind, counted once while
+    /// it lives (`WorkCounts::host_imports_read_apart`), and once for each reason. A load once
+    /// noted.
+    fn note_read_apart(&self, reason: ReadApart) {
+        let bit = reason.bit();
+        if self.read_apart.load(Ordering::Relaxed) & bit != 0 {
+            return;
+        }
+        let before = self.read_apart.fetch_or(bit, Ordering::Relaxed);
+        if before & bit != 0 {
+            return;
+        }
+        let counts = &self.device.shared().counts;
+        if before == 0 {
+            counts.host_import_read_apart(true);
+        }
+        counts.host_import_read_apart_for(reason, true);
     }
 }
 
@@ -943,6 +1110,21 @@ impl Drop for HostImport {
         // one, as every holder of one holds the import.
         self.shared.clear();
         let shared = self.device.shared();
+        let read_apart = self.read_apart.load(Ordering::Relaxed);
+        if read_apart != 0 {
+            shared.counts.host_import_read_apart(false);
+        }
+        for reason in ReadApart::ALL {
+            if read_apart & reason.bit() != 0 {
+                shared.counts.host_import_read_apart_for(reason, false);
+            }
+        }
+        if let Some(because) = self.kept_because {
+            shared.counts.host_import_kept(because, false);
+        }
+        if self.unlisted.load(Ordering::Relaxed) {
+            shared.counts.host_import_rebound_unlisted(false);
+        }
         drop(busy);
         // Once freed, the keep-alive goes, and the deallocators that waited for the free run.
         let kept = lock(&self.kept).take();
@@ -968,6 +1150,7 @@ impl Drop for HostImport {
                 residency.let_go();
                 Some(Box::new(after) as Box<dyn Send>)
             }
+                }
         };
         match (freed, length) {
             // Freed now: what waited goes here.
@@ -991,6 +1174,21 @@ impl Drop for HostImport {
             (None, None) => {}
         }
     }
+}
+
+/// Count and announce once that a deallocator of a no-copy buffer of `length` bytes waits for
+/// the batches submitted before its release (`freed_memory.rs`): its import's memory, freed,
+/// waits for them, and the deallocator with it.
+    device.shared().counts.host_deallocator_delayed();
+    device.degrade_once(Degradation::HostDeallocatorDelayed, || {
+        (
+            format!("a no-copy buffer of {length} bytes"),
+            "its pages' import, freed, waits for the batches submitted before its release: the \
+             device's driver fails pending work whose pipelines read device addresses where \
+             such memory is freed, and the caller gave no keep-alive"
+                .to_owned(),
+        )
+    });
 }
 
 /// What goes once a host import's memory is freed: the keep-alive of the pages that went while it
@@ -1118,22 +1316,24 @@ pub(super) struct Bound {
 
 impl OwnBytes {
     /// `f` of the pages the buffer lies in now: a detached buffer's stand-in (`Detached`). A
-    /// read of a no-copy buffer's import other than a blit's, which keeps it imported for good
-    /// (`HostImport::pages`).
-    fn with<R>(&self, f: impl FnOnce(&Pages) -> R) -> R {
+    /// read of a no-copy buffer's import other than a blit's, for `reason`, which keeps it
+    /// imported for good (`HostImport::pages`).
+    fn with<R>(&self, reason: ReadApart, f: impl FnOnce(&Pages) -> R) -> R {
         match &self.lie {
             Lie::Fixed(fixed) => f(&fixed.pages),
             Lie::Host(cell) => match cell.lying() {
-                Lying::In(pages) => f(&pages.import.pages()),
+                Lying::In(pages) => f(&pages.import.pages(reason)),
                 Lying::Detached(detached) => f(&detached.pages),
             },
         }
     }
 
     /// [`with`](Self::with) while the buffer lies in pages: `None` while it is detached.
+    fn with_attached<R>(&self, reason: ReadApart, f: impl FnOnce(&Pages) -> R) -> Option<R> {
         match &self.lie {
             Lie::Fixed(fixed) => Some(f(&fixed.pages)),
             Lie::Host(cell) => match cell.lying() {
+                Lying::In(pages) => Some(f(&pages.import.pages(reason))),
                 Lying::Detached(_) => None,
             },
         }
@@ -1791,10 +1991,17 @@ impl Device {
         let lie = match owner {
             // A no-copy buffer's pages are its until a rebind (`rebind.rs`).
             Owner::Caller => {
+                // Kept imported where nothing imports it again: a heap's, an import of dma-bufs
+                // whose descriptors did not fit (counted as such), or one by pointer.
+                let kept = match (of_heap, pages.memory.placement.over_dma_buf()) {
+                    (true, _) => Some(KeptBecause::Heap),
+                    (false, true) => None,
+                    (false, false) => Some(KeptBecause::Pointer),
+                };
                 #[cfg(unix)]
-                let import = self.host_import(pages, again);
+                let import = self.host_import(pages, again, kept);
                 #[cfg(not(unix))]
-                let import = Arc::new(HostImport::new(self, pages));
+                let import = Arc::new(HostImport::new(self, pages, kept));
                 self.host_lie(identity.key, import, release)
             }
             Owner::Runtime | Owner::Vulkan => Lie::Fixed(Arc::new(FixedPages {
@@ -1816,19 +2023,26 @@ impl Device {
 
     /// The import of a no-copy buffer's `pages`: one the device releases while idle where
     /// `again` imports them again and the device keeps a stand-in for it and a thread to release
-    /// it (`host_residency.rs`), else one it keeps.
+    /// it (`host_residency.rs`), else one it keeps, for `kept` where nothing imports it again.
     #[cfg(unix)]
-    fn host_import(&self, pages: Pages, again: Option<Again>) -> Arc<HostImport> {
-        let stand_in = again.as_ref().and_then(|_| self.detach_stand_in().ok());
-        let (Some(again), Some(stand_in)) =
-            (again, stand_in.as_ref().and_then(Buffer::fixed_pages))
-        else {
-            return Arc::new(HostImport::new(self, pages));
+    fn host_import(
+        &self,
+        pages: Pages,
+        again: Option<Again>,
+        kept: Option<KeptBecause>,
+    ) -> Arc<HostImport> {
+        let Some(again) = again else {
+            return Arc::new(HostImport::new(self, pages, kept));
+        };
+        let stand_in = self.detach_stand_in().ok();
+        let Some(stand_in) = stand_in.as_ref().and_then(Buffer::fixed_pages) else {
+            let kept = Some(KeptBecause::NoStandIn);
+            return Arc::new(HostImport::new(self, pages, kept));
         };
         let import = Arc::new(HostImport::releasable(self, pages, again, stand_in));
         if !self.shared().residency.note(&import) {
             // No thread releases it: kept imported.
-            import.expose();
+            import.expose(ReadApart::Unreleased);
         }
         import
     }
@@ -1869,7 +2083,8 @@ impl Device {
             texels: Mutex::new(Vec::new()),
             aliases: Mutex::new(Vec::new()),
             textures: Mutex::new(TexturesOver::default()),
-            exposed: AtomicBool::new(false),
+            exposed: AtomicU8::new(0),
+            device: self.clone(),
         });
         self.shared().rebinds.register(key, &cell);
         Lie::Host(cell)
@@ -1935,8 +2150,16 @@ impl Device {
         base: u64,
         reach: u64,
     ) -> Arc<HostPages> {
-        let import = HostImport::new(self, self.pages_of(raw, memory, offset, base, reach));
+        let pages = self.pages_of(raw, memory, offset, base, reach);
+        let import = HostImport::new(self, pages, Some(KeptBecause::Rebind));
         Arc::new(HostPages::new(Arc::new(import)))
+    }
+
+    /// Host pages a rebind gives a no-copy buffer lying in `import`, the import of the same bytes
+    /// a live no-copy buffer was made over (`rebind.rs`, `host_aliases.rs`), without their
+    /// release, as [`Device::host_pages`] gives them.
+    pub(super) fn pages_in_import(&self, import: Arc<HostImport>) -> Arc<HostPages> {
+        Arc::new(HostPages::new(import))
     }
 
     /// The Vulkan device address of `raw`, where the device enables `bufferDeviceAddress`.
@@ -2079,6 +2302,7 @@ impl Buffer {
     /// for a heap's buffer, whose bytes are its heap's. A buffer's pages are its for good.
     pub(super) fn own_pages_device_local(&self) -> Option<bool> {
         match &self.0.bytes {
+            Bytes::Own(own) => own.with(ReadApart::Binding, |pages| {
                 let memory = lock(&self.0.device.shared().memory);
                 Some(memory.is_device_local(&pages.memory.placement))
             }),
@@ -2204,13 +2428,26 @@ impl Buffer {
     /// buffer takes its offsets from here, since a buffer's byte 0 may lie past the `VkBuffer`'s:
     /// a no-copy buffer's ([`Buffer::base`]), and a heap buffer's, which is its heap's.
     pub(super) fn at(&self, offset: u64) -> (vk::Buffer, u64) {
+        self.at_for(offset, ReadApart::Binding)
+    }
+
+    /// [`Buffer::at`] for `reason`, which a no-copy buffer's import counts its read apart for
+    /// (`HostImport::note_read_apart`).
+    pub(super) fn at_for(&self, offset: u64, reason: ReadApart) -> (vk::Buffer, u64) {
         match &self.0.bytes {
+            Bytes::Own(own) => own.with(reason, |pages| (pages.raw, pages.base + offset)),
+            Bytes::Heap(bytes) => bytes.bytes.at_for(bytes.offset + offset, reason),
+        }
+    }
 
     /// [`Buffer::at`] while the buffer's bytes lie in pages, read with them at once: `None` while
     /// they are detached (`detach.rs`), when its `VkBuffer` is the device's stand-in, which holds
     /// none of its bytes.
     pub(super) fn attached_at(&self, offset: u64) -> Option<(vk::Buffer, u64)> {
         match &self.0.bytes {
+            Bytes::Own(own) => {
+                own.with_attached(ReadApart::Binding, |pages| (pages.raw, pages.base + offset))
+            }
             Bytes::Heap(bytes) => bytes.bytes.attached_at(bytes.offset + offset),
         }
     }
@@ -2230,8 +2467,23 @@ impl Buffer {
     /// (`ArgumentTable::stage_table`) count from there, [`Buffer::base`] bytes before byte 0.
     /// A multiple of 256 bytes, so every alignment Vulkan asks of an offset holds of it.
     pub(super) fn space(&self) -> (vk::Buffer, u64) {
-        let (raw, start) = self.at(0);
-        (raw, start - self.base())
+        // `at(0)` less `base()`, from one look at where the buffer lies.
+        let space = |pages: &Pages, base: u64| (pages.raw, pages.base - base);
+        match &self.0.bytes {
+            Bytes::Own(own) => match &own.lie {
+                Lie::Fixed(fixed) => space(&fixed.pages, Shape::of(&fixed.pages).base),
+                Lie::Host(cell) => match cell.lying() {
+                    Lying::In(pages) => space(
+                        &pages.import.pages(ReadApart::Binding),
+                        pages.import.shape.base,
+                    ),
+                    Lying::Detached(detached) => {
+                        space(&detached.pages, Shape::of(&detached.pages).base)
+                    }
+                },
+            },
+            Bytes::Heap(bytes) => bytes.bytes.at_for(bytes.offset, ReadApart::Binding),
+        }
     }
 
     /// Where the buffer's byte 0 lies in its bind layer space ([`Buffer::space`]): 0, but for a
@@ -2244,12 +2496,38 @@ impl Buffer {
         }
     }
 
+    /// [`base`](Self::base) and [`device_address`](Self::device_address) together, from one look
+    /// at where the buffer lies, a no-copy buffer's pages read for `reason`
+    /// (`HostImport::note_read_apart`): what a binding of it reads (`argument_table::bound_buffer`),
+    /// each as its own call reads it.
+    pub(super) fn base_and_device_address(&self, reason: ReadApart) -> (u64, Option<u64>) {
+        let address = |pages: &Pages| Some(pages.memory.device_address? + pages.base);
+        match &self.0.bytes {
+            Bytes::Own(own) => match &own.lie {
+                Lie::Fixed(fixed) => (Shape::of(&fixed.pages).base, address(&fixed.pages)),
+                Lie::Host(cell) => match cell.lying() {
+                    Lying::In(pages) => {
+                        let read = pages.import.pages(reason);
+                        (pages.import.shape.base, address(&read))
+                    }
+                    Lying::Detached(detached) => {
+                        (Shape::of(&detached.pages).base, address(&detached.pages))
+                    }
+                },
+            },
+            Bytes::Heap(bytes) => (
+                0,
+                (bytes.bytes.device_address()).map(|address| address + bytes.offset),
+            ),
+        }
+    }
+
     /// The memory the buffer's bytes lie in: the `VkDeviceMemory`, the offset of the buffer's
     /// first byte in it, and its memory type's index. A texture over the buffer aliases it there
     /// (`texture.rs`).
     pub(super) fn memory(&self) -> (vk::DeviceMemory, u64, u32) {
         match &self.0.bytes {
-            Bytes::Own(own) => own.with(|pages| {
+            Bytes::Own(own) => own.with(ReadApart::Texture, |pages| {
                 let placement = &pages.memory.placement;
                 (
                     placement.memory,
@@ -2373,7 +2651,7 @@ impl Buffer {
     /// `bufferDeviceAddress`.
     pub(super) fn device_address(&self) -> Option<u64> {
         match &self.0.bytes {
-            Bytes::Own(own) => own.with(|pages| {
+            Bytes::Own(own) => own.with(ReadApart::Binding, |pages| {
                 let address = pages.memory.device_address?;
                 Some(address + pages.base)
             }),
@@ -2452,7 +2730,11 @@ impl Buffer {
                     owner: Owner::Caller,
                     ..
                 },
-            ) => Some((self.gpu_address(), own.reserved, self.contents()?)),
+            ) => Some((
+                self.exposed_address(ReadApart::SecondBuffer),
+                own.reserved,
+                self.contents()?,
+            )),
             Bytes::Own(_) | Bytes::Heap(_) => None,
         }
     }
@@ -2535,32 +2817,40 @@ impl Buffer {
     }
 
     /// Keep a no-copy buffer's import imported for good from now on, its Metal address handed
-    /// out (`host_residency.rs`): imported again now where the device released it, and its
-    /// live-table range read again where one was noted before a release.
-    fn expose(&self) {
+    /// out for `reason` (`host_residency.rs`): imported again now where the device released it,
+    /// and its live-table range read again where one was noted before a release.
+    fn expose(&self, reason: ReadApart) {
         let Some(cell) = self.host_cell() else {
             return;
         };
-        if cell.exposed.load(Ordering::Acquire) {
+        let bit = reason.bit();
+        let before = cell.exposed.load(Ordering::Acquire);
+        if before & bit != 0 {
             return;
         }
         if let Some(pages) = cell.current() {
-            if pages.import.expose() {
-                self.device().shared().live_buffers.refresh(self);
+            match before {
+                0 => {
+                    if pages.import.expose(reason) {
+                        self.device().shared().live_buffers.refresh(self);
+                    }
+                }
+                // Kept imported already: the new reason is only counted.
+                _ => pages.import.note_read_apart(reason),
             }
         }
-        cell.exposed.store(true, Ordering::Release);
+        cell.exposed.fetch_or(bit, Ordering::Release);
     }
 
     /// [`Buffer::at`] for a blit's command, which reads the `VkBuffer` without exposing the
     /// buffer: a no-copy buffer's import the device released while idle is imported again first
-    /// (`host_residency.rs`). With what the command buffer holds until it completed: the
-    /// import's objects, where the device may release them. Refused where the device cannot
-    /// import them again.
+    /// (`host_residency.rs`). With what the command buffer holds of the import's objects, where
+    /// the device may release them (`rebind::ImportHold`). Refused where the device cannot import
+    /// them again.
     pub(super) fn blit_at(
         &self,
         offset: u64,
-    ) -> Result<((vk::Buffer, u64), Option<Arc<dyn Any + Send + Sync>>), Error> {
+    ) -> Result<((vk::Buffer, u64), Option<ImportHold>), Error> {
         if let Bytes::Own(OwnBytes {
             lie: Lie::Host(cell),
             ..
@@ -2581,27 +2871,18 @@ impl Buffer {
         self.pages_cell()?.current()
     }
 
-    /// Where the bytes of the host pages the buffer lies in ([`Buffer::pages_cell`]) start in
-    /// their memory, which an aliasing image's place in them is reckoned from. Refused (an
-    /// internal error) for a buffer over no host pages.
-    pub(super) fn pages_base(&self) -> Result<u64, Error> {
-        let cell = self
-            .pages_cell()
-            .ok_or_else(|| internal("an aliasing image over host pages of a buffer over none"))?;
-        // A detached buffer's bytes are in no memory: no texture is made over them.
-        let pages = cell
-            .current()
-            .ok_or(Error::NotImplemented(RuntimeGap::DetachTextures))?;
-        Ok(pages.memory().1)
-    }
-
-    /// Note `watch`, an aliasing image bound to the host pages the buffer lies in, where a
-    /// rebind gives those other pages (a no-copy buffer's, or for a heap's buffer its heap's):
-    /// the rebind makes the image again over them. A buffer over no host pages notes nothing.
-    pub(super) fn watch_alias(&self, watch: AliasWatch) {
-        if let Some(cell) = self.pages_cell() {
-            cell.watch_alias(watch);
-        }
+    /// The host imports `buffers` lie in now, each counted once however many lie in it
+    /// (`host_aliases.rs`): a committed command buffer's used buffers'
+    /// (`WorkCounts::host_imports_used`). Buffers over no host pages count none.
+    pub(super) fn distinct_host_imports(buffers: &[Buffer]) -> u64 {
+        let mut imports: Vec<*const HostImport> = buffers
+            .iter()
+            .filter_map(|buffer| buffer.host_pages())
+            .map(|pages| Arc::as_ptr(&pages.import))
+            .collect();
+        imports.sort_unstable();
+        imports.dedup();
+        imports.len() as u64
     }
 
     /// Note `noted`, a texture over the buffer's bytes (`TexturesOver`), where they are host
@@ -2711,7 +2992,14 @@ impl Buffer {
     /// observes) is kept imported for good from this call on: a command may reach it unnamed by
     /// this address.
     pub fn gpu_address(&self) -> GpuAddress {
-        self.expose();
+        self.exposed_address(ReadApart::Address)
+    }
+
+    /// [`Buffer::gpu_address`] for the runtime's use that hands the address on for `reason` (a
+    /// binding's, a buffer sharing the range): the import kept as `gpu_address` keeps it,
+    /// counted for that reason.
+    pub(super) fn exposed_address(&self, reason: ReadApart) -> GpuAddress {
+        self.expose(reason);
         self.0.address
     }
 

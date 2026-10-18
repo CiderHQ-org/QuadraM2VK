@@ -1460,6 +1460,15 @@ pub enum DriverFact {
     /// or `shared-exponent-kept`, and its exact tile store (`TileStorePolicy::Exact`) adds no load
     /// pass for such an attachment.
     TileStoreIsMetals,
+    /// A buffer bound to memory the driver imported from a host pointer
+    /// (`VK_EXT_external_memory_host`) reads and writes, at each submission, the pages mapped at
+    /// that pointer then: pages the process maps over the address after the import (`mmap` with
+    /// `MAP_FIXED`) take the place of those it was made over, for the GPU as for the CPU. Vulkan
+    /// states nothing of a remap under a live import, and Metal's no-copy buffer keeps the pages
+    /// wired when it was made. ANV on i915 imports a pointer as a userptr object, whose pages the
+    /// kernel gets again at the next execbuffer once a remap invalidated them (Linux 7.2.9's
+    /// `i915_gem_object_userptr_submit_init`, or at its first execbuffer, before which nothing was
+    PointerImportsFollowTheirAddress,
 }
 
 impl DriverFact {
@@ -1885,6 +1894,14 @@ const DYNAMIC_RESTART_WARNING: DriverDiagnostic = DriverDiagnostic {
 /// left a third answer; RADV, Mesa 26.0.8, on the RX 7900 XTX, clean at dd718a7905 but an
 /// unmeasured identity (`MEASURED_DEVICES`); and every GPU and release not measured, which store
 /// with `STORE`.
+///
+/// `PointerImportsFollowTheirAddress`: ANV, Mesa 26.2.4 on the Iris Xe of RPL-P under Linux 7.2.9's
+/// i915, measured with a probe outside the runtime (2026-10-17): a page of a `memfd` filled with
+/// `0xaa`, mapped shared at an address and imported by its pointer as a buffer's memory, read
+/// `0xaa` through a copy; another `memfd`'s page of `0xbb` mapped over the address with `MAP_FIXED`,
+/// the next copy read `0xbb`; a page of `0xa2` imported and replaced by one of `0xb2` before any
+/// submission, the first copy read `0xb2`. lavapipe (`MESA_LLVMPIPE`) from Mesa 26.0.8 through
+/// 26.2.4 by construction, read in both releases' `lvp_AllocateMemory`, which binds an import's
 pub(crate) const MEASURED: &[Measured<DriverFact>] = &[
     Measured {
         fact: DriverFact::RobustIndexFetchReadsZero,
@@ -2389,6 +2406,22 @@ pub(crate) const MEASURED: &[Measured<DriverFact>] = &[
         device: None,
         first: moltenvk(1, 4, 1),
         last: moltenvk(1, 4, 1),
+    },
+    Measured {
+        fact: DriverFact::PointerImportsFollowTheirAddress,
+        driver: DriverId::INTEL_OPEN_SOURCE_MESA,
+        vendor: Some(INTEL_VENDOR_ID),
+        device: Some(INTEL_IRIS_XE_RPL_P),
+        first: mesa(26, 2, 4),
+        last: mesa(26, 2, 4),
+    },
+    Measured {
+        fact: DriverFact::PointerImportsFollowTheirAddress,
+        driver: DriverId::MESA_LLVMPIPE,
+        vendor: None,
+        device: None,
+        first: mesa(26, 0, 8),
+        last: mesa(26, 2, 4),
     },
         device: Some(INTEL_IRIS_XE_RPL_P),
         first: mesa(26, 2, 4),

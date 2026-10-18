@@ -203,6 +203,12 @@ recorded here.
 Open differences from Metal that no note announces yet, and runtime costs still above the
 driver's. Each is open work.
 
+- **A no-copy buffer imported by its pointer follows a remap of its pages** on a driver whose
+  pointer imports follow their address (`DriverFact::PointerImportsFollowTheirAddress`: ANV on
+  `MAP_FIXED`) are what its later command buffers read and write, where Metal's buffer keeps the
+  pages it was made over. `HostMemory::new`'s contract forbids such a remap under a live buffer,
+  and no notice tells of it. An import of dma-bufs (`HostMemory::with_dma_buf`) keeps its pages on
+  every driver, but is taken only where the device refuses the pointer.
 - **A runtime sampler's nearest sample of an 8-bit sRGB texture under native sampling.** On a
   device that samples the format, the sample keeps the device's sRGB decode (announced as
   `SrgbTexelDecode`), where the table's exact decode of the one texel it reads would cost little:

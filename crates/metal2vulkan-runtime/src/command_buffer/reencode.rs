@@ -25,6 +25,7 @@
 //!   as before. So does any encoder of a kind that logs nothing (a render encoder's).
 
 use super::{lock, CommandBuffer, CommandBufferShared, State};
+use crate::device::functions::Vk;
 use crate::encoder::{Replayed, Segment};
 use crate::replay::Replay;
 use crate::residency::Residency;
@@ -88,7 +89,8 @@ impl CommandBufferShared {
                 continue;
             };
             // What a refused splice held goes after the lock.
-            let spliced = lock(&self.state).splice_replay(at, replayed, residency);
+            let vk = device.shared().vk();
+            let spliced = lock(&self.state).splice_replay(vk, at, replayed, residency);
             match spliced {
                 Ok(()) => counts.encoder_reencoded(),
                 Err(unspliced) => {
@@ -134,9 +136,11 @@ impl State {
     /// recording retained stays retained; its `VkCommandBuffer`s go with the pool unsubmitted.
     /// Refused, changing nothing and giving `replayed` back, where its place is not one part
     /// without segments but pending dispatches' (which go, the encoding again having recorded them
-    /// at once), or the command buffer was submitted.
+    /// at once), or the command buffer was submitted. Its replays hold what its commands took
+    /// with `device`, the device's functions (`Replays::hold`).
     pub(super) fn splice_replay(
         &mut self,
+        device: &Vk,
         at: usize,
         replayed: Replayed,
         residency: Option<Residency>,
@@ -173,8 +177,9 @@ impl State {
             heaps,
         } = replayed;
         // Held weakly until the first submission, as the commit held what the first recording
-        // took.
-        taken.wait();
+        // took, and by its replays until they are replayed: what they held last goes here, as
+        // it does without them (`Replays::hold`, with `device`, the device's functions).
+            Some(replays) => drop(replays.hold(device, |pages| taken.wait(pages))),
         let recorded = &mut self.recorded[part];
         recorded.raws = raws;
         recorded.summary = summary;

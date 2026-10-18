@@ -2,7 +2,7 @@
 //! purgeable state on the device the cfg selects, under the validation layer. Each test fails on
 //! any validation message, so a leaked import or buffer fails it too.
 //!
-//! The host memory is the consumer's (`paravirt-decompile`): guest RAM is one shared memory
+//! The host memory is the consumer's (reims-vgpu): guest RAM is one shared memory
 //! object, and the buffers wrap a second, 16-KiB-aligned mapping of some of its pages
 //! (`gpu_task/memory.rs`'s `no_copy_buffer`, with a deallocator that unmaps it; `display/efi.rs`'s
 //! framebuffer, with none), with resource options 0. The CPU writes through the guest RAM

@@ -282,6 +282,69 @@ fn rebinding_one_of_two_buffers_over_one_memory_moves_it_alone() {
     });
 }
 
+/// A rebind onto the bytes a live no-copy buffer was made over lies in that buffer's import, as a
+/// buffer made over them does: it asks the kernel about none of their mappings
+/// (`WorkCounts::host_mappings_queried`, which Linux's imports count) and imports nothing, and the
+/// GPU reads and writes those bytes through either buffer. Rebound back onto bytes no live buffer
+/// was made over, it imports them, asking about their mapping, and reads them.
+#[test]
+fn a_rebind_onto_a_live_buffer_s_bytes_lies_in_its_import() {
+    on_device(|device| {
+        let queue = device.new_command_queue().unwrap();
+        let (live_seen, moved_seen, onto_seen, back_seen) = (
+            Arc::new(Seen::default()),
+            Arc::new(Seen::default()),
+            Arc::new(Seen::default()),
+            Arc::new(Seen::default()),
+        );
+        let queried = || device.work_counts().host_mappings_queried;
+        let shared = host(LEN, 5);
+        let shared_pointer = shared.pointer();
+        let Some(live) = buffer_over(device, shared, &live_seen) else {
+            return;
+        };
+        let Some(moved) = buffer_over(device, host(LEN, 6), &moved_seen) else {
+            return;
+        };
+        let before = queried();
+        // SAFETY: the shared mapping lives until the live buffer goes, after the moved one leaves
+        // it; no other thread encodes or commits meanwhile.
+        unsafe {
+            moved.rebind_bytes_no_copy(
+                HostMemory::new(shared_pointer),
+                Some(recording(&onto_seen, ())),
+                None,
+            )
+        }
+        .unwrap();
+        assert_eq!(queried() - before, 0, "mappings asked for the live import");
+        assert_eq!(moved.contents(), Some(shared_pointer));
+        assert_eq!(gpu_read(&queue, &moved, 0..64), counting(LEN, 5)[..64]);
+        gpu_fill(&queue, &moved, 0..16, 0x5d);
+        gpu_fill(&queue, &live, 16..32, 0x2e);
+        let both = [[0x5d; 16], [0x2e; 16]].concat();
+        // SAFETY: the shared mapping lives; no command writes it now.
+        assert_eq!(unsafe { at(shared_pointer, 0..32) }, both);
+        assert_eq!(gpu_read(&queue, &live, 0..32), both);
+        assert_eq!(gpu_read(&queue, &moved, 0..32), both);
+        // Back onto fresh bytes: imported, their mapping asked about where Linux counts it.
+        let back = host(LEN, 7);
+        let before = queried();
+        rebind(&moved, back, &back_seen).unwrap();
+        let asked = queried() - before;
+        assert_eq!(
+            asked > 0,
+            cfg!(target_os = "linux"),
+            "{asked} mappings asked"
+        );
+        assert_eq!(gpu_read(&queue, &moved, 0..64), counting(LEN, 7)[..64]);
+        ran(&onto_seen, shared_pointer, LEN, &both[..16], Thread::Any);
+        drop(moved);
+        drop(live);
+        eprintln!("REBIND onto a live import: no mapping asked; back: {asked} asked");
+    });
+}
+
 /// The consumer's task memory, rebound: a public kernel case runs over no-copy buffers, which are
 /// then rebound to new pages holding the case's inputs; the case run again reads them and writes
 /// its output into the new pages, matching Metal's output, at the same `gpu_address`es.

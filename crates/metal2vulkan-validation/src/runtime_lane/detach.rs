@@ -19,16 +19,21 @@
 //!   first submission, the rebind encodes a compute or blit encoder again over them, and the
 //!   command buffer completes over the new pages, as Metal's (`EncodedUseRebound` before). The
 //!   layer reports nothing: no Vulkan command takes the detached buffer's stand-in.
+//! - **Racing a commit.** A detach on one thread while another commits a command buffer whose
+//!   command names the buffer runs the old pages' deallocator in one of the two calls, wherever
+//!   the device's recorder replays the commands, and announces nothing.
 //! - **No memory.** A detach places no memory of the bytes it detaches: once the device's
 //!   stand-in is made, detaching a large heap, and a large buffer, allocates no device memory.
 //! - **Textures**: `detach_textures.rs`.
 
-use super::degrade_notices::{assert_made_once, on_device as on_device_noticed};
+use super::degrade_notices::{
+    assert_made_once, assert_once_allowing, on_device as on_device_noticed,
+};
 use super::host_memory::{gpu_read, on_device, recording, Mapping, Seen};
 use super::no_copy_heaps::shared;
 use super::rebind_reach::{
-    buffer_len, buffer_over, deallocated, heap_member, member_over, node, pages, rebind_heap_to,
-    rebind_to, walk, Outputs, Uses, Walked, A, B, POINTER_WALKER,
+    buffer_len, buffer_over, deallocated, heap_member, kept_member_over, member_over, node, pages,
+    rebind_heap_to, rebind_to, walk, Outputs, Uses, Walked, A, B, POINTER_WALKER,
 };
 use super::shared_kinds;
 use super::{
@@ -616,4 +621,104 @@ fn a_detach_of_a_large_heap_allocates_no_device_memory() {
             LARGE >> 20
         );
     });
+}
+
+/// The rounds of [`a_detach_racing_a_commit_runs_the_deallocator_in_one_of_the_two_calls`], for
+/// each form: two sweeps of the offsets.
+const RACES: u32 = 640;
+
+/// How far apart the detach and the commit of a race start, at most, either first.
+const RACE_SPAN: Duration = Duration::from_micros(40);
+
+/// How far one race's offset is from the last's.
+const RACE_STEP: Duration = Duration::from_nanos(250);
+
+/// When a race's two calls start, after its other thread is spawned.
+const RACE_LEAD: Duration = Duration::from_micros(500);
+
+/// Spin until `at`.
+fn spin_until(at: Instant) {
+    while Instant::now() < at {
+        std::hint::spin_loop();
+    }
+}
+
+/// A detach on one thread racing the commit, on another, of a command buffer whose blit names the
+/// buffer: the old pages' deallocator runs once, in one of the two calls (the detach where it lets
+/// go of the pages last, the commit where its encoder held them last), wherever the device's
+/// recorder replays the command buffer's commands, and nothing is announced: with a keep-alive
+/// and without one. The command buffer, which an event holds back until both calls returned,
+/// then fails `DetachedBacking`. The races start the two calls up to 40 us apart, either first,
+/// swept in steps of 0.25 us, so that many land inside each other.
+#[test]
+fn a_detach_racing_a_commit_runs_the_deallocator_in_one_of_the_two_calls() {
+    for (form, kept) in [("no keep-alive", false), ("keep-alive", true)] {
+        on_device_noticed(|device, messages| {
+            let queue = device.new_command_queue().unwrap();
+            let event = device.new_shared_event().unwrap();
+            let made = || match kept {
+                true => kept_member_over(device, A).map(|(buffer, seen, _)| (buffer, seen)),
+                false => member_over(device, A),
+            };
+            let detacher = std::thread::current().id();
+            let (mut in_detach, mut in_commit, mut late, mut elsewhere) = (0, 0, 0, 0);
+            let before = device.work_counts();
+            let span = RACE_SPAN.as_nanos() as i64;
+            for round in 0..RACES {
+                let Some((buffer, seen)) = made() else {
+                    return;
+                };
+                let value = u64::from(round) + 1;
+                let command_buffer = queue.command_buffer().unwrap();
+                command_buffer
+                    .encode_wait_for_event(EventRef::from(&event), value)
+                    .unwrap();
+                let mut blit = command_buffer.blit_command_encoder().unwrap();
+                blit.fill_buffer(&buffer, 0..16, 0x5a).unwrap();
+                blit.end_encoding().unwrap();
+                // The commit's start less the detach's, swept over the span.
+                let step = RACE_STEP.as_nanos() as i64;
+                let offset = (i64::from(round) * step) % (2 * span) - span;
+                let start = Instant::now() + RACE_LEAD;
+                let late_by = |ns: i64| Duration::from_nanos(ns.max(0) as u64);
+                let (commit_at, detach_at) = (start + late_by(offset), start + late_by(-offset));
+                let committer = std::thread::scope(|scope| {
+                    let committing = scope.spawn(|| {
+                        spin_until(commit_at);
+                        command_buffer.commit().unwrap();
+                        std::thread::current().id()
+                    });
+                    spin_until(detach_at);
+                    detach(&buffer);
+                    committing.join().unwrap()
+                });
+                let ran = *seen.thread.lock().unwrap();
+                match (seen.runs.load(Ordering::SeqCst), ran) {
+                    (1, Some(thread)) if thread == detacher => in_detach += 1,
+                    (1, Some(thread)) if thread == committer => in_commit += 1,
+                    (0, _) => late += 1,
+                    _ => elsewhere += 1,
+                }
+                event.set_signaled_value(value);
+                command_buffer.wait_until_completed_for(WAIT).unwrap();
+                detached_backing(&command_buffer, form);
+                deallocated(&seen);
+                assert_eq!(seen.runs.load(Ordering::SeqCst), 1, "{form}: ran once");
+            }
+            let inline = device.work_counts().command_buffers_replayed_inline
+                - before.command_buffers_replayed_inline;
+            eprintln!(
+                "DETACH race {} ({form}): {RACES} races, the deallocator ran in the detach {in_detach}, \
+                 in the commit {in_commit}, after both returned {late}, on another thread \
+                 {elsewhere}; {inline} command buffers replayed off the recorder's thread",
+                device.name()
+            );
+            assert_eq!(
+                (late, elsewhere),
+                (0, 0),
+                "{form}: the deallocator ran outside the detach and the commit"
+            );
+            assert_once_allowing(&messages.take_notices(), &[], &shared_kinds(device));
+        });
+    }
 }

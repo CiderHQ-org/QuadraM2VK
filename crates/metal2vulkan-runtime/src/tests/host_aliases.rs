@@ -5,6 +5,7 @@ use super::super::memory::MemoryClass;
 use super::super::resource::ResourceKey;
 use super::super::tracker::{Access, Use, UseRange};
 use ash::vk;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 /// The registry, its imports stood in for by numbers.
@@ -143,6 +144,54 @@ fn a_buffer_over_the_bytes_another_covers_lies_in_its_import() {
     drop((again, own));
 }
 
+/// The host page of the tests that name none of their own: an import's unit.
+const PAGE: u64 = 0x1000;
+
+/// A reported remap counts the ranges placed buffers lie over that have a page among its bytes
+/// rounded out to the import's unit, with or without memories noted: none for bytes beside
+/// them, one for a byte of a page one lies on, and none at all with nothing placed.
+#[test]
+fn a_reported_remap_counts_the_placed_ranges_it_touches() {
+    let aliases = Aliases::default();
+    assert_eq!(aliases.remapped(0, u64::MAX, PAGE), 0, "nothing placed");
+    let (first, second, third) = (ResourceKey::new(), ResourceKey::new(), ResourceKey::new());
+    aliases.place(first, (0x40000, 0x8000));
+    // A second key over the same bytes: one range, one import.
+    aliases.place(second, (0x40000, 0x8000));
+    // Bytes in the middle of a page past the first range's.
+    aliases.place(third, (0x50010, 0x20));
+    assert_eq!(
+        aliases.remapped(0x30000, 0x40000, PAGE),
+        0,
+        "the pages before"
+    );
+    assert_eq!(
+        aliases.remapped(0x48000, 0x50000, PAGE),
+        0,
+        "the pages between"
+    );
+    assert_eq!(aliases.remapped(0x44000, 0x44001, PAGE), 1, "a byte inside");
+    // A byte of the third's page that is not one of its bytes: its page is replaced all the same.
+    assert_eq!(
+        aliases.remapped(0x50800, 0x50900, PAGE),
+        1,
+        "a byte of its page"
+    );
+    assert_eq!(aliases.remapped(0x50800, 0x50900, 1), 0, "not its bytes");
+    assert_eq!(aliases.remapped(0x3f000, 0x51000, PAGE), 2, "both");
+    // A remap keeps the placements: the same bytes count again.
+    assert_eq!(aliases.remapped(0x44000, 0x45000, PAGE), 1, "again");
+    aliases.unplace(first);
+    assert_eq!(
+        aliases.remapped(0x44000, 0x45000, PAGE),
+        1,
+        "one key left there"
+    );
+    aliases.forget(second);
+    aliases.forget(third);
+    assert_eq!(aliases.remapped(0, u64::MAX, PAGE), 0, "all gone");
+}
+
 /// After the caller reports a remap of any byte of a memory, a later buffer over it lies in no
 /// import made before and joins no earlier key; the buffers made before keep the key they
 /// joined, and forgetting them later leaves the new buffer's memory alone. A remap of other
@@ -162,11 +211,11 @@ fn a_reported_remap_ends_the_sharing_of_imports_made_before() {
         Some(Alias { key: first })
     );
     // Bytes next to the memory, on either side: nothing changes.
-    aliases.remapped(0x30000, 0x40000);
-    aliases.remapped(0x48000, 0x50000);
+    aliases.remapped(0x30000, 0x40000, PAGE);
+    aliases.remapped(0x48000, 0x50000, PAGE);
     assert!(aliases.import(memory, MemoryClass::Shared).is_some());
     // One page inside the memory: its import is shared no more.
-    aliases.remapped(0x44000, 0x45000);
+    aliases.remapped(0x44000, 0x45000, PAGE);
     assert!(aliases.import(memory, MemoryClass::Shared).is_none());
     // A buffer made after imports anew and joins nothing; the second keeps the key it joined.
     let fresh = Arc::new(2);
@@ -339,8 +388,8 @@ fn remaps_from_any_thread_keep_the_notes_whole() {
                 let mut round = 0;
                 while !done.load(std::sync::atomic::Ordering::SeqCst) {
                     let (start, length) = memory(round);
-                    aliases.remapped(start + PAGE / 2, start + length);
-                    aliases.remapped(0, u64::MAX);
+                    aliases.remapped(start + PAGE / 2, start + length, PAGE);
+                    aliases.remapped(0, u64::MAX, PAGE);
                     round += 1;
                 }
             });
@@ -486,6 +535,185 @@ fn a_sample_through_a_second_key_waits_for_a_render_through_the_first() {
     );
 }
 
+/// A use of a range a few others meet reads them from what its range keeps, looking none up by
+/// address (`WorkCounts::host_range_lookups`), as a draw's uses of the consumer's buffers over
+/// one stretch of its pages do draw after draw; a use of a range met by more than the classes of
+/// length the lookup visits looks them up, and takes the same uses.
+#[test]
+fn a_use_reads_the_ranges_its_range_keeps_while_few() {
+    let aliases = Aliases::default();
+    let (whole, indices, rects) = (ResourceKey::new(), ResourceKey::new(), ResourceKey::new());
+    // Three classes of length: a page, two pages and three (up to four).
+    aliases.place(whole, (0x10_0000, 0x3000));
+    aliases.place(indices, (0x10_0000, 0x1000));
+    aliases.place(rects, (0x10_1000, 0x2000));
+    let uses = [sample(indices, 0x100..0x200), sample(rects, 0..0x2000)];
+    let carried = vec![
+        uses[0].clone(),
+        uses[1].clone(),
+        sample(whole, 0x100..0x200),
+        sample(whole, 0x1000..0x3000),
+    ];
+    for _ in 0..100 {
+        assert_eq!(aliases.augment(&uses), Some(carried.clone()));
+    }
+    // The whole range, met by two ranges, reads them too, in the lookup's order.
+    let all = [write(whole, 0..0x3000)];
+    let met = vec![
+        all[0].clone(),
+        write(indices, 0..0x1000),
+        write(rects, 0..0x2000),
+    ];
+    assert_eq!(aliases.augment(&all), Some(met));
+    assert_eq!(aliases.range_lookups(), 0);
+    // Four quarter pages more inside it, a fourth class: met by six ranges, more than the four
+    // classes, it looks them up; each quarter page, met by two, reads them.
+    let quarters: Vec<ResourceKey> = (0..4).map(|_| ResourceKey::new()).collect();
+    for (quarter, &key) in (0..4u64).zip(&quarters) {
+        aliases.place(key, (0x10_0000 + quarter * 0x800, 0x400));
+    }
+    assert_eq!(
+        aliases.augment(&[write(whole, 0x1800..0x1c00)]),
+        Some(vec![
+            write(whole, 0x1800..0x1c00),
+            write(quarters[3], 0..0x400),
+            write(rects, 0x800..0xc00),
+        ])
+    );
+    assert_eq!(aliases.range_lookups(), 1);
+    assert_eq!(
+        aliases.augment(&[sample(quarters[1], 0..0x400)]),
+        Some(vec![
+            sample(quarters[1], 0..0x400),
+            sample(indices, 0x800..0xc00),
+            sample(whole, 0x800..0xc00),
+        ])
+    );
+    assert_eq!(aliases.range_lookups(), 1);
+}
+
+/// The class of length `length` as the lookup by address orders ranges (`host_aliases::class`):
+/// the least `b` with `length <= 2^b`.
+fn class_of(length: u64) -> u32 {
+    u64::BITS - length.saturating_sub(1).leading_zeros()
+}
+
+/// A model of the placements: each range of bytes by its first byte and length, with its key,
+/// how many keys lie over it, and whether its key does.
+type Model = BTreeMap<(u64, u64), (ResourceKey, usize, bool)>;
+
+/// `key`, which lay over `was`, lies over no bytes in `model` from now on.
+fn model_unplace(model: &mut Model, key: ResourceKey, was: Option<(u64, u64)>) {
+    let Some(was) = was else {
+        return;
+    };
+    let range = model.get_mut(&was).expect("a placed key's range");
+    range.1 -= 1;
+    if range.0 == key {
+        range.2 = false;
+    }
+    if range.1 == 0 {
+        model.remove(&was);
+    }
+}
+
+/// The uses a use of `bytes` of `key`, over `own`, takes beside its own in `model`: its range's
+/// key where another, and the key of each other range its bytes meet, clipped, in the lookup's
+/// order; none where its range is not crowded.
+fn model_sharing(
+    model: &Model,
+    key: ResourceKey,
+    own: (u64, u64),
+    bytes: std::ops::Range<u64>,
+) -> Vec<Use<ResourceKey>> {
+    let (range_key, count, first) = model[&own];
+    let end = own.0 + own.1;
+    let meets = |other: &(u64, u64)| *other != own && other.0 < end && own.0 < other.0 + other.1;
+    let mut taken = Vec::new();
+    if count == 1 && first && !model.keys().any(meets) {
+        return taken;
+    }
+    if range_key != key {
+        taken.push(write(range_key, bytes.clone()));
+    }
+    let (from, to) = (own.0 + bytes.start.min(own.1), own.0 + bytes.end.min(own.1));
+    let mut others: Vec<(&(u64, u64), &(ResourceKey, usize, bool))> =
+        model.iter().filter(|(other, _)| meets(other)).collect();
+    others.sort_by_key(|(other, _)| (class_of(other.1), other.0, other.1));
+    for (other, (other_key, _, _)) in others {
+        let (lo, hi) = (from.max(other.0), to.min(other.0 + other.1));
+        if lo < hi {
+            taken.push(write(*other_key, lo - other.0..hi - other.0));
+        }
+    }
+    taken
+}
+
+/// Keys placed, rebound and removed at random over overlapping ranges of many lengths: each use
+/// takes exactly the uses a reading of every range gives ([`model_sharing`]), whether its
+/// range's company was read from what the range keeps or looked up by address, and both ran.
+#[test]
+fn a_use_takes_the_ranges_its_bytes_meet_kept_or_looked_up() {
+    const PAGE: u64 = 0x1000;
+    const BASE: u64 = 0x7000_0000_0000;
+    let mut state = 0x2545_f491_4f6c_dd1d_u64;
+    let mut next = move |below: u64| {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state % below
+    };
+    let aliases = Aliases::default();
+    let keys: Vec<ResourceKey> = (0..48).map(|_| ResourceKey::new()).collect();
+    let mut at: Vec<Option<(u64, u64)>> = vec![None; keys.len()];
+    let mut model = Model::new();
+    let (mut kept, mut looked_up) = (0, 0);
+    for round in 0..4000 {
+        let index = next(keys.len() as u64) as usize;
+        let key = keys[index];
+        match next(8) {
+            0 => {
+                model_unplace(&mut model, key, at[index].take());
+                aliases.unplace(key);
+            }
+            1..=2 => {
+                let class = next(7);
+                let length = (1 + next(1 << class)) * PAGE;
+                let place = (BASE + next(192) * PAGE, length);
+                model_unplace(&mut model, key, at[index].take());
+                model.entry(place).or_insert((key, 0, true)).1 += 1;
+                at[index] = Some(place);
+                aliases.place(key, place);
+            }
+            _ => {}
+        }
+        let Some(own) = at[index] else {
+            continue;
+        };
+        let start = next(own.1 + PAGE);
+        let bytes = start..start + next(own.1 + PAGE);
+        let uses = [write(key, bytes.clone())];
+        let taken = model_sharing(&model, key, own, bytes);
+        let met = model
+            .keys()
+            .filter(|other| **other != own && other.0 < own.0 + own.1 && own.0 < other.0 + other.1)
+            .count();
+        let expected: Option<Vec<Use<ResourceKey>>> =
+            (!taken.is_empty()).then(|| uses.iter().cloned().chain(taken).collect());
+        let before = aliases.range_lookups();
+        assert_eq!(aliases.augment(&uses), expected, "round {round}");
+        match aliases.range_lookups() - before {
+            0 if met > 0 => kept += 1,
+            0 => {}
+            _ => looked_up += 1,
+        }
+    }
+    assert!(
+        kept > 100 && looked_up > 100,
+        "kept {kept}, looked up {looked_up}"
+    );
+}
+
 /// The version counts each change of what `augment` reads: a buffer joining another's memory,
 /// a key placed, rebound or unplaced, a buffer forgotten. A buffer over a memory of its own, a
 /// rebound buffer leaving its memory, a reported remap, and `augment` itself change nothing it
@@ -502,6 +730,7 @@ fn the_version_counts_each_change_augment_reads() {
     assert!(joined > version, "joined");
     aliases.augment(&[write(second, 0..64)]);
     aliases.leave(second);
+    aliases.remapped(0x40000, 0x41000, PAGE);
     assert_eq!(aliases.version(), joined, "augment, leave and a remap");
     let mut last = joined;
     let mut changed = |what: &str| {

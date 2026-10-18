@@ -187,12 +187,12 @@ impl Device {
         shared.aliases.leave(key);
         // It lies over no host bytes: its uses take its stand-in.
         shared.aliases.unplace(key);
-        // The device's heap sets view the stand-ins; the images and views they named before
-        // wait for the command buffers that may read them through the sets, and the old pages,
-        // which the images bound there read, wait with them.
+        // The device's heap sets view the stand-ins of the textures over the bytes, and no other
+        // texture's elements change (`heap_sets::renew_over`); the images and views they named
+        // before wait for the command buffers that may read them through the sets, and the old
+        // pages, which the images bound there read, wait with them.
         if !images.is_empty() || !texels.is_empty() {
-            lock(&shared.resource_ids).renew_textures();
-            super::heap_sets::renew(self);
+            super::heap_sets::renew_over(self, key);
         }
         // What lay in the old pages goes with them, as a rebind's swapped images do: once the
         // command buffers that may read them through the heap sets completed, and once nothing

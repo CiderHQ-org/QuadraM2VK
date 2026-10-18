@@ -20,7 +20,8 @@
 //!   each image array holds the texture at ID `i` as the array's class takes it
 //!   (`bind::heap_element`: its view where it fits the class, else the neutral), written as the
 //!   texture takes the slot ([`place`]), for each set that lives then, and by a set made later
-//!   for each texture that lives then. A texture the class fits that it cannot view (a format
+//!   elements of the textures whose images or texel views lie in those bytes ([`renew_over`]),
+//!   and of no other texture (`WorkCounts::heap_slots_rewritten`). A texture the class fits that it cannot view (a format
 //!   the device cannot sample or store formatless, or that needs its function's decode) is the
 //!   neutral, announced ([`Degradation::UnnamedTextureUnviewable`]); one whose usage the class
 //!   lacks is the neutral, as Metal's contract leaves the read undefined. A shadowed texture's
@@ -135,6 +136,9 @@ struct Placed {
     flags: u32,
     /// Whether a heap write stores the device's conversion of a NaN in it ([`NanResidue::of`]).
     residue: [bool; 2],
+    /// The key of the buffer whose bytes its images and texel views lie in
+    /// (`Texture::bytes_key`), whose rebind or detach writes its elements again ([`renew_over`]).
+    bytes: Option<ResourceKey>,
     texture: Weak<TextureShared>,
 }
 
@@ -360,7 +364,7 @@ impl DeviceHeaps {
     }
 
     /// Write texture slot `id` into the table and every heap set where its holder changed since
-    /// (every slot where `force`, a rebind's): its holder's elements, or the neutral's entry where
+    /// (whatever changed where `force`, a rebind's): its holder's elements, or the neutral's entry where
     /// it has none. The holder goes to `held`, to drop once the lock is free.
     fn sync(
         &mut self,
@@ -392,6 +396,7 @@ impl DeviceHeaps {
         let facts = texture.facts();
         let flags = handle_entry_flags(&facts);
         let residue = NanResidue::of(&facts);
+        let bytes = texture.bytes_key();
         // The neutral's entry until every set holds the texture.
         if let Some(table) = &self.table {
             table.put(id, 0, 0);
@@ -413,6 +418,7 @@ impl DeviceHeaps {
                 serial,
                 flags,
                 residue,
+                bytes,
                 texture: weak,
             },
         );
@@ -1063,12 +1069,21 @@ pub(crate) fn heap_set(
 /// heap set (the module docs). A failure to write it leaves the ID's entry the neutral's,
 /// announced.
 pub(super) fn place(device: &Device, texture: &Texture) {
-    sync(device, texture.gpu_resource_id().0, false);
+    sync(device, Slots::Changed(texture.gpu_resource_id().0));
 }
 
-/// Write texture slot `id` where its holder changed (every slot's where `force`, `id` then
-/// ignored).
-fn sync(device: &Device, id: u64, force: bool) {
+/// The texture slots a [`sync`] writes.
+enum Slots {
+    /// One, where its holder changed since it was written.
+    Changed(u64),
+    /// Every live texture's.
+    All,
+    /// Those of the live textures whose images and texel views lie in the bytes of the buffer of
+    /// a key (`Texture::bytes_key`).
+    Over(ResourceKey),
+}
+
+fn sync(device: &Device, slots: Slots) {
     let mut held = Vec::new();
     let mut notes = Notes::default();
     let failed = {
@@ -1110,11 +1125,21 @@ pub(super) fn tickets_out(device: &Device) -> bool {
     !heaps.retirement.out.is_empty() || !heaps.replaced.out.is_empty()
 }
 
-/// Write every live texture's elements again: a rebind remade their images or views
-/// (`buffer_descriptor.rs`), whose caller commits no command that uses the bytes meanwhile, so
-/// no pending command buffer reads the elements rewritten.
+/// Write every live texture's elements again: a change of storage form swapped images in
+/// (`texture/storage_form.rs`) while no command buffer that may read the elements is pending.
 pub(super) fn renew(device: &Device) {
-    sync(device, 0, true);
+    sync(device, Slots::All);
+}
+
+/// Write again the elements of the live textures whose images and texel views lie in the bytes
+/// of the buffer of `key` (`Texture::bytes_key`; a heap's own buffer for its textures and those
+/// over its buffers), and no other's: a rebind or a detach of those bytes remade their images or
+/// views, or made them present stand-ins or their own images again (`buffer_descriptor.rs`,
+/// `detach.rs`); its caller commits no command that uses the bytes meanwhile, so no pending
+/// command buffer reads the elements rewritten. Every other texture's images and views stay
+/// what its elements were written with.
+pub(super) fn renew_over(device: &Device, key: ResourceKey) {
+    sync(device, Slots::Over(key));
 }
 
 /// A program's texture at `id`, of hold serial `serial`, went: its entry is the neutral's where
@@ -1143,7 +1168,7 @@ pub(super) fn gone(device: &Device, id: u64, serial: u64, keeper: Option<Keeper>
 }
 
 /// Keep `kept`, what the sets' elements named until they were written again without it
-/// (`renew`): the views and images of textures a detach or a reattach of their bytes replaced
+/// (`renew_over`): the views and images of textures a detach or a reattach of their bytes replaced
 /// (`detach.rs`, `buffer_descriptor.rs`). It waits for the command buffers committed before it,
 /// which may read it (the module docs).
 pub(super) fn retire(device: &Device, kept: Keeper) {

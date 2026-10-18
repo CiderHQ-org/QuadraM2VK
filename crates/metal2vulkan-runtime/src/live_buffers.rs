@@ -102,6 +102,9 @@ struct Inner {
     listed: SortedChunks<Key, Listed>,
     /// Bumped by each change of what the table lists.
     generation: u64,
+    /// Bumped by each rebind or detach ([`LiveBuffers::rebound`]): a listing whose pages were
+    /// read before one is read again ([`LiveBuffers::register`]).
+    rebinds: u64,
     /// The table of the current generation, once made: dropped at the next change, so a gone
     /// buffer's pages go with the last command buffer that holds an older table. It holds the
     /// device only while a listed buffer lives, which holds it too.
@@ -175,23 +178,38 @@ impl LiveBuffers {
         }
     }
 
-    /// List `buffer`, unless it is: a change of the list only where it was not.
+    /// List `buffer`, unless it is: a change of the list only where it was not. Its pages are
+    /// read with no lock held, so a rebind or detach of them meanwhile ([`rebound`](Self::rebound),
+    /// which follows the swap of its pages) has them read again: else the list would hold the
+    /// pages it let go of until the buffer goes, and their deallocator with them.
     fn register(&self, buffer: &Buffer) {
         let key = (buffer.metal_address().0, buffer.object_id());
-        if lock(&self.inner).listed.contains(&key) {
+        loop {
+            let rebinds = {
+                let inner = lock(&self.inner);
+                if inner.listed.contains(&key) {
+                    return;
+                }
+                inner.rebinds
+            };
+            // Its range and pages, asked once, with no lock held.
+            let listed = Listed {
+                buffer: buffer.downgrade(),
+                length: buffer.length(),
+                resident: buffer.resident(),
+            };
+            let mut inner = lock(&self.inner);
+            if inner.rebinds != rebinds {
+                // Dropped with no lock held, as `let_go` drops: it may hold the old pages last.
+                drop(inner);
+                drop(listed);
+                continue;
+            }
+            let stale = inner.listed.insert(key, listed).then(|| inner.change());
+            drop(inner);
+            self.let_go(stale);
             return;
         }
-        // Its range and pages, asked once, with no lock held.
-        let listed = Listed {
-            buffer: buffer.downgrade(),
-            length: buffer.length(),
-            resident: buffer.resident(),
-        };
-        let stale = {
-            let mut inner = lock(&self.inner);
-            inner.listed.insert(key, listed).then(|| inner.change())
-        };
-        self.let_go(stale);
     }
 
     /// `buffer`'s import was released while idle and imported again before its Metal address was
@@ -235,6 +253,7 @@ impl LiveBuffers {
         };
         let stale = {
             let mut inner = lock(&self.inner);
+            inner.rebinds = inner.rebinds.wrapping_add(1);
             let mut listed = Vec::new();
             for buffer in &gone {
                 let key = (buffer.metal_address().0, buffer.object_id());

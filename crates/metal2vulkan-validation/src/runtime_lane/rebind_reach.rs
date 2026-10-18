@@ -319,7 +319,10 @@ impl Drop for DropFlag {
 /// A no-copy buffer over a node of `value`, its deallocator's runs in a `Seen` of its own, whose
 /// keep-alive holds the mapping and sets the flag returned as it drops; `None`, printed, where the
 /// device imports no host memory.
-fn kept_member_over(device: &Device, value: u32) -> Option<(Buffer, Arc<Seen>, Arc<AtomicBool>)> {
+pub(super) fn kept_member_over(
+    device: &Device,
+    value: u32,
+) -> Option<(Buffer, Arc<Seen>, Arc<AtomicBool>)> {
     let seen = Arc::new(Seen::default());
     let dropped = Arc::new(AtomicBool::new(false));
     let mapping = pages(buffer_len(), 0, &node(value));

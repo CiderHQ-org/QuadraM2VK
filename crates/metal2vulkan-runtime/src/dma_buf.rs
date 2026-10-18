@@ -201,6 +201,10 @@ pub(super) struct DmaBufPages {
     /// The sparse binding of the buffer over several imports, which nothing waited for: the
     /// internal timeline and the value it signals (`Device::bind_sparse_buffer`).
     bound: Option<(vk::Semaphore, u64)>,
+    /// A no-copy buffer's own import that the device would release while idle but keeps
+    /// imported, as the descriptors to import it again did not fit (`host_residency.rs`):
+    /// counted in `WorkCounts::host_imports_kept_for_fds` while the pages live.
+    kept_for_fds: bool,
 }
 
 impl Drop for DmaBufPages {
@@ -234,6 +238,9 @@ impl Drop for DmaBufPages {
             unsafe { release::object(raw_device, memory) };
         }
         (shared.counts).dma_buf_memories_freed(self.of_image, self.memories.len());
+        if self.kept_for_fds {
+            shared.counts.host_import_kept_for_fds(false);
+        }
         drop(busy);
         if let Some(source) = self.source.take() {
             exit_guard::program_release(move || drop(source));
@@ -258,6 +265,7 @@ impl DmaBufPages {
             start: request.start.as_ptr() as u64,
             length: request.length,
             bound: None,
+            kept_for_fds: false,
         }
     }
 
@@ -389,7 +397,9 @@ impl Device {
     /// no lock of the runtime's held, and never again here. Where `keep`, a descriptor of each
     /// dma-buf is kept too, which imports them again once the device released the import while
     /// idle (`host_residency.rs`): `None` where the host gives no descriptor more, or the device
-    /// keeps as many as it may. Refused, everything made released, as the module says.
+    /// keeps as many as it may, the import then kept imported and counted
+    /// (`WorkCounts::host_imports_kept_for_fds`). Refused, everything made released, as the
+    /// module says.
     ///
     /// # Safety
     ///
@@ -445,19 +455,30 @@ impl Device {
         if pages.bound.is_some() {
             counts.dma_buf_sparse_buffer_made();
         }
-        let placement = Placement::dma_buf(Arc::new(pages), memory, type_index, window.size, start);
         let again = kept.zip(kept_source).and_then(|(chunks, source)| {
-            Again::new(self, chunks, source, request, (length, *window, class))
+            Again::dma_bufs(self, chunks, source, request, (length, *window, class))
         });
+        if keep && again.is_none() {
+            pages.kept_for_fds = true;
+            counts.host_import_kept_for_fds(true);
+        }
+        let placement = Placement::dma_buf(Arc::new(pages), memory, type_index, window.size, start);
         Ok((buffer, placement, again))
     }
 
-    /// The pages of a released import made again from the dma-bufs `again` kept
-    /// (`host_residency.rs`): a new `VkBuffer` made and bound as the first was, over imports of
-    /// the same dma-bufs, so over the pages they hold whatever the address maps now, at the same
-    /// offsets in the same memory type. Never calls the source. Refused (out of device memory, or
-    /// the device lost) where the device cannot import them again, or lays them otherwise.
-    pub(super) fn import_again(&self, again: &Again) -> Result<Pages, Error> {
+    /// The pages of a released import made again from the dma-bufs `chunks` it kept, which
+    /// `source` made for `request` (`host_residency.rs`), as `again` made it: a new `VkBuffer`
+    /// made and bound as the first was, over imports of the same dma-bufs, so over the pages they
+    /// hold whatever the address maps now, at the same offsets in the same memory type. Never
+    /// calls the source. Refused (out of device memory, or the device lost) where the device
+    /// cannot import them again, or lays them otherwise.
+    pub(super) fn import_dma_bufs_again(
+        &self,
+        chunks: &[(OwnedFd, u64)],
+        source: &DmaBufSource,
+        request: DmaBufRequest,
+        again: &Again,
+    ) -> Result<Pages, Error> {
         if self.is_lost() {
             return Err(Error::DeviceLost);
         }
@@ -467,7 +488,8 @@ impl Device {
             .host_import
             .as_ref()
             .map_err(|_| internal("a dma-buf import made again on a device that imports none"))?;
-        let chunks = (again.chunks.iter())
+        let chunks = chunks
+            .iter()
             .map(|(fd, length)| {
                 let fd = fd
                     .try_clone()
@@ -478,7 +500,7 @@ impl Device {
                 })
             })
             .collect::<Result<Vec<_>, Error>>()?;
-        let mut pages = DmaBufPages::new(self, Arc::clone(&again.source), again.request, false);
+        let mut pages = DmaBufPages::new(self, Arc::clone(source), request, false);
         let window = &again.window;
         // SAFETY: the dma-bufs are those the first import took, which hold the pages it was
         // made over for as long as they are open (the import holds them).
@@ -496,7 +518,7 @@ impl Device {
             Error::DeviceLost => Error::DeviceLost,
             other => refused(other),
         })?;
-        let start = again.request.start;
+        let start = request.start;
         let placement = Placement::dma_buf(Arc::new(pages), memory, type_index, window.size, start);
         let made = self.pages_of(
             buffer.raw,

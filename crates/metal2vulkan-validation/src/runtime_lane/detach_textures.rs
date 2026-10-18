@@ -24,6 +24,10 @@
 //!   where Metal reads zero; `DetachedStorageKeepsWrites` is announced once for it, with its ID,
 //!   and `StaleDetachedReach` is not ([`DETACHED_REACHES`]). A device without
 //!   `shaderStorageImageReadWithoutFormat` refuses that kernel, typed.
+//! - **Only its own slots**: a detach, and a rebind, of one form's bytes write again the heap slots
+//!   of the textures over them alone (`WorkCounts::heap_slots_rewritten`), and every texture,
+//!   those over the other form's bytes and one of the device's own among them, reads its own
+//!   texels through its slot after each.
 //! - **Attached again**: a rebind gives every texture its pages back, those made while detached
 //!   among them; a kernel's write of one made while detached lands in the new pages, through the
 //!   copy back that dispatches where the device's does.
@@ -507,6 +511,108 @@ fn a_rebind_gives_every_texture_its_pages_again() {
             assert_eq!(texels(&target), read_texels(), "{form:?}");
         }
         eprintln!("DETACH textures: attached again, read and written");
+    });
+}
+
+/// Texels of the `n`th texture of [`a_rebind_or_a_detach_rewrites_its_own_textures_slots_alone`]
+/// as of its `round`th fill, apart from every other texture's and round's.
+fn marked(n: usize, round: usize) -> [f32; 16] {
+    std::array::from_fn(|i| (n * 100 + round * 20 + i) as f32)
+}
+
+/// What [`QUERY_READ`] writes of a source holding `source`: each texel plus `(4, 0, 0, 0)`, its
+/// width and not null.
+fn read_of(source: &[f32; 16]) -> [f32; 16] {
+    std::array::from_fn(|i| source[i] + if i % 4 == 0 { 4.0 } else { 0.0 })
+}
+
+/// A detach and a rebind of one form's bytes write again the heap slots of the textures over
+/// them alone (`WorkCounts::heap_slots_rewritten`): two for the two textures over them, after a
+/// detach and after the rebind that gives them pages again, and two or none after a rebind of
+/// attached bytes (none where nothing over them was remade: shadows of the bytes), none for the
+/// two textures over the other form's bytes or for the device's own. After each, every texture
+/// reads its own texels through its slot: a kernel reads each through its argument buffer, made
+/// resident, those over the bytes filled again after the rebind.
+#[test]
+fn a_rebind_or_a_detach_rewrites_its_own_textures_slots_alone() {
+    on_device(|device| {
+        let query = QueryRead::new(device);
+        let (Some(buffer), Some(heap)) = (
+            Bytes::new(device, Over::Buffer),
+            Bytes::new(device, Over::Heap),
+        ) else {
+            return;
+        };
+        // Two textures over each form's bytes, and one of the device's own, by the form's index.
+        let mut textures: Vec<(Option<usize>, Texture)> = Vec::new();
+        for (form, bytes) in [&buffer, &heap].into_iter().enumerate() {
+            let descriptor = query.descriptor(bytes.options());
+            for index in 0..2 {
+                let Some(texture) = bytes.texture(&descriptor, index) else {
+                    return;
+                };
+                textures.push((Some(form), texture));
+            }
+        }
+        textures.push((None, query.own(device, &[0.0; 16])));
+        let mut held: Vec<[f32; 16]> = (0..textures.len()).map(|n| marked(n, 0)).collect();
+        for ((_, texture), texels) in textures.iter().zip(&held) {
+            fill(texture, texels);
+        }
+        let read_all = |held: &[[f32; 16]], step: &str| {
+            for (n, ((form, texture), want)) in textures.iter().zip(held).enumerate() {
+                let target = query.own(device, &[0.0; 16]);
+                let run = query.run(device, texture, &target, &[texture, &target]);
+                completed(&run);
+                assert_eq!(
+                    texels(&target),
+                    read_of(want),
+                    "{step}: texture {n} over {form:?}"
+                );
+            }
+        };
+        read_all(&held, "made");
+        let rewritten = || device.work_counts().heap_slots_rewritten;
+        let mut round = 0;
+        let forms = [(&buffer, "a no-copy buffer"), (&heap, "a no-copy heap")];
+        for (form, (bytes, over)) in forms.into_iter().enumerate() {
+            let refill = |held: &mut [[f32; 16]], round: usize| {
+                for (n, (of, texture)) in textures.iter().enumerate() {
+                    if *of == Some(form) {
+                        held[n] = marked(n, round);
+                        fill(texture, &held[n]);
+                    }
+                }
+            };
+            let before = rewritten();
+            bytes.rebind();
+            let attached = rewritten() - before;
+            assert!(
+                attached == 0 || attached == 2,
+                "{over}: a rebind rewrote {attached} slots"
+            );
+            round += 1;
+            refill(&mut held, round);
+            read_all(&held, &format!("{over}, rebound"));
+
+            let before = rewritten();
+            bytes.detach();
+            assert_eq!(rewritten() - before, 2, "{over}: the detach");
+            let before = rewritten();
+            bytes.rebind();
+            assert_eq!(
+                rewritten() - before,
+                2,
+                "{over}: the rebind after the detach"
+            );
+            round += 1;
+            refill(&mut held, round);
+            read_all(&held, &format!("{over}, detached and rebound"));
+            eprintln!(
+                "DETACH textures: {over}: a rebind rewrote {attached} heap slots, a detach and \
+                 its rebind 2 each, of 5 textures"
+            );
+        }
     });
 }
 

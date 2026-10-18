@@ -1420,6 +1420,16 @@ fn measure(runs: &[Run]) {
             per_frame(|c| c.batches_with_four_or_more_pending),
         );
         eprintln!(
+            "FRAME-COST {name} {label}: a frame's host remap reports {:.1}, {:.1} of them over \
+             live imports, touching {:.1} imports; {:.1} imports made by pointer, {:.1} KiB of \
+             pages (each taken at its first kernel submission on i915)",
+            per_frame(|c| c.host_remaps_reported),
+            per_frame(|c| c.host_remaps_over_imports),
+            per_frame(|c| c.host_imports_remapped),
+            per_frame(|c| c.host_pointer_imports_made),
+            per_frame(|c| c.host_pointer_import_bytes_made) / 1024.0,
+        );
+        eprintln!(
             "FRAME-COST {name} {label}: the device's live VkDeviceMemory after the timed frames \
              (what ANV on i915 lists in each kernel submission, beside its own buffer objects): \
              {} pooled blocks in use, {} empty, {} dedicated, {} host imports, {} dma-buf \

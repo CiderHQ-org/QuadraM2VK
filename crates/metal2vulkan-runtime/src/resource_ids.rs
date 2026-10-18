@@ -414,9 +414,9 @@ impl ResourceIds {
         self.textures.plain.make();
     }
 
-    /// Change every texture slot's generation, its holder kept: a rebind of host pages remade
-    /// images or emptied texel views a slot's elements were written with, so the device writes
-    /// them again (`heap_sets::renew`).
+    /// Change every texture slot's generation, its holder kept: a change of storage form swapped
+    /// in images a slot's elements were written with, so the device writes them again
+    /// (`heap_sets::renew`).
     pub(super) fn renew_textures(&mut self) {
         let generation = self.next();
         for slot in self.textures.slots.values_mut() {

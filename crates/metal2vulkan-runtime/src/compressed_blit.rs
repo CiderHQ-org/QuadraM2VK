@@ -290,7 +290,8 @@ impl BlitCommandEncoder {
         let back = RowsCopy::new(&tight, rows);
         let rewrite = self.rewrite(at, texel, rules)?;
         let (raw_scratch, scratch_base) = rewrite.scratch;
-        let (raw_buffer, base) = buffer.at(0);
+        // Read as a blit's (`host_residency.rs`): the command buffer holds the import.
+        let (raw_buffer, base) = self.core().blit_at(buffer, 0)?;
         let copy = |rows: &[BufferRange], (src, src_base), (dst, dst_base)| {
             let regions: Vec<vk::BufferCopy> = rows
                 .iter()

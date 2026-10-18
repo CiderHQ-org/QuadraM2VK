@@ -28,15 +28,29 @@
 //! submissions per commit, the objects each lists (dma-bufs and userptrs among them) and the
 //! microseconds each spent in the ioctl. Its slope over `n` is the kernel's cost per entry.
 //!
-//! Ignored by default: a measurement, not a check. Run it by name with `--run-ignored all`; on a
+//! A second measurement holds a guest's shape (`submit_per_import_guest_shape`): [`GUEST_IMPORTS`]
+//! pointer imports, of which each frame's blits read [`GUEST_USED`], in frames of
+//! [`GUEST_PER_FRAME`] command buffers. It measures frames at once, every import resident, then,
+//! where the driver's pointer imports follow their address
+//! (`DriverFact::PointerImportsFollowTheirAddress`), again once the device's residency thread
+//! released the idle ones while paced frames kept the read ones in use. Printed as
+//! `SUBMIT-GUEST-SHAPE` lines: the imports (`WorkCounts::host_imports_live`,
+//! `host_imports_resident`, `host_imports_released`, `host_imports_reimported`), a frame's wall
+//! time, the scheduler thread's CPU time a frame and, where the kernel-submission counter is
+//! preloaded, the kernel submissions a frame, the objects and userptrs each lists and the
+//! microseconds a frame spent in the ioctl.
+//!
+//! Ignored by default: measurements, not checks. Run them by name with `--run-ignored all`; on a
 //! host without `/dev/udmabuf` access the dma-buf rows say so and are skipped.
 
+use super::commit_costs::percentiles;
 use super::commit_latency::named_cpu_us;
 use super::dma_buf_imports::{no_copy as dma_buf_no_copy, udmabuf_openable, Calls, Memfd};
 use super::host_memory::{no_copy, Mapping};
 use super::submit_costs::Execbuffers;
 use super::{validated_device_with, Messages, ScratchCache, WAIT};
 use crate::gpu::TEST_DEVICE;
+use metal2vulkan::device::DriverFact;
 use metal2vulkan_runtime::{
     Buffer, CommandBuffer, CommandBufferStatus, CommandQueue, Device, ResourceOptions,
 };
@@ -54,6 +68,17 @@ const COMMITS: usize = 300;
 const RELEASED: Duration = Duration::from_secs(30);
 /// The linux name (15 bytes) of the device's scheduler thread.
 const SCHEDULER: &str = "metal2vulkan-sc";
+/// The guest's shape (a macOS guest's desktop on the Iris Xe of RPL-P, its counts of 2026-10-17):
+/// its live host imports, those its frames' blits read, and its command buffers a frame.
+const GUEST_IMPORTS: usize = 520;
+const GUEST_USED: usize = 35;
+const GUEST_PER_FRAME: usize = 43;
+/// The guest-shape frames measured, after [`GUEST_WARM`] untimed, each committed in a row and
+/// waited for at its end.
+const GUEST_FRAMES: usize = 120;
+const GUEST_WARM: usize = 10;
+/// The frame period while the device's residency thread releases the idle imports.
+const GUEST_PERIOD: Duration = Duration::from_micros(16_667);
 
 /// The kind of import a phase holds.
 #[derive(Clone, Copy, Debug)]
@@ -225,4 +250,132 @@ fn submit_per_import() {
             phase(&device, &queue, &target, kind, n);
         }
     }
+}
+
+/// One guest-shape frame: [`GUEST_PER_FRAME`] command buffers committed in a row, the first of
+/// which each copy 4 KiB out of one of `used` into `target`, the rest each fill `target`'s 4 KiB;
+/// waited for at its end.
+fn guest_frame(queue: &CommandQueue, target: &Buffer, used: &[Buffer]) {
+    let mut last = None;
+    for i in 0..GUEST_PER_FRAME {
+        let command_buffer = queue.command_buffer().unwrap();
+        let mut blit = command_buffer.blit_command_encoder().unwrap();
+        match used.get(i) {
+            Some(import) => blit
+                .copy_from_buffer_to_buffer(import, 0, target, 0, 4096)
+                .unwrap(),
+            None => blit.fill_buffer(target, 0..4096, i as u8).unwrap(),
+        }
+        blit.end_encoding().unwrap();
+        command_buffer.commit().unwrap();
+        last = Some(command_buffer);
+    }
+    let last = last.expect("a frame of command buffers");
+    last.wait_until_completed_for(WAIT).unwrap();
+    assert_eq!(last.status(), CommandBufferStatus::Completed);
+}
+
+/// Guest-shape frames measured and printed as `phase`.
+fn guest_measure(
+    device: &Device,
+    queue: &CommandQueue,
+    target: &Buffer,
+    used: &[Buffer],
+    phase: &str,
+) {
+    for _ in 0..GUEST_WARM {
+        guest_frame(queue, target, used);
+    }
+    let counts = device.work_counts();
+    let execbuffers = Execbuffers::read();
+    let scheduler = named_cpu_us(SCHEDULER);
+    let times: Vec<f64> = (0..GUEST_FRAMES)
+        .map(|_| {
+            let start = Instant::now();
+            guest_frame(queue, target, used);
+            start.elapsed().as_secs_f64() * 1e6
+        })
+        .collect();
+    let scheduler = (named_cpu_us(SCHEDULER) - scheduler) / GUEST_FRAMES as f64;
+    let after = device.work_counts();
+    let [p10, p50, p90] = percentiles(times);
+    let kernel = Execbuffers::read()
+        .zip(execbuffers)
+        .map(|(after, before)| {
+            let submissions = (after.execbuffers - before.execbuffers) as f64;
+            let each = |after: u64, before: u64| (after - before) as f64 / submissions;
+            format!(
+                "; {:.1} kernel submissions a frame, {:.0} objects each ({:.0} userptrs), {:.0} us \
+                 a frame in the ioctl ({:.1} us each)",
+                submissions / GUEST_FRAMES as f64,
+                each(after.objects, before.objects),
+                each(after.userptr, before.userptr),
+                (after.nanos - before.nanos) as f64 / 1e3 / GUEST_FRAMES as f64,
+                each(after.nanos, before.nanos) / 1e3,
+            )
+        })
+        .unwrap_or_default();
+    eprintln!(
+        "SUBMIT-GUEST-SHAPE {}: {phase}: {} host imports live, {} to {} releasable resident, {} \
+         released and {} imported again in all; frame p50 {p50:.0} us (p10 {p10:.0}, p90 \
+         {p90:.0}); scheduler thread {scheduler:.1} us a frame{kernel}",
+        device.name(),
+        after.host_imports_live,
+        counts.host_imports_resident,
+        after.host_imports_resident,
+        after.host_imports_released,
+        after.host_imports_reimported,
+    );
+}
+
+/// The guest's shape, printed (the module docs).
+#[test]
+#[ignore = "a measurement, not a check: run by name with --run-ignored all"]
+fn submit_per_import_guest_shape() {
+    let cache = ScratchCache::new().unwrap();
+    let messages = Messages::default();
+    let device = validated_device_with(TEST_DEVICE, &messages, cache.path(), |options| {
+        options.layers.clear();
+        // A consumer's device keeps no execution record.
+        options.record_executions = false;
+    })
+    .unwrap();
+    let queue = device.new_command_queue().unwrap();
+    let target = device.new_buffer(4096, ResourceOptions::shared()).unwrap();
+    let pages = Mapping::anonymous(GUEST_IMPORTS * IMPORT_BYTES);
+    pages.fill(0x5a);
+    let buffers: Vec<Buffer> = (0..GUEST_IMPORTS)
+        .map(|i| {
+            // SAFETY: the pages are this process's, mapped read and write, and outlive the
+            // buffers (dropped first).
+            let at = unsafe { pages.pointer().add(i * IMPORT_BYTES) };
+            // SAFETY: as above.
+            unsafe { no_copy(&device, at, IMPORT_BYTES, ResourceOptions::shared(), None) }.unwrap()
+        })
+        .collect();
+    let used = &buffers[..GUEST_USED];
+    guest_measure(&device, &queue, &target, used, "at once");
+    let follows =
+        (device.properties().driver_facts).contains(&DriverFact::PointerImportsFollowTheirAddress);
+    if !follows {
+        eprintln!(
+            "SUBMIT-GUEST-SHAPE {}: pointer imports kept (the driver is not measured to have them \
+             follow their address)",
+            device.name()
+        );
+        return;
+    }
+    let start = Instant::now();
+    while device.work_counts().host_imports_resident > GUEST_USED as u64 {
+        assert!(start.elapsed() < RELEASED, "idle imports still resident");
+        let frame = Instant::now();
+        guest_frame(&queue, &target, used);
+        std::thread::sleep(GUEST_PERIOD.saturating_sub(frame.elapsed()));
+    }
+    let waited = format!(
+        "released after {:.1} s of paced frames",
+        start.elapsed().as_secs_f64()
+    );
+    guest_measure(&device, &queue, &target, used, &waited);
+    drop(buffers);
 }

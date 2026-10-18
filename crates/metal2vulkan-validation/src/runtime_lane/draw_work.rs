@@ -29,6 +29,8 @@
 //!   its own.
 //! - **Stage tables.** A draw reads into its encoder's bind state only the stage tables a call
 //!   changed since a draw read them, through the same pipeline state's interface
+//!   (`WorkCounts::stage_tables_read`), and looks at where a no-copy buffer a table binds lies
+//!   once for its binding and once for its descriptor (`WorkCounts::no_copy_lies_read`).
 //! - **Pipelines.** A draw of a pipeline state one of whose last draws found its `VkPipeline`
 //!   made, of the same variant and an equal key, finds that entry again without looking the key
 //!   up (`WorkCounts::graphics_pipelines_looked_up`), states and keys switched between included.
@@ -913,6 +915,62 @@ fn draws_into_a_pass_color_their_state_lacks_copy_no_color_set() {
             beside - own <= bound,
             "{beside:.2} allocations a draw beside a lacked color, {own:.2} without"
         );
+    });
+}
+
+/// Draws whose encoder reads a table binding a no-copy buffer (the corners, over host pages, at
+/// vertex buffer 0) again at each draw, for the bytes each sets at vertex buffer 1, look at where
+/// the buffer lies at most twice each (`WorkCounts::no_copy_lies_read`): once for its binding,
+/// its base and device address read together (`Buffer::base_and_device_address`), and once for a
+/// descriptor written for it (`Buffer::space`), where each read took two looks. A build with
+/// debug assertions looks once more a draw, as its check of the table brought in place reads the
+/// slot whole again (`ArgumentTable::check_reading`). The target is the texture's.
+#[test]
+fn draws_reading_a_no_copy_buffer_s_binding_look_where_it_lies_once() {
+    use super::host_memory::{host_page, no_copy, Mapping};
+    on_device(|device, _| {
+        let scene = Scene::new(device);
+        let red = solid(device, PixelFormat::RGBA8Unorm, RED);
+        let page = host_page();
+        let pages = Mapping::anonymous(page);
+        pages.write(0, &[-1.0f32, -1.0, 1.0, 1.0].map(f32::to_le_bytes).concat());
+        // SAFETY: the pages are this process's, mapped read and write, and outlive the buffer,
+        // which goes first.
+        let corners = unsafe {
+            no_copy(
+                device,
+                pages.pointer(),
+                page,
+                ResourceOptions::shared(),
+                None,
+            )
+        }
+        .unwrap();
+        let (command_buffer, mut encoder) = scene.encoder(device);
+        encoder.set_vertex_buffer(Some(&corners), 0, 0).unwrap();
+        encoder.set_fragment_texture(Some(&red), 0).unwrap();
+        let mut first = None;
+        for at in 0..SIDE {
+            encoder.set_vertex_bytes(&at.to_le_bytes(), 1).unwrap();
+            draw(&mut encoder);
+            if at == 0 {
+                first = Some(device.work_counts());
+            }
+        }
+        let (first, rest) = (first.unwrap(), device.work_counts());
+        encoder.end_encoding().unwrap();
+        let later = SIDE - 1;
+        eprintln!(
+            "DRAW-WORK {}: {} looks at where the buffer lies, {} tables read",
+            device.name(),
+            grew(&first, &rest, |c| c.no_copy_lies_read),
+            grew(&first, &rest, |c| c.stage_tables_read),
+        );
+        assert_eq!(grew(&first, &rest, |c| c.stage_tables_read), later);
+        let looks = 2 + u64::from(cfg!(debug_assertions));
+        assert!(grew(&first, &rest, |c| c.no_copy_lies_read) <= looks * later);
+        let pixels = scene.pixels(&command_buffer);
+        assert!(pixels.iter().all(|&p| p == RED), "{pixels:?}");
     });
 }
 

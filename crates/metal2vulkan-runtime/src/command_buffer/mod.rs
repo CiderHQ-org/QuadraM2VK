@@ -79,7 +79,7 @@ use super::tracker::Footprint;
 use super::upload::{Upload, Uploads};
 use super::used_resources::{EncoderKind, EncoderRecord, Reached, ReadRecord};
 use super::values::CommandBufferStatus;
-use super::{CommandQueue, Device};
+use super::{Buffer, CommandQueue, Device};
 use crate::release;
 use ash::vk;
 use batches::Batches;
@@ -1787,6 +1787,8 @@ impl CommandBuffer {
         // the lock: what it upgrades may be a resource's last hold.
         let used = reached.list();
         device.shared().live_buffers.reach(&used);
+        let shared = device.shared();
+        (shared.counts).commit_used_host_imports(Buffer::distinct_host_imports(&used.buffers));
         // Listed again at its first submission where the list changed since (a rebind ends a
         // use).
         let listing = Listing::new(device, used);

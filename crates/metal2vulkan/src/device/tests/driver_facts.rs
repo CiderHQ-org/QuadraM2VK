@@ -533,6 +533,7 @@ const STALL: DriverFact = DriverFact::SemaphoreOperationsStallSubmits;
 const SAMPLED_HIZ: DriverFact = DriverFact::SampledDepthKeepsHiZ;
 const MSAA_DEPTH: DriverFact = DriverFact::MultisampledDepthFasterOutOfGeneral;
 const TILE_STORE: DriverFact = DriverFact::TileStoreIsMetals;
+const FOLLOWS: DriverFact = DriverFact::PointerImportsFollowTheirAddress;
 
 /// Every committed profile's driver has exactly its measured facts (on a measured identity those
 /// its rows name, on any other its driver's defects alone). A profile of a measured identity: the
@@ -556,6 +557,7 @@ const TILE_STORE: DriverFact = DriverFact::TileStoreIsMetals;
 /// shadow's copy back runs faster as a dispatch on the RPL-S and the RPL-P, and a merged shadow's
 /// copy in with its keep on the RPL-S alone, and a copy of rows
 /// linear-tiling attachment features uninitialized; NVIDIA's stalls a submission per thousand
+/// semaphore operations on the RTX 5080 Laptop GPU; pointer imports follow their address on the
 /// profile is an unmeasured identity and takes its driver's defects alone: the GTX 1060
 /// (580.178.04) and the RTX 5080 desktop GPU (another GPU at 615.71.09) NVIDIA's custom-position
 /// depth, the ARL (26.2.3) and the Tiger Lake Iris Xe (26.2.2) ANV's hidden aliased writes; the
@@ -584,11 +586,11 @@ fn the_committed_profiles_drivers_have_their_facts() {
         ),
         (
             "gate-lavapipe",
-            vec![DENORMALS, FRAGDEPTH, DEPTH16, FETCH, BC6H],
+            vec![DENORMALS, FRAGDEPTH, DEPTH16, FETCH, BC6H, FOLLOWS],
         ),
         (
             "gate-lavapipe-x86_64",
-            vec![DENORMALS, FRAGDEPTH, DEPTH16, FETCH, BC6H],
+            vec![DENORMALS, FRAGDEPTH, DEPTH16, FETCH, BC6H, FOLLOWS],
         ),
         ("intel-arl-anv", vec![HIDE]),
         ("intel-irisxe-anv", vec![HIDE]),
@@ -606,6 +608,7 @@ fn the_committed_profiles_drivers_have_their_facts() {
                 COPY_BACK,
                 SAMPLED_HIZ,
                 MSAA_DEPTH,
+                FOLLOWS,
             ],
         ),
         (
