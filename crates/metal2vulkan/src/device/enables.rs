@@ -286,7 +286,7 @@ exposures! {
     Extension(&[E::KhrShaderSubgroupUniformControlFlow]) => [ShaderSubgroupUniformControlFlow];
     Extension(DERIVATIVES) => [ComputeDerivativeGroupQuads, ComputeDerivativeGroupLinear];
     Extension(&[E::KhrMaintenance8]) => [Maintenance8];
-    Extension(&[E::KhrShaderFma]) => [ShaderFmaFloat32];
+    Extension(&[E::KhrShaderFma]) => [ShaderFmaFloat16, ShaderFmaFloat32];
     Extension(BORDER_SWIZZLE) => [BorderColorSwizzle, BorderColorSwizzleFromImage];
     Extension(&[E::ExtDepthBiasControl]) => [DepthBiasControl, FloatRepresentation, DepthBiasExact];
     Extension(&[E::ExtDepthClipEnable]) => [DepthClipEnable];

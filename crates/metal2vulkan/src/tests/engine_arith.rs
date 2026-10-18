@@ -3034,8 +3034,13 @@ fn half_rounding_follows_the_operation() {
             let round_even = count_ops(&words, |w| {
                 w[0] & 0xFFFF == crate::spv::Op::ExtInst as u32 && w.len() > 4 && w[4] == 2
             });
+            // The fused pairs on 16-bit floats: the device's `Fma` measured Metal's, or `OpFmaKHR`
+            // under the 16-bit float controls; each converts three operands and widens its result.
             let f16 = kk.name == "fast_chain"
-                && p.takes_driver_deviation(crate::error::DriverDeviation::MetalHalfFma);
+                && matches!(
+                    crate::lower::arith::fma::half_route(&p),
+                    crate::lower::arith::fma::Route::F16 | crate::lower::arith::fma::Route::F16Khr
+                );
             let (q, c, r) = match (kk.name == "fast_chain", f16) {
                 (true, true) => (3, 7 * 4, 2),
                 (true, false) => (4, 0, 3),
@@ -3056,13 +3061,15 @@ fn half_rounding_follows_the_operation() {
             let device = p.takes_driver_deviation(crate::error::DriverDeviation::MetalHalfQuantize)
                 && !converted
                 && !controlled;
-            // Where the device's 16-bit `+ - *` is Metal's, the operations among the roundings:
-            // sixteen of the strict chain's seventeen, the first addition and the last multiply of
-            // the fast chain's three. The conversion's rounding stays the module's.
-            let ha = p.takes_driver_deviation(crate::error::DriverDeviation::MetalHalfArithmetic)
-                && p.fields().leaf.float16;
+            // Where the device's 16-bit `+ - *` is Metal's, measured or under the 16-bit float
+            // controls, the operations among the roundings: sixteen of the strict chain's
+            // seventeen, the first addition and the last multiply of the fast chain's three. The
+            // conversion's rounding stays the module's.
+            let ha = (p.takes_driver_deviation(crate::error::DriverDeviation::MetalHalfArithmetic)
+                && p.fields().leaf.float16)
+                || controlled;
             assert!(
-                !ha || converted,
+                !ha || converted || controlled,
                 "{what}: the half arithmetic beside the conversion"
             );
             let kept = match (ha, kk.name == "fast_chain") {

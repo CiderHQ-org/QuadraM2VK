@@ -2678,43 +2678,59 @@ fn srgb_conversions_are_named_apart_and_charge_their_table_once() {
     assert_eq!(routine_words(&ArithPlan::default()).count(), 0);
 }
 
-/// A `half` `fadd`, `fsub` or `fmul` takes the device's 16-bit arithmetic exactly where the profile
-/// takes `DriverDeviation::MetalHalfArithmetic` and has `shaderFloat16` (the MoltenVK captures
-/// alone), on one to four lanes; `fdiv`, `frem`, other formats, and a chunk wider than four lanes
+/// A `half` `fadd`, `fsub` or `fmul` takes the device's 16-bit arithmetic, on one to four lanes,
+/// exactly where the profile has `shaderFloat16` and takes `DriverDeviation::MetalHalfArithmetic`
+/// (the MoltenVK captures alone, measured) or rounds to `half` under the 16-bit float controls (by
+/// the Vulkan spec, with no fact); `fdiv`, `frem`, other formats, and a chunk wider than four lanes
 /// never do.
 #[test]
 fn half_arithmetic_on_the_device_follows_the_profile() {
+    use super::super::F16Basis;
     use crate::error::DriverDeviation;
+    use crate::spirv::builder::QuantizeForm;
     use crate::spirv::testing::is_moltenvk_capture;
-    let mut taken = 0;
+    let (mut measured, mut controlled) = (0, 0);
     for (stem, p) in committed_profiles().expect("profiles") {
-        let device = p.takes_driver_deviation(DriverDeviation::MetalHalfArithmetic)
-            && p.fields().leaf.float16;
-        assert_eq!(device, is_moltenvk_capture(&stem), "{stem}");
+        let float16 = p.fields().leaf.float16;
+        let fact = p.takes_driver_deviation(DriverDeviation::MetalHalfArithmetic) && float16;
+        assert_eq!(fact, is_moltenvk_capture(&stem), "{stem}");
+        let controls = super::super::narrow::quantize_form(&p) == QuantizeForm::Controlled;
+        let basis = match (fact, controls) {
+            (true, _) => Some(F16Basis::Measured),
+            (false, true) => Some(F16Basis::Controlled),
+            (false, false) => None,
+        };
         for op in [AirBin::FAdd, AirBin::FSub, AirBin::FMul] {
             for lanes in 1..=4 {
                 assert_eq!(
                     super::super::f16_arithmetic(&p, op, vec(half(), lanes)),
-                    device,
+                    basis,
                     "{stem}: {op:?} on {lanes} lanes"
                 );
             }
             for f in [vec(half(), 8), float(32), bfloat(), float(64)] {
-                assert!(
-                    !super::super::f16_arithmetic(&p, op, f),
+                assert_eq!(
+                    super::super::f16_arithmetic(&p, op, f),
+                    None,
                     "{stem}: {op:?} on {f:?}"
                 );
             }
         }
         for op in [AirBin::FDiv, AirBin::FRem] {
-            assert!(
-                !super::super::f16_arithmetic(&p, op, half()),
+            assert_eq!(
+                super::super::f16_arithmetic(&p, op, half()),
+                None,
                 "{stem}: {op:?}"
             );
         }
-        taken += usize::from(device);
+        measured += usize::from(basis == Some(F16Basis::Measured));
+        controlled += usize::from(basis == Some(F16Basis::Controlled));
     }
-    assert!(taken >= 2, "the MoltenVK captures take it");
+    assert!(measured >= 2, "the MoltenVK captures take it, measured");
+    assert!(
+        controlled >= 2,
+        "the float-controls profiles take it, by the spec"
+    );
 }
 
 /// The device's `half` `+ - *` ([`ops::f16_binary`]) is the exact result rounded once to `half`, on

@@ -255,6 +255,7 @@ fn derive_fields(
         fragment_stores_and_atomics: has(VkFeature::FragmentStoresAndAtomics),
         zero_initialize_workgroup_memory: has(VkFeature::ShaderZeroInitializeWorkgroupMemory),
         fma32: has(VkFeature::ShaderFmaFloat32),
+        fma16: has(VkFeature::ShaderFmaFloat16),
     };
     let images = ImageCaps {
         storage_read_without_format: has(VkFeature::ShaderStorageImageReadWithoutFormat),

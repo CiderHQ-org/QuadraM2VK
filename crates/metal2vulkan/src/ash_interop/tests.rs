@@ -572,6 +572,7 @@ fn unexposed_structures_are_never_chained() {
         VkFeature::ExtendedDynamicState2,
         VkFeature::ShaderSubgroupRotate,
         VkFeature::Maintenance8,
+        VkFeature::ShaderFmaFloat16,
         VkFeature::ShaderFmaFloat32,
         VkFeature::Maintenance5,
         VkFeature::DepthBiasControl,

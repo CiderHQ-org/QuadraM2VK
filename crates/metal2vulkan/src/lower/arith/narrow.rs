@@ -29,9 +29,11 @@
 //! device decoded ([`round_texel`]) unless the profile leaves NaN bits to the device under native
 //! half rounding or the float controls; `bfloat` rounds through an
 //! exact integer round-to-nearest-even of the `f32` bits. Where the device's 16-bit `+ - *`, kept
-//! apart, is measured to be Metal's `half` arithmetic (`DriverDeviation::MetalHalfArithmetic`) and
-//! the profile has `shaderFloat16`, a `half` `+ - *` is that instruction between exact conversions
-//! instead, with no rounding here (`ops::f16_binary`). For `+ - * /` and square root the double
+//! apart, is Metal's `half` arithmetic and the profile has `shaderFloat16`, a `half` `+ - *` is
+//! that instruction between exact conversions instead, with no rounding here (`ops::f16_binary`):
+//! where it is measured to be (`DriverDeviation::MetalHalfArithmetic`), and under the float
+//! controls of [`QuantizeForm::Controlled`], which make it so by the Vulkan spec and which the
+//! entry then declares ([`computes_in_16_bits`]). For `+ - * /` and square root the double
 //! rounding (the exact result to `f32`, then to the narrow format) is innocuous, because `f32`
 //! carries at least `2p + 2` significand bits for both formats; a `half` fused multiply-add is not,
 //! so it rounds its exact `f32` sum to odd first (`super::fma`), and a `bfloat` one is corrected
@@ -1269,6 +1271,33 @@ pub fn widens_bits(m: &TypedModule, meter: &mut Meter) -> Result<bool, Error> {
     drop((halves, lanes));
     meter.release(16 * words);
     Ok(found)
+}
+
+/// Whether module `m` computes in 16-bit floats: an `OpFAdd`, `OpFSub` or `OpFMul`, an `OpFmaKHR`
+/// or a `GLSL.std.450 Fma` whose result is a 16-bit float or a vector of them, the device's own
+/// `half` arithmetic (`super::ops::f16_binary`, `super::fma`). Under the 16-bit float controls
+/// ([`QuantizeForm::Controlled`]) the entry then declares [`controlled_modes`], which make that
+/// arithmetic Metal's. One pass over the instructions.
+pub fn computes_in_16_bits(m: &TypedModule) -> bool {
+    let half = |v: Value| -> bool {
+        let Ok(ty) = m.value(v).map(|v| v.ty) else {
+            return false;
+        };
+        let ty = match m.types().get(ty) {
+            Ok(Type::Vector { elem, .. }) => *elem,
+            _ => ty,
+        };
+        matches!(m.types().get(ty), Ok(Type::Float { width: 16 }))
+    };
+    m.blocks().iter().flat_map(|b| &b.insts).any(|n| {
+        let arithmetic = match &n.inst {
+            Inst::Binary { op, .. } => matches!(op, BinOp::FAdd | BinOp::FSub | BinOp::FMul),
+            Inst::Fma { .. } => true,
+            Inst::Glsl { op, .. } => *op == GlslOp::Fma,
+            _ => false,
+        };
+        arithmetic && n.result.is_some_and(half)
+    })
 }
 
 /// Half bits `h` (the low 16 bits of each lane) to the `f32` bits of the same value: the

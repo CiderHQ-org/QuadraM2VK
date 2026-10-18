@@ -1531,8 +1531,9 @@ pub enum PrecisionNote {
     /// tolerance from it.
     NativeDivision,
     /// Native device maths: a `float` fused multiply-add on a device without `OpFmaKHR`, or a
-    /// `half` one where the device's 16-bit `Fma` is not measured to be Metal's, is the device's
-    /// `GLSL.std.450 Fma` (on the `half` operands held in `float`, its result rounded to `half`),
+    /// `half` one where the device's 16-bit `Fma` is not measured to be Metal's and the device has
+    /// no 16-bit `OpFmaKHR` under the 16-bit float controls, is the device's `GLSL.std.450 Fma`
+    /// (on the `half` operands held in `float`, its result rounded to `half`),
     /// not the translation's correctly rounded routine, under `FloatMathsPolicy::Native` (the
     /// default). **Recorded bound:** a `half` result within one unit in its last place of
     /// Metal's (the product of two `half` values is exact in `float`, so only the two roundings

@@ -23,9 +23,10 @@
 //! and `double` are native (`f64` needs `shaderFloat64`), and `half` and `bfloat` are held widened
 //! in an `f32` that is always a value of the narrow format ([`narrow`]): each operation rounds its
 //! `f32` result back to the format, so no profile needs `shaderFloat16`; where the device's 16-bit
-//! `+ - *` is measured to be Metal's `half` arithmetic and the profile has `shaderFloat16`, a
-//! `half` `+ - *` is that instruction, kept apart, between exact conversions instead
-//! ([`ArithStrategy::F16`]).
+//! `+ - *` is Metal's `half` arithmetic and the profile has `shaderFloat16`, a `half` `+ - *` is
+//! that instruction, kept apart, between exact conversions instead ([`ArithStrategy::F16`]): where
+//! it is measured to be, and where the 16-bit float controls the module then declares make it so
+//! by the Vulkan spec ([`narrow::controlled_modes`]).
 //!
 //! Precision: a `half` rounding keeps half denormals, as Metal does; a `float` or `half` fused
 //! multiply-add (`air.fma`, `llvm.fma`, and `llvm.fmuladd`, which Metal fuses) rounds once on every
@@ -199,9 +200,9 @@ pub enum ArithStrategy {
         contract: Contraction,
     },
     /// A `half` `fadd`, `fsub` or `fmul` on lanes of `form` by the device's 16-bit arithmetic,
-    /// Metal's own in the forms that keep it apart (`DriverDeviation::MetalHalfArithmetic`,
-    /// [`ops::f16_binary`]): the operands narrowed to 16 bits, exactly, the instruction kept
-    /// apart, and its result widened, exactly.
+    /// Metal's own in the forms that keep it apart (measured, `DriverDeviation::MetalHalfArithmetic`,
+    /// or by the Vulkan spec under the 16-bit float controls, [`ops::f16_binary`]): the operands
+    /// narrowed to 16 bits, exactly, the instruction kept apart, and its result widened, exactly.
     F16 {
         op: AirBin,
         form: Form,
@@ -2256,10 +2257,12 @@ fn select_in(
                         } else {
                             s
                         }
-                    } else if f16_arithmetic(cx.profile, *op, f) {
-                        // The device's own `half` arithmetic, measured to be Metal's in the forms
-                        // that keep it apart, which the AIR's flags allow whatever they are.
-                        cx.families.arith.f16_arith = true;
+                    } else if let Some(basis) = f16_arithmetic(cx.profile, *op, f) {
+                        // The device's own `half` arithmetic, Metal's in the forms that keep it
+                        // apart, which the AIR's flags allow whatever they are. Only the measured
+                        // basis is a property the module requires; the float controls are modes
+                        // its entry declares.
+                        cx.families.arith.f16_arith |= basis == F16Basis::Measured;
                         let s = S::F16 { op: *op, form: f };
                         with_nan(cx, at, s, nan::binary_answer(*op, fmt), f)
                     } else {
@@ -2946,19 +2949,42 @@ fn native_min_max(p: &DeviceProfile, op: FloatFn, f: Form) -> bool {
         && p.fields().min_max == MinMaxRoute::Native
 }
 
+/// Why the device's 16-bit `+ - *` answers as Metal's `half` arithmetic ([`f16_arithmetic`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum F16Basis {
+    /// Measured (`DriverDeviation::MetalHalfArithmetic`): the module requires
+    /// `VkProperty::MetalHalfArithmetic`.
+    Measured,
+    /// The 16-bit float controls the module's `half` roundings take ([`QuantizeForm::Controlled`],
+    /// [`narrow::controlled_modes`]), which its entry then declares ([`narrow::computes_in_16_bits`]):
+    /// no fact.
+    Controlled,
+}
+
 /// Whether the float binary operator `op` on lanes of form `f` takes the device's 16-bit
-/// arithmetic ([`ArithStrategy::F16`]): a `half` `fadd`, `fsub` or `fmul`, on one to four lanes (a
-/// chunk's own form), where profile `p` takes `DriverDeviation::MetalHalfArithmetic` and has
-/// `shaderFloat16`. A `half` `fdiv` keeps the shared precise routine: Metal's fast and relaxed
-/// compiles answer the device's 16-bit quotient of widened operands as a `float` one (EV
-/// `CRT2-ha2-m4`), and it has no form that keeps it apart. A `half` `frem` is not measured.
-fn f16_arithmetic(p: &DeviceProfile, op: AirBin, f: Form) -> bool {
+/// arithmetic ([`ArithStrategy::F16`]), and on what basis: a `half` `fadd`, `fsub` or `fmul`, on
+/// one to four lanes (a chunk's own form), where profile `p` has `shaderFloat16` and takes
+/// `DriverDeviation::MetalHalfArithmetic` ([`F16Basis::Measured`]) or rounds to `half` under the
+/// 16-bit float controls ([`F16Basis::Controlled`]). Under those controls the instruction is Metal's
+/// by the Vulkan spec ([`ops::f16_binary`]). A `half` `fdiv` keeps the shared precise routine:
+/// Metal's fast and relaxed compiles answer the device's 16-bit quotient of widened operands as a
+/// `float` one, it has no form that keeps it apart, and Vulkan's precision table
+/// does not make a 16-bit quotient correctly rounded. A `half` `frem` is not measured.
+fn f16_arithmetic(p: &DeviceProfile, op: AirBin, f: Form) -> Option<F16Basis> {
     use crate::error::DriverDeviation;
-    matches!(op, AirBin::FAdd | AirBin::FSub | AirBin::FMul)
+    let applies = matches!(op, AirBin::FAdd | AirBin::FSub | AirBin::FMul)
         && f.float_fmt() == Some(FloatFmt::Half)
         && (1..=4).contains(&f.lanes)
-        && p.takes_driver_deviation(DriverDeviation::MetalHalfArithmetic)
-        && p.fields().leaf.float16
+        && p.fields().leaf.float16;
+    if !applies {
+        None
+    } else if p.takes_driver_deviation(DriverDeviation::MetalHalfArithmetic) {
+        Some(F16Basis::Measured)
+    } else if narrow::quantize_form(p) == QuantizeForm::Controlled {
+        Some(F16Basis::Controlled)
+    } else {
+        None
+    }
 }
 
 /// The fast division routine a float function call of form `f` lowered as `how` calls:

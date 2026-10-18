@@ -817,6 +817,8 @@ pub struct LeafCaps {
     pub zero_initialize_workgroup_memory: bool,
     /// `OpFmaKHR` on 32-bit floats (`shaderFmaFloat32`): a correctly rounded fused multiply-add.
     pub fma32: bool,
+    /// `OpFmaKHR` on 16-bit floats (`shaderFmaFloat16`): a correctly rounded fused multiply-add.
+    pub fma16: bool,
 }
 
 /// Image and sampler capabilities ([`DeviceProfile::images`]). Each field without its own note is

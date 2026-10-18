@@ -751,6 +751,7 @@ members! {
     RasterOrder.raster_order.rasterization_order_depth_attachment_access => RasterizationOrderDepthAttachmentAccess;
     RasterOrder.raster_order.rasterization_order_stencil_attachment_access => RasterizationOrderStencilAttachmentAccess;
     Maintenance8.maintenance8.maintenance8 => Maintenance8;
+    ShaderFma.shader_fma.shader_fma_float16 => ShaderFmaFloat16;
     ShaderFma.shader_fma.shader_fma_float32 => ShaderFmaFloat32;
     Maintenance5.maintenance5.maintenance5 => Maintenance5;
     BorderColorSwizzle.border_color_swizzle.border_color_swizzle => BorderColorSwizzle;

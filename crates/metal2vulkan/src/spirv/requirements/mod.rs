@@ -1157,12 +1157,21 @@ impl Deriver<'_> {
                     self.cap(Cap::RayTraversalPrimitiveCullingKHR);
                 }
             }
-            // The builder admits 32-bit floats only (`FunctionBuilder::fma`), so `shaderFmaFloat32`
-            // is the feature (VUID-RuntimeSpirv-shaderFmaFloat32-10978).
-            Inst::Fma { .. } => {
+            // The builder admits 16- and 32-bit floats (`FunctionBuilder::fma`): `shaderFmaFloat16`
+            // or `shaderFmaFloat32` by the operands' width, the result's
+            // (VUID-RuntimeSpirv-shaderFmaFloat16-10977, VUID-RuntimeSpirv-shaderFmaFloat32-10978).
+            Inst::Fma { a, .. } => {
                 self.cap(Cap::Fmakhr);
                 self.ext(SpirvExtension::KhrFma);
-                self.feat(VkFeature::ShaderFmaFloat32);
+                let half = matches!(
+                    self.scalar_of(self.value_ty(*a)?)?,
+                    Type::Float { width: 16 }
+                );
+                self.feat(if half {
+                    VkFeature::ShaderFmaFloat16
+                } else {
+                    VkFeature::ShaderFmaFloat32
+                });
             }
             Inst::DemoteToHelperInvocation | Inst::IsHelperInvocation => {
                 self.cap(Cap::DemoteToHelperInvocation);

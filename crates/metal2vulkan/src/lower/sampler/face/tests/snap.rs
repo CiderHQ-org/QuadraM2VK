@@ -23,7 +23,7 @@ use crate::spirv::ir::TypedModule;
 fn routines(b: &mut ModuleBuilder, fma: Fma) -> BResult<SnapRoutines> {
     let (path, khr) = match fma.route {
         Route::Khr => (Path::Fused, true),
-        Route::Wide | Route::Soft | Route::HalfOdd | Route::F16 | Route::Native => {
+        Route::Wide | Route::Soft | Route::HalfOdd | Route::F16 | Route::F16Khr | Route::Native => {
             (Path::Integer, false)
         }
     };

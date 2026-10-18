@@ -316,6 +316,11 @@ pub enum VkFeature {
     /// `VK_EXT_extended_dynamic_state3`'s `extendedDynamicState3ColorWriteMask`: the dynamic
     /// state `VK_DYNAMIC_STATE_COLOR_WRITE_MASK_EXT`, set by `vkCmdSetColorWriteMaskEXT`.
     ExtendedDynamicState3ColorWriteMask,
+    // Appended.
+    /// `VK_KHR_shader_fma`'s `shaderFmaFloat16`: `OpFmaKHR` on 16-bit floats
+    /// (`VUID-RuntimeSpirv-shaderFmaFloat16-10977`), which Vulkan's precision table makes correctly
+    /// rounded: a `half` fused multiply-add in one instruction under the 16-bit float controls.
+    ShaderFmaFloat16,
 }
 
 /// A Vulkan device extension the new core can require.

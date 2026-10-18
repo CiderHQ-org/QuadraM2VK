@@ -926,6 +926,7 @@ codec_enum! {
         ShaderQuadControl,
         ShaderTessellationAndGeometryPointSize, MultiviewGeometryShader,
         AttachmentFeedbackLoopLayout, ExtendedDynamicState3ColorWriteMask,
+        ShaderFmaFloat16,
     }
     VkExtension {
         ExtRobustness2, ExtImageRobustness, ExtShaderAtomicFloat, ExtShaderAtomicFloat2,

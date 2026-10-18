@@ -2248,13 +2248,17 @@ fn compile_kept<K>(
     let converts = plan.families.arith.quantize == crate::spirv::builder::QuantizeForm::Converted
         && crate::lower::arith::narrow::rounds_by_conversion(&module, m)?;
     // A `half` rounded through the device's conversion and its widening, each decorated
-    // `NoContraction`, under the float controls that make it Metal's, or read from its bits by the
-    // device's widening, which they make exact but for a NaN's bits: the entry declares them, and
-    // so requires the device's float-controls properties for them, and no fact. A module that
-    // widens so leaves a NaN's bits to the device, as the profile does (`NanMinMaxPolicy::Native`).
+    // `NoContraction`, under the float controls that make it Metal's, computed by the device's
+    // 16-bit arithmetic, which they make Metal's too, or read from its bits by the device's
+    // widening, which they make exact but for a NaN's bits: the entry declares them, and so
+    // requires the device's float-controls properties for them, and no fact. A module that widens
+    // so leaves a NaN's bits to the device, as the profile does (`NanMinMaxPolicy::Native`).
     if plan.families.arith.quantize == crate::spirv::builder::QuantizeForm::Controlled {
         let widens = crate::lower::arith::narrow::widens_bits(&module, m)?;
-        if widens || crate::lower::arith::narrow::rounds_by_conversion(&module, m)? {
+        if widens
+            || crate::lower::arith::narrow::computes_in_16_bits(&module)
+            || crate::lower::arith::narrow::rounds_by_conversion(&module, m)?
+        {
             let modes = crate::lower::arith::narrow::controlled_modes(p).unwrap_or_default();
             module.declare_modes(&modes)?;
         }

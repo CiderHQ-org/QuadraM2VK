@@ -271,11 +271,24 @@ pub fn f16_binary_words(f: Form) -> u32 {
 }
 
 /// The `half` `fadd`, `fsub` or `fmul` of `a` and `b` (`half` values held in `float` lanes of
-/// `lanes` lanes) by the device's 16-bit arithmetic, Metal's own where the profile takes
-/// `DriverDeviation::MetalHalfArithmetic`: each operand narrowed to 16 bits, exactly since it is a
-/// `half`, the instruction, which rounds the exact result once as Metal's `half` arithmetic does,
-/// and its result widened, exactly. No rounding of the module's own ([`narrow::round`]), so no
-/// conversion barrier.
+/// `lanes` lanes) by the device's 16-bit arithmetic: each operand narrowed to 16 bits, exactly
+/// since it is a `half`, the instruction, which rounds the exact result once as Metal's `half`
+/// arithmetic does, and its result widened, exactly. No rounding of the module's own
+/// ([`narrow::round`]), so no conversion barrier and no conversion pair, which a device's compiler
+/// spends most on (ANV's register allocation grows with the values the pairs add).
+///
+/// The instruction is Metal's where the profile takes `DriverDeviation::MetalHalfArithmetic`, and,
+/// by the Vulkan spec, in an entry declaring the 16-bit float controls the module's roundings take
+/// ([`narrow::controlled_modes`]): the precision table "for IEEE754 half- (16 bit) and single- (32
+/// bit) precision instructions" lists `OpFAdd`, `OpFSub` and `OpFMul` as "Correctly rounded",
+/// "according to IEEE 754 roundTiesToEven" under `RoundingModeRTE`, `DenormPreserve` keeps
+/// denormal operands and results, and `SignedZeroInfNanPreserve` the zero signs IEEE 754 gives. That
+/// is the value the `float` operation rounded once to `half` gives too ([`f16_binary`]'s
+/// alternative, [`float_binary`]): `float`'s 24-bit significand is at least `2 · 11 + 2` bits, so
+/// rounding its correctly rounded sum, difference or product to `half` rounds the exact result once
+/// (the double rounding is innocuous). A NaN's bits are the device's, as the controlled rounding's
+/// are; Metal's NaN, where the profile asks for it, is selected around the instruction
+/// (`ArithStrategy::Nan`).
 ///
 /// The instruction is always kept apart, whatever the AIR's flags allow: a sum or difference
 /// decorated `NoContraction` (SPIRV-Cross writes its `[[clang::optnone]]` `spvFAdd` or `spvFSub`),

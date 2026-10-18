@@ -286,12 +286,14 @@ fn only_the_entry_reads_the_coverage_of_a_looped_body() {
 /// `fmx_fma_precise` computes a `half` `fma` and a `half` `a * b + c` (`llvm.fmuladd`, which Metal
 /// fuses) beside their `float` forms. On a MoltenVK capture each `half` one is the device's 16-bit
 /// `Fma`, inline: the module defines no function but its entry, declares a 16-bit float, and
-/// requires `VkProperty::MetalHalfFma`; on macOS it compiles as MoltenVK's MSL. Every other
-/// committed profile takes native device maths (the default): the device's `float` `Fma` rounded to
-/// `half`, inline too, under `PrecisionNote::NativeFma`; it holds a 16-bit float only where it
-/// rounds a `half` through the device's conversion, measured (`QuantizeForm::Converted`) or under
-/// the float controls (`QuantizeForm::Controlled`: ANV and RADV). Under `FloatMathsPolicy::Exact`
-/// it calls the `half` routine.
+/// requires `VkProperty::MetalHalfFma`; on macOS it compiles as MoltenVK's MSL. A profile that
+/// rounds a `half` under the 16-bit float controls (`QuantizeForm::Controlled`: ANV and RADV) with
+/// `shaderFmaFloat16` takes `OpFmaKHR` on 16 bits (`fma::Route::F16Khr`), inline and under no note.
+/// Every other committed profile takes native device maths (the default): the device's `float`
+/// `Fma` rounded to `half`, inline too, under `PrecisionNote::NativeFma`; it holds a 16-bit float
+/// only where it rounds a `half` through the device's conversion, measured
+/// (`QuantizeForm::Converted`) or under the float controls. Under `FloatMathsPolicy::Exact` it
+/// calls the `half` routine where it takes neither 16-bit form.
 #[test]
 fn a_half_fused_multiply_add_is_inline_on_moltenvk() {
     let Some(lib) = library("fmx_fma_precise") else {
@@ -332,7 +334,9 @@ fn a_half_fused_multiply_add_is_inline_on_moltenvk() {
             .stage
             .precision_notes
             .contains(&crate::pipeline::PrecisionNote::NativeFma);
-        assert_eq!(native, !moltenvk, "{what}");
+        let khr16 = crate::lower::arith::fma::half_route(dev.profile())
+            == crate::lower::arith::fma::Route::F16Khr;
+        assert_eq!(native, !moltenvk && !khr16, "{what}");
         inline += usize::from(moltenvk);
         compiles_as_moltenvk_msl(&stem, words, &what);
     }

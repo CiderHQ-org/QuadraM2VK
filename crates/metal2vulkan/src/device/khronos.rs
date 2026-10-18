@@ -1530,6 +1530,7 @@ pub(super) const FEATURE_MEMBERS: &[(&str, VkFeature)] = {
         ("depthBiasControl", F::DepthBiasControl),
         ("floatRepresentation", F::FloatRepresentation),
         ("depthBiasExact", F::DepthBiasExact),
+        ("shaderFmaFloat16", F::ShaderFmaFloat16),
         ("shaderFmaFloat32", F::ShaderFmaFloat32),
         ("synchronization2", F::Synchronization2),
         ("extendedDynamicState", F::ExtendedDynamicState),

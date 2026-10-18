@@ -1102,6 +1102,7 @@ members! {
     RasterOrder.raster_order.rasterization_order_stencil_attachment_access =>
         Some(F::RasterizationOrderStencilAttachmentAccess);
     Maintenance8.maintenance8.maintenance8 => Some(F::Maintenance8);
+    ShaderFma.shader_fma.shader_fma_float16 => Some(F::ShaderFmaFloat16);
     ShaderFma.shader_fma.shader_fma_float32 => Some(F::ShaderFmaFloat32);
     FloatControls2.float_controls2.shader_float_controls2 => None;
     Maintenance5.maintenance5.maintenance5 => Some(F::Maintenance5);

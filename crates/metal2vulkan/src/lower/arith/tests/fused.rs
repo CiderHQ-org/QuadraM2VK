@@ -707,8 +707,9 @@ fn the_half_reference_rounds_the_exact_sum() {
 /// The route follows the profile: `OpFmaKHR` where `shaderFmaFloat32` is enabled, else `double`
 /// where 64-bit floats and integers are, else the integer routine; `half` has its own, the device's
 /// 16-bit `Fma` where the driver is measured to compute it as Metal's `half` `fma` and
-/// `shaderFloat16` is enabled (the MoltenVK captures alone), and `bfloat` and `double` keep their
-/// own lowering.
+/// `shaderFloat16` is enabled (the MoltenVK captures alone), else `OpFmaKHR` on 16 bits where
+/// `shaderFmaFloat16` is enabled and the profile rounds under the 16-bit float controls, under
+/// either policy, and `bfloat` and `double` keep their own lowering.
 ///
 /// Under native device maths (the default policy) a profile whose functions are not Metal's takes
 /// the device's `Fma` ([`Route::Native`]) where it would take a routine. Under
@@ -722,7 +723,23 @@ fn the_fused_multiply_add_route_follows_the_profile() {
     use crate::error::DriverDeviation;
     use crate::pipeline::testing::exact_maths;
     use crate::spirv::testing::{committed_profiles_with, is_moltenvk_capture};
+    // The `half` route a profile offers whatever its policy: Metal's measured `Fma`, or `OpFmaKHR`
+    // on 16 bits under the float controls, or none.
+    let exact_half = |p: &crate::device::DeviceProfile| {
+        let l = &p.fields().leaf;
+        if p.takes_driver_deviation(DriverDeviation::MetalHalfFma) && l.float16 {
+            Some(Route::F16)
+        } else if l.fma16
+            && crate::lower::arith::narrow::quantize_form(p)
+                == crate::spirv::builder::QuantizeForm::Controlled
+        {
+            Some(Route::F16Khr)
+        } else {
+            None
+        }
+    };
     let mut native = 0;
+    let mut khr16 = 0;
     for (stem, p) in committed_profiles().expect("profiles") {
         let l = &p.fields().leaf;
         if p.fields().float_functions != FloatFunctions::Native {
@@ -733,13 +750,12 @@ fn the_fused_multiply_add_route_follows_the_profile() {
         let f = Fma::on(&p, float(32)).expect("float");
         assert_eq!((f.route, f.routine()), (want, None), "{stem}");
         let h = Fma::on(&p, float(16)).expect("half");
-        let half = match p.takes_driver_deviation(DriverDeviation::MetalHalfFma) && l.float16 {
-            true => Route::F16,
-            false => Route::Native,
-        };
+        let half = exact_half(&p).unwrap_or(Route::Native);
         assert_eq!((h.route, h.routine()), (half, None), "{stem}");
+        khr16 += usize::from(half == Route::F16Khr);
     }
     assert!(native >= 10, "{native} profiles take native device maths");
+    assert!(khr16 >= 2, "{khr16} profiles take OpFmaKHR on 16 bits");
     let mut seen = std::collections::BTreeSet::new();
     let mut f16 = Vec::new();
     let mut checked = 0;
@@ -779,10 +795,7 @@ fn the_fused_multiply_add_route_follows_the_profile() {
         flushing += usize::from(
             tiny.is_some() && p.takes_driver_deviation(DriverDeviation::MetalFloatDenormals),
         );
-        let half = match p.takes_driver_deviation(DriverDeviation::MetalHalfFma) && l.float16 {
-            true => Route::F16,
-            false => Route::HalfOdd,
-        };
+        let half = exact_half(&p).unwrap_or(Route::HalfOdd);
         let h = Fma::on(&p, float(16)).expect("half");
         assert_eq!(h.route, half, "{stem}");
         assert_eq!(

@@ -771,6 +771,7 @@ feature_sources! { c, x;
     ImageView2DOn3DImage => on(c.portability_subset.image_view2_d_on3_d_image);
     SeparateStencilMaskRef => on(c.portability_subset.separate_stencil_mask_ref);
     ImageViewFormatSwizzle => on(c.portability_subset.image_view_format_swizzle);
+    ShaderFmaFloat16 => on(c.shader_fma.shader_fma_float16);
     ShaderFmaFloat32 => on(c.shader_fma.shader_fma_float32);
     Maintenance5 => on(c.maintenance5.maintenance5);
     TaskShader => on(c.mesh_shader.task_shader);

@@ -532,8 +532,8 @@ fn a_texels_nan_is_kept_under_native_half_rounding_only_where_the_nan_switch_ask
 }
 
 /// What a module's words say of its `half` rounding: its execution modes with a float width, the
-/// conversions from 32- to 16-bit floats and back with how many carry `NoContraction`, and its
-/// `OpQuantizeToF16`s.
+/// conversions from 32- to 16-bit floats and back with how many carry `NoContraction`, its
+/// `OpQuantizeToF16`s, and its 16-bit float arithmetic.
 #[derive(Debug, Default)]
 struct Rounding {
     modes: std::collections::BTreeSet<(u32, u32)>,
@@ -543,6 +543,9 @@ struct Rounding {
     quantizes: usize,
     /// `OpConstant`s of 32-bit float type with Metal's canonical NaN, `0x7FC00000`.
     canonical_nans: usize,
+    /// `OpFAdd`s, `OpFSub`s and extended instructions of a 16-bit float type: a `half` operation
+    /// on the device's 16-bit arithmetic (`ops::f16_binary`), between exact conversions.
+    f16_ops: usize,
 }
 
 /// [`Rounding`] of `words`, read back through the test parser.
@@ -604,6 +607,10 @@ fn rounding(words: &[u32]) -> Rounding {
         }
     }
     for i in &parsed.instructions {
+        let width = i.result_type.and_then(|t| widths.get(&t).copied());
+        if matches!(i.opcode, Op::FAdd | Op::FSub | Op::ExtInst) && width == Some(16) {
+            r.f16_ops += 1;
+        }
         if i.opcode != Op::FConvert {
             continue;
         }
@@ -627,8 +634,9 @@ fn rounding(words: &[u32]) -> Rounding {
 /// Where the profile has `shaderFloat16` and the float controls that make a conversion to 16 bits
 /// Metal's `half(float)` by the Vulkan spec (every ANV and RADV profile), and its driver does not
 /// fold the round trip (`DriverWorkaround::HalfConversionPairFolded`, NVIDIA's), each kernel
-/// rounds its `half` through that conversion and its
-/// widening, every one decorated `NoContraction`, with no quantize, under either policy; its entry
+/// rounds its `half` through that conversion and its widening, every one decorated
+/// `NoContraction`, with no quantize, under either policy, and computes its `half` sum on the
+/// device's 16-bit arithmetic, between conversions that are exact and undecorated; its entry
 /// declares `RoundingModeRTE`, `DenormPreserve` and `SignedZeroInfNanPreserve` for 16 bits and the
 /// modes the device's independence ties to them (`RoundingModeRTE` for 32 and 64 bits on ANV,
 /// whose rounding modes are not independent; `RoundingModeRTE` and `DenormPreserve` for 64 bits on
@@ -693,7 +701,13 @@ fn a_controlled_conversion_rounds_half_where_the_float_controls_allow() {
             let r = rounding(&a.module.words);
             assert_eq!(r.quantizes, 0, "{what}: {r:?}");
             assert!(r.narrowings > 0 && r.widenings > 0, "{what}: {r:?}");
-            assert_eq!(r.uncontracted, r.narrowings + r.widenings, "{what}: {r:?}");
+            assert_eq!(r.f16_ops, usize::from(*name == "half_sum"), "{what}: {r:?}");
+            // Each 16-bit operation narrows its two operands and widens its result, exactly.
+            assert_eq!(
+                r.uncontracted + 3 * r.f16_ops,
+                r.narrowings + r.widenings,
+                "{what}: {r:?}"
+            );
             // Less `SignedZeroInfNanPreserve` for 32 and 64 bits, which the entry's own `float`
             // arithmetic declares.
             let declared: std::collections::BTreeSet<(u32, u32)> = r

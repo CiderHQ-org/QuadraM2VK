@@ -114,9 +114,12 @@ impl Path {
     pub fn on(p: &DeviceProfile) -> Path {
         match fma::float_route(p) {
             Route::Khr => Path::Fused,
-            Route::Wide | Route::Soft | Route::HalfOdd | Route::F16 | Route::Native => {
-                Path::Integer
-            }
+            Route::Wide
+            | Route::Soft
+            | Route::HalfOdd
+            | Route::F16
+            | Route::F16Khr
+            | Route::Native => Path::Integer,
         }
     }
 }
@@ -291,9 +294,12 @@ impl Reciprocal {
     pub fn of(route: Route) -> Reciprocal {
         match route {
             Route::Khr => Reciprocal::Rounded,
-            Route::Wide | Route::Soft | Route::HalfOdd | Route::F16 | Route::Native => {
-                Reciprocal::Device
-            }
+            Route::Wide
+            | Route::Soft
+            | Route::HalfOdd
+            | Route::F16
+            | Route::F16Khr
+            | Route::Native => Reciprocal::Device,
         }
     }
 
