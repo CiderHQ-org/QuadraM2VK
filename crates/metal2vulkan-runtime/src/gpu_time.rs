@@ -30,6 +30,23 @@
 //!   the start the batch took and the end once the command buffer completed, and gives the slot
 //!   back. Their difference, in ticks of `timestampPeriod` nanoseconds, is exact on every device
 //!   that writes timestamps.
+//! - **Reset on the host as a command buffer takes its slot**, on a device the runtime created,
+//!   which enables `hostQueryReset` (Vulkan 1.2 requires it: "If Vulkan 1.2 is supported, the
+//!   following features must be supported: ... hostQueryReset", Feature Requirements):
+//!   `vkResetQueryPool` "sets the status of query indices [firstQuery, firstQuery + queryCount -
+//!   1] to unavailable", before any of the command buffer's batches is submitted, and a queue
+//!   submission's first synchronization scope "includes execution of vkQueueSubmit on the host and
+//!   anything that happened-before it" (Host Write Ordering Guarantees). A slot is free only once
+//!   its last holding's work completed, or was never submitted (its command buffer gives it back
+//!   as it completes, or as it goes uncommitted), and only its holder resets it: "Submitted
+//!   commands that refer to the range ... must have completed execution", and no other thread
+//!   reads or resets it meanwhile (`vkResetQueryPool`'s valid usage). So no command buffer the
+//!   GPU runs resets a query: neither the starts' command buffers of barriers, which the scheduler
+//!   keeps and submits again for every holding of a slot (`command_buffer/kept_barriers.rs`), nor
+//!   a first encoder's prefix. An adopted device (`Device::from_raw`), which states nothing of
+//!   `hostQueryReset`, resets them in those command buffers: the start's command buffer resets its
+//!   slot's start and end, and the first encoder's prefix the end and its own start, each before
+//!   its timestamp. Counted: `WorkCounts::timestamp_slots_reset_on_host`.
 //! - **Pools made as needed**. Each pool holds [`SLOTS`] slots. The device makes its first at its
 //!   first timed command buffer, and another whenever one takes a slot while every slot of the
 //!   ones it has is held, until the device refuses one: its own limit, which Vulkan states nowhere
@@ -81,7 +98,10 @@
 //!   times are refused (`Unsupported`, `Feature::GpuTimes`). So are a command buffer's that found
 //!   no slot free.
 //! - **Kernel times** are the host times at which the scheduler began submitting the command
-//!   buffer's first batch and finished submitting its last.
+//!   buffer's first batch and finished submitting its last. They are kept apart from the command
+//!   buffer's state ([`KernelTimes`]), which the scheduler holds while it replays the batch's
+//!   deferred command buffers (`recorder`) and submits it: a read waits for no submission in
+//!   progress and for no GPU work, as Metal's reads wait for none.
 //! - **No encoder, no timestamps**. A command buffer that encoded nothing and waits for no event or
 //!   semaphore takes no slot and writes no timestamps. Its GPU start and end are both where its
 //!   queue reached it: its kernel end time, or the GPU end of the queue's command buffer before it
@@ -128,13 +148,14 @@
 //!   queue's command buffer before it complete; the end is late by the time the runtime took to
 //!   see this one complete; so the duration holds both latencies, not the GPU's own time.
 //!
-//! The pair a command buffer's times are placed by is the device's latest, taken at a commit at
-//! most [`REFRESH`] before: one calibration per device per 100 ms, not one per commit. The GPU's
-//! clock and the host's drift apart by parts per million, so a pair that old moves a time by
-//! nanoseconds to microseconds, within what the calibration states for itself on the devices
-//! measured.
+//! The pair a command buffer's times are placed by is the device's latest, taken at a completion
+//! at most [`REFRESH`] before its own: one calibration per device per 100 ms, not one per command
+//! buffer. The GPU's clock and the host's drift apart by parts per million, so a pair that old
+//! moves a time by nanoseconds to microseconds, within what the calibration states for itself on
+//! the devices measured.
 
 use super::device::lock;
+use super::exit_guard::{self, Call};
 use super::release;
 use super::work_counts::Counters;
 use ash::vk;
@@ -144,7 +165,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-/// The longest a device's calibration pair serves the commits after it.
+/// The longest a device's calibration pair serves the completions after it.
 pub(crate) const REFRESH: Duration = Duration::from_millis(100);
 
 /// The most readings one calibration pair takes ([`least_deviation`]).
@@ -301,7 +322,7 @@ pub(crate) struct Life {
 pub(crate) enum Placement {
     /// By the device's calibration pair.
     Calibrated,
-    /// By its completion: the device had no pair at its commit.
+    /// By its completion: the device had no pair as it completed.
     Uncalibrated,
     /// By its completion: the pair placed a time outside its life by `by` nanoseconds, more than
     /// the pair's stated `deviation` and the clocks' drift allow (the module docs).
@@ -351,59 +372,7 @@ impl GpuClock {
     /// reading of the smallest deviation ([`least_deviation`]), and how many readings it took.
     pub(crate) fn pair(&self) -> Option<(Reading, u32)> {
         let calibration = self.calibration?;
-        least_deviation(|| self.reading(calibration))
-    }
-
-    /// One reading of `calibration`, where it succeeds.
-    fn reading(&self, calibration: Calibration) -> Option<Reading> {
-        let infos = [
-            vk::CalibratedTimestampInfoKHR::default().time_domain(vk::TimeDomainKHR::DEVICE),
-            vk::CalibratedTimestampInfoKHR::default().time_domain(calibration.domain),
-        ];
-        let mut values = [0u64; 2];
-        let mut deviation = 0u64;
-        #[cfg(unix)]
-        let domain = domain_clock(calibration.domain)?;
-        // SAFETY: the device is live (the caller holds it) and enabled the extension the entry
-        // point belongs to; the arrays hold one value per info.
-        let result = unsafe {
-            (calibration.get)(
-                calibration.device,
-                infos.len() as u32,
-                infos.as_ptr(),
-                values.as_mut_ptr(),
-                &mut deviation,
-            )
-        };
-        if result != vk::Result::SUCCESS {
-            return None;
-        }
-        #[cfg(unix)]
-        {
-            // The domain's clock onto the host's: both read at once, the host's around it.
-            let (host, around) = if domain == BASE {
-                (values[1], 0)
-            } else {
-                let first = read_clock(BASE)?;
-                let during = read_clock(domain)?;
-                let last = read_clock(BASE)?;
-                let middle = first + last.saturating_sub(first) / 2;
-                let offset = i128::from(middle) - i128::from(during);
-                let host = u64::try_from(i128::from(values[1]) + offset).ok()?;
-                (host, last.saturating_sub(first))
-            };
-            Some(Reading {
-                pair: Pair {
-                    ticks: values[0],
-                    host,
-                },
-                deviation: deviation.saturating_add(around),
-            })
-        }
-        #[cfg(not(unix))]
-        {
-            None
-        }
+        least_deviation(|| calibration.reading())
     }
 
     /// The host time, in nanoseconds of the host's clock, of the timestamp `ticks`, by `pair`.
@@ -545,6 +514,9 @@ pub(crate) struct Timing {
     latest: Mutex<Option<(Instant, Reading)>>,
     /// Its slots hold the start the first encoder writes ([`PREFIXED`]).
     prefixed: bool,
+    /// Its device enables `hostQueryReset`: a slot is reset on the host as it is taken (the module
+    /// docs).
+    host_reset: bool,
     pools: Mutex<Pools>,
 }
 
@@ -692,41 +664,30 @@ impl Drop for Slot {
 }
 
 impl Timing {
-    /// The timing of `device` of `physical`, made from `instance` through `entry`, whose runtime
-    /// queue family has `valid_bits` timestamp bits, ticking every `period` nanoseconds, with
-    /// `extension` enabled where it is: calibrated when the device offers its own time domain and
-    /// one of the host's the runtime reads ([`host_domain`]). With `from_host`, it answers GPU
-    /// times from the host and writes no timestamps (the module docs), for that reason. With
-    /// `scarce_pools` (`DriverFact::TimestampPoolsAreCounterSampleBuffers`) it makes one
-    /// timestamp pool at most, else as many as its command buffers in flight need until the
-    /// device refuses one. With `prefixed`, a slot also holds the start its command buffer's
-    /// first encoder writes ([`PREFIXED`] queries; else [`PLAIN`]); never with `scarce_pools`.
-    ///
-    /// # Safety
-    ///
-    /// `device` is a live device of `physical`, made from `instance` with `extension` enabled,
-    /// and the loader serves `vkGetDeviceProcAddr` for it (its loader word is in place).
-    pub(crate) unsafe fn new(
-        entry: &ash::Entry,
-        instance: &ash::Instance,
-        physical: vk::PhysicalDevice,
-        device: &ash::Device,
+    /// The timing of a device whose runtime queue family has `valid_bits` timestamp bits, ticking
+    /// every `period` nanoseconds, calibrated by `calibration` where it has one ([`calibrated`]).
+    /// With `from_host`, it answers GPU times from the host and writes no timestamps (the module
+    /// docs), for that reason. With `scarce_pools`
+    /// (`DriverFact::TimestampPoolsAreCounterSampleBuffers`) it makes one timestamp pool at most,
+    /// else as many as its command buffers in flight need until the device refuses one. With
+    /// `prefixed`, a slot also holds the start its command buffer's first encoder writes
+    /// ([`PREFIXED`] queries; else [`PLAIN`]); never with `scarce_pools`. With `host_reset` (the
+    /// device enables `hostQueryReset`), a slot is reset on the host as it is taken.
+    pub(crate) fn new(
         valid_bits: u32,
         period: f32,
-        extension: Option<Extension>,
+        calibration: Option<Calibration>,
         from_host: Option<FromHost>,
         scarce_pools: bool,
         prefixed: bool,
+        host_reset: bool,
     ) -> Timing {
-        // SAFETY: the caller's.
-        let calibration = extension.and_then(|extension| unsafe {
-            calibration(entry, instance, physical, device, extension.0)
-        });
         Timing {
             clock: GpuClock::new(valid_bits, period, calibration),
             from_host,
             latest: Mutex::new(None),
             prefixed: prefixed && !scarce_pools,
+            host_reset,
             pools: Mutex::new(match (scarce_pools, prefixed) {
                 (true, _) => Pools::new(Some(1), PLAIN),
                 (false, true) => Pools::new(None, PREFIXED),
@@ -741,22 +702,38 @@ impl Timing {
         self.prefixed
     }
 
+    /// Whether a slot is reset on the host as it is taken (the module docs): no command buffer
+    /// resets its queries.
+    pub(crate) fn resets_on_host(&self) -> bool {
+        self.host_reset
+    }
+
     /// A slot for a timed command buffer, from the device's pools, a pool made where
-    /// every slot of the ones made is held ([`Pools::take`]); `None` where the device writes no
+    /// every slot of the ones made is held ([`Pools::take`]), its queries reset on the host where
+    /// the device resets them there (the module docs); `None` where the device writes no
     /// timestamps, or every slot is held and no pool more can be made.
     ///
     /// # Safety
     ///
     /// `device` is the live device of this timing.
-    pub(crate) unsafe fn slot(&self, device: &ash::Device) -> Option<Slot> {
+    pub(crate) unsafe fn slot(&self, device: &ash::Device, counts: &Counters) -> Option<Slot> {
         self.clock.as_ref()?;
-        lock(&self.pools).take(|count| {
+        let slot = lock(&self.pools).take(|count| {
             let info = vk::QueryPoolCreateInfo::default()
                 .query_type(vk::QueryType::TIMESTAMP)
                 .query_count(count);
             // SAFETY: the caller's; `info` is valid.
             unsafe { device.create_query_pool(&info, None) }.ok()
-        })
+        })?;
+        if self.host_reset {
+            // SAFETY: the device enables `hostQueryReset`; the slot's queries are its pool's, and
+            // free: its last holding's work completed or was never submitted, and no other
+            // thread reads or resets them (the module docs).
+            unsafe { device.reset_query_pool(slot.queries, slot.first(), slot.per_slot) };
+            exit_guard::called(Call::ResetQueryPool);
+            counts.timestamp_slot_reset_on_host();
+        }
+        Some(slot)
     }
 
     /// The slots of the timestamp pools the device made.
@@ -794,7 +771,8 @@ impl Timing {
 
     /// The device's latest calibration reading, its pair and stated deviation, taken now when
     /// the last is [`REFRESH`] old or there is none, and counted in `counts`; `None` where the
-    /// device has no calibration or the reading fails.
+    /// device has no calibration or the reading fails. A completion turn's, in its section, once
+    /// the command buffer's timestamps were read (the module docs).
     pub(crate) fn pair(&self, counts: &Counters) -> Option<Reading> {
         let clock = self.clock.as_ref()?;
         clock.calibration?;
@@ -804,10 +782,87 @@ impl Timing {
                 return Some(reading);
             }
         }
+        exit_guard::called(Call::GetCalibratedTimestamps);
         let (reading, readings) = clock.pair()?;
         counts.calibrated(readings, reading.deviation);
         *latest = Some((Instant::now(), reading));
         Some(reading)
+    }
+}
+
+/// The calibration of `device` of `physical`, made from `instance` through `entry`, with
+/// `extension` enabled where it is: where it offers its own time domain and one of the host's the
+/// runtime reads ([`host_domain`]).
+///
+/// # Safety
+///
+/// `device` is a live device of `physical`, made from `instance` with `extension` enabled, and
+/// the loader serves `vkGetDeviceProcAddr` for it (its loader word is in place).
+pub(crate) unsafe fn calibrated(
+    entry: &ash::Entry,
+    instance: &ash::Instance,
+    physical: vk::PhysicalDevice,
+    device: &ash::Device,
+    extension: Option<Extension>,
+) -> Option<Calibration> {
+    // SAFETY: the caller's.
+    extension.and_then(|extension| unsafe {
+        calibration(entry, instance, physical, device, extension.0)
+    })
+}
+
+impl Calibration {
+    /// One reading of the device's time domain and the host's, where it succeeds: a completion
+    /// turn's ([`GpuClock::pair`]) and priming's (`device/prime.rs`).
+    pub(crate) fn reading(self) -> Option<Reading> {
+        let infos = [
+            vk::CalibratedTimestampInfoKHR::default().time_domain(vk::TimeDomainKHR::DEVICE),
+            vk::CalibratedTimestampInfoKHR::default().time_domain(self.domain),
+        ];
+        let mut values = [0u64; 2];
+        let mut deviation = 0u64;
+        #[cfg(unix)]
+        let domain = domain_clock(self.domain)?;
+        // SAFETY: the device is live (the caller holds it) and enabled the extension the entry
+        // point belongs to; the arrays hold one value per info.
+        let result = unsafe {
+            (self.get)(
+                self.device,
+                infos.len() as u32,
+                infos.as_ptr(),
+                values.as_mut_ptr(),
+                &mut deviation,
+            )
+        };
+        if result != vk::Result::SUCCESS {
+            return None;
+        }
+        #[cfg(unix)]
+        {
+            // The domain's clock onto the host's: both read at once, the host's around it.
+            let (host, around) = if domain == BASE {
+                (values[1], 0)
+            } else {
+                let first = read_clock(BASE)?;
+                let during = read_clock(domain)?;
+                let last = read_clock(BASE)?;
+                let middle = first + last.saturating_sub(first) / 2;
+                let offset = i128::from(middle) - i128::from(during);
+                let host = u64::try_from(i128::from(values[1]) + offset).ok()?;
+                (host, last.saturating_sub(first))
+            };
+            Some(Reading {
+                pair: Pair {
+                    ticks: values[0],
+                    host,
+                },
+                deviation: deviation.saturating_add(around),
+            })
+        }
+        #[cfg(not(unix))]
+        {
+            None
+        }
     }
 }
 
@@ -816,7 +871,7 @@ impl Timing {
 ///
 /// # Safety
 ///
-/// As [`Timing::new`]'s, `names` the form enabled.
+/// As [`calibrated`]'s, `names` the form enabled.
 unsafe fn calibration(
     entry: &ash::Entry,
     instance: &ash::Instance,
@@ -863,8 +918,40 @@ unsafe fn calibration(
     })
 }
 
-/// A command buffer's times, in its state: host times in nanoseconds of the host's clock, 0
-/// until known.
+/// A command buffer's kernel times, in nanoseconds of the host's clock, 0 until known: apart
+/// from its state, so a read waits for no submission in progress (the module docs).
+#[derive(Debug, Default)]
+pub(crate) struct KernelTimes {
+    /// The scheduler began submitting its first batch.
+    start: AtomicU64,
+    /// The scheduler finished submitting its last batch.
+    end: AtomicU64,
+}
+
+impl KernelTimes {
+    /// The scheduler begins submitting the first batch now.
+    pub(crate) fn begin(&self) {
+        self.start.store(host_nanos(), Ordering::Release);
+    }
+
+    /// The scheduler finished submitting the last batch at host time `at`.
+    pub(crate) fn end_at(&self, at: u64) {
+        self.end.store(at, Ordering::Release);
+    }
+
+    /// When the scheduler began submitting the first batch; 0 before.
+    pub(crate) fn start(&self) -> u64 {
+        self.start.load(Ordering::Acquire)
+    }
+
+    /// When the scheduler finished submitting the last batch; 0 before.
+    pub(crate) fn end(&self) -> u64 {
+        self.end.load(Ordering::Acquire)
+    }
+}
+
+/// A command buffer's other times, in its state: host times in nanoseconds of the host's clock,
+/// 0 until known.
 #[derive(Debug, Default)]
 pub(crate) struct Times {
     /// Its slot of the device's timestamp pool, from its first encoder's opening (or its commit)
@@ -875,12 +962,8 @@ pub(crate) struct Times {
     pub(crate) prefixed: bool,
     /// What its timestamps gave.
     pub(crate) stamped: Stamped,
-    /// The device's calibration reading at its commit, where the device has one.
+    /// The device's calibration reading as it completed, where the device has one.
     pub(crate) pair: Option<Reading>,
-    /// The scheduler began submitting its first batch.
-    pub(crate) kernel_start: u64,
-    /// The scheduler finished submitting its last batch.
-    pub(crate) kernel_end: u64,
     /// A completion turn saw its last batch complete.
     pub(crate) completed: u64,
     /// Its GPU start and end, once read.

@@ -33,6 +33,7 @@ use crate::error::{internal, vulkan, Error};
 use crate::exit_guard::{self, Call};
 use crate::release;
 use crate::sharing::Sharing;
+use crate::work_counts::Begun;
 use ash::vk;
 use ash::vk::Handle;
 use std::sync::Mutex;
@@ -210,7 +211,7 @@ impl Device {
         // SAFETY: the command buffer is not pending (every submission is waited for below) and
         // the staging lock is held; beginning it resets it (the pool resets command buffers).
         unsafe { raw.begin_command_buffer(made.buffer, &begin) }.map_err(vulkan)?;
-        shared.counts.command_buffer_begun();
+        shared.counts.command_buffer_begun(Begun::Internal);
         record(raw, made.buffer, staging.flags);
         // SAFETY: as above.
         unsafe { raw.end_command_buffer(made.buffer) }.map_err(vulkan)?;

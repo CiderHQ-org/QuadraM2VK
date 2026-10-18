@@ -57,7 +57,7 @@ use super::execution::Execution;
 use super::exit_guard::{self, Call};
 use super::function_table::TableSnapshot;
 use super::gpu_pools::{IndexPool, PoolKind, PoolLease};
-use super::gpu_time::{self, Life, Placement, Stamped, Times};
+use super::gpu_time::{self, KernelTimes, Life, Placement, Stamped, Times};
 use super::heap::Heap;
 use super::heap_sets::HeapUse;
 use super::live_buffers::LiveTable;
@@ -169,6 +169,37 @@ pub(super) struct CommandBufferShared {
     /// where they are every one the pool handed out and it completed, it gives the pool back
     /// with none recording (`spares.rs`).
     raws_ended: AtomicU64,
+    /// Its kernel times, apart from the state, which the scheduler holds while it replays and
+    /// submits a batch: a read waits for neither (`gpu_time.rs`).
+    kernel: KernelTimes,
+    /// Its status as `status` answers it, apart from the state for the same reason: each
+    /// transition of the state's status stores it here under the state's lock
+    /// ([`CommandBufferShared::answer`]), its raw value with release ordering, and a read loads
+    /// it with acquire ordering and takes no lock. Metal's reads wait for no submission.
+    status: AtomicU8,
+    /// Its error as `error` answers it: set once, by the completion that fails it, before that
+    /// stores the `Error` status, so a read that loads `Error` finds it. A commit takes nothing
+    /// here: no lock is taken first at a commit (on Apple's hosts a mutex allocates at its first
+    /// lock).
+    error: OnceLock<CommandBufferError>,
+}
+
+/// The word [`CommandBufferShared::status`] holds for `status`: its raw value.
+fn status_word(status: CommandBufferStatus) -> u8 {
+    status.raw() as u8
+}
+
+/// The status whose word ([`status_word`]) `word` is: every word stored is one of a status, the
+/// last of them `Error`'s.
+fn status_of(word: u8) -> CommandBufferStatus {
+    match word {
+        0 => CommandBufferStatus::NotEnqueued,
+        1 => CommandBufferStatus::Enqueued,
+        2 => CommandBufferStatus::Committed,
+        3 => CommandBufferStatus::Scheduled,
+        4 => CommandBufferStatus::Completed,
+        _ => CommandBufferStatus::Error,
+    }
 }
 
 /// How [`CommandBuffer::commit_failed`] fails a command buffer: a runtime extension, no Metal
@@ -1346,6 +1377,9 @@ impl CommandBuffer {
             reencode: AtomicU64::new(0),
             reencoding: Mutex::new(()),
             raws_ended: AtomicU64::new(0),
+            kernel: KernelTimes::default(),
+            status: AtomicU8::new(status_word(CommandBufferStatus::NotEnqueued)),
+            error: OnceLock::new(),
         }))
     }
 
@@ -1398,7 +1432,15 @@ impl CommandBuffer {
     /// A primary `VkCommandBuffer` from this command buffer's pool, made on first use. The
     /// caller holds `state` (the pool is externally synchronized).
     pub(super) fn allocate_raw(&self, state: &mut State) -> Result<vk::CommandBuffer, Error> {
-        self.0.allocate_raw(state)
+
+    /// An encoder's own primary `VkCommandBuffer` from this command buffer's pool, and whether it
+    /// is begun: the pool's primary begun ahead where it holds one (`spares.rs`), else as
+    /// [`allocate_raw`](Self::allocate_raw) hands one out, to begin. The caller holds `state`.
+    pub(super) fn encoder_primary(
+        &self,
+        state: &mut State,
+    ) -> Result<(vk::CommandBuffer, bool), Error> {
+        self.0.encoder_primary(state)
     }
 
     /// Write the start into `raw`, the first encoder's first `VkCommandBuffer`, just begun, where
@@ -1790,6 +1832,7 @@ impl CommandBuffer {
                 state.retained.push(Box::new(ticket));
             }
             state.status = CommandBufferStatus::Committed;
+            self.0.answer(&state);
             for heap in state.used_heaps.drain(..) {
                 heap.mark_used();
             }
@@ -1798,18 +1841,6 @@ impl CommandBuffer {
             let (unreplayable, keys) = state.keep_replays();
             if !keys.is_empty() {
                 device.shared().rebinds.wait_for_replay(&self.0, keys);
-            }
-            // Committed, its commands recorded for good: a rebind of what they used takes
-            // effect after them (`rebind.rs`); one a host step records holds until completion.
-            if stepped {
-                let held = &mut *state;
-                let kept = held
-                    .holds
-                    .drain(..)
-                    .map(|holds| Box::new(holds) as Box<dyn Any + Send + Sync>);
-                held.retained.extend(kept);
-            } else {
-                state.holds.clear();
             }
             if let Some(slot) = &mut state.slot {
                 slot.committed();
@@ -1898,14 +1929,18 @@ impl CommandBuffer {
         Ok(())
     }
 
-    /// `status`.
+    /// `status`. Like Metal's, the read waits for no submission in progress and no GPU work.
     pub fn status(&self) -> CommandBufferStatus {
-        self.state().status
+        status_of(self.0.status.load(Ordering::Acquire))
     }
 
-    /// `error`: why the command buffer failed, once its status is `Error`.
+    /// `error`: why the command buffer failed, once its status is `Error`. Like Metal's, the
+    /// read waits for no submission in progress and no GPU work.
     pub fn error(&self) -> Option<CommandBufferError> {
-        self.state().error
+        match self.status() {
+            CommandBufferStatus::Error => self.0.error.get().copied(),
+            _ => None,
+        }
     }
 
     /// `error.localizedDescription`, where the driver relayed Metal's failure of the command
@@ -1999,15 +2034,15 @@ impl CommandBuffer {
 
     /// `kernelStartTime`: the host time, in seconds of [`host_time`](super::host_time)'s clock,
     /// at which the device's scheduler began submitting the command buffer's work to Vulkan; 0
-    /// before.
+    /// before. Like Metal's, the read waits for no submission in progress and no GPU work.
     pub fn kernel_start_time(&self) -> f64 {
-        gpu_time::seconds(self.state().times.kernel_start)
+        gpu_time::seconds(self.0.kernel.start())
     }
 
     /// `kernelEndTime`: the host time at which the device's scheduler finished submitting the
     /// command buffer's work to Vulkan (it is then `Scheduled`); 0 before.
     pub fn kernel_end_time(&self) -> f64 {
-        gpu_time::seconds(self.state().times.kernel_end)
+        gpu_time::seconds(self.0.kernel.end())
     }
 
     /// The GPU start and end, in nanoseconds of the host's clock: placed from the command
@@ -2075,13 +2110,18 @@ impl CommandBuffer {
         };
         // Read timestamps came from the device's clock.
         let clock = clock.ok_or_else(untimed)?;
-        let (times, placement) = clock.span(state.times.pair, start, end, life(&state.times));
+        let (times, placement) = clock.span(
+            state.times.pair,
+            start,
+            end,
+            life(&self.0.kernel, &state.times),
+        );
         state.times.gpu = Some(times);
         drop(state);
         let reason = match placement {
             Placement::Calibrated => return Ok(times),
             Placement::Uncalibrated if clock.calibration.is_some() => {
-                "the device's calibrated timestamps could not be read at its commit".to_owned()
+                "the device's calibrated timestamps could not be read as it completed".to_owned()
             }
             Placement::Uncalibrated => {
                 "the device calibrates its timestamps against no host clock the runtime reads"
@@ -2584,6 +2624,29 @@ impl CommandBufferShared {
         state: &mut State,
         level: vk::CommandBufferLevel,
     ) -> Result<vk::CommandBuffer, Error> {
+        let pool = self.pool(state)?;
+        if let Some(buffer) = pool.reuse(level) {
+            return Ok(buffer);
+        }
+        let info = vk::CommandBufferAllocateInfo::default()
+            .command_pool(pool.raw)
+            .level(level)
+            .command_buffer_count(1);
+        let buffer = self.device.allocate_command_buffers(&info)?[0];
+        pool.made(level, buffer);
+        Ok(buffer)
+    }
+
+    fn encoder_primary(&self, state: &mut State) -> Result<(vk::CommandBuffer, bool), Error> {
+        if let Some(buffer) = self.pool(state)?.take_begun() {
+            return Ok((buffer, true));
+        }
+        Ok((self.allocate_raw(state)?, false))
+    }
+
+    /// This command buffer's pool, taken on first use: a spare of the device's, or a new one.
+    /// The caller holds `state` (the pool is externally synchronized).
+    fn pool<'a>(&self, state: &'a mut State) -> Result<&'a mut CommandPool, Error> {
         let device = &self.device;
         let raw = device.shared().vk();
         if state.pool.is_none() {
@@ -2611,25 +2674,16 @@ impl CommandBufferShared {
             };
             state.pool = Some(pool);
         }
-        let Some(pool) = &mut state.pool else {
-            return Err(internal("a command buffer without its command pool"));
-        };
-        if let Some(buffer) = pool.reuse(level) {
-            return Ok(buffer);
-        }
-        let info = vk::CommandBufferAllocateInfo::default()
-            .command_pool(pool.raw)
-            .level(level)
-            .command_buffer_count(1);
-        let buffer = device.allocate_command_buffers(&info)?[0];
-        pool.made(level, buffer);
-        Ok(buffer)
+        state
+            .pool
+            .as_mut()
+            .ok_or_else(|| internal("a command buffer without its command pool"))
     }
 
     /// Ready `state`'s times at its commit, on the program's thread: where the device writes
     /// timestamps, the slot of the device's timestamp pools the batches write its start and end
-    /// into, and the device's calibration pair. Without a slot free (and no pool more), it has
-    /// no timestamps. One
+    /// into. Without a slot free (and no pool more), it has no timestamps. Its calibration pair
+    /// is taken as it completes (`place_gpu_times`): no reading of the GPU's clock here. One
     /// that encoded nothing and waits for nothing, and every one where the device answers GPU
     /// times from the host, writes none (`gpu_time.rs`).
     fn time(&self, state: &mut State) {
@@ -2652,9 +2706,8 @@ impl CommandBufferShared {
             state.times.stamped = Stamped::FromHost;
             return;
         }
-        match self.take_slot(state) {
-            true => state.times.pair = timing.pair(&shared.counts),
-            false => state.times.stamped = Stamped::NoSlot,
+        if !self.take_slot(state) {
+            state.times.stamped = Stamped::NoSlot;
         }
     }
 
@@ -2667,7 +2720,7 @@ impl CommandBufferShared {
         }
         let shared = self.device.shared();
         // SAFETY: the device is live.
-        let Some(slot) = (unsafe { shared.timing.slot(shared.vk()) }) else {
+        let Some(slot) = (unsafe { shared.timing.slot(shared.vk(), &shared.counts) }) else {
             return false;
         };
         shared.counts.timestamp_slot_taken();
@@ -2703,13 +2756,14 @@ impl CommandBufferShared {
         let device = self.device.shared().vk();
         // SAFETY: `raw` was just begun, under the state lock, outside any render pass, and only
         // this call records it now; the end's query is the one before the prefix's, and both are
-        // reset before the timestamp is written (`vkCmdResetQueryPool`: "sets the status of query
-        // indices [firstQuery, firstQuery + queryCount - 1] to unavailable").
+        // reset before the timestamp is written, on the host as the slot was taken or here
+        // (`vkCmdResetQueryPool`: "sets the status of query indices [firstQuery, firstQuery +
+        // queryCount - 1] to unavailable").
         unsafe {
-            device.cmd_reset_query_pool(raw, queries, prefix - 1, 2);
-            exit_guard::called(Call::CmdResetQueryPool);
-            let top = vk::PipelineStageFlags::TOP_OF_PIPE;
-            device.cmd_write_timestamp(raw, top, queries, prefix);
+            if !timing.resets_on_host() {
+                device.cmd_reset_query_pool(raw, queries, prefix - 1, 2);
+                exit_guard::called(Call::CmdResetQueryPool);
+            }
             exit_guard::called(Call::CmdWriteTimestamp);
         }
         state.prefix = Some(raw);
@@ -2758,6 +2812,19 @@ impl CommandBufferShared {
         };
     }
 
+    /// Publish the state's status, and its error where it failed, for `status` and `error` to
+    /// read ([`CommandBufferShared::status`]), under the state's lock, so in the order of its
+    /// transitions: the error first, set once (only the completion fails it, and nothing
+    /// follows that), then the status.
+    fn answer(&self, state: &State) {
+        if let Some(error) = state.error {
+            // Set at most once: a second set would be of the same completion's error.
+            let _ = self.error.set(error);
+        }
+        self.status
+            .store(status_word(state.status), Ordering::Release);
+    }
+
     /// Place its GPU times among its queue's, now that it completed: in the completion turn,
     /// after its timestamps were read, in its queue's order (`gpu_time.rs`). One that wrote no
     /// timestamps takes its times here: encoder-less, where its queue reached it; answered from
@@ -2768,8 +2835,13 @@ impl CommandBufferShared {
         let shared = self.device.shared();
         let mut state = lock(&self.state);
         let times = &mut state.times;
+        // The device's calibration pair, taken now, where the GPU that ran the work is awake
+        // (`gpu_time.rs`).
+        if let Stamped::Read(Some(_)) = times.stamped {
+            times.pair = shared.timing.pair(&shared.counts);
+        }
         self.queue.place_gpu_times(|latest_end| {
-            let (kernel_end, completed) = (times.kernel_end, times.completed);
+            let (kernel_end, completed) = (self.kernel.end(), times.completed);
             match times.stamped {
                 Stamped::NoWork => {
                     let at = kernel_end.max(latest_end);
@@ -2785,7 +2857,8 @@ impl CommandBufferShared {
                 }
                 Stamped::Read(Some((start, end))) => match shared.timing.clock() {
                     Some(clock) => {
-                        let ((_, end), placement) = clock.span(times.pair, start, end, life(times));
+                        let ((_, end), placement) =
+                            clock.span(times.pair, start, end, life(&self.kernel, times));
                         if let Placement::Disagreed { .. } = placement {
                             shared.counts.calibration_disagreed();
                         }
@@ -2821,6 +2894,7 @@ impl CommandBufferShared {
                     .0;
             }
             state.status = CommandBufferStatus::Scheduled;
+            self.answer(&state);
         }
         let buffer = CommandBuffer(Arc::clone(self));
         {
@@ -2990,6 +3064,9 @@ impl CommandBufferShared {
         // A capture replay found a primitive whose reach was not measured: its pass rewrote
         // every tile, announced once the lock is let go (below).
         let mut unmeasured_reach = false;
+        // Its command pool, where it settled, whose primary the device's spares begin ahead once
+        // its completed handlers ran (below).
+        let mut settled_pool = None;
         {
             let mut state = lock(&self.state);
             // Every trail of the work it waited for (a pipeline's making, a twin's decode) was
@@ -3092,6 +3169,9 @@ impl CommandBufferShared {
                     state.error = Some(error);
                 }
             }
+            // The final status, with its error, once: a read sees no `Completed` that a decoded
+            // failure turns to `Error`.
+            self.answer(&state);
             state.status_words = None;
             state.capture_tallies.clear();
             state.index_pool = None;
@@ -3111,6 +3191,7 @@ impl CommandBufferShared {
                 let ended = self.raws_ended.load(Ordering::Relaxed);
                 let settled = state.status == CommandBufferStatus::Completed
                     && u64::try_from(pool.handed_out()).is_ok_and(|handed| handed == ended);
+                settled_pool = settled.then_some(pool.raw);
                 let shared = self.device.shared();
                 shared.spares.give_command_pool(shared, pool, settled);
             }
@@ -3194,6 +3275,14 @@ impl CommandBufferShared {
         let slot = lock(&self.state).slot.take();
         drop(slot);
         self.gate.finish();
+        // Its pool's primary begun ahead, where no command buffer took the pool since
+        // (`spares.rs`), and no thread waits for the gate, which opens only once this
+        // transition's hold goes: a waiter's return is never delayed by the begin, but for one
+        // that came after this check.
+        if let Some(pool) = settled_pool.filter(|_| !self.gate.awaited()) {
+            let shared = self.device.shared();
+            shared.spares.begin_ahead(shared, pool);
+        }
     }
 }
 
@@ -3373,11 +3462,11 @@ fn submission_error(device: &Device, error: vk::Result) -> CommandBufferError {
     }
 }
 
-/// The life of the command buffer whose times are `times`, as its timestamps are checked against
-/// it (`gpu_time.rs`, `GpuClock::span`).
-fn life(times: &Times) -> Life {
+/// The life of the command buffer whose kernel times are `kernel` and other times `times`, as its
+/// timestamps are checked against it (`gpu_time.rs`, `GpuClock::span`).
+fn life(kernel: &KernelTimes, times: &Times) -> Life {
     Life {
-        kernel_start: times.kernel_start,
+        kernel_start: kernel.start(),
         completed: times.completed,
     }
 }

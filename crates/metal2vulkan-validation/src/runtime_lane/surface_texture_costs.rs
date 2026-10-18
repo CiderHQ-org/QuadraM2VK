@@ -22,21 +22,9 @@
 //! and 90th percentile of the host's time making the buffer, making the texture and releasing
 //! both, per texture; per frame, the encoding and the commit-to-completion wall time and the
 //! process's CPU time; and the device's work counts per frame that the path moves (dma-buf images
-//! and fallbacks, shadows and those zeroed as made, images at Metal's row pitch over host pages
-//! and the driver's refusals of them, asked and recalled, images started on the host, internal
-//! submissions, shadows' copies and the texels their copies in and back move). `SURFTEX-QUERY` lines
-//! print what the driver answers for a `DRM_FORMAT_MOD_LINEAR` image of host allocations.
-//!
-//! [`pitch_classes`] asks which row pitches the device lays a texture over a no-copy buffer's
-//! host pages at: for each of a few formats and usages (a device each), widths, and pitches of
-//! each power-of-two class from 16 bytes up (a pitch's class is the largest power of two dividing
-//! it; two pitches a class, the smallest odd multiples of the class that cover the row), each
-//! texture made twice, the form its making took (the driver's own linear image, an image at
-//! Metal's row pitch, a shadow where the driver refused that image, asked or recalled, or a shadow
-//! for another reason) and the median time of each form's making. Printed per format, usage and
-//! class (`SURFTEX-PITCH`): the forms, and whether every texture of the class that the driver's
-//! own linear image does not alias took one answer; per format and usage (`SURFTEX-PITCH-RULE`)
-//! the classes at Metal's pitch, shadowed and mixed, and the reason the first shadow announced.
+//! scratches reused and zeroed, the merges that fetched their texels, the command buffers begun by
+//! what for, the render pass begins and secondary executions replayed, and the passes whose first
+//! instance recorded inline).
 //!
 //! [`surface_texture_cost_parts`] takes the frame apart over anonymous pages: the textures' making
 //! around an empty command buffer, the passes that store, the passes that store `DontCare`, the
@@ -295,7 +283,10 @@ fn counts_per_frame(before: &WorkCounts, after: &WorkCounts, frames: usize) -> S
          recalled {:.2}), dma-buf images {:.2}, dma-buf image fallbacks {:.2}, dma-buf imports \
          {:.2}, images started on the host {:.2}, internal submissions {:.2}, staging submissions \
          {:.2}, shadow copies {:.2} (texels copied in {:.0}, back {:.0}; copies back dispatched \
-         {:.2})",
+         {:.2}, zeroed {:.2}; merges fetched {:.2}); command buffers begun {:.2} (encoders' own \
+         {:.2}, segments {:.2}, draws' secondaries {:.2}, batches' {:.2}, barriers kept {:.2}, \
+         internal {:.2}), render pass begins replayed {:.2}, secondaries executed {:.2}, passes \
+         recorded inline {:.2}",
         per(after.shadowed_textures, before.shadowed_textures),
         per(after.shadows_zeroed, before.shadows_zeroed),
         per(after.pitched_host_images, before.pitched_host_images),
@@ -354,51 +345,41 @@ fn print_host_modifier_queries(device: &Device) {
             "sampled+color+storage",
             sampled | vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::STORAGE,
         ),
-    ] {
-        for (tiling, modifier, tiling_name) in [
-            (vk::ImageTiling::LINEAR, false, "LINEAR"),
-            (
-                vk::ImageTiling::DRM_FORMAT_MODIFIER_EXT,
-                true,
-                "DRM_FORMAT_MOD_LINEAR",
-            ),
-        ] {
-            let mut drm = vk::PhysicalDeviceImageDrmFormatModifierInfoEXT::default()
-                .drm_format_modifier(0)
-                .sharing_mode(vk::SharingMode::EXCLUSIVE);
-            let mut host = vk::PhysicalDeviceExternalImageFormatInfo::default()
-                .handle_type(vk::ExternalMemoryHandleTypeFlags::HOST_ALLOCATION_EXT);
-            let mut info = vk::PhysicalDeviceImageFormatInfo2::default()
-                .format(vk::Format::B8G8R8A8_UNORM)
-                .ty(vk::ImageType::TYPE_2D)
-                .tiling(tiling)
-                .usage(usage)
-                .push_next(&mut host);
-            if modifier {
-                info = info.push_next(&mut drm);
-            }
-            let mut external = vk::ExternalImageFormatProperties::default();
-            let mut properties = vk::ImageFormatProperties2::default().push_next(&mut external);
-            // SAFETY: the physical device is the instance's; the chains live for the call.
-            let answer = unsafe {
-                raw.instance.get_physical_device_image_format_properties2(
-                    raw.physical_device,
-                    &info,
-                    &mut properties,
-                )
-            };
-            let limits = properties.image_format_properties;
-            let features = external.external_memory_properties.external_memory_features;
-            println!(
-                "SURFTEX-QUERY on {}: B8G8R8A8_UNORM {tiling_name} {name} for host allocations: \
-                 {answer:?}, max extent {}x{}, external features {:#x}",
-                device.name(),
-                limits.max_extent.width,
-                limits.max_extent.height,
-                features.as_raw(),
-            );
-        }
-    }
+        per(after.command_buffers_begun, before.command_buffers_begun),
+        per(
+            after.command_buffers_begun_encoders,
+            before.command_buffers_begun_encoders
+        ),
+        per(
+            after.command_buffers_begun_segments + after.command_buffers_begun_continuations,
+            before.command_buffers_begun_segments + before.command_buffers_begun_continuations
+        ),
+        per(
+            after.command_buffers_begun_secondaries,
+            before.command_buffers_begun_secondaries
+        ),
+        per(
+            after.command_buffers_begun_batch_work + after.command_buffers_begun_batch_barriers,
+            before.command_buffers_begun_batch_work + before.command_buffers_begun_batch_barriers
+        ),
+        per(
+            after.command_buffers_begun_kept_barriers,
+            before.command_buffers_begun_kept_barriers
+        ),
+        per(
+            after.command_buffers_begun_internal,
+            before.command_buffers_begun_internal
+        ),
+        per(
+            after.commands_replayed.cmd_begin_render_pass,
+            before.commands_replayed.cmd_begin_render_pass
+        ),
+        per(
+            after.commands_replayed.cmd_execute_commands,
+            before.commands_replayed.cmd_execute_commands
+        ),
+        per(after.inline_passes, before.inline_passes),
+    )
 }
 
 #[test]

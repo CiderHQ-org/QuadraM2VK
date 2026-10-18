@@ -333,6 +333,7 @@ use super::tracker::{self, Access, Barrier, GeometryWrites, IndirectReads, Unord
 use super::used_resources::EncoderKind;
 use super::visibility::{self, Continuation, Visibility, VisibilityResultMode};
 use crate::device::functions::Vk;
+use crate::work_counts::Begun;
 use ash::vk;
 pub(super) use executions::DeferredPass;
 use executions::{PassInstance, PassStorage, RenderExecution, RunPasses};
@@ -1745,7 +1746,8 @@ impl CommandBuffer {
                 .begin_command_buffer(draws, &begin)
         }
         .map_err(vulkan)?;
-        self.device().shared().counts.encoder_command_buffer_begun();
+        let counts = &self.device().shared().counts;
+        counts.encoder_command_buffer_begun(Begun::Secondary);
         Ok(draws)
     }
 }

@@ -652,7 +652,7 @@ degradations! {
         /// A command buffer's GPU times on a device that calibrates its timestamps against no
         /// host clock the runtime reads (no `VK_KHR_calibrated_timestamps` or
         /// `VK_EXT_calibrated_timestamps` with the device's time domain and a monotonic host
-        /// one), whose calibration failed at the commit, or whose calibration placed them outside
+        /// one), whose calibration failed as it completed, or whose calibration placed them outside
         /// the command buffer's life (before its first submission, after its completion) by more
         /// than its stated deviation and the clocks' drift allow (`gpu_time.rs`).
         UncalibratedGpuTimes = "uncalibrated-gpu-times", Precision,

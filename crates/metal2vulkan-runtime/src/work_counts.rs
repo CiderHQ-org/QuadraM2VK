@@ -22,6 +22,7 @@ pub(crate) struct Counters {
     missed_completion_wakes: AtomicU64,
     completed_where_seen: AtomicU64,
     timestamp_slots_taken: AtomicU64,
+    timestamp_slots_reset_on_host: AtomicU64,
     calibrations: AtomicU64,
     calibration_readings: AtomicU64,
     calibration_deviation_most: AtomicU64,
@@ -78,6 +79,9 @@ pub(crate) struct Counters {
     command_buffers_submitted: AtomicU64,
     command_buffers_begun: AtomicU64,
     encoder_command_buffers_begun: AtomicU64,
+    command_buffers_begun_by: [AtomicU64; Begun::COUNT],
+    encoder_primaries_begun_ahead: AtomicU64,
+    primaries_begun_ahead: AtomicU64,
     barrier_buffers_kept: AtomicU64,
     stamped_buffers_kept: AtomicU64,
     stamped_buffers_reused: AtomicU64,
@@ -173,6 +177,35 @@ pub(crate) struct Counters {
     fragment_shader_libraries_made: AtomicU64,
     pipelines_linked: AtomicU64,
     dispatch_pipelines_pooled: AtomicU64,
+    upload_chunks_in_device_memory: AtomicU64,
+/// What a `VkCommandBuffer` the runtime began was for (`WorkCounts::command_buffers_begun` and
+/// its parts, `command_buffers_begun_encoders` and kin).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Begun {
+    /// An encoder's own, as it opened (or begun ahead in its spare pool, as it took it).
+    Encoder,
+    /// A segment's at the commit, an untracked segment's, or an ended encoder's encoded again.
+    Segment,
+    /// One an encoder went on in after a segment or a pass's end (`EncoderCore::continuation`).
+    Continuation,
+    /// A render encoder's draws' secondary.
+    Secondary,
+    /// A batch's work of its own as it is submitted: a sparse binding's mappings, the first work.
+    BatchWork,
+    /// A batch's barriers (and transitions and timestamps) as it is submitted.
+    BatchBarriers,
+    /// A barrier command buffer recorded to keep (`kept_barriers.rs`).
+    KeptBarriers,
+    /// The device's own submissions' (`device/submit.rs`) and staging submissions'
+    /// (`device/staging.rs`).
+    Internal,
+}
+
+impl Begun {
+    /// How many there are.
+    pub(crate) const COUNT: usize = 8;
+}
+
 }
 
 /// A command the runtime records that MoltenVK 1.4.1 encodes on Apple's GPUs through a pipeline it
@@ -264,6 +297,13 @@ impl Counters {
         self.timestamp_slots_taken.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// A slot of one of the device's timestamp pools was reset on the host as a command buffer
+    /// took it (`gpu_time.rs`).
+    pub(crate) fn timestamp_slot_reset_on_host(&self) {
+        self.timestamp_slots_reset_on_host
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
     /// A calibration pair was taken of `readings` readings, its deviation `deviation`
     /// nanoseconds (`gpu_time.rs`, `Timing::pair`).
     pub(crate) fn calibrated(&self, readings: u32, deviation: u64) {
@@ -348,6 +388,13 @@ impl Counters {
     /// (`pipeline/dispatch_making.rs`).
     pub(crate) fn dispatch_pipeline_pooled(&self) {
         self.dispatch_pipelines_pooled
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A command buffer's upload arena opened a chunk in device-local memory of a device without
+    /// unified memory (`upload.rs`).
+    pub(crate) fn upload_chunk_in_device_memory(&self) {
+        self.upload_chunks_in_device_memory
             .fetch_add(1, Ordering::Relaxed);
     }
 
@@ -485,11 +532,31 @@ impl Counters {
         self.command_buffers_begun.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// An encoder began a `VkCommandBuffer` as it recorded (`vkBeginCommandBuffer`): its own, a
-    /// segment's, one it went on in, or a render encoder's draws' secondary.
-    pub(crate) fn encoder_command_buffer_begun(&self) {
+    /// A `VkCommandBuffer` was begun (`vkBeginCommandBuffer`) for `what`.
+    pub(crate) fn command_buffer_begun(&self, what: Begun) {
         self.command_buffers_begun.fetch_add(1, Ordering::Relaxed);
+        self.command_buffers_begun_by[what as usize].fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// An encoder began a `VkCommandBuffer` as it recorded (`vkBeginCommandBuffer`) for `what`:
+    /// its own, a segment's, one it went on in, or a render encoder's draws' secondary.
+    pub(crate) fn encoder_command_buffer_begun(&self, what: Begun) {
+        self.command_buffer_begun(what);
         (self.encoder_command_buffers_begun).fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// An encoder took its own `VkCommandBuffer` begun ahead in its spare command pool
+    /// (`spares.rs`), counted as begun too ([`encoder_command_buffer_begun`]).
+    ///
+    /// [`encoder_command_buffer_begun`]: Self::encoder_command_buffer_begun
+    pub(crate) fn encoder_primary_begun_ahead(&self) {
+        (self.encoder_primaries_begun_ahead).fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A spare command pool's primary was begun ahead, and the pool kept among the spares again
+    /// (`spares.rs`).
+    pub(crate) fn primary_begun_ahead(&self) {
+        self.primaries_begun_ahead.fetch_add(1, Ordering::Relaxed);
     }
 
     /// A batch's barrier command buffer was recorded to be kept and submitted again
@@ -1157,6 +1224,10 @@ pub struct WorkCounts {
     /// Command buffers that took a slot of the device's timestamp pools: only those that encoded
     /// work, on a device that times them by GPU timestamps.
     pub timestamp_slots_taken: u64,
+    /// Of `timestamp_slots_taken`, the slots reset on the host as they were taken
+    /// (`vkResetQueryPool`), on a device that enables `hostQueryReset` (every device the runtime
+    /// creates): no command buffer the GPU runs resets their queries.
+    pub timestamp_slots_reset_on_host: u64,
     /// Calibration pairs the device took to place its command buffers' GPU times on the host's
     /// clock (one a commit at most every 100 ms, on a device with calibrated timestamps).
     pub calibrations: u64,
@@ -1375,7 +1446,9 @@ pub struct WorkCounts {
     /// `VkCommandBuffer`s the runtime began once the device was made: each encoder's, a render
     /// encoder's draws' secondary ones, segments', a batch's barrier and first-work ones, internal
     /// and staging submissions'. A driver may clear a command buffer's state as it begins one
-    /// (ANV, Mesa 26.2.4: `anv_cmd_state_init` at each begin after a reset).
+    /// (ANV, Mesa 26.2.4: `anv_cmd_state_init` at each begin after a reset). An encoder's own
+    /// begun ahead in its spare command pool counts as the encoder takes it
+    /// (`encoder_primaries_begun_ahead`).
     pub command_buffers_begun: u64,
     /// Of `command_buffers_begun`, those encoders began as they recorded: each encoder's own, a
     /// segment's, one an encoder went on in, and a render encoder's draws' secondaries. The others
@@ -1383,6 +1456,36 @@ pub struct WorkCounts {
     /// them, and by the device's own submissions; a lane that reads its encoding thread's steps
     /// counts these alone there.
     pub encoder_command_buffers_begun: u64,
+    /// Of `command_buffers_begun`, the encoders' own (begun as they opened, or begun ahead in
+    /// their spare pools).
+    pub command_buffers_begun_encoders: u64,
+    /// Of `command_buffers_begun`, segments' at the commit, untracked segments', and ended
+    /// encoders' encoded again.
+    pub command_buffers_begun_segments: u64,
+    /// Of `command_buffers_begun`, those encoders went on in after a segment or a pass's end.
+    pub command_buffers_begun_continuations: u64,
+    /// Of `command_buffers_begun`, render encoders' draws' secondaries: the only secondaries the
+    /// runtime begins once the device is made.
+    pub command_buffers_begun_secondaries: u64,
+    /// Of `command_buffers_begun`, batches' work of their own as they are submitted (a sparse
+    /// binding's mappings, the first work).
+    pub command_buffers_begun_batch_work: u64,
+    /// Of `command_buffers_begun`, batches' barriers, transitions and timestamps as they are
+    /// submitted.
+    pub command_buffers_begun_batch_barriers: u64,
+    /// Of `command_buffers_begun`, barrier command buffers recorded to keep.
+    pub command_buffers_begun_kept_barriers: u64,
+    /// Of `command_buffers_begun`, the device's own submissions' and staging submissions'.
+    pub command_buffers_begun_internal: u64,
+    /// Of `encoder_command_buffers_begun`, the encoders' own `VkCommandBuffer`s begun ahead: a
+    /// settled spare command pool's primary, begun by the thread that completed the command
+    /// buffer that gave it back where no thread waited for that one, which the first encoder of
+    pub encoder_primaries_begun_ahead: u64,
+    /// The spare command pools' primaries begun ahead (`encoder_primaries_begun_ahead`), taken
+    /// by an encoder or not yet: not among `command_buffers_begun` until one is taken. Each is
+    /// counted once its pool is among the spares again, so a command buffer made after the count
+    /// moved can take it.
+    pub primaries_begun_ahead: u64,
     /// Barrier command buffers of batches recorded once, kept, and submitted again by later
     /// batches once the batch that last took one completed (`command_buffer/kept_barriers.rs`):
     /// each is among `command_buffers_begun` once.
@@ -1790,6 +1893,10 @@ pub struct WorkCounts {
     /// Dispatches that handed the making of a region's `VkPipeline` to the device's pool and
     /// went on, rather than make it at the dispatch: each counted once per region it handed.
     pub dispatch_pipelines_pooled: u64,
+    /// Chunks of command buffers' upload arenas placed in device-local memory on a device without
+    /// unified memory, which the encoding thread then writes: none where the device has
+    /// host-coherent, host-cached system memory (`upload.rs`).
+    pub upload_chunks_in_device_memory: u64,
 }
 
 impl Device {
@@ -1798,6 +1905,8 @@ impl Device {
     #[doc(hidden)]
     pub fn work_counts(&self) -> WorkCounts {
         let counters = &self.shared().counts;
+        let begun =
+            |what: Begun| counters.command_buffers_begun_by[what as usize].load(Ordering::Relaxed);
         let (allocated, census, (parked, waiting), (made, freed)) = {
             let memory = lock(&self.shared().memory);
             let turnover = memory.turnover();
@@ -1817,6 +1926,8 @@ impl Device {
             missed_completion_wakes: counters.missed_completion_wakes.load(Ordering::Relaxed),
             completed_where_seen: counters.completed_where_seen.load(Ordering::Relaxed),
             timestamp_slots_taken: counters.timestamp_slots_taken.load(Ordering::Relaxed),
+            timestamp_slots_reset_on_host: (counters.timestamp_slots_reset_on_host)
+                .load(Ordering::Relaxed),
             calibrations: counters.calibrations.load(Ordering::Relaxed),
             calibration_readings: counters.calibration_readings.load(Ordering::Relaxed),
             calibration_deviation_most: (counters.calibration_deviation_most)
@@ -1900,8 +2011,18 @@ impl Device {
             queue_submissions: counters.queue_submissions.load(Ordering::Relaxed),
             command_buffers_submitted: counters.command_buffers_submitted.load(Ordering::Relaxed),
             command_buffers_begun: counters.command_buffers_begun.load(Ordering::Relaxed),
+            command_buffers_begun_encoders: begun(Begun::Encoder),
+            command_buffers_begun_segments: begun(Begun::Segment),
+            command_buffers_begun_continuations: begun(Begun::Continuation),
+            command_buffers_begun_secondaries: begun(Begun::Secondary),
+            command_buffers_begun_batch_work: begun(Begun::BatchWork),
+            command_buffers_begun_batch_barriers: begun(Begun::BatchBarriers),
+            command_buffers_begun_kept_barriers: begun(Begun::KeptBarriers),
+            command_buffers_begun_internal: begun(Begun::Internal),
             encoder_command_buffers_begun: (counters.encoder_command_buffers_begun)
                 .load(Ordering::Relaxed),
+            encoder_primaries_begun_ahead: (counters.encoder_primaries_begun_ahead)
+            primaries_begun_ahead: counters.primaries_begun_ahead.load(Ordering::Relaxed),
             barrier_buffers_kept: counters.barrier_buffers_kept.load(Ordering::Relaxed),
             stamped_buffers_kept: counters.stamped_buffers_kept.load(Ordering::Relaxed),
             stamped_buffers_reused: counters.stamped_buffers_reused.load(Ordering::Relaxed),
@@ -2016,6 +2137,8 @@ impl Device {
                 .load(Ordering::Relaxed),
             pipelines_linked: counters.pipelines_linked.load(Ordering::Relaxed),
             dispatch_pipelines_pooled: counters.dispatch_pipelines_pooled.load(Ordering::Relaxed),
+            upload_chunks_in_device_memory: (counters.upload_chunks_in_device_memory)
+                .load(Ordering::Relaxed),
         }
     }
 }

@@ -63,6 +63,8 @@ struct GateState {
     finished: bool,
     /// The [`Hold`]s alive.
     held: usize,
+    /// The threads blocked until it opens ([`Gate::awaited`]).
+    waiting: usize,
 }
 
 impl GateState {
@@ -83,6 +85,13 @@ impl Gate {
         lock(&self.state).open()
     }
 
+    /// Whether a thread is blocked until the gate opens, in [`wait`](Self::wait) or
+    /// [`wait_until`](Self::wait_until): what the thread that finishes the command buffer does
+    /// before its hold goes delays that thread's return.
+    pub(crate) fn awaited(&self) -> bool {
+        lock(&self.state).waiting > 0
+    }
+
     /// Block until the gate opens. `Err` once the process is exiting and it is not open: the
     /// runtime's threads that would open it end (`exit_guard`).
     pub(crate) fn wait(&self) -> Result<(), Exiting> {
@@ -93,35 +102,45 @@ impl Gate {
     /// [`closed`](exit_guard::closed), or a test's own).
     pub(crate) fn wait_unless(&self, exiting: impl Fn() -> bool) -> Result<(), Exiting> {
         let mut state = lock(&self.state);
-        while !state.open() {
+        state.waiting += 1;
+        let waited = loop {
+            if state.open() {
+                break Ok(());
+            }
             if exiting() {
-                return Err(Exiting);
+                break Err(Exiting);
             }
             state = self
                 .changed
                 .wait_timeout(state, exit_guard::WAKE)
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .0;
-        }
-        Ok(())
+        };
+        state.waiting -= 1;
+        waited
     }
 
     /// Block until the gate opens, or until `deadline`; at once once the process is exiting, as
     /// [`Gate::wait`].
     pub(crate) fn wait_until(&self, deadline: Instant) -> Result<(), TimedOut> {
         let mut state = lock(&self.state);
-        while !state.open() {
+        state.waiting += 1;
+        let waited = loop {
+            if state.open() {
+                break Ok(());
+            }
             let left = deadline.saturating_duration_since(Instant::now());
             if left.is_zero() || exit_guard::closed() {
-                return Err(TimedOut);
+                break Err(TimedOut);
             }
             state = self
                 .changed
                 .wait_timeout(state, left.min(exit_guard::WAKE))
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .0;
-        }
-        Ok(())
+        };
+        state.waiting -= 1;
+        waited
     }
 
     fn enter(&self) {

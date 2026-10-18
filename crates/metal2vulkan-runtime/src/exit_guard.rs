@@ -330,8 +330,16 @@ calls! {
     BeginCommandBuffer => c"vkBeginCommandBuffer",
     CmdPipelineBarrier => c"vkCmdPipelineBarrier",
     CmdResetQueryPool => c"vkCmdResetQueryPool",
+    // A timestamp slot's reset as a command buffer takes it (`gpu_time.rs`), on a device that
+    // enables `hostQueryReset`
+    // ([`HOST_QUERY_RESET_CALLS`](crate::device::prime::HOST_QUERY_RESET_CALLS)).
+    ResetQueryPool => c"vkResetQueryPool",
     CmdWriteTimestamp => c"vkCmdWriteTimestamp",
     GetQueryPoolResults => c"vkGetQueryPoolResults",
+    // A completion turn's calibration reading (`gpu_time.rs`), on a device that calibrates its
+    // timestamps ([`CALIBRATION_CALLS`](crate::device::prime::CALIBRATION_CALLS)), through the
+    // entry point the device gave (`vkGetCalibratedTimestampsEXT` where it enables that form).
+    GetCalibratedTimestamps => c"vkGetCalibratedTimestampsKHR",
     EndCommandBuffer => c"vkEndCommandBuffer",
     CreateFence => c"vkCreateFence",
     // The timeline of the device's internal submissions (`device/submit.rs`), made at the first,

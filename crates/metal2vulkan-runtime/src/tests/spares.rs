@@ -3,8 +3,8 @@
 
 use crate::descriptor_arena::{Room, SetNeeds};
 use crate::spares::{
-    keep_command_pool, keep_descriptor_pool, take_command_pool, take_descriptor_pool, CommandPool,
-    DescriptorPool, DESCRIPTORS, DESCRIPTOR_POOLS,
+    keep_command_pool, keep_descriptor_pool, take_command_pool, take_descriptor_pool,
+    take_to_begin, CommandPool, DescriptorPool, DESCRIPTORS, DESCRIPTOR_POOLS,
 };
 use ash::vk::{self, Handle};
 use std::collections::VecDeque;
@@ -73,6 +73,62 @@ fn a_pool_without_a_secondary_is_stocked_with_one_for_its_next_taker() {
     let mut made = CommandPool::new(vk::CommandPool::from_raw(2), 0);
     made.made(secondary, vk::CommandBuffer::from_raw(30));
     assert!(!made.wants_secondary(), "one made already");
+}
+
+/// A spare command pool's primary begun ahead goes to the first encoder of the command buffer
+/// that takes the pool, handed out among the pool's command buffers (so the pool settles only
+/// once it ended too), never to `reuse`, which hands out the others; a pool its taker resets (one
+/// given back recording) holds it as an ordinary primary again.
+#[test]
+fn a_primary_begun_ahead_goes_to_the_first_encoder_alone() {
+    let primary = vk::CommandBufferLevel::PRIMARY;
+    let mut pool = CommandPool::new(vk::CommandPool::from_raw(1), 0);
+    pool.made(primary, vk::CommandBuffer::from_raw(10));
+    pool.begun = Some(vk::CommandBuffer::from_raw(11));
+    pool.taken();
+    assert_eq!(pool.reuse(primary), Some(vk::CommandBuffer::from_raw(10)));
+    assert_eq!(pool.reuse(primary), None, "the begun one is not reused");
+    assert_eq!(pool.take_begun(), Some(vk::CommandBuffer::from_raw(11)));
+    assert_eq!(pool.take_begun(), None, "taken once");
+    assert_eq!(pool.handed_out(), 2, "the begun one counts as handed out");
+    pool.taken();
+    assert_eq!(pool.reuse(primary), Some(vk::CommandBuffer::from_raw(10)));
+    assert_eq!(
+        pool.reuse(primary),
+        Some(vk::CommandBuffer::from_raw(11)),
+        "taken, it is an ordinary primary of the pool"
+    );
+    let mut reset = CommandPool::new(vk::CommandPool::from_raw(2), 0);
+    reset.begun = Some(vk::CommandBuffer::from_raw(20));
+    reset.recording = true;
+    reset.taken();
+    assert_eq!(
+        reset.take_begun(),
+        None,
+        "the reset left it in the initial state"
+    );
+    assert_eq!(reset.reuse(primary), Some(vk::CommandBuffer::from_raw(20)));
+}
+
+/// A command buffer takes the newest spare command pool of its queue's family that holds a
+/// primary begun ahead, else the newest of that family.
+#[test]
+fn a_spare_command_pool_holding_a_begun_primary_is_taken_first() {
+    let mut pools = Vec::new();
+    for (raw, begun) in [(1, false), (2, true), (3, false)] {
+        let mut pool = CommandPool::new(vk::CommandPool::from_raw(raw), 0);
+        if begun {
+            pool.begun = Some(vk::CommandBuffer::from_raw(raw * 10));
+        }
+        keep_command_pool(&mut pools, pool);
+    }
+    let raw = |pool: Option<CommandPool>| pool.map(|pool| pool.raw);
+    for expected in [2, 3, 1] {
+        assert_eq!(
+            raw(take_command_pool(&mut pools, 0)),
+            Some(vk::CommandPool::from_raw(expected))
+        );
+    }
 }
 
 /// A command buffer takes the newest spare command pool made for its queue's family, never one
@@ -190,4 +246,35 @@ fn spare_descriptor_pools_are_bounded_and_taken_by_room() {
     let past = keep_descriptor_pool(&mut pools, descriptor_pool(5, &storage(whole, plain), 1));
     assert_eq!(past, [vk::DescriptorPool::from_raw(5)]);
     assert_eq!(pools.len(), 3);
+}
+
+/// A spare command pool a completing thread begins a primary ahead in is out of the spares while
+/// it begins, so a taker meanwhile takes another, and never waits for the begin; a pool that may
+/// not begin one (recording, or holding one begun) stays; kept again, it is the newest.
+#[test]
+fn a_spare_command_pool_begins_ahead_out_of_the_spares() {
+    let pool = |n: u64| CommandPool::new(vk::CommandPool::from_raw(n), 0);
+    let mut pools = vec![pool(1), pool(2)];
+    let taken = take_to_begin(&mut pools, vk::CommandPool::from_raw(2)).unwrap();
+    assert_eq!(taken.raw, vk::CommandPool::from_raw(2));
+    let other = take_command_pool(&mut pools, 0).unwrap();
+    assert_eq!(
+        other.raw,
+        vk::CommandPool::from_raw(1),
+        "a taker takes another"
+    );
+    assert!(
+        take_command_pool(&mut pools, 0).is_none(),
+        "and finds none being begun"
+    );
+    keep_command_pool(&mut pools, other);
+    keep_command_pool(&mut pools, taken);
+    let raws: Vec<_> = pools.iter().map(|pool| pool.raw.as_raw()).collect();
+    assert_eq!(raws, [1, 2], "kept again, the newest");
+    pools[1].begun = Some(vk::CommandBuffer::from_raw(20));
+    assert!(take_to_begin(&mut pools, vk::CommandPool::from_raw(2)).is_none());
+    pools[0].recording = true;
+    assert!(take_to_begin(&mut pools, vk::CommandPool::from_raw(1)).is_none());
+    assert!(take_to_begin(&mut pools, vk::CommandPool::from_raw(3)).is_none());
+    assert_eq!(pools.len(), 2, "a pool that may not begin one stays");
 }

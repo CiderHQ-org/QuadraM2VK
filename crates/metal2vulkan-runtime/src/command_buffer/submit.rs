@@ -169,6 +169,7 @@ use crate::texture::decoded_twin::{SecondDecode, TwinWrite};
 use crate::texture::wrapped::Transition;
 use crate::texture::Texture;
 use crate::tracker::{Barrier, EncoderUses, Point, Summary};
+use crate::work_counts::Begun;
 use ash::vk;
 use metal2vulkan::bind::ReplayFaults;
 use std::collections::BTreeSet;
@@ -341,7 +342,7 @@ impl CommandBufferShared {
         }
         reached.extend(device.own_completed());
         if index == 0 {
-            state.times.kernel_start = gpu_time::host_nanos();
+            self.kernel.begin();
         }
         let slot = state
             .times
@@ -813,8 +814,7 @@ impl CommandBufferShared {
             }
             return Err(error);
         }
-        if last {
-            state.times.kernel_end = gpu_time::host_nanos();
+            self.kernel.end_at(gpu_time::host_nanos());
         }
         if !single {
             match folded {
@@ -916,7 +916,10 @@ impl CommandBufferShared {
         let begun = unsafe { raw.begin_command_buffer(buffer, &begin) };
         exit_guard::called(Call::BeginCommandBuffer);
         begun.map_err(|error| submission_error(device, error))?;
-        device.shared().counts.command_buffer_begun();
+        device
+            .shared()
+            .counts
+            .command_buffer_begun(Begun::BatchWork);
         record(state, buffer).map_err(|error| recording_error(device, error))?;
         // SAFETY: as above.
         let ended = unsafe { self.end_raw(buffer) };
@@ -1086,10 +1089,16 @@ impl CommandBufferShared {
             let begun = raw.begin_command_buffer(buffer, &begin);
             exit_guard::called(Call::BeginCommandBuffer);
             begun.map_err(|error| submission_error(device, error))?;
-            device.shared().counts.command_buffer_begun();
+            device
+                .shared()
+                .counts
+                .command_buffer_begun(Begun::BatchBarriers);
             if let Some((queries, first, _)) = stamps.start {
-                raw.cmd_reset_query_pool(buffer, queries, first, 2);
-                exit_guard::called(Call::CmdResetQueryPool);
+                // The slot's start and end, where it was not reset on the host (`gpu_time.rs`).
+                if !device.shared().timing.resets_on_host() {
+                    raw.cmd_reset_query_pool(buffer, queries, first, 2);
+                    exit_guard::called(Call::CmdResetQueryPool);
+                }
                 if !stamps.after {
                     let top = vk::PipelineStageFlags::TOP_OF_PIPE;
                     raw.cmd_write_timestamp(buffer, top, queries, first);

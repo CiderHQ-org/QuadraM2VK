@@ -49,6 +49,32 @@
 //!   it would be made there, on the thread that encodes: on the M3 Max (MoltenVK, macOS 27.0.1),
 //!   0 to 5 of a run's 4020 pass opens made one, 16 allocations each against 14. A making that
 //!   fails is left to that open.
+//! - **A settled pool given back holds a primary already begun.** The thread that completed its
+//!   command buffer begins one of its primaries once the completed handlers ran
+//!   (`ONE_TIME_SUBMIT`, as every encoder begins its own; recording nothing), inside a section of
+//!   the exit guard, where no command buffer took the pool since ([`Spares::begin_ahead`]). It
+//!   takes the pool out of the spares under their lock and begins with no lock held, then keeps
+//!   it again, the newest: a taker meanwhile takes another spare, or makes a pool, and never
+//!   waits for that begin (a wait on the lock across it was 747 waits of the guest's encoding
+//!   thread in 255 frames, 11 us at the median, on ANV). The command buffer's gate opens only
+//!   once that thread's hold goes (`command_buffer/gate.rs`), so it begins none where a thread
+//!   waits for the gate: a waiter's return waits for no begin, but for one wait that came after
+//!   the check. The first encoder of the command buffer that takes the pool takes the primary
+//!   begun (`EncoderCore::open`), so the thread that encodes makes no `vkBeginCommandBuffer` for
+//!   it. On ANV, whose begin clears the command buffer's state (Mesa 26.2.4,
+//!   `genX(BeginCommandBuffer)`), that begin was 8 to 20 us of the encoding thread's time a
+//!   command buffer (above). Vulkan asks only external synchronization of a command buffer and
+//!   its pool, never one thread: `vkBeginCommandBuffer`, and every command recorded, "Host access
+//!   to commandBuffer must be externally synchronized" and "Host access to the VkCommandPool that
+//!   commandBuffer was allocated from must be externally synchronized". The pool passes between
+//!   threads through the spares, under their lock, and is never in use on two threads at once, so
+//!   a command buffer begun on one thread is recorded on another. Only the first encoder takes
+//!   it: the primaries every other path makes (segments, continuations, a batch's barriers) are
+//!   never the begun one. A pool whose taker resets it (one given back unsettled) resets the begun
+//!   primary with the rest, which is then an ordinary one again. A pool given back unsettled, or
+//!   while a thread waited, or whose begin fails, holds none. A taker takes the newest spare
+//!   holding one first ([`take_command_pool`]). Counted: `WorkCounts::primaries_begun_ahead`, and
+//!   those encoders took, `WorkCounts::encoder_primaries_begun_ahead`.
 //! - **Descriptor pools are reset by the taker**, on the thread that encodes: the program's own, or
 //!   one running the program's code (a handler).
 //! - **Taken outside sections alone.** A section of the exit guard (a host step's recording on the
@@ -68,7 +94,7 @@
 use super::descriptor_arena::{Room, SetNeeds};
 use super::device::{lock, DeviceShared};
 use super::error::{vulkan, Error};
-use super::exit_guard;
+use super::exit_guard::{self, Call};
 use super::release::{self, Released};
 use ash::vk;
 use std::collections::VecDeque;
@@ -93,6 +119,9 @@ pub(super) struct CommandPool {
     family: u32,
     made: [Vec<vk::CommandBuffer>; 2],
     handed: [usize; 2],
+    /// A primary made from the pool, begun ahead while the pool was a spare and recording
+    /// nothing, not among `made` until an encoder takes it ([`take_begun`](Self::take_begun)).
+    pub(super) begun: Option<vk::CommandBuffer>,
     /// One of its command buffers may still be recording: the command buffer that gave it back
     /// did not complete, or left one it was handed unended (the module docs), so its taker
     /// resets it.
@@ -107,8 +136,19 @@ impl CommandPool {
             family,
             made: [Vec::new(), Vec::new()],
             handed: [0, 0],
+            begun: None,
             recording: false,
         }
+    }
+
+    /// The pool's primary begun ahead (the module docs), handed out: taken by the first encoder
+    /// of the command buffer that took the pool. `None` where it holds none.
+    pub(super) fn take_begun(&mut self) -> Option<vk::CommandBuffer> {
+        let buffer = self.begun.take()?;
+        let at = level_index(vk::CommandBufferLevel::PRIMARY);
+        self.made[at].insert(self.handed[at], buffer);
+        self.handed[at] += 1;
+        Some(buffer)
     }
 
     /// A command buffer of `level` made from the pool before a command buffer last took it, not
@@ -134,8 +174,15 @@ impl CommandPool {
     }
 
     /// A command buffer took the pool, reset where it was [`recording`](Self::recording): none of
-    /// the command buffers made from it is handed out, and none is recording.
+    /// the command buffers made from it is handed out, and none is recording but the primary
+    /// begun ahead, where the pool was not reset.
     pub(super) fn taken(&mut self) {
+        if self.recording {
+            // The reset left the primary begun ahead in the initial state.
+            if let Some(buffer) = self.begun.take() {
+                self.made[level_index(vk::CommandBufferLevel::PRIMARY)].push(buffer);
+            }
+        }
         self.handed = [0, 0];
         self.recording = false;
     }
@@ -168,6 +215,57 @@ impl CommandPool {
         if let Ok(made) = device.allocate_command_buffers(&info) {
             for buffer in made {
                 self.stock_secondary(buffer);
+            }
+        }
+    }
+
+    /// Whether the pool may begin a primary ahead: none of its command buffers is recording or
+    /// pending, and it holds none begun (the module docs).
+    fn begins_ahead(&self) -> bool {
+        !self.recording && self.begun.is_none()
+    }
+
+    /// Begin one of the pool's primaries ahead, where it [`begins_ahead`](Self::begins_ahead): one
+    /// it made, which its begin resets, or a new one. Inside a section of the exit guard, on a
+    /// pool taken out of the spares; nothing where the guard is closing, and none begun where the
+    /// making or the begin fails. Whether it began one.
+    fn begin_ahead(&mut self, device: &DeviceShared) -> bool {
+        if !self.begins_ahead() {
+            return false;
+        }
+        let Some(_busy) = exit_guard::enter() else {
+            return false;
+        };
+        let at = level_index(vk::CommandBufferLevel::PRIMARY);
+        let buffer = match self.made[at].pop() {
+            Some(buffer) => buffer,
+            None => {
+                let info = vk::CommandBufferAllocateInfo::default()
+                    .command_pool(self.raw)
+                    .level(vk::CommandBufferLevel::PRIMARY)
+                    .command_buffer_count(1);
+                match device.allocate_command_buffers(&info) {
+                    Ok(made) if !made.is_empty() => made[0],
+                    _ => return false,
+                }
+            }
+        };
+        let begin = vk::CommandBufferBeginInfo::default()
+            .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+        // SAFETY: the pool is out of the spares, this thread's alone, and none of its command
+        // buffers is pending or recording (settled): the buffer is executable, invalid or
+        // initial, and its begin resets it (`VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT`).
+        let begun = unsafe { device.vk().begin_command_buffer(buffer, &begin) };
+        exit_guard::called(Call::BeginCommandBuffer);
+        match begun {
+            Ok(()) => {
+                self.begun = Some(buffer);
+                true
+            }
+            // Begun again at its next use, which resets it.
+            Err(_) => {
+                self.made[at].push(buffer);
+                false
             }
         }
     }
@@ -238,6 +336,22 @@ impl Spares {
         keep_command_pool(&mut lock(&self.command_pools), pool);
     }
 
+    /// Begin a primary ahead in the spare command pool `raw` of `device`, where it is still a
+    /// spare, settled, and holds none begun (the module docs): taken out of the spares under
+    /// their lock, begun with no lock held, so a taker meanwhile takes another spare rather than
+    /// wait for the begin, and kept again, the newest. Counted (`WorkCounts::primaries_begun_ahead`)
+    /// once it is kept again, so a taker that saw the count finds the pool among the spares.
+    pub(super) fn begin_ahead(&self, device: &DeviceShared, raw: vk::CommandPool) {
+        let Some(mut pool) = take_to_begin(&mut lock(&self.command_pools), raw) else {
+            return;
+        };
+        let begun = pool.begin_ahead(device);
+        keep_command_pool(&mut lock(&self.command_pools), pool);
+        if begun {
+            device.counts.primary_begun_ahead();
+        }
+    }
+
     /// A spare descriptor pool of `device`, reset, with room for one set of `needs`, the newest
     /// such; `None` when there is none, or this thread is in a section.
     pub(super) fn descriptor_pool(
@@ -306,9 +420,25 @@ pub(super) unsafe fn release_in_section<T: Released>(device: &DeviceShared, obje
     unsafe { release::object(device.vk(), object) };
 }
 
-/// The newest of the spare command pools `pools` made for queue family `family`, taken out.
+/// The newest of the spare command pools `pools` made for queue family `family` that holds a
+/// primary begun ahead, else the newest of them, taken out.
 pub(super) fn take_command_pool(pools: &mut Vec<CommandPool>, family: u32) -> Option<CommandPool> {
-    let at = pools.iter().rposition(|pool| pool.family == family)?;
+    let of_family = |pool: &CommandPool| pool.family == family;
+    let at = (pools
+        .iter()
+        .rposition(|pool| of_family(pool) && pool.begun.is_some()))
+    .or_else(|| pools.iter().rposition(of_family))?;
+    Some(pools.remove(at))
+}
+
+/// The spare command pool `raw` of `pools`, taken out to begin a primary ahead in
+/// ([`Spares::begin_ahead`]), where it is still among them and may begin one
+/// ([`CommandPool::begins_ahead`]).
+pub(super) fn take_to_begin(
+    pools: &mut Vec<CommandPool>,
+    raw: vk::CommandPool,
+) -> Option<CommandPool> {
+    let at = (pools.iter()).rposition(|pool| pool.raw == raw && pool.begins_ahead())?;
     Some(pools.remove(at))
 }
 

@@ -1101,6 +1101,15 @@ impl Device {
                 >(function)
             }
         });
+        // Its calibrated timestamps, where its queue family writes timestamps: a completion turn
+        // reads them (`gpu_time.rs`).
+        // SAFETY: the device enables `calibration`'s form where it is set; the loader serves
+        // `vkGetDeviceProcAddr` once the word is put back.
+        let calibrated = unsafe {
+            loader_word.restore();
+            gpu_time::calibrated(&instance.entry, &instance.raw, physical, &raw, calibration)
+        }
+        .filter(|_| timestamp_bits > 0);
         // Before the exit hook is registered for this device (below): the first call of each
         // entry point of the exit guard's table (`prime.rs`).
         // SAFETY: the device is live, of `physical`, and enables timeline semaphores, and
@@ -1117,11 +1126,15 @@ impl Device {
                 Sharing::new(&queue_families),
                 prime::Has {
                     timestamps: timestamp_bits > 0,
+                    // A device the runtime created enables it (`enables.rs`).
+                    host_query_reset: owned,
                     device_addresses: device_address,
                     generated_commands: generated_commands.is_some(),
                     sparse_binding: sparse.binds(),
+                    calibration: calibrated.is_some(),
                     object_names: object_name.is_some(),
                 generated_commands.as_ref(),
+                calibrated,
             )
         } {
             scheduler.stop();
@@ -1284,25 +1297,19 @@ impl Device {
             .description
             .driver_facts()
             .contains(&metal2vulkan::device::DriverFact::TimestampPoolsAreCounterSampleBuffers);
-        // SAFETY: as above, `calibration` enabled; the loader serves `vkGetDeviceProcAddr` once
-        // the word is put back.
-        let timing = unsafe {
-            loader_word.restore();
-            Timing::new(
-                &instance.entry,
-                &instance.raw,
-                physical,
-                &raw,
-                timestamp_bits,
-                limits.timestamp_period,
-                calibration,
-                from_host,
-                scarce_pools,
-                // A command buffer's first encoder writes its start where its first batch can
-                // begin with no command buffer of barriers (`gpu_time.rs`).
-                !completed_by_barrier,
-            )
-        };
+        let timing = Timing::new(
+            timestamp_bits,
+            limits.timestamp_period,
+            calibrated,
+            from_host,
+            scarce_pools,
+            // A command buffer's first encoder writes its start where its first batch can begin
+            // with no command buffer of barriers (`gpu_time.rs`).
+            !completed_by_barrier,
+            // Its slots are reset on the host where the device enables `hostQueryReset`: every
+            // device the runtime created (`enables.rs`).
+            owned,
+        );
         // SAFETY: as above; the loader serves `vkGetDeviceProcAddr` once the word is put back.
         let functions = unsafe {
             loader_word.restore();

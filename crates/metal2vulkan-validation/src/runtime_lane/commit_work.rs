@@ -5,7 +5,9 @@
 //!
 //! - **Command pools.** A command buffer that encoded nothing takes, for any barrier its
 //!   submission records, the spare command pool the one before gave back; before, it made one in
-//!   the scheduler's section, where no spare is taken.
+//!   the scheduler's section, where no spare is taken. A command buffer's first encoder records
+//!   into its spare pool's primary begun ahead, as the command buffer that gave the pool back
+//!   completed; before, it began one on the thread that encodes (8 to 20 us on ANV).
 //! - **Empty submissions.** A command buffer that encoded nothing and waits for nothing is one
 //!   `vkQueueSubmit` of no `VkCommandBuffer`: its signals alone. Before, it carried one of the
 //!   barrier to the host, and ANV on i915 lists every `VkDeviceMemory` of the device in a kernel
@@ -109,6 +111,54 @@ fn empty_command_buffers_take_the_spare_command_pool() {
         }
         let after = device.work_counts();
         assert_eq!(after.command_pools_made, before.command_pools_made);
+    });
+}
+
+/// A command buffer's first encoder takes the primary its spare command pool holds begun ahead
+/// (`spares.rs`): the command buffer before, which gave the pool back, began it as it completed,
+/// where no thread waited for it (`WorkCounts::primaries_begun_ahead`), and the encoder begins
+/// none of its own (`WorkCounts::encoder_primaries_begun_ahead`). The fills still read correctly.
+#[test]
+fn a_first_encoder_takes_the_primary_its_spare_pool_began_ahead() {
+    const ROUNDS: u8 = 4;
+    on_device(|device, _| {
+        let queue = device.new_command_queue().unwrap();
+        let buffer = device.new_buffer(256, ResourceOptions::shared()).unwrap();
+        for round in 0..ROUNDS {
+            let before = device.work_counts();
+            let first = fill(&queue, &buffer);
+            first.commit().unwrap();
+            // Begun on the completing thread, which a wait for the command buffer would skip:
+            // read from the counts instead, which count it once its pool is among the spares
+            // again (the begin runs with the pool out of them), so the next command buffer
+            // takes that pool.
+            let deadline = std::time::Instant::now() + WAIT;
+            while device.work_counts().primaries_begun_ahead == before.primaries_begun_ahead {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "round {round}: no primary begun ahead after a command buffer completed"
+                );
+                std::thread::yield_now();
+            }
+            assert_eq!(first.status(), CommandBufferStatus::Completed);
+            let begun = device.work_counts();
+            let command_buffer = queue.command_buffer().unwrap();
+            let mut blit = command_buffer.blit_command_encoder().unwrap();
+            blit.fill_buffer(&buffer, 0..buffer.length(), round + 1)
+                .unwrap();
+            blit.end_encoding().unwrap();
+            finish(&command_buffer);
+            let after = device.work_counts();
+            assert_eq!(
+                after.encoder_primaries_begun_ahead - begun.encoder_primaries_begun_ahead,
+                1,
+                "round {round}: the encoder took its pool's primary begun ahead"
+            );
+            assert!(
+                bytes(&buffer).iter().all(|&b| b == round + 1),
+                "round {round}: the fill read back"
+            );
+        }
     });
 }
 

@@ -41,6 +41,9 @@
 //!   and an object the program let go of after its draw lives until the command buffer
 //!   completes. Its encoder lists every object a retain took or held already
 //!   (`CommandBuffer::ended_encoders`), a slot rebound to one that looks like its last included.
+//! - **Uploads.** Draws that set their bytes write them, and their tables, into no device-local
+//!   memory on a device with host-coherent, host-cached system memory
+//!   (`WorkCounts::upload_chunks_in_device_memory`).
 //!
 //! The pipeline is the owned fixture `tob_renders`'s `tob_rect` (a rectangle of the corners at
 //! vertex buffer 0) and `tob_sample` (texture 0 through sampler 0, where its pixel lies).
@@ -884,6 +887,56 @@ fn draws_into_a_pass_color_their_state_lacks_copy_no_color_set() {
             beside - own <= bound,
             "{beside:.2} allocations a draw beside a lacked color, {own:.2} without"
         );
+    });
+}
+
+/// Whether `device` has unified memory, or host-coherent, host-cached memory none of whose types
+/// is device-local: its upload arenas then lie outside device-local memory.
+fn uploads_outside_device_memory(device: &Device) -> bool {
+    use ash::vk::MemoryPropertyFlags as P;
+    if device.properties().has_unified_memory {
+        return true;
+    }
+    // SAFETY: the handles are used only while the device lives.
+    let raw = unsafe { device.raw() };
+    // SAFETY: a physical device of the instance.
+    let properties =
+        unsafe { (raw.instance).get_physical_device_memory_properties(raw.physical_device) };
+    let types = &properties.memory_types[..properties.memory_type_count as usize];
+    let cached = || {
+        (types.iter())
+            .map(|ty| ty.property_flags)
+            .filter(|flags| flags.contains(P::HOST_VISIBLE | P::HOST_COHERENT | P::HOST_CACHED))
+    };
+    cached().next().is_some() && cached().all(|flags| !flags.contains(P::DEVICE_LOCAL))
+}
+
+/// Draws that each set their bytes, one column each, write them into the command buffer's upload
+/// arena in no device-local memory where the device has host-coherent, host-cached system memory
+/// ([`uploads_outside_device_memory`]): a write into device-local memory waits for a GPU powered
+/// down to wake. Every column is drawn.
+#[test]
+fn draws_setting_bytes_write_no_device_local_memory() {
+    on_device(|device, _| {
+        let scene = Scene::new(device);
+        let red = solid(device, PixelFormat::RGBA8Unorm, RED);
+        let before = device.work_counts();
+        let (command_buffer, mut encoder) = scene.encoder(device);
+        encoder.set_fragment_texture(Some(&red), 0).unwrap();
+        for c in 0..SIDE {
+            encoder.set_vertex_bytes(&column(c), 0).unwrap();
+            draw(&mut encoder);
+        }
+        encoder.end_encoding().unwrap();
+        let pixels = scene.pixels(&command_buffer);
+        let opened = grew(&before, &device.work_counts(), |c| {
+            c.upload_chunks_in_device_memory
+        });
+        println!("runtime_lane: upload chunks in device-local memory: {opened}");
+        if uploads_outside_device_memory(device) {
+            assert_eq!(opened, 0);
+        }
+        assert!(pixels.iter().all(|&p| p == RED), "{pixels:?}");
     });
 }
 

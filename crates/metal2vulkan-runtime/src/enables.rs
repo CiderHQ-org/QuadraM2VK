@@ -3,18 +3,18 @@
 //!
 //! The runtime enables exactly the [`EnableSet`] it computed (the description's
 //! `recommended_enables` for the policy, closed by `with_enabled`), plus the extensions the
-//! caller's options name and `timelineSemaphore`, which the runtime needs itself. Each feature is
-//! one `VkBool32` member of one feature structure ([`MEMBERS`]); a structure is chained when one
-//! of its members is set, and an extension structure only through its enabled extension, or from
-//! the core version that promoted it (`Structure::promotion`, the registry's promotions, which
-//! the tests hold to the description's), at the device's version (its own, capped by the
-//! instance's). From Vulkan 1.3 a member 1.3 promoted is set in
-//! `VkPhysicalDeviceVulkan13Features` ([`CORE_1_3`]), never in its extension structure; from 1.4
-//! a member 1.4 promoted is set in its own structure, which 1.4 makes core
+//! caller's options name, `timelineSemaphore` and `hostQueryReset`, which the runtime needs itself
+//! (each required in Vulkan 1.2). Each feature is one `VkBool32` member of one feature structure
+//! ([`MEMBERS`]); a structure is chained when one of its members is set, and an extension structure
+//! only through its enabled extension, or from the core version that promoted it
+//! (`Structure::promotion`, the registry's promotions, which the tests hold to the description's),
+//! at the device's version (its own, capped by the instance's). From Vulkan 1.3 a member 1.3
+//! promoted is set in `VkPhysicalDeviceVulkan13Features` ([`CORE_1_3`]), never in its extension
+//! structure; from 1.4 a member 1.4 promoted is set in its own structure, which 1.4 makes core
 //! (`ash 0.38` has no `VkPhysicalDeviceVulkan14Features`), as the description reads it
-//! (`ash_interop::query`); a feature core without a member from its version (extended dynamic
-//! state from 1.3) sets nothing. Each extension of the vocabulary is enabled under the first of
-//! its names the device lists ([`EXTENSIONS`]).
+//! (`ash_interop::query`); a feature core without a member from its version (extended dynamic state
+//! from 1.3) sets nothing. Each extension of the vocabulary is enabled under the first of its names
+//! the device lists ([`EXTENSIONS`]).
 
 use super::error::{Error, ExtensionFeature, RuntimeGap};
 use ash::vk;
@@ -1133,9 +1133,11 @@ impl Enables {
             linked: BTreeSet::new(),
             names: Vec::new(),
         };
-        // The runtime's own need, outside the vocabulary: events and the completion of command
-        // buffers are timeline semaphores (core and required in Vulkan 1.2).
+        // The runtime's own needs, outside the vocabulary, each core and required in Vulkan 1.2:
+        // events and the completion of command buffers are timeline semaphores, and timestamp
+        // slots are reset on the host (`gpu_time.rs`).
         enables.chain.v12.timeline_semaphore = vk::TRUE;
+        enables.chain.v12.host_query_reset = vk::TRUE;
         for &extension in &set.extensions {
             let name = names_of(extension)
                 .find(|name| listed.contains(*name))

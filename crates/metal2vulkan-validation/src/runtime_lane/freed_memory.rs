@@ -66,7 +66,7 @@ fn a_buffer_released_behind_work_that_reads_device_addresses_fails_none_of_it() 
             long.commit().unwrap();
             behind.commit().unwrap();
             let deadline = Instant::now() + WAIT;
-            while behind.kernel_start_time() == 0.0 {
+            while behind.kernel_end_time() == 0.0 {
                 assert!(
                     Instant::now() < deadline,
                     "the walker's batch was never submitted"

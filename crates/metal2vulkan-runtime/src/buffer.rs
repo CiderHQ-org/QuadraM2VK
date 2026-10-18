@@ -1489,14 +1489,7 @@ impl Device {
         if class != MemoryClass::Shared || self.properties().has_unified_memory {
             return;
         }
-        // A buffer of the runtime's memory: its pages are its for good.
-        let local = match &buffer.0.bytes {
-            Bytes::Own(own) => own.with(|pages| {
-                Some(lock(&self.shared().memory).is_device_local(&pages.memory.placement))
-            }),
-            Bytes::Heap(_) => None,
-        };
-        if local != Some(false) {
+        if buffer.own_pages_device_local() != Some(false) {
             return;
         }
         self.degrade(Degradation::SharedInSystemMemory, || {
@@ -2063,6 +2056,17 @@ impl Heap {
 }
 
 impl Buffer {
+    /// Whether the buffer's own pages, of the runtime's memory, lie in device-local memory; `None`
+    /// for a heap's buffer, whose bytes are its heap's. A buffer's pages are its for good.
+    pub(super) fn own_pages_device_local(&self) -> Option<bool> {
+        match &self.0.bytes {
+                let memory = lock(&self.0.device.shared().memory);
+                Some(memory.is_device_local(&pages.memory.placement))
+            }),
+            Bytes::Heap(_) => None,
+        }
+    }
+
     /// The length padded to 16 bytes: the bytes the `VkBuffer` holds from [`Buffer::base`].
     pub(super) fn padded_length(&self) -> u64 {
         self.0.length.next_multiple_of(16)

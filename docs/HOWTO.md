@@ -262,6 +262,9 @@ For a claim about behavior, follow [VALIDATION.md](VALIDATION.md): a synthetic r
 the golden output hashes where output must not move, and an authored case run on Metal and Vulkan
 where it should.
 
-A host note: on a Radeon 780M under Ubuntu 26.04's kernel 7.0.0-38 and linux-firmware 20260319, a
-copy's write is sometimes lost under multi-process GPU load, with no error; kernel 7.2.9 with
-linux-firmware 20260916 loses none.
+
+A host note: on a laptop whose NVIDIA GPU powers down when idle (the driver's runtime D3, shown in
+`/proc/driver/nvidia/gpus/*/power`), the first GPU work after about 15 seconds idle waits about
+1 second while the GPU wakes (970 to 980 ms on an RTX 5080 Laptop GPU, driver 615.71.09). A host
+that wants no wake can keep the GPU powered (`on` in its PCI device's `power/control`); the runtime
+never needs it.

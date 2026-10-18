@@ -39,7 +39,7 @@
 //! counted in [`COUNTED`] frames of their own after the timed ones: each read of the counter is a
 //! system call, which a timed frame's CPU time would hold; the notices the sink took per frame;
 //! and a frame's share of the device's work counts (`Device::work_counts`) the draw and commit
-//! paths keep, the command buffers begun and submitted among them. Then the CPU time of the
+//! paths keep, the command buffers begun (by what for: `WorkCounts::command_buffers_begun_encoders`
 //! process's other threads over the timed frames, their waits included, per command buffer (on
 //! Linux, from each thread's `schedstat`), with its user-space part (from its `stat`, in clock
 //! ticks) and how often they slept (their voluntary context switches, from their `status`: the
@@ -1226,14 +1226,33 @@ fn measure(runs: &[Run]) {
         );
         eprintln!(
             "FRAME-COST {name} {label}: a frame's command buffers: {:.1} begun ({:.2} a pass), \
-             {:.1} of them barrier command buffers recorded to keep; {:.1} submitted ({:.2} a \
-             pass) in {:.1} vkQueueSubmit calls",
+             {:.1} of them barrier command buffers recorded to keep, {:.1} encoders' own begun \
+             ahead in their spare pools; {:.1} submitted ({:.2} a pass) in {:.1} vkQueueSubmit \
+             calls, {:.1} of which held {:.1} batches together; {:.1} batches ended in their \
+             work, {:.1} in a command buffer of their own",
             per_frame(|c| c.command_buffers_begun),
             per_frame(|c| c.command_buffers_begun) / BUFFERS as f64,
             per_frame(|c| c.barrier_buffers_kept),
+            per_frame(|c| c.encoder_primaries_begun_ahead),
             per_frame(|c| c.command_buffers_submitted),
             per_frame(|c| c.command_buffers_submitted) / BUFFERS as f64,
             per_frame(|c| c.queue_submissions),
+        eprintln!(
+            "FRAME-COST {name} {label}: a frame's command buffers begun by what for: {:.1} \
+             encoders' own, {:.1} segments, {:.1} continuations, {:.1} draws' secondaries, {:.1} \
+             batches' work, {:.1} batches' barriers, {:.1} barriers kept, {:.1} internal; their \
+             logs replayed: {:.1} by the recorder's thread, {:.1} by threads that submit",
+            per_frame(|c| c.command_buffers_begun_encoders),
+            per_frame(|c| c.command_buffers_begun_segments),
+            per_frame(|c| c.command_buffers_begun_continuations),
+            per_frame(|c| c.command_buffers_begun_secondaries),
+            per_frame(|c| c.command_buffers_begun_batch_work),
+            per_frame(|c| c.command_buffers_begun_batch_barriers),
+            per_frame(|c| c.command_buffers_begun_kept_barriers),
+            per_frame(|c| c.command_buffers_begun_internal),
+            per_frame(|c| c.command_buffers_replayed),
+            per_frame(|c| c.command_buffers_replayed_inline),
+        );
         );
         let buffers = (TIMED * BUFFERS) as f64;
         let threads = match (&threads_before, &threads) {
@@ -1411,7 +1430,9 @@ fn a_frame_s_draws_and_pass_ends_allocate_within_their_bounds() {
 /// recorded inline, how many of them split, and their instances after a split that recorded
 /// inline too (`WorkCounts::inline_passes`, `WorkCounts::inline_passes_split`,
 /// `WorkCounts::inline_split_instances`): each inline pass that did not split begins one fewer,
-/// its draws' secondary never begun.
+/// its draws' secondary never begun. By what they were begun for
+/// (`WorkCounts::command_buffers_begun_encoders` and kin), the encoders' are each command
+/// buffer's one encoder's own and their draws' secondaries, and the device's own submissions begin
 #[test]
 fn a_frame_s_passes_and_commits_begin_their_command_buffers_within_their_bound() {
     let cache = ScratchCache::new().unwrap();
@@ -1479,6 +1500,22 @@ fn a_frame_s_passes_and_commits_begin_their_command_buffers_within_their_bound()
     assert_eq!(
         whole.encoder, pass,
         "command buffers encoders began outside the frame's steps"
+    );
+    // What they were begun for: each command buffer's one encoder its own once, and the rest
+    // its draws' secondaries; no segment, continuation or device submission of its own.
+    let begun = |by: fn(&WorkCounts) -> u64| by(&after) - by(&counted);
+    let own = begun(|c| c.command_buffers_begun_encoders);
+    let secondaries = begun(|c| c.command_buffers_begun_secondaries);
+    assert_eq!(own, passes, "encoders' own command buffers begun");
+    assert_eq!(
+        own + secondaries,
+        pass,
+        "command buffers encoders began besides their own and their draws' secondaries"
+    );
+    assert_eq!(
+        begun(|c| c.command_buffers_begun_internal),
+        0,
+        "the device's own submissions began command buffers"
     );
     // The frame's batches' submissions, on whichever thread made them.
     let own = whole.all - whole.encoder - whole.kept;

@@ -29,11 +29,13 @@
 //!   only by a batch of a later holding of that slot (`gpu_time::Slot::lease`), once the batch
 //!   that last took it completed. A slot is taken again only once given back, which its command
 //!   buffer does after the completion turn read its timestamps (`read_stamps`): so a kept
-//!   command buffer resets the slot's queries and writes them again only after the results the
-//!   last holding wrote were read. The start's reset of the slot's two queries stays in the kept
-//!   command buffer, before its start timestamp. Vulkan (`vkCmdResetQueryPool`): "When executed
-//!   on a queue, this command sets the status of query indices [firstQuery, firstQuery +
-//!   queryCount - 1] to unavailable": at each submission of the kept command buffer again.
+//!   command buffer writes the slot's queries again only after the results the last holding
+//!   wrote were read, and after the slot was reset on the host as it was taken again
+//!   (`gpu_time.rs`). On a device that does not reset slots on the host (an adopted one), the
+//!   start's reset of the slot's two queries stays in the kept command buffer, before its start
+//!   timestamp. Vulkan (`vkCmdResetQueryPool`): "When executed on a queue, this command sets the
+//!   status of query indices [firstQuery, firstQuery + queryCount - 1] to unavailable": at each
+//!   submission of the kept command buffer again.
 //! - **Where.** On every `VkQueue` but one whose command buffers end at a fence
 //!   (`fences::ends_at_fence`): MoltenVK reads a command buffer after its timeline signal and
 //!   refuses one submitted again before its completed handler ran. A barrier command buffer that
@@ -59,6 +61,7 @@ use crate::error::{vulkan, Error};
 use crate::exit_guard::{self, Call};
 use crate::release;
 use crate::tracker::Barrier;
+use crate::work_counts::Begun;
 use crate::Device;
 use ash::vk;
 use std::collections::VecDeque;
@@ -359,10 +362,12 @@ impl KeptBarriers {
             let begun = raw.begin_command_buffer(buffer, &begin);
             exit_guard::called(Call::BeginCommandBuffer);
             begun.map_err(vulkan)?;
-            shared.counts.command_buffer_begun();
+            shared.counts.command_buffer_begun(Begun::KeptBarriers);
             if let Some(stamps) = stamps.filter(|stamps| stamps.start) {
-                raw.cmd_reset_query_pool(buffer, stamps.queries, stamps.first, 2);
-                exit_guard::called(Call::CmdResetQueryPool);
+                if !shared.timing.resets_on_host() {
+                    raw.cmd_reset_query_pool(buffer, stamps.queries, stamps.first, 2);
+                    exit_guard::called(Call::CmdResetQueryPool);
+                }
                 if !stamps.after {
                     let top = vk::PipelineStageFlags::TOP_OF_PIPE;
                     raw.cmd_write_timestamp(buffer, top, stamps.queries, stamps.first);

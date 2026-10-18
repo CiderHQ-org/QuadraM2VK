@@ -85,11 +85,12 @@ pub(super) enum MemoryClass {
     /// Host-visible and coherent memory the host reads as well as writes (`Shared` storage of
     /// the default CPU cache mode, staging for the host's reads and writes): host-cached where the
     /// device has such, else device-local where it has such ([`candidates`]). Without unified
-    /// memory that is system memory, as a shared resource's on a Mac with a discrete GPU.
+    /// memory that is system memory, as a shared resource's on a Mac with a discrete GPU. The
+    /// upload arena's chunks take it (`upload.rs`).
     Shared,
     /// Host-visible and coherent memory the GPU uses and the host writes, reading little or
-    /// nothing of it (`Shared` storage of the write-combined CPU cache mode, the upload arena, a
-    /// function table's words): without unified memory device-local where the device has such
+    /// nothing of it (`Shared` storage of the write-combined CPU cache mode, a function table's
+    /// words): without unified memory device-local where the device has such
     /// (resizable BAR), else as `Shared`; with unified memory as `Shared` ([`candidates`]).
     WriteCombined,
     /// Device-local (`Private` storage), host-invisible where the device has a choice.

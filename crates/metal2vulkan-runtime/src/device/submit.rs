@@ -25,6 +25,7 @@ use crate::error::{vulkan, Error};
 use crate::exit_guard::{self, Call};
 use crate::release;
 use crate::resource::ResourceKey;
+use crate::work_counts::Begun;
 use ash::vk;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
@@ -213,7 +214,7 @@ impl Device {
         if lead {
             // SAFETY: as below, for the first work's command buffer.
             unsafe { raw.begin_command_buffer(objects.first, &begin) }.map_err(vulkan)?;
-            shared.counts.command_buffer_begun();
+            shared.counts.command_buffer_begun(Begun::Internal);
             // SAFETY: recording, outside a render pass, for the queue family; it is submitted
             // just before the work's submission, which is waited for before anything that uses
             // the resources is submitted after it.
@@ -224,7 +225,7 @@ impl Device {
         // SAFETY: the command buffer is not pending (every submission is waited for below) and
         // the internal lock is held; beginning it resets it (the pool resets command buffers).
         unsafe { raw.begin_command_buffer(objects.buffer, &begin) }.map_err(vulkan)?;
-        shared.counts.command_buffer_begun();
+        shared.counts.command_buffer_begun(Begun::Internal);
         // Host calls' staged copies, after the first work's `VkSubmitInfo`, before the work.
         // SAFETY: recording, outside a render pass; every image's move is in the first work's
         // submission or one before.

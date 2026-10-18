@@ -2,18 +2,25 @@
 //! into while the command is encoded — argument, handle and root tables, constant blobs, neutral
 //! buffers, and the command buffer's execution status words.
 //!
-//! - **Chunks.** The arena is a list of write-combined `Shared` buffers of the device
-//!   (host-coherent, device-local where the device has no unified memory and maps such, with
-//!   Vulkan device addresses where the device has them), each filled from its start. A region is never
-//!   reused while the command buffer lives: every command reads data no other command wrote, and
-//!   the host writes it before the command's batch is submitted (a host step's, after the batches
-//!   before it). The regions the GPU writes: where a pass's visibility results land before they are
-//!   copied on into a no-copy buffer (`visibility.rs`), within one command of barriers, and an
-//!   index bounds pass's bounds words and the command buffer's index pool (`index_bounds.rs`),
-//!   written before the pass between barriers; and a flat dispatch's region record and
-//!   `VkDispatchIndirectCommand` (`binding::Tables::region_record`), which its preprocess writes
-//!   before the dispatch between barriers; and an execution's device replay scratch on the GPU
-//!   alone (its slot tables, region records, sequences and counts, and the sink;
+//! - **Chunks.** The arena is a list of `Shared` buffers of the device in the default CPU cache
+//!   mode, with Vulkan device addresses where the device has them, each filled from its start:
+//!   host-coherent, host-cached where the device has such memory, else device-local where it maps
+//!   such (`MemoryClass::Shared`), so system memory on a discrete GPU. The encoding thread writes
+//!   them, and a write into device-local memory waits for a powered-down GPU to wake, where one
+//!   into system memory does not (an RTX 5080 laptop GPU in NVIDIA's runtime D3 took 970 to 980 ms
+//!   for its first write into device-local memory after 20 s idle, against 0.01 ms into system
+//!   memory). The host writes host-cached memory faster too, and the GPU reads it as fast: on an RX
+//!   7900 XTX (RADV), 3.7 us of thread time a draw that sets its bytes, against 4.3 in device-local
+//!   memory, and a vertex-heavy draw's GPU time the same (28.19 ms against 28.18). A region is
+//!   never reused while the command buffer lives: every command reads data no other command wrote,
+//!   and the host writes it before the command's batch is submitted (a host step's, after the
+//!   batches before it). The regions the GPU writes: where a pass's visibility results land before
+//!   they are copied on into a no-copy buffer (`visibility.rs`), within one command of barriers,
+//!   and an index bounds pass's bounds words and the command buffer's index pool
+//!   (`index_bounds.rs`), written before the pass between barriers; and a flat dispatch's region
+//!   record and `VkDispatchIndirectCommand` (`binding::Tables::region_record`), which its
+//!   preprocess writes before the dispatch between barriers; and an execution's device replay
+//!   scratch on the GPU alone (its slot tables, region records, sequences and counts, and the sink;
 //!   `generated_execute.rs`), which the replay's preprocess writes before the executions between
 //!   barriers; and an emulated tessellation draw's work buffer, whose first words an indirect
 //!   draw's copy of its arguments and whose header and chunk slots its scan write before its draws
@@ -140,16 +147,21 @@ impl Uploads {
                     // At most `CHUNK_BYTES`: `need` is at most half of it.
                     (FIRST_CHUNK_BYTES << self.opened.min(4)).max(need.next_power_of_two())
                 };
-                // The host writes the chunk and reads back only the status words: write-combined
-                // memory, device-local without unified memory where the device maps such.
+                // The encoding thread writes the chunk: host-cached memory where the device has
+                // such (the module docs).
                 let buffer = device.own_buffer(
                     size,
                     ResourceOptions::new(
                         StorageMode::Shared,
-                        CpuCacheMode::WriteCombined,
+                        CpuCacheMode::DefaultCache,
                         HazardTrackingMode::Untracked,
                     ),
                 )?;
+                if !device.properties().has_unified_memory
+                    && buffer.own_pages_device_local() == Some(true)
+                {
+                    device.shared().counts.upload_chunk_in_device_memory();
+                }
                 // A large region takes a chunk of its own, leaving the current chunk current.
                 let at = if dedicated && !self.chunks.is_empty() {
                     self.chunks.len() - 1

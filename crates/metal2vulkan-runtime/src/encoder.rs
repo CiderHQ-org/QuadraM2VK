@@ -49,6 +49,7 @@ use super::tracker::{Barrier, EncoderUses, Summary, Use, UseRange};
 use super::used_resources::EncoderKind;
 use super::Device;
 use crate::device::functions::Vk;
+use crate::work_counts::Begun;
 use ash::vk;
 use metal2vulkan::bind::{ReplayFaults, ResidentRange};
 use std::any::Any;
@@ -282,17 +283,19 @@ impl EncoderCore {
         if let Some(problem) = state.refusal() {
             return Err(invalid(call, problem));
         }
-        let raw = command_buffer.allocate_raw(&mut state)?;
-        let device = command_buffer.device().shared().vk();
-        let begin = vk::CommandBufferBeginInfo::default()
-            .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
-        // SAFETY: the command buffer was just allocated from the pool, under the state lock.
-        unsafe { device.begin_command_buffer(raw, &begin) }.map_err(vulkan)?;
-        command_buffer
-            .device()
-            .shared()
-            .counts
-            .encoder_command_buffer_begun();
+        // The pool's primary begun ahead where it holds one (`spares.rs`).
+        let (raw, begun) = command_buffer.encoder_primary(&mut state)?;
+        let shared = command_buffer.device().shared();
+        if !begun {
+            let begin = vk::CommandBufferBeginInfo::default()
+                .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+            // SAFETY: the command buffer was just handed out of the pool, under the state lock.
+            unsafe { shared.vk().begin_command_buffer(raw, &begin) }.map_err(vulkan)?;
+        }
+        shared.counts.encoder_command_buffer_begun(Begun::Encoder);
+        if begun {
+            shared.counts.encoder_primary_begun_ahead();
+        }
         // The first encoder of a timed command buffer writes its start first (`gpu_time.rs`).
         command_buffer.open_start(&mut state, raw);
         state.encoder_open = true;
@@ -376,7 +379,7 @@ impl EncoderCore {
             .device()
             .shared()
             .counts
-            .encoder_command_buffer_begun();
+            .encoder_command_buffer_begun(Begun::Segment);
         Ok(EncoderCore {
             open: OpenGuard {
                 command_buffer: command_buffer.clone(),
@@ -1141,7 +1144,8 @@ impl EncoderCore {
                 .begin_command_buffer(next, &begin)
         }
         .map_err(vulkan)?;
-        self.device().shared().counts.encoder_command_buffer_begun();
+        let counts = &self.device().shared().counts;
+        counts.encoder_command_buffer_begun(Begun::Continuation);
         Ok(Continuation(next))
     }
 

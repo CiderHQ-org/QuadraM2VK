@@ -17,11 +17,30 @@
 //! here fails every lane at its first device. The calls: a batch's (a command pool and a command
 //! buffer of it, begun, with the barrier every batch ends with and, where the queue family writes
 //! timestamps, the reset and the two timestamps of a command buffer's GPU times
-//! ([`TIMESTAMP_CALLS`], made only there), ended, submitted after each queue's timeline at 0 and
-//! signalling a timeline of its own and a new fence; the wait for the timeline, a read of every
+//! ([`TIMESTAMP_CALLS`], made only there; their reset on the host before, where the device enables
+//! `hostQueryReset`, [`HOST_QUERY_RESET_CALLS`]), ended, submitted after each queue's timeline at 0
+//! and signalling a timeline of its own and a new fence; the wait for the timeline, a read of every
 //! timeline, the wait for the fence and its reset, a wait for the queue to be idle (its drain after
+//! a failed wait), and the read of the two timestamps and, where the device calibrates them, a
+//! calibration reading ([`CALIBRATION_CALLS`]), as a completion turn makes them); a sampler, an
+//! occlusion query pool, a buffer in host-visible memory, mapped (and, where the device has device
+//! addresses, [`DEVICE_ADDRESS_CALLS`], its address read), and an image with their memory and
+//! views, a depth image, a render pass and a framebuffer, a descriptor set layout, a pipeline
+//! layout with a push constant range and a descriptor pool with a set written, and a compute
+//! pipeline made with a pipeline cache from a shader module, its stage specialized as the runtime's
+//! makings are ([`SPECIALIZED`]), whose data is read; a command buffer, recorded and never
+//! submitted, with what a host step records: the pipeline and the set bound (and, where the device
+//! has the push command, the set's write pushed first, [`PUSH_DESCRIPTOR_CALLS`]), a push constant,
+//! a dispatch and one from the buffer's arguments, a copy within the buffer, a copy from the buffer
+//! to the image and back with a barrier between them, a copy between the image's texels and the
+//! image's clear (a render host step's pass steps) and the depth image's (a batch's first work's),
+//! then a render host step's: a graphics pipeline that rasterizes nothing, its stage specialized
 //! too (and named, where the instance reports messages, [`NAMING_CALLS`]), drawn in a secondary
 //! command buffer, directly and from the buffer's arguments, with a
+//! vertex buffer and the states a draw sets, inside a query of the occlusion pool, which the render
+//! pass's subpass executes; where the queues bind sparse memory, an empty `vkQueueBindSparse`
+//! ([`SPARSE_CALLS`]); a wait for the device to be idle; and the release of each object made.
+//! Nothing of it outlives the call.
 //!
 //! **Specialized, with an extended instruction, as the runtime's makings are.** A stage with
 //! specialization constants takes paths of its own: in a driver's compiler, and in the Khronos
@@ -56,6 +75,7 @@ use crate::generated_commands::{
     LayoutCreateInfo, LayoutToken, EXECUTION_SET_PIPELINES, INDIRECT_BINDABLE, TOKEN_DISPATCH,
     TOKEN_EXECUTION_SET,
 };
+use crate::gpu_time::Calibration;
 use crate::loader_word::LoaderWord;
 use crate::memory;
 use crate::release::{self, Generated, Released};
@@ -84,6 +104,11 @@ pub(crate) const TIMESTAMP_CALLS: [Call; 3] = [
     Call::GetQueryPoolResults,
 ];
 
+/// The table's entry points a device that writes no timestamps, or does not enable
+/// `hostQueryReset` (an adopted one), never calls, nor primes: a timestamp slot's reset on the
+/// host (`gpu_time.rs`).
+pub(crate) const HOST_QUERY_RESET_CALLS: [Call; 1] = [Call::ResetQueryPool];
+
 /// The table's entry points a device without device addresses (`bufferDeviceAddress`) never
 /// calls, nor primes: a buffer's address (`buffer.rs`).
 pub(crate) const DEVICE_ADDRESS_CALLS: [Call; 1] = [Call::GetBufferDeviceAddress];
@@ -98,6 +123,10 @@ pub(crate) const GENERATED_COMMANDS_CALLS: [Call; 2] = [
 /// The table's entry points a device that binds no sparse memory never calls, nor primes: a
 /// batch's sparse binding (`sparse/bind.rs`).
 pub(crate) const SPARSE_CALLS: [Call; 1] = [Call::QueueBindSparse];
+
+/// The table's entry points a device that calibrates no timestamps never calls, nor primes: a
+/// completion turn's calibration reading (`gpu_time.rs`).
+pub(crate) const CALIBRATION_CALLS: [Call; 1] = [Call::GetCalibratedTimestamps];
 
 /// The table's entry points a device whose instance reports no messages never calls, nor primes:
 /// a graphics pipeline's debug name (`pipeline/graphics.rs`).
@@ -280,14 +309,16 @@ fn specialization() -> vk::SpecializationInfo<'static> {
         .data(&SPECIALIZED_VALUE)
 }
 
-/// What the device primed has: a queue family that writes timestamps, device addresses,
-/// `VK_EXT_device_generated_commands`, and sparse binding on its queues.
+/// What the device primed has: a queue family that writes timestamps, `hostQueryReset`, device
+/// addresses, `VK_EXT_device_generated_commands`, sparse binding on its queues, the push command,
 #[derive(Clone, Copy)]
 pub(crate) struct Has {
     pub(crate) timestamps: bool,
+    pub(crate) host_query_reset: bool,
     pub(crate) device_addresses: bool,
     pub(crate) generated_commands: bool,
     pub(crate) sparse_binding: bool,
+    pub(crate) calibration: bool,
     pub(crate) object_names: bool,
 }
 
@@ -312,11 +343,13 @@ pub(super) unsafe fn prime(
     sharing: Sharing<'_>,
     has: Has,
     generated: Option<&Commands>,
+    calibration: Option<Calibration>,
 ) -> Result<(), Error> {
     let mut primer = Primer {
         device,
         loader_word,
         sharing,
+        calibration,
         // SAFETY: the caller's.
         memory: unsafe { instance.get_physical_device_memory_properties(physical) },
         calls: 0,
@@ -325,7 +358,7 @@ pub(super) unsafe fn prime(
     // SAFETY: the caller's.
     let primed = unsafe {
         primer
-            .batch(queue_family, queues, has.timestamps)
+            .batch(queue_family, queues, has.timestamps, has.host_query_reset)
             .and_then(|()| primer.objects(queue_family, has.device_addresses))
             .and_then(|()| match generated {
                 Some(commands) => primer.generated(commands),
@@ -354,6 +387,10 @@ pub(super) unsafe fn prime(
 }
 
 /// The table's entry points, but [`UNPRIMED`], those of [`TIMESTAMP_CALLS`] where the device
+/// has no timestamps, those of [`HOST_QUERY_RESET_CALLS`] where it has no timestamps or does not
+/// enable `hostQueryReset`, those of [`DEVICE_ADDRESS_CALLS`] where it has no device addresses,
+/// those of [`GENERATED_COMMANDS_CALLS`] where it has no generated commands, those of
+/// [`SPARSE_CALLS`] where it binds no sparse memory, those of [`PUSH_DESCRIPTOR_CALLS`] where it
 /// has no push command, those of [`CALIBRATION_CALLS`] where it calibrates no timestamps, those
 /// of [`NAMING_CALLS`] where its instance reports no messages, and those of
 /// [`EXTENDED_DYNAMIC_STATE_CALLS`], [`PRIMITIVE_RESTART_CALLS`],
@@ -365,9 +402,12 @@ pub(crate) fn missing(calls: u128, has: Has) -> Vec<Call> {
             calls & call.bit() == 0
                 && !UNPRIMED.contains(&call)
                 && (has.timestamps || !TIMESTAMP_CALLS.contains(&call))
+                && ((has.timestamps && has.host_query_reset)
+                    || !HOST_QUERY_RESET_CALLS.contains(&call))
                 && (has.device_addresses || !DEVICE_ADDRESS_CALLS.contains(&call))
                 && (has.generated_commands || !GENERATED_COMMANDS_CALLS.contains(&call))
                 && (has.sparse_binding || !SPARSE_CALLS.contains(&call))
+                && (has.calibration || !CALIBRATION_CALLS.contains(&call))
                 && (has.object_names || !NAMING_CALLS.contains(&call))
         })
         .collect()
@@ -398,6 +438,8 @@ struct Primer<'a> {
     loader_word: &'a LoaderWord,
     /// How the device's buffers and images are shared among its queue families.
     sharing: Sharing<'a>,
+    /// The device's calibrated timestamps, where its queue family writes timestamps.
+    calibration: Option<Calibration>,
     memory: vk::PhysicalDeviceMemoryProperties,
     /// The table's entry points called, one bit each.
     calls: u128,
@@ -468,16 +510,18 @@ impl Primer<'_> {
     /// timestamp before and after them, as a command buffer's GPU times are written), submitted
     /// to the first queue after every queue's timeline at 0, signalling a timeline semaphore to 1
     /// and a new fence; the wait for the timeline, a read of every timeline, the wait for the
-    /// fence and its reset, and, with `timestamps`, the read of the two timestamps.
+    /// fence and its reset, and, with `timestamps`, the read of the two timestamps; with
+    /// `host_reset` too, their reset on the host first, as a timestamp slot's (`gpu_time.rs`).
     ///
     /// # Safety
     ///
-    /// As [`prime`]'s.
+    /// As [`prime`]'s; with `host_reset`, the device enables `hostQueryReset`.
     unsafe fn batch(
         &mut self,
         queue_family: u32,
         queues: &[QueueSlot],
         timestamps: bool,
+        host_reset: bool,
     ) -> Result<(), Error> {
         let device = self.device;
         let mut kind = vk::SemaphoreTypeCreateInfo::default()
@@ -509,6 +553,12 @@ impl Primer<'_> {
             // SAFETY: the caller's.
             let queries = unsafe { device.create_query_pool(&info, None) }.map_err(vulkan)?;
             self.hold(queries);
+            if host_reset {
+                // SAFETY: the device enables `hostQueryReset` (the caller's); nothing uses the
+                // new pool's queries.
+                unsafe { device.reset_query_pool(queries, 0, 2) };
+                self.made(Call::ResetQueryPool);
+            }
             Some(queries)
         } else {
             None
@@ -624,6 +674,10 @@ impl Primer<'_> {
                 Err(error) => return Err(vulkan(error)),
             }
             self.made(Call::GetQueryPoolResults);
+        }
+        if let Some(calibration) = self.calibration {
+            let _ = calibration.reading();
+            self.made(Call::GetCalibratedTimestamps);
         }
         Ok(())
     }

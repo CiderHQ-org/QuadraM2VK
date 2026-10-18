@@ -1921,6 +1921,7 @@ fn the_table_names_each_entry_point_once() {
 
 /// Priming's check misses nothing but the entry points it cannot make (and, on a queue family
 /// that writes no timestamps, the timestamp commands, on a device without device addresses, a
+/// buffer's address, on one without generated commands, the release of their objects, on one
 /// completion turn's calibration reading, on one whose instance reports no messages, a pipeline's
 /// debug name, and on one without a render encoder's command of an extension or of Vulkan 1.3,
 /// that command), and names an entry point of the table it did not make.
@@ -1928,12 +1929,15 @@ fn the_table_names_each_entry_point_once() {
 fn the_priming_check_names_what_was_not_made() {
     use crate::device::prime::{
         HOST_QUERY_RESET_CALLS, NAMING_CALLS, PRIMITIVE_RESTART_CALLS, PUSH_DESCRIPTOR_CALLS,
+        SIZED_INDEX_BIND_CALLS, SPARSE_CALLS, TIMESTAMP_CALLS, UNPRIMED,
     };
     let has = |timestamps, device_addresses| Has {
         timestamps,
+        host_query_reset: true,
         device_addresses,
         generated_commands: true,
         sparse_binding: true,
+        calibration: true,
         object_names: true,
     };
     let all = Call::ALL.iter().fold(0, |bits, call| bits | call.bit());
@@ -1952,12 +1956,25 @@ fn the_priming_check_names_what_was_not_made() {
             assert_eq!(missing(made & !call.bit(), has(true, true)), [call]);
         }
     }
-    // Without timestamps, their commands are neither made nor missed.
-    let untimed = TIMESTAMP_CALLS
-        .iter()
+    // Without timestamps, their commands are neither made nor missed, nor is their reset on the
+    // host.
+    let untimed = (TIMESTAMP_CALLS.iter().chain(&HOST_QUERY_RESET_CALLS))
         .fold(made, |bits, call| bits & !call.bit());
     assert!(missing(untimed, has(false, true)).is_empty());
-    assert_eq!(missing(untimed, has(true, true)), TIMESTAMP_CALLS);
+    let mut timed = TIMESTAMP_CALLS.to_vec();
+    timed.extend(HOST_QUERY_RESET_CALLS);
+    timed.sort_by_key(|call| Call::ALL.iter().position(|each| each == call));
+    assert_eq!(missing(untimed, has(true, true)), timed);
+    // Without `hostQueryReset`, nor is the reset on the host.
+    let unreset = HOST_QUERY_RESET_CALLS
+        .iter()
+        .fold(made, |bits, call| bits & !call.bit());
+    let without = Has {
+        host_query_reset: false,
+        ..has(true, true)
+    };
+    assert!(missing(unreset, without).is_empty());
+    assert_eq!(missing(unreset, has(true, true)), HOST_QUERY_RESET_CALLS);
     // Without device addresses, nor is a buffer's address.
     let unaddressed = DEVICE_ADDRESS_CALLS
         .iter()
@@ -1987,6 +2004,16 @@ fn the_priming_check_names_what_was_not_made() {
     };
     assert!(missing(unbound, without).is_empty());
     assert_eq!(missing(unbound, has(true, true)), SPARSE_CALLS);
+    // Without calibrated timestamps, nor is a completion turn's calibration reading.
+    let uncalibrated = CALIBRATION_CALLS
+        .iter()
+        .fold(made, |bits, call| bits & !call.bit());
+    let without = Has {
+        calibration: false,
+        ..has(true, true)
+    };
+    assert!(missing(uncalibrated, without).is_empty());
+    assert_eq!(missing(uncalibrated, has(true, true)), CALIBRATION_CALLS);
     // Without messages reported, nor is a pipeline's debug name.
     let unnamed = NAMING_CALLS
         .iter()
