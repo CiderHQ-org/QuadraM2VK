@@ -2132,7 +2132,23 @@ impl Device {
         // Over bytes detached from their pages (`detach.rs`) no image aliases them: the texture
         // is their shadow, which presents a stand-in until they lie in pages again.
         let detached = texels.buffer.detached();
-        let dma_buf = texels.buffer.over_dma_buf();
+        // The plans a linear image aliasing the bytes is tried with, the first the device makes:
+        // with the feedback loop usage a draw takes that reads the texture its own pass renders
+        // through a snapshot (`feedback_candidate`, `texture/attached_reads.rs`), which costs a
+        // linear image nothing as the usage the texture lacks does; then the usage the texture
+        // lacks; then the texture's own.
+        let feedback = feedback_candidate(&wider, self);
+        let mut plans: Vec<&ImagePlan> = feedback.iter().collect();
+        if wider != plan {
+            plans.push(&wider);
+        }
+        plans.push(&plan);
+            let usage = image.plan().usage;
+            if usage.contains(ImageUsageFlags::ATTACHMENT_FEEDBACK_LOOP_EXT) {
+                self.shared().counts.feedback_loop_alias_image();
+            }
+            Ok(Storage::Alias { image, texels })
+        };
         // Where no image aliases the bytes, the reason the plan's attempt gives is the notice's.
         let why = if detached {
             "the buffer's bytes were detached from their pages (detach_backing) as the texture \
@@ -2154,13 +2170,12 @@ impl Device {
             }
         } else {
             let over = (&*texels, &holds);
-            if wider != plan {
-                if let Ok(image) = self.alias_image(wider, layout, descriptor, over, &facts)? {
-                    return Ok(Storage::Alias { image, texels });
+            for &wider in &plans[..plans.len() - 1] {
+                if let Ok(image) = made {
+                    return alias(image, texels);
                 }
             }
-            match self.alias_image(plan.clone(), layout, descriptor, over, &facts)? {
-                Ok(image) => return Ok(Storage::Alias { image, texels }),
+                Ok(image) => return alias(image, texels),
                 Err(why) => why,
             }
         };

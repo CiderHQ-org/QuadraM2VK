@@ -24,7 +24,11 @@
 //!   Shading) for each, so every pixel the drawing draw reads was taken. The snapshot draw's
 //!   fragments write no color ("Otherwise, the value in memory is unmodified", the color write
 //!   mask), and the drawing draw's fetch of the texture never runs: "Data races can only occur
-//!   due to instructions that are actually executed" (the memory model).
+//!   due to instructions that are actually executed" (the memory model). The snapshot draw keeps
+//!   the draw's depth/stencil state, so a draw that writes depth or stencil would write them in
+//!   the snapshot draw first: a pass with a depth or stencil attachment takes the split, as the
+//!   binder makes no snapshot variant for it (`metal2vulkan::bind`'s snapshot reads; lane case
+//!   `snapshot_reads::a_reader_in_a_pass_with_depth_or_stencil_takes_the_split`).
 //! - **The ordering, in the subpass.** The texture's color attachment is in
 //!   `VK_IMAGE_LAYOUT_ATTACHMENT_FEEDBACK_LOOP_OPTIMAL_EXT` for the instance
 //!   (`render_target::Feedback`), so "A vkCmdPipelineBarrier inside a subpass can synchronize prior
@@ -75,11 +79,12 @@
 //!   through a view of another format, and which no later fetch can render through a stand-in
 //!   (`RenderCommandEncoder::keeps_own_attachment`), no two of the colors of one image (whose
 //!   snapshot is one); the draw costs no more so than the split would
-//!   (`RenderCommandEncoder::snapshot_cheaper`: its scissors' area times [`SNAPSHOT_PIXEL_COST`]
-//!   for each color against each color's level times its texel bytes, whatever the snapshot's
-//!   form, so a 4-byte color's reader, `RGBA8Unorm`'s or `BGRA8Unorm`'s, takes the snapshot up to
-//!   a fifth of the render area, an `RGBA16Float` one's up to two fifths and an `RGBA32Float`
-//!   one's up to four fifths); the binder keeps every such slot (on a device that also enabled
+//!   (`RenderCommandEncoder::snapshot_cheaper`: at any area where every such color is a texture
+//!   whose image lies over its buffer's bytes, `RenderCommandEncoder::over_bytes`; else its
+//!   scissors' area times [`SNAPSHOT_PIXEL_COST`] for each color against each color's level
+//!   times its texel bytes, whatever the snapshot's form, so a 4-byte color's reader,
+//!   `RGBA8Unorm`'s or `BGRA8Unorm`'s, takes the snapshot up to a fifth of the render area, an
+//!   `RGBA16Float` one's up to two fifths and an `RGBA32Float` one's up to four fifths); the binder keeps every such slot (in a pass with no depth or stencil attachment, on a device that also enabled
 //!   `fragmentStoresAndAtomics`) and the variant is made; no slot takes the snapshot slot as
 //!   storage. The draw's instance holds those colors in the feedback loop layout from its render
 //!   pass instance's begin, which records in a secondary: where the current instance
@@ -332,11 +337,12 @@ impl RenderCommandEncoder {
     }
 
     /// Whether a draw of `pipeline` that reads the pass's `colors` through snapshots costs no
-    /// more than the split would ([`snapshot_weights`](Self::snapshot_weights)), counted by its
-    /// size where `METAL2VULKAN_LOG_PIPELINES` is set (`reader_sizes.rs`).
+    /// more than the split would: at any area over a buffer's bytes
+    /// ([`over_bytes`](Self::over_bytes)), else by [`snapshot_weights`](Self::snapshot_weights);
+    /// counted by its size where `METAL2VULKAN_LOG_PIPELINES` is set (`reader_sizes.rs`).
     fn snapshot_cheaper(&self, pipeline: &DrawingState, colors: &[usize]) -> bool {
         let (covered, pixels, bytes) = self.snapshot_weights(pipeline, colors);
-        let within = covered * SNAPSHOT_PIXEL_COST <= bytes;
+        let within = self.over_bytes(colors) || covered * SNAPSHOT_PIXEL_COST <= bytes;
         if crate::pipeline::creation_log_enabled() {
             let device = self.core.device();
             let line = crate::device::lock(&device.shared().reader_sizes)
@@ -346,6 +352,23 @@ impl RenderCommandEncoder {
             }
         }
         within
+    }
+
+    /// Whether every one of the pass's `colors` renders a texture whose image lies over its
+    /// buffer's bytes (`Texture::image_over_buffer`, as a surface over host pages does, the
+    /// consumer's guest's framebuffer), whose reader takes the snapshot whatever its area: the
+    /// split's copy reads the bytes into the shadow, where the snapshot draw reads only the
+    /// pixels the draw covers. On the Iris Xe
+    /// (`runtime_lane::attachment_read_costs::snapshot_crossover`, a 1920x1080 surface) the
+    /// snapshot took 0.56 to 0.99 times the split's GPU time for readers through scissors of
+    /// 960x540 and up, covering 1.5% to 100% of them, at most 1.08 times through the whole
+    /// target, and at most 1.2 times through a 320x180 scissor it covers half of or more, about
+    /// 10 microseconds a reader.
+    fn over_bytes(&self, colors: &[usize]) -> bool {
+        colors.iter().all(|&index| {
+            let color = self.layout.colors.get(index).and_then(Option::as_ref);
+            color.is_some_and(|color| color.target.texture.image_over_buffer())
+        })
     }
 
     /// What weighs whether a draw of `pipeline` that reads the pass's `colors` through snapshots

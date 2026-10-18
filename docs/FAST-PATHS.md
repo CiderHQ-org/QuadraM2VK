@@ -127,11 +127,21 @@ recorded here.
   instance (`texture/attached_reads.rs`): the texels around the draw's scissors where it reads at
   its own pixels alone, else every texel or what the instances since drew. After a barrier inside
   the instance, an own-pixel read takes a snapshot drawn in its subpass (`render/snapshot.rs`,
-  docs/API.md "Snapshot reads") or splits the instance; both are exact. The rule weighs the
-  snapshot draw at 20 bytes of the split's copy for each pixel its scissors bound, which fits the
-  Iris Xe, the RX 7900 XTX and the RTX 5080 Laptop GPU; on the Radeon 780M the split is faster from
-  about 14.5%, 17% and 42% of the target for 4-, 8- and 16-byte texels, so the rule costs up to 36%
-  there (`RGBA16Float` at 30% of a 1920x1080 target).
+  docs/API.md "Snapshot reads") or splits the instance; both are exact. Over a texture whose image
+  the device makes that linear image with feedback loop usage
+  (`WorkCounts::feedback_loop_alias_images`; NVIDIA's drivers make it without, and a surface's
+  readers split there): on the Iris Xe (`runtime_lane::attachment_read_costs::snapshot_crossover`,
+  a 1920x1080 surface) 0.56 to 0.99 times the split's GPU time through scissors of 960x540 and up,
+  at most 1.08 times through the whole target and 1.2 times through a 320x180 scissor it covers
+  half of or more.
+  Elsewhere the rule weighs the snapshot draw at 20 bytes of the split's copy for each pixel its
+  scissors bound, against a copy of every texel of the color (an upper bound of the split's copy,
+  which is cut to the scissors or to what changed for a one-level, one-slice texture), which fits
+  the RX 7900 XTX and the RTX 5080 Laptop GPU; on the Radeon 780M the split is faster from about
+  14.5%, 17% and 42% of the target for 4-, 8- and 16-byte texels, so the rule costs up to 36% there
+  (`RGBA16Float` at 30% of a 1920x1080 target), and on the Iris Xe from an eighth of the reader's
+  scissor covered, whatever its area, so the rule costs up to 2.1 times there (a 320x180 scissor
+  covered whole over a private 1920x1080 `BGRA8Unorm` texture).
 - **A `Depth16Unorm` depth whose code the fragment stage writes is tested after the stage.** Where
   the device's conversion is not measured to store Metal's code
   (`DriverDeviation::MetalDepth16Stores`, or `MetalDepth16BiasedStores` for a biased draw), a

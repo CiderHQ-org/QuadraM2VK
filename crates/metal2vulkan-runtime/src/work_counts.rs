@@ -262,6 +262,7 @@ pub(crate) struct Counters {
     attachment_read_splits: AtomicU64,
     reading_draws_snapshotted: AtomicU64,
     snapshot_inline_splits: AtomicU64,
+    feedback_loop_alias_images: AtomicU64,
     depth_attachments_moved: AtomicU64,
     depth_instances_held: AtomicU64,
     held_depths_released: AtomicU64,
@@ -1615,6 +1616,13 @@ impl Counters {
         self.snapshot_inline_splits.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// The device made a linear image aliasing a buffer's bytes with feedback loop usage
+    /// (`Device::storage_over_buffer`, `texture::feedback_candidate`).
+    pub(crate) fn feedback_loop_alias_image(&self) {
+        self.feedback_loop_alias_images
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
     /// A render pass instance holds its multisampled depth/stencil attachment in the attachment
     /// layout (`render_target::depth_layout`).
     pub(crate) fn depth_attachment_moved(&self) {
@@ -2819,6 +2827,12 @@ pub struct WorkCounts {
     /// was recorded inline, its render pass instance begun without the feedback loop layout the
     /// snapshot needs (`render/snapshot.rs`, `render/inline_first.rs`).
     pub snapshot_inline_splits: u64,
+    /// Linear images aliasing a buffer's bytes (a texture over a buffer, a no-copy buffer or an
+    /// IOSurface plane) that the device made with feedback loop usage
+    /// (`texture::feedback_candidate`), so a draw may read the texture through a snapshot while
+    /// its pass renders it (`render/snapshot.rs`): one per image made. Where the device makes no
+    /// such image with the usage, it makes one without, and the texture's readers split.
+    pub feedback_loop_alias_images: u64,
     /// Render pass instances that held their multisampled depth/stencil attachment in
     /// `DEPTH_STENCIL_ATTACHMENT_OPTIMAL`, moved there from `GENERAL` just before each began and
     /// back just after it ended, on a device measured to render it faster so
@@ -3206,6 +3220,7 @@ impl Device {
             attachment_read_splits: counters.attachment_read_splits.load(Ordering::Relaxed),
             reading_draws_snapshotted: counters.reading_draws_snapshotted.load(Ordering::Relaxed),
             snapshot_inline_splits: counters.snapshot_inline_splits.load(Ordering::Relaxed),
+            feedback_loop_alias_images: counters.feedback_loop_alias_images.load(Ordering::Relaxed),
             depth_attachments_moved: counters.depth_attachments_moved.load(Ordering::Relaxed),
             depth_instances_held: counters.depth_instances_held.load(Ordering::Relaxed),
             held_depths_released: counters.held_depths_released.load(Ordering::Relaxed),
