@@ -67,6 +67,7 @@
 use super::graphics::{FixedState, GraphicsKey};
 use super::render::{GraphicsState, RenderVariant, StateDescriptor};
 use super::BufferForms;
+use crate::color_list::ColorList;
 use crate::fetch_reach::format_bytes;
 use crate::framebuffer_fetch;
 use crate::render_state::EncoderState;
@@ -196,16 +197,16 @@ impl GraphicsState {
             storage.dedup();
         }
         let pass = PassShape {
-            color_resolves: vec![None; colors.len()],
-            colors,
+            color_resolves: ColorList::of(colors.iter().map(|_| None)).ok()?,
+            colors: ColorList::of(colors).ok()?,
             depth_stencil,
             samples: descriptor.raster_sample_count,
             depth_stencil_resolve: None,
             fetch_inputs,
-            no_inputs: Vec::new(),
-            storage,
+            no_inputs: ColorList::new(),
+            storage: ColorList::of(storage).ok()?,
             view_mask: 0,
-            locations: Vec::new(),
+            locations: ColorList::new(),
         };
         let primitive = match descriptor.input_primitive_topology {
             PrimitiveTopologyClass::Point => PrimitiveType::Point,

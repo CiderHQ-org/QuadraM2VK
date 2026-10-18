@@ -826,6 +826,34 @@ pub(super) fn push_writes(
         .into_iter()
         .map(|write| (write.stages.into(), write.offset, write.bytes))
         .collect();
+    fill_holes(&mut filled, holes)?;
+    Ok(filled)
+}
+
+/// [`push_writes`] of `writes`, written over `filled`: each write's bytes copied into the storage
+/// of the write a draw before left at its place, where there is one.
+pub(super) fn push_writes_into(
+    writes: &[PushConstantWrite],
+    holes: &[Hole],
+    filled: &mut Vec<PushWrite>,
+) -> Result<(), Error> {
+    filled.truncate(writes.len());
+    for (at, write) in writes.iter().enumerate() {
+        let stages = write.stages.into();
+        match filled.get_mut(at) {
+            Some(kept) => {
+                (kept.0, kept.1) = (stages, write.offset);
+                kept.2.clear();
+                kept.2.extend_from_slice(&write.bytes);
+            }
+            None => filled.push((stages, write.offset, write.bytes.clone())),
+        }
+    }
+    fill_holes(filled, holes)
+}
+
+/// Fill each of `holes` in the write of `filled` of its own stages that covers its eight bytes.
+fn fill_holes(filled: &mut [PushWrite], holes: &[Hole]) -> Result<(), Error> {
     for hole in holes {
         let write = filled
             .iter_mut()
@@ -838,6 +866,8 @@ pub(super) fn push_writes(
         let at = (hole.offset - write.1) as usize;
         write.2[at..at + 8].copy_from_slice(&hole.address.to_le_bytes());
     }
+    Ok(())
+}
         let mut pushed = Vec::new();
         Self::push_into(writes, immutable, &mut pushed);
         pushed

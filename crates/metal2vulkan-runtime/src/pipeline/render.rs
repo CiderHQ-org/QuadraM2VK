@@ -202,8 +202,9 @@ pub(crate) struct Program {
     /// What its last [`SETTLED`] settles of other shapes settled, in which buffer forms, the
     /// latest used first (`GraphicsState::settle_shape`).
     settled: Mutex<VecDeque<(BufferForms, Settled)>>,
-    /// The `VkPipeline` its last draw found made (`RenderVariant::begin_graphics_pipeline`).
-    last_pipeline: Mutex<Option<LastPipeline>>,
+    /// The `VkPipeline`s its last draws found made in their variants' memos, the latest found
+    /// first, at most [`LAST_PIPELINES`] (`RenderVariant::begin_graphics_pipeline`).
+    last_pipelines: Mutex<VecDeque<LastPipeline>>,
     /// Its routing into the pass colors it was last set in a pass of (`GraphicsState::routed`).
     routed: Mutex<Option<(PassColors, Result<Arc<Routing>, u32>)>>,
     /// What its pool pieces hold (`piece_holds.rs`): its draws' makings and its capture forms'
@@ -242,9 +243,9 @@ pub(crate) enum PieceHeld {
 /// ([`GraphicsState::routed`]).
 pub(crate) type PassColors = [Option<PixelFormat>; MAX_COLOR_ATTACHMENTS];
 
-/// The `VkPipeline` a state's last draw found made in its variant's memo: the variant (held
-/// weakly, so the state holds it no longer than before, and its address stays its own while
-/// held), the key, and where the memo's entry lies.
+/// A `VkPipeline` a state's draw found made in its variant's memo: the variant (held weakly, so
+/// the state holds it no longer than before, and its address stays its own while held), the key,
+/// and where the memo's entry lies.
 struct LastPipeline {
     variant: Weak<RenderVariant>,
     key: GraphicsKey,
@@ -265,6 +266,12 @@ pub(crate) struct Settled {
 /// state take a few shapes in turn: a pass's first draw binds nothing else, and a later one finds
 /// what the draws of other states left bound (their bytes), which is of its shape.
 const SETTLED: usize = 4;
+
+/// The most `VkPipeline`s a state keeps of those its draws found made
+/// (`RenderVariant::begin_graphics_pipeline`). A window server's draws of one state take a few
+/// keys in turn, as they take a few shapes ([`SETTLED`]): a pass's first draw finds its own bind
+/// shape, whose plan's specialization another draw of the pass does not share.
+const LAST_PIPELINES: usize = 4;
 
 /// The most capture forms of its variants a state keeps (`GraphicsState::capture_variant`): a
 /// settled key's and the key its plan asks for, of each form a pass draws.
@@ -1626,7 +1633,7 @@ impl GraphicsState {
                 refused_interlocks: Mutex::new(Vec::new()),
                 captures: Mutex::new(Lru::counted(CAPTURES)),
                 settled: Mutex::new(VecDeque::with_capacity(SETTLED)),
-                last_pipeline: Mutex::new(None),
+                last_pipelines: Mutex::new(VecDeque::with_capacity(LAST_PIPELINES)),
                 routed: Mutex::new(None),
                 pieces: PieceHolds::new(),
             };
@@ -2582,23 +2589,30 @@ impl RenderVariant {
         compatible: &Arc<RenderPassObject>,
         (state, formats): (&GraphicsState, crate::degradation::BoundFormats<'_>),
     ) -> DrawPipeline {
-        // A draw of this variant and a key equal to the state's last draw's finds that entry
-        // again, made, where it stays, and uses it as a lookup of the key would: the key is
-        // compared, not hashed, nor made.
-        let last = lock(&state.0.last_pipeline)
-            .as_ref()
-            .filter(|last| std::ptr::eq(last.variant.as_ptr(), Arc::as_ptr(self)))
-            .filter(|last| key.is(&last.key))
+        // A draw of this variant and a key equal to one the state's last draws found made finds
+        // that entry again, made, where it stays, and uses it as a lookup of the key would: the
+        // key is compared, not hashed, nor made. An entry that went is forgotten here too.
+        let ours = |last: &LastPipeline| std::ptr::eq(last.variant.as_ptr(), Arc::as_ptr(self));
+        let last = lock(&state.0.last_pipelines)
+            .iter()
+            .find(|last| ours(last) && key.is(&last.key))
             .map(|last| last.at);
-        if let Some(made) = last.and_then(|at| self.pipelines.made_at(at)) {
-            return DrawPipeline::Made(made);
+        if let Some(at) = last {
+            match self.pipelines.made_at(at) {
+                Some(made) => return DrawPipeline::Made(made),
+                None => lock(&state.0.last_pipelines).retain(|last| !(ours(last) && last.at == at)),
+            }
         }
         device.shared().counts.graphics_pipeline_looked_up();
         let key = &key.key();
         match self.pipelines.begin_at(key) {
             (Begun::Made(made), at) => {
                 if let Some(at) = at {
-                    *lock(&state.0.last_pipeline) = Some(LastPipeline {
+                    let mut kept = lock(&state.0.last_pipelines);
+                    if kept.len() == LAST_PIPELINES {
+                        kept.pop_back();
+                    }
+                    kept.push_front(LastPipeline {
                         variant: Arc::downgrade(self),
                         key: key.clone(),
                         at,

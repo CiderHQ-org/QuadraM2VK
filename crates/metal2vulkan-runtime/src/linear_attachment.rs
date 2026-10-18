@@ -80,7 +80,7 @@ use metal2vulkan::pipeline::ColorAttachmentState;
 #[derive(Clone, Debug, Default)]
 pub(super) struct Coverage {
     /// By color index: the box of every pixel a draw may write, `[x0, y0, x1, y1]`, half-open.
-    colors: Vec<Option<[u32; 4]>>,
+    colors: [Option<[u32; 4]>; MAX_COLOR_ATTACHMENTS],
     /// A draw's pixels were not bounded (an execution of render commands, a tile dispatch, a
     /// draw through a rasterization-rate map or of a state the host does not read): each
     /// attachment's draws write over the whole render area, in no box.
@@ -92,7 +92,7 @@ impl Coverage {
     /// (`render/executions.rs`), whose pass the executing encoder ends.
     pub(super) fn unbounded() -> Coverage {
         Coverage {
-            colors: Vec::new(),
+            colors: [None; MAX_COLOR_ATTACHMENTS],
             unbounded: true,
         }
     }
@@ -112,9 +112,6 @@ impl Coverage {
         let Some(bounds) = bounds else {
             return;
         };
-        if self.colors.len() < writes.len() {
-            self.colors.resize(writes.len(), None);
-        }
         for (color, write) in self.colors.iter_mut().zip(writes) {
             if write.is_some() {
                 *color = Some(color.map_or(bounds, |b| union(b, bounds)));
@@ -266,19 +263,18 @@ pub(super) fn apart(
 }
 
 /// Render the bound attachments among `layout`'s colors, a pass's as it ends, apart where a
-/// render pass instance of it holds a color attachment that is not linear: `others` by instance,
-/// the color indices an instance renders through an image of the runtime's (a stand-in of
-/// another format). Refused (`NotImplemented(Render)`) where a draw took a view of a bound one
+/// render pass instance of it holds a color attachment that is not linear: `other`, the first
+/// color index an instance renders through an image of the runtime's (a stand-in of another
+/// format), of the first instance with one. Refused (`NotImplemented(Render)`) where a draw took a view of a bound one
 /// (`taken`): the pass renders it in place.
 pub(super) fn settle(
     maker: &CommandBuffer,
     colors: &mut [Option<ColorTarget>],
-    others: &[Vec<usize>],
+    mut other: Option<usize>,
     taken: impl Fn(usize) -> bool,
 ) -> Result<(), Error> {
     let device = maker.device();
     let mut bound_at = Vec::new();
-    let mut other = others.iter().flatten().next().copied();
     for (index, color) in colors.iter().enumerate() {
         let Some(color) = color else {
             continue;

@@ -22,11 +22,16 @@
 //! - **Argument samplers.** A draw lists the device's live sampler states as its encoder's bind
 //!   state keeps them, without taking them again, until a state is made or goes
 //!   (`WorkCounts::argument_samplers_taken`).
+//! - **Render passes.** A pass that draws as the one before it makes no render pass: its device
+//!   keeps the compatible pass and the pass its instance begins (`WorkCounts::render_passes_made`).
 //! - **Views.** A pass that binds the textures the pass before it bound works out none of their
 //!   views (`WorkCounts::bind_views_worked_out`); a texture made after one of them went works out
 //!   its own.
 //! - **Stage tables.** A draw reads into its encoder's bind state only the stage tables a call
 //!   changed since a draw read them, through the same pipeline state's interface
+//! - **Pipelines.** A draw of a pipeline state one of whose last draws found its `VkPipeline`
+//!   made, of the same variant and an equal key, finds that entry again without looking the key
+//!   up (`WorkCounts::graphics_pipelines_looked_up`), states and keys switched between included.
 //! - **Recorded states.** A draw records into its secondary command buffer only the state
 //!   commands that set what changed since the draws before it there
 //!   (`WorkCounts::draw_states_recorded`): of an unchanged state, none but its own descriptor set;
@@ -44,6 +49,8 @@ use super::degrade_notices::on_device;
 use super::{buffer_with, WAIT};
 use crate::air_library::AirLibrary;
 use metal2vulkan::metal::state::DepthStencilDescriptor;
+use metal2vulkan::metal::{
+};
 use metal2vulkan::pipeline::{ColorAttachmentDescriptor, RenderPipelineDescriptor, StageSource};
 use metal2vulkan_devtools::{engine_dir, llvm_assemble};
 use metal2vulkan_runtime::{
@@ -346,6 +353,34 @@ fn draws_take_the_device_s_sampler_states_only_where_they_changed() {
         assert_eq!(counts[2..], [0, 1, 0, 0, 1, 0], "{counts:?}");
         let pixels = scene.pixels(&command_buffer);
         assert!(pixels.iter().all(|&p| p == RED), "{pixels:?}");
+    });
+}
+
+/// Passes that each draw as the one before them, one column a draw, make no render pass past the
+/// first's (`WorkCounts::render_passes_made`): their device keeps the compatible pass their draws
+/// record against and the pass their instance begins, each by what it is made of. Each pass's
+/// target is the texture's.
+#[test]
+fn a_pass_that_draws_as_the_one_before_makes_no_render_pass() {
+    on_device(|device, _| {
+        let scene = Scene::new(device);
+        let red = solid(device, PixelFormat::RGBA8Unorm, RED);
+        let made = || device.work_counts().render_passes_made;
+        let mut counts = Vec::new();
+        for _ in 0..3 {
+            let before = made();
+            let (command_buffer, mut encoder) = scene.encoder(device);
+            encoder.set_fragment_texture(Some(&red), 0).unwrap();
+            for c in 0..SIDE {
+                encoder.set_vertex_bytes(&column(c), 0).unwrap();
+                draw(&mut encoder);
+            }
+            encoder.end_encoding().unwrap();
+            let pixels = scene.pixels(&command_buffer);
+            assert!(pixels.iter().all(|&p| p == RED), "{pixels:?}");
+            counts.push(made() - before);
+        }
+        assert_eq!(counts[1..], [0, 0], "{counts:?}");
     });
 }
 
@@ -698,6 +733,52 @@ fn draws_switching_between_pipeline_states_of_other_states_keep_each_shape() {
             let want = [RED, GREEN][at % 2];
             assert_eq!(pixel, want, "pixel {at}: {pixels:?}");
         }
+    });
+}
+
+/// Draws of one pipeline state that switch between two keys of its `VkPipeline` at every draw
+/// (its depth clip mode, which no pipeline makes dynamic) look neither up by its key once each
+/// key's draw found it made: the state keeps the pipelines its last draws found
+/// (`WorkCounts::graphics_pipelines_looked_up`). A first command buffer, completed, and the
+/// pipeline makings its draws began on the device's pool, settled, have both made. Every column is
+/// drawn. Not run on a device without `depthClamp`, which refuses the clamp.
+#[test]
+fn draws_of_one_state_switching_keys_find_their_pipelines_again() {
+    on_device(|device, _| {
+        let scene = Scene::new(device);
+        let red = solid(device, PixelFormat::RGBA8Unorm, RED);
+        let modes = [DepthClipMode::Clip, DepthClipMode::Clamp];
+        let (made, mut encoder) = scene.encoder(device);
+        if encoder.set_depth_clip_mode(DepthClipMode::Clamp).is_err() {
+            return;
+        }
+        encoder.set_fragment_texture(Some(&red), 0).unwrap();
+        for mode in modes {
+            encoder.set_depth_clip_mode(mode).unwrap();
+            encoder.set_vertex_bytes(&column(0), 0).unwrap();
+            draw(&mut encoder);
+        }
+        encoder.end_encoding().unwrap();
+        scene.pixels(&made);
+        pipelines_settled(device);
+        let (command_buffer, mut encoder) = scene.encoder(device);
+        encoder.set_fragment_texture(Some(&red), 0).unwrap();
+        let mut first = None;
+        for c in 0..SIDE {
+            encoder
+                .set_depth_clip_mode(modes[(c % 2) as usize])
+                .unwrap();
+            encoder.set_vertex_bytes(&column(c), 0).unwrap();
+            draw(&mut encoder);
+            if c == 1 {
+                first = Some(device.work_counts());
+            }
+        }
+        let (first, rest) = (first.unwrap(), device.work_counts());
+        encoder.end_encoding().unwrap();
+        assert_eq!(grew(&first, &rest, |c| c.graphics_pipelines_looked_up), 0);
+        let pixels = scene.pixels(&command_buffer);
+        assert!(pixels.iter().all(|&p| p == RED), "{pixels:?}");
     });
 }
 

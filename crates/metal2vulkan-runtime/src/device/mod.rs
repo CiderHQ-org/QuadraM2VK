@@ -65,8 +65,8 @@ use super::memory::Memory;
 use super::memory_log::MemoryLog;
 use super::mipmap_scratch::MipmapScratch;
 use super::owned_kernel::OwnedKernels;
-use super::render_state::{depth_bias_command, DepthBiasCommand};
-use super::render_target::KeptCompatible;
+use super::render_state::{depth_bias_command, DepthBiasCommand, DepthRanges};
+use super::render_target::KeptRenderPasses;
 use super::resource_ids::{ResourceIds, SamplerIdReads};
 use super::sample_planes::PlanesObjects;
 use super::sampler::{SamplerCount, SamplerKey, SamplerShared};
@@ -187,6 +187,9 @@ pub(super) struct DeviceShared {
     presenting_made: AtomicU64,
     /// The compile-and-plan device: the description restricted to what is enabled.
     compile: metal2vulkan::device::Device,
+    /// What `compile`'s profile takes of viewport depth ranges past `[0, 1]`, which draws read
+    /// (`render_state::native_depth_range`).
+    pub(super) depth_ranges: DepthRanges,
     /// What the `VkDevice` enabled, in the compile layer's vocabulary.
     enabled: EnableSet,
     properties: DeviceProperties,
@@ -332,8 +335,9 @@ pub(super) struct DeviceShared {
     /// The render passes of its passes without attachments, one per sample count, made on first
     /// use (`attachmentless.rs`).
     pub(super) attachmentless: Mutex<KeptPasses>,
-    /// The compatible passes it keeps, by shape (`render_target::shared_compatible_pass`).
-    pub(super) compatible_passes: Mutex<KeptCompatible>,
+    /// The render passes it keeps: compatible ones and those instances begin, by what each is
+    /// made of (`render_target::KeptRenderPasses`).
+    pub(super) render_passes: Mutex<KeptRenderPasses>,
     /// The caller's images that move between layouts, and the events' timeline semaphores
     /// (`interop.rs`).
     pub(super) interop: Interop,
@@ -570,7 +574,7 @@ impl Drop for DeviceShared {
         lock(&self.depth_copies).destroy(self.vk());
         lock(&self.depth_stencil_resolves).destroy(self.vk());
         lock(&self.attachmentless).destroy(self.vk());
-        lock(&self.compatible_passes).destroy(self.vk());
+        lock(&self.render_passes).destroy(self.vk());
         // What released variants left (`pipeline/kept.rs`).
         lock(&self.kept).destroy(self);
         // The graphics pipeline libraries, after every pipeline they linked: each linked
@@ -1306,6 +1310,7 @@ impl Device {
         }
         let resource_ids: Arc<Mutex<ResourceIds>> = Arc::default();
         let sampler_ids = lock(&resource_ids).sampler_id_reads();
+        let depth_ranges = DepthRanges::of(compile.profile());
         let shared = Arc::new(DeviceShared {
             instance,
             physical,
@@ -1318,6 +1323,7 @@ impl Device {
             round_robin_made: AtomicU64::new(0),
             presenting_made: AtomicU64::new(0),
             compile,
+            depth_ranges,
             enabled,
             properties,
             announced: Announced::new(&announce_each),
@@ -1384,7 +1390,7 @@ impl Device {
             depth_copies: Mutex::new(DepthCopyObjects::default()),
             depth_stencil_resolves: Mutex::new(DepthStencilResolveObjects::default()),
             attachmentless: Mutex::default(),
-            compatible_passes: Mutex::default(),
+            render_passes: Mutex::default(),
             interop: Interop::default(),
             heap_keys: Default::default(),
             rebinds: Default::default(),

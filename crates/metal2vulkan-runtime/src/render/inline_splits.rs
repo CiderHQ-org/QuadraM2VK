@@ -347,8 +347,7 @@ fn record_kept(
             offset: vk::Offset2D { x: 0, y: 0 },
             extent: vk::Extent2D { width, height },
         })
-        .clear_values(&clear_values);
-    let mut recorded = 0;
+        .clear_values(clear_values.as_slice());
     // SAFETY: the held command buffer is recording outside a render pass instance, and only this
     // encoder records it; the steps' objects are live until it completes (retained at their
     // draws); the pass and framebuffer are live until it completes (the encoder holds them to its

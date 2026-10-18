@@ -43,6 +43,9 @@ pub(crate) struct Lru<K, V> {
     weight: u64,
     max_weight: u64,
     max_entries: usize,
+    /// The uses that moved an entry in `order` ([`used`](Self::used)).
+    #[cfg(test)]
+    reordered: u64,
 }
 
 struct Slot<K, V> {
@@ -68,6 +71,8 @@ impl<K: Clone + Eq + Hash, V> Lru<K, V> {
             weight: 0,
             max_weight,
             max_entries,
+            #[cfg(test)]
+            reordered: 0,
         }
     }
 
@@ -100,9 +105,19 @@ impl<K: Clone + Eq + Hash, V> Lru<K, V> {
         self.used(at.0).map(|slot| &slot.value)
     }
 
-    /// The entry numbered `number`, now the most recently used.
+    /// The entry numbered `number`, now the most recently used. One that is already keeps its
+    /// stamp and its place: no other entry was used since, so the order stands as a new stamp
+    /// would leave it.
     fn used(&mut self, number: u64) -> Option<&mut Slot<K, V>> {
         let slot = self.entries.get_mut(&number)?;
+        // The latest stamp given is the clock's last.
+        if slot.used + 1 == self.clock {
+            return Some(slot);
+        }
+        #[cfg(test)]
+        {
+            self.reordered += 1;
+        }
         let stamp = self.clock;
         self.clock += 1;
         self.order.remove(&slot.used);
@@ -151,6 +166,12 @@ impl<K: Clone + Eq + Hash, V> Lru<K, V> {
             self.order.remove(&slot.used);
             self.weight -= slot.weight;
         }
+    }
+
+    /// How many uses moved an entry in the order: none that used the latest used again.
+    #[cfg(test)]
+    pub(crate) fn reordered(&self) -> u64 {
+        self.reordered
     }
 
     /// The entries' total weight and their count, checked against the entries themselves.

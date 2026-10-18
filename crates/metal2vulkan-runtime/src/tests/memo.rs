@@ -116,6 +116,58 @@ fn an_entry_found_again_where_it_lies_is_used_as_a_lookup_of_its_key_uses_it() {
     assert_eq!(lru.footprint(), (3, 3));
 }
 
+/// Using the entry used last again moves nothing in the order (`Lru::reordered`), as no entry was
+/// used since; using another moves it once. Over a fixed churn of which half the steps take the key
+/// taken last, every lookup hits where a map that moves each entry used to the back holds the key,
+/// and the two hold as many entries, so the same go first.
+#[test]
+fn using_the_latest_entry_again_keeps_the_order() {
+    let mut lru: Lru<&str, u32> = Lru::counted(2);
+    lru.insert("a", 1, 1);
+    lru.insert("b", 2, 1);
+    for _ in 0..8 {
+        assert_eq!(lru.get(&"b"), Some(&2));
+    }
+    assert_eq!(lru.reordered(), 0, "b was the latest used");
+    assert_eq!(lru.get(&"a"), Some(&1));
+    assert_eq!(lru.get(&"a"), Some(&1));
+    assert_eq!(lru.reordered(), 1, "a moved once");
+    lru.insert("c", 3, 1);
+    assert_eq!(lru.get(&"b"), None, "b went: the least recently used");
+    const ENTRIES: usize = 8;
+    let mut lru: Lru<u64, u64> = Lru::counted(ENTRIES);
+    let mut model: Vec<u64> = Vec::new();
+    let mut sequence = Sequence(0x2545_f491_4f6c_dd1d);
+    let mut last = 0;
+    let mut hits = 0;
+    for step in 0..20_000 {
+        let key = match sequence.next(2) {
+            0 => last,
+            _ => sequence.next(24),
+        };
+        last = key;
+        if sequence.next(3) == 0 {
+            lru.insert(key, key * 7, 1);
+            model.retain(|&kept| kept != key);
+            model.push(key);
+            if model.len() > ENTRIES {
+                model.remove(0);
+            }
+        } else {
+            let hit = lru.get(&key).copied();
+            let held = model.contains(&key);
+            assert_eq!(hit, held.then_some(key * 7), "step {step}: key {key}");
+            if held {
+                hits += 1;
+                model.retain(|&kept| kept != key);
+                model.push(key);
+            }
+        }
+        assert_eq!(lru.footprint().1, model.len(), "step {step}");
+    }
+    assert!(hits > 5_000 && lru.reordered() < hits, "{hits} hits");
+}
+
 /// The owned `ob3_texture_array` kernel, from its committed AIR, compiled for the committed
 /// MoltenVK profile, and that device.
 fn texture_array() -> (Device, CompiledFunction) {

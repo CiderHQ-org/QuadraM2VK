@@ -279,7 +279,7 @@ use super::depth_stand_in::DepthStandIn;
 use super::depth_stencil::{DepthStencilState, FailingDraw};
 use super::depth_stencil_resolve::DrawnResolve;
 use super::depth_stencil_scratch::{ScratchCopy, Separate};
-use super::device::lock;
+use super::device::{lock, Device};
 use super::draw_source::{CopySteps, DrawSource, IndexBind};
 use super::dynamic_state::ExtendedDynamicState;
 use super::encoder::{EncoderCore, Replayed};
@@ -1205,6 +1205,11 @@ pub struct RenderCommandEncoder {
     /// commands: Metal's pass rewrites the unused bits of an extended-range or padded attachment
     /// it loads in the tiles its draws reach (`render/unused_bits_load.rs`).
     rewrites_unused_bits: bool,
+    /// The kept-attachment notices of the layout as it stands (`degrade_kept_attachments`),
+    /// decided at the first draw or execution under it; `None` until then, and again each time
+    /// the encoder changes its layout: installs another, sets a color's store action or resolve,
+    /// loads a memoryless color, or reroutes the pass.
+    kept_attachments: Option<unused_bits_load::KeptAttachments>,
     /// The pass's extended-range color attachments an earlier draw or execution of render
     /// commands may have written, or whose clear Metal's tile memory holds as values its codes
     /// do not read back (`cleared_off_codes`), by index (`degrade_extended_range_blends`).
@@ -1232,7 +1237,7 @@ pub struct RenderCommandEncoder {
     /// The views and sampler descriptions its draws' binds made or found, taken from the
     /// device's ended render encoders' and given back as it ends (`binding::BindMemo`).
     bind_memo: binding::BindMemo,
-    /// What its last draw retained of its own ([`LastRetained`]).
+    /// What its draws retained of their own, each once ([`LastRetained`]).
     last_retained: LastRetained,
     /// Whether the pass's first instance records inline (`render/inline_first.rs`).
     inline: inline_first::Inline,
@@ -1244,69 +1249,95 @@ pub struct RenderCommandEncoder {
     grouped: Option<Box<color_groups::Grouped>>,
 }
 
-/// What a render encoder's last draw retained of its own (its pipeline state, its variant's
-/// objects, its `VkPipeline` and the samplers its bind named), held: a draw retains each again
-/// only where it is another object, by another reference to it (`retained.rs`). What an encoder retains goes to its command buffer, which
-/// holds it until it completes, so an object retained once is held for every later draw of the
-/// encoder; and as each is held here, an object seen again is the same one.
+/// What a render encoder's draws retained of their own (their pipeline states, their variants'
+/// objects, their `VkPipeline`s and the samplers their binds named), each held once: a draw
+/// retains an object only where no earlier draw of the encoder retained it, by another reference
+/// to it (`retained.rs`). What an encoder retains goes to its command buffer, which holds it until
+/// it completes, so an object retained once is held for every later draw of the encoder; and as
+/// each is held here, an object seen again is the same one. The command buffer lets go of its
+/// holds last first, so an object held twice went at its first hold: holding it once there lets
+/// it go at the same point.
 #[derive(Default)]
 struct LastRetained {
-    pipeline: Option<DrawingState>,
-    objects: Option<Arc<VariantObjects>>,
-    made: Option<Arc<RawPipeline>>,
-    samplers: Vec<Arc<OwnedSampler>>,
+    pipelines: Kept<DrawingState>,
+    objects: Kept<Arc<VariantObjects>>,
+    made: Kept<Arc<RawPipeline>>,
+    samplers: Kept<Arc<OwnedSampler>>,
+}
+
+/// The objects of each kind a render encoder keeps in place ([`Kept`]): a pass's draws of a few
+/// pipeline states retain no more, and keep them with no storage of their own.
+const KEPT_INLINE: usize = 8;
+
+/// Objects an encoder's draws retained, each once: the first [`KEPT_INLINE`] in place, the others
+/// in a list made at the first of them.
+struct Kept<T> {
+    inline: [Option<T>; KEPT_INLINE],
+    more: Vec<T>,
+}
+
+impl<T> Default for Kept<T> {
+    fn default() -> Kept<T> {
+        Kept {
+            inline: [const { None }; KEPT_INLINE],
+            more: Vec::new(),
+        }
+    }
+}
+
+impl<T> Kept<T> {
+    /// Whether `object` is among them, by `same`, the latest kept compared first.
+    fn holds(&self, object: &T, same: impl Fn(&T, &T) -> bool) -> bool {
+        let inline = self.inline.iter().rev().flatten();
+        self.more
+            .iter()
+            .rev()
+            .chain(inline)
+            .any(|kept| same(kept, object))
+    }
+
+    /// Keep `object`, which is not among them.
+    fn keep(&mut self, object: T) {
+        match self.inline.iter_mut().find(|slot| slot.is_none()) {
+            Some(slot) => *slot = Some(object),
+            None => self.more.push(object),
+        }
+    }
 }
 
 impl LastRetained {
     /// Retain into `core` a draw's pipeline state, variant objects and made `VkPipeline`, each
-    /// unless it is the one the last draw retained.
+    /// unless an earlier draw of the encoder retained it.
     fn retain_draw(
         &mut self,
         core: &mut EncoderCore,
         (pipeline, objects, made): (DrawingState, Arc<VariantObjects>, Option<Arc<RawPipeline>>),
     ) {
-        if !self
-            .pipeline
-            .as_ref()
-            .is_some_and(|kept| kept.same(&pipeline))
-        {
+        if !self.pipelines.holds(&pipeline, DrawingState::same) {
             core.retain_shared(pipeline.held());
-            self.pipeline = Some(pipeline);
+            self.pipelines.keep(pipeline);
         }
-        if !self
-            .objects
-            .as_ref()
-            .is_some_and(|kept| Arc::ptr_eq(kept, &objects))
-        {
+        if !self.objects.holds(&objects, Arc::ptr_eq) {
             core.retain_shared(objects.clone());
-            self.objects = Some(objects);
+            self.objects.keep(objects);
         }
         if let Some(made) = made {
-            if !self
-                .made
-                .as_ref()
-                .is_some_and(|kept| Arc::ptr_eq(kept, &made))
-            {
+            if !self.made.holds(&made, Arc::ptr_eq) {
                 core.retain_shared(made.clone());
-                self.made = Some(made);
+                self.made.keep(made);
             }
         }
     }
 
-    /// Retain into `core` the samplers a draw's bind named, unless they are the ones the last
-    /// draw's named, in order: each by another reference to it, the last first, so they go in
-    /// their order (`retained.rs`).
+    /// Retain into `core` the samplers a draw's bind named, each unless an earlier draw of the
+    /// encoder retained it: by another reference to it, the last first, so they go in their
+    /// order (`retained.rs`).
     fn retain_samplers(&mut self, core: &mut EncoderCore, samplers: Vec<Arc<OwnedSampler>>) {
-        let same = samplers.len() == self.samplers.len()
-            && samplers
-                .iter()
-                .zip(&self.samplers)
-                .all(|(a, b)| Arc::ptr_eq(a, b));
-        if !same {
-            for sampler in samplers.iter().rev() {
+        for sampler in samplers.into_iter().rev() {
+            if !self.samplers.holds(&sampler, Arc::ptr_eq) {
                 core.retain_shared(sampler.clone());
+                self.samplers.keep(sampler);
             }
-            self.samplers = samplers;
         }
     }
 }
@@ -1659,6 +1690,7 @@ impl RenderCommandEncoder {
             coverage: linear_attachment::Coverage::default(),
             inputs_read: BTreeSet::new(),
             rewrites_unused_bits: false,
+            kept_attachments: None,
             extended_written,
             extended,
             pass_start: PassStartReads::default(),
@@ -3574,38 +3606,33 @@ impl RenderCommandEncoder {
         // instance is linear: where a draw made one an image of the runtime's (a stand-in of
         // another format, a fetched texture's scratch), the attachments the device renders only
         // so render through images their textures keep, but one a draw took a view of
-        // (`linear_attachment.rs`).
-        let others: Vec<Vec<usize>> = instances
-            .iter()
-            .map(|instance| {
-                let reformats = instance.reformats.iter();
-                reformats.filter(|r| r.copies).map(|r| r.index).collect()
-            })
-            .collect();
+        // (`linear_attachment.rs`): the first such color, of the first instance with one.
+        let other = (instances.iter())
+            .flat_map(|instance| instance.reformats.iter())
+            .find(|r| r.copies)
+            .map(|r| r.index);
         // The colors a draw took a view of: read as input attachments or in the pixel
         // interlock, as sample planes, through a view of another format, or its extended-range
         // shadow. A pass whose draws fetch through input attachments counts every color taken
         // for its bound linear ones (`linear_attachment.rs`).
-        let viewed: BTreeSet<usize> = (0..layout.colors.len())
-            .filter(|&index| {
-                let planes = layout.colors[index]
-                    .as_ref()
-                    .is_some_and(|color| color.planes.is_some());
-                inputs_read.contains(&(index as u32))
-                    || planes
-                    || extended.made(index as u32)
-                    || instances.iter().any(|instance| {
-                        instance.shape.storage.contains(&(index as u32))
-                            || instance
-                                .reformats
-                                .iter()
-                                .any(|r| r.index == index && !r.copies)
-                    })
-            })
-            .collect();
-        let taken: BTreeSet<usize> = match layout.fetch_inputs {
-            true => (0..layout.colors.len()).collect(),
-            false => viewed.clone(),
+        let viewed = ColorIndices::of((0..layout.colors.len()).filter(|&index| {
+            let planes = layout.colors[index]
+                .as_ref()
+                .is_some_and(|color| color.planes.is_some());
+            inputs_read.contains(&(index as u32))
+                || planes
+                || extended.made(index as u32)
+                || instances.iter().any(|instance| {
+                    instance.shape.storage.contains(&(index as u32))
+                        || instance
+                            .reformats
+                            .iter()
+                            .any(|r| r.index == index && !r.copies)
+                })
+        }));
+        let taken = match layout.fetch_inputs {
+            true => ColorIndices::of(0..layout.colors.len()),
+            false => viewed,
         };
         // Whether a draw renders views, and the pass executes render commands, whose commands
         // record later, whatever they record (`render/executions.rs`).
@@ -3626,11 +3653,12 @@ impl RenderCommandEncoder {
             _ => None,
         };
         let handed = HandedToMetal::of(core.device(), &layout, whole);
-        let handed: BTreeSet<usize> = (layout.colors.iter().enumerate())
-            .filter_map(|(index, color)| Some((index, color.as_ref()?)))
-            .filter(|&(index, color)| handed.as_ref().is_some_and(|h| h.color(index, color)))
-            .map(|(index, _)| index)
-            .collect();
+        let handed = ColorIndices::of(
+            (layout.colors.iter().enumerate())
+                .filter_map(|(index, color)| Some((index, color.as_ref()?)))
+                .filter(|&(index, color)| handed.as_ref().is_some_and(|h| h.color(index, color)))
+                .map(|(index, _)| index),
+        );
         // A texture over a buffer the pass does not store renders through an image its texture
         // keeps, so the buffer keeps its bytes, as Metal's does, where the pass does not hand it
         // to Metal's own `DontCare` and no draw took a view of its image (`kept_bytes.rs`).
@@ -3639,16 +3667,13 @@ impl RenderCommandEncoder {
             core.command_buffer(),
             &mut layout.colors,
             executes,
-            |index| handed.contains(&index),
-            |index| viewed.contains(&index),
-            |index| taken.contains(&index),
+            |index| handed.contains(index),
+            |index| viewed.contains(index),
+            |index| taken.contains(index),
         )?;
-        linear_attachment::settle(
-            core.command_buffer(),
-            &mut layout.colors,
-            &others,
-            |index| taken.contains(&index),
-        )?;
+        linear_attachment::settle(core.command_buffer(), &mut layout.colors, other, |index| {
+            taken.contains(index)
+        })?;
         // One the pass loads renders in place, apart over the box its draws write in; one it
         // clears through such an image, copied back, only where no command of the pass may read
         // its bytes: no barrier inside it, no command reaching memory it does not name, and no
@@ -3656,35 +3681,33 @@ impl RenderCommandEncoder {
         // (`linear_attachment::choose`).
         let reached_heaps = core.reached_heaps();
         let rebinds = &core.device().shared().rebinds;
-        let may_read: BTreeSet<usize> = (0..layout.colors.len())
-            .filter(|&index| {
-                let Some(color) = layout.colors[index].as_ref() else {
-                    return false;
-                };
-                if unnamed_reads || reached_heaps {
-                    return true;
-                }
-                let none = crate::tracker::Access::NONE;
-                let key = color.target.texture.bound_use(none, none).key;
-                let named = core.named_keys();
-                if named.contains(&key) {
-                    return true;
-                }
-                rebinds.host_range(key).is_some_and(|bytes| {
-                    named.iter().any(|&other| {
-                        rebinds
-                            .host_range(other)
-                            .is_some_and(|other| other.start < bytes.end && bytes.start < other.end)
-                    })
+        let may_read = ColorIndices::of((0..layout.colors.len()).filter(|&index| {
+            let Some(color) = layout.colors[index].as_ref() else {
+                return false;
+            };
+            if unnamed_reads || reached_heaps {
+                return true;
+            }
+            let none = crate::tracker::Access::NONE;
+            let key = color.target.texture.bound_use(none, none).key;
+            let named = core.named_keys();
+            if named.contains(&key) {
+                return true;
+            }
+            rebinds.host_range(key).is_some_and(|bytes| {
+                named.iter().any(|&other| {
+                    rebinds
+                        .host_range(other)
+                        .is_some_and(|other| other.start < bytes.end && bytes.start < other.end)
                 })
             })
-            .collect();
+        }));
         linear_attachment::choose(
             core.command_buffer(),
             &mut layout.colors,
             &coverage,
-            |index| taken.contains(&index),
-            |index| may_read.contains(&index),
+            |index| taken.contains(index),
+            |index| may_read.contains(index),
         )?;
         let device = core.device().clone();
         // The pass's clears write a new texture's unwritten texels where they reach it: through
@@ -3700,13 +3723,13 @@ impl RenderCommandEncoder {
         // The color attachments the pass loads as the encoder set them, before its `DontCare`
         // loads and reach clears below give any a clear before the pass and a load
         // (`render/shadows.rs` bounds the others' copies back by the draws' scissors).
-        let loaded_colors: Vec<bool> = (layout.colors.iter())
-            .map(|color| {
-                color
-                    .as_ref()
-                    .is_some_and(|color| color.load == LoadAction::Load)
-            })
-            .collect();
+        let mut loaded = [false; MAX_COLOR_ATTACHMENTS];
+        for (loaded, color) in loaded.iter_mut().zip(&layout.colors) {
+            *loaded = color
+                .as_ref()
+                .is_some_and(|color| color.load == LoadAction::Load);
+        }
+        let loaded_colors = &loaded[..layout.colors.len()];
         let tiles = match reach {
             clear_reach::PassReach::Draws => drawn.tiles(&layout),
             _ => None,
@@ -4338,7 +4361,7 @@ impl RenderCommandEncoder {
                 &mut core,
                 order.iter().map(|&(s, bound, _)| (s, bound)),
                 &layout,
-                (reached, drawn_bounds.map(|area| (area, &loaded_colors[..]))),
+                (reached, drawn_bounds.map(|area| (area, loaded_colors))),
             )?;
             let (mut planned_copies, mut dispatch_copies) = (Vec::new(), Vec::new());
             for (&(_, _, of_dispatch), copies) in order.iter().zip(planned) {
@@ -4383,9 +4406,11 @@ impl RenderCommandEncoder {
         // The copies of each color an instance renders through a stand-in of another format:
         // from the attachment before it, and back after it but where it is the pass's last and
         // the color's store discards it. Never the pass's first instance clearing that color
-        // (`next_instance`), so no clear is lost.
-        let mut reformat_copies = Vec::with_capacity(count);
-        for (index, instance) in instances.iter().enumerate() {
+        // (`next_instance`), so no clear is lost. No list where no instance copies: each
+        // instance's copies are then none.
+        let copying = (instances.iter()).any(|i| i.reformats.iter().any(|r| r.copies));
+        let mut reformat_copies = Vec::with_capacity(if copying { count } else { 0 });
+        for (index, instance) in instances.iter().enumerate().filter(|_| copying) {
             let last = index + 1 == count && !resolve_after;
             let pairs: Vec<_> = instance
                 .reformats
@@ -4503,17 +4528,29 @@ impl RenderCommandEncoder {
             Some(grouped) => grouped.later(&mut core, &layout)?,
             None => None,
         };
-        // Each instance's draws and pieces, and the steps around the instances, which record
-        // alike whether the pass records now or later with its executions
-        // (`render/pass_steps.rs`).
+        let mut later_moved = Vec::with_capacity(count - inlined);
+            later_moved.push(render_target::moved_images(
+                &viewed,
+                instance.views,
+                feedback,
+                moved,
+            )?);
+        // The draws and pieces of each instance after those recorded inline, and the steps
+        // around the instances, which record alike whether the pass records now or later with
+        // its executions (`render/pass_steps.rs`). An empty list of the extended-range shadows'
+        // settings or of the stand-ins' copies leaves every instance's empty.
         let dispatch_count = dispatches.len();
-        let mut drawn = Vec::with_capacity(count);
+        let mut drawn = Vec::with_capacity(count - inlined);
         let mut instance_steps = Vec::with_capacity(count);
-        let fills_and_copies = shadow_fills.into_iter().zip(reformat_copies);
-        for ((instance, (shadow_fills, (reformat_in, reformat_out))), feedback) in instances
+        let shadow_fills = (shadow_fills.into_iter()).chain(std::iter::repeat_with(Vec::new));
+        let none = || (None, None);
+        let reformat_copies = (reformat_copies.into_iter()).chain(std::iter::repeat_with(none));
+        let fills_and_copies = shadow_fills.zip(reformat_copies);
+        let moved_images = (std::iter::repeat_with(Vec::new).take(inlined)).chain(later_moved);
+        for (index, ((instance, (shadow_fills, (reformat_in, reformat_out))), moved)) in instances
             .into_iter()
             .zip(fills_and_copies)
-            .zip(feedback_images)
+            .enumerate()
         {
             let Instance {
                 draws,
@@ -4541,7 +4578,9 @@ impl RenderCommandEncoder {
                 reformat_out,
                 feedback,
             });
-            drawn.push((draws, pieces, shape));
+            if index >= inlined {
+                drawn.push((draws, pieces, shape));
+            }
         }
         let mut dispatch_copies = dispatch_copies.into_iter();
         let steps = PassSteps {
@@ -4622,7 +4661,7 @@ impl RenderCommandEncoder {
                             }
                             steps.after(raw, command_buffer, last);
                         }
-                        let later = drawn.iter().skip(inlined).zip(&objects);
+                        let later = drawn.iter().zip(&objects);
                         for (index, ((draws, _, _), (pass, framebuffer))) in (inlined..).zip(later)
                         {
                             // Each instance after the first sees everything the one before wrote.
@@ -4644,6 +4683,11 @@ impl RenderCommandEncoder {
                     }
                 },
             );
+            // Those made since their dispatches, held until the command buffer completes: none
+            // in a pass without tile dispatches.
+            if !tiles.is_empty() {
+                core.retain(tiles.clone());
+            }
             recorded_steps = Some(steps);
         } else {
             // The pass records later, as a segment of its own: its visibility results are reset
@@ -4684,7 +4728,7 @@ impl RenderCommandEncoder {
                 false => None,
             };
             let mut pass_instances = Vec::with_capacity(count);
-            let later = drawn.into_iter().skip(inlined).zip(&objects);
+            let later = drawn.into_iter().zip(&objects);
             for (index, ((draws, pieces, shape), (pass, framebuffer))) in (inlined..).zip(later) {
                 // An instance whose execution may reach the tile threadgroup memory, or hold a
                 // command's barrier, may run as several, each run's draws after the run before
@@ -4811,7 +4855,7 @@ impl RenderCommandEncoder {
         device.degrade_pass(&layout, whole);
         device.degrade_instances(
             &layout,
-            &shapes.iter().collect::<Vec<_>>(),
+            &shapes,
             SplitCauses {
                 shadow: shadow.is_some(),
                 shader_tests: depth_stand_in.is_some(),
@@ -5203,7 +5247,7 @@ impl RenderCommandEncoder {
         hidden: Option<Target>,
         locations: &[Option<u32>],
         reformats: &[Reformat],
-    ) -> Result<(Next, Option<PassLayout>), Error> {
+    ) -> Result<(Next, Option<Box<PassLayout>>), Error> {
         let device = self.core.device();
         let maker = self.core.command_buffer();
         // The usage a fetched attachment's image needs: input attachment usage where the fetch
@@ -5342,7 +5386,7 @@ impl RenderCommandEncoder {
         let images = standing.iter().any(|s| !matches!(s, Standing::Planes(..)));
         let takes = (storage, locations, reformats);
         if self.takes_current(takes, (shadow, shader_tests), views, images) && !ordered {
-            let stood = (!standing.is_empty()).then(|| stood(&self.layout, standing));
+            let stood = (!standing.is_empty()).then(|| Box::new(stood(&self.layout, standing)));
             return Ok((Next::Current, stood));
         }
         // The first instance runs the pass's load actions. An attachment it leaves out that
@@ -5415,12 +5459,12 @@ impl RenderCommandEncoder {
                 }
             }
         }
-        let stood = (!standing.is_empty()).then(|| stood(&self.layout, standing));
-        let layout = stood.as_ref().unwrap_or(&self.layout);
+        let stood = (!standing.is_empty()).then(|| Box::new(stood(&self.layout, standing)));
+        let layout = stood.as_deref().unwrap_or(&self.layout);
         let mut shape = PassShape::of(layout)?
-            .with_storage(storage.to_vec())
+            .with_storage(storage)?
             .with_view_mask(views.view_mask)
-            .with_locations(locations.to_vec());
+            .with_locations(locations)?;
         for reformat in reformats {
             match shape.colors.get_mut(reformat.index) {
                 Some(Some(format)) => *format = reformat.target.format,
@@ -5602,11 +5646,12 @@ impl RenderCommandEncoder {
     fn install(
         &mut self,
         next: Next,
-        stood: Option<PassLayout>,
+        stood: Option<Box<PassLayout>>,
         continuation: Option<Continuation>,
     ) {
         if let Some(layout) = stood {
-            self.layout = layout;
+            self.layout = *layout;
+            self.kept_attachments = None;
         }
         if let Next::New {
             mut instance,
@@ -6093,38 +6138,66 @@ impl RenderCommandEncoder {
             });
     }
 
+    /// Announce the kept-attachment notices at a draw, or an execution of render commands, of
+    /// each kind whose list of the pass's colors is not empty
+    /// (`unused_bits_load::KeptAttachments`): decided once for each layout the encoder records
+    /// under, as its calls change it ([`kept_attachments`](Self::kept_attachments)).
+    fn degrade_kept_attachments(&mut self) {
+        let device = self.core.device();
+        let layout = &self.layout;
+        let kept = (self.kept_attachments)
+            .get_or_insert_with(|| unused_bits_load::KeptAttachments::of(layout, device));
+        debug_assert_eq!(
+            *kept,
+            unused_bits_load::KeptAttachments::of(layout, device),
+            "the kept colors decided for a layout the encoder changed since"
+        );
+        Self::degrade_unused_bits(device, &kept.unused_bits);
+        Self::degrade_snorm_minimum(device, &kept.snorm_minimum);
+        Self::degrade_shared_exponent(device, &kept.shared_exponent);
+    }
+
     /// Announce `extended-range-bits-kept` at a draw in a pass that loads a color attachment of
     /// an extended-range or padded 10-bit format (and does not discard it at the store), whatever
-    /// the draw's state, naming every such attachment the load pass does not take
+    /// the draw's state, naming every such attachment the load pass does not take, `kept`
     /// (`render/unused_bits_load.rs`): Metal's pass, once it draws, rewrites the bits their codes
-    /// leave unused in each tile a draw reaches, the texels the draws do not write too (EVs
-    /// XRR2-x6g to -x6k, XRR2-xrb2 and -xrb3), where such an attachment keeps those.
-    fn degrade_unused_bits(&self) {
-        let kept: Vec<String> = self
-            .layout
-            .colors
-            .iter()
-            .enumerate()
-            .filter_map(|(index, c)| {
-                let c = c.as_ref().filter(|c| unused_bits_load::untaken(c))?;
-                let format = c.target.texture.pixel_format();
-                Some(format!("color {index}, {format:?}"))
-            })
-            .collect();
+    fn degrade_unused_bits(device: &Device, kept: &[String]) {
         if kept.is_empty() {
             return;
         }
-        self.core
-            .device()
-            .degrade(Degradation::ExtendedRangeBitsKept, || {
-                (
-                    format!("a draw in a render pass that loads {}", kept.join(" and ")),
-                    "the texels the pass's draws do not write keep the bits their codes leave \
-                     unused, and a BGRA10_XR alpha code past [384, 894], which Metal's pass \
-                     rewrites in each tile a draw reaches"
-                        .to_owned(),
-                )
-            });
+        device.degrade(Degradation::ExtendedRangeBitsKept, || {
+            (
+                format!("a draw in a render pass that loads {}", kept.join(" and ")),
+                "the texels the pass's draws do not write keep the bits their codes leave \
+                 unused, and a BGRA10_XR alpha code past [384, 894], which Metal's pass \
+                 rewrites in each tile a draw reaches"
+                    .to_owned(),
+            )
+        });
+    }
+    /// the draw's state, naming every such attachment, `kept`
+    /// (`unused_bits_load::snorm_minimum_kept`): Metal's pass, once it draws, writes each tile a
+    /// draw reaches back through the channels' values, so a minimum code (-128, or -32768) the
+    /// draws do not write is stored as the code above it, where such an attachment keeps it. Not
+    /// on a driver whose pass stores it so too (`DriverFact::TileStoreIsMetals`: MoltenVK's pass
+    /// is a Metal pass), nor for an attachment the load pass rewrites (`TileStorePolicy::Exact`).
+    fn degrade_snorm_minimum(device: &Device, kept: &[String]) {
+    /// state, naming every such attachment, `kept` (`unused_bits_load::shared_exponent_kept`):
+    /// Metal's pass, once it draws, writes each tile a draw reaches back through its texels'
+    /// values, so a word the draws do not write whose largest mantissa is below 256 under an
+    /// exponent above 0 is stored normalized, where such an attachment keeps it. Not on a driver
+    /// whose pass stores it so too (`DriverFact::TileStoreIsMetals`), nor for an attachment the
+    /// load pass rewrites (`TileStorePolicy::Exact`).
+    fn degrade_shared_exponent(device: &Device, kept: &[String]) {
+        device.degrade(Degradation::SharedExponentKept, || {
+            (
+                format!("a draw in a render pass that loads {}", kept.join(" and ")),
+                "the texels the pass's draws do not write keep their words, where Metal's \
+                 pass normalizes a word whose largest mantissa is below 256 (its exponent \
+                 above 0) in each tile a draw reaches"
+                    .to_owned(),
+            )
+        });
     }
 
     /// The pass's color attachments of an extended-range format (`BGR10_XR`, `BGRA10_XR`,
@@ -6738,7 +6811,7 @@ impl RenderCommandEncoder {
         // Every draw, one of nothing too (EV XRR2-x6j); an execution's commands announce at the
         // execution (`executions.rs`).
         if !self.replaying {
-            self.degrade_unused_bits();
+            self.degrade_kept_attachments();
             self.rewrites_unused_bits = true;
             self.degrade_extended_range_blends();
         }
@@ -6789,10 +6862,10 @@ impl RenderCommandEncoder {
     /// A draw the encoder records nothing for (`EncoderCore::skips`): what its tables bind is
     /// held and listed as a recorded draw's is.
     fn skipped_draw(&mut self) {
-        self.vertex.retain(&mut self.core);
-        self.fragment.retain(&mut self.core);
-        self.object.retain(&mut self.core);
-        self.mesh.retain(&mut self.core);
+        self.vertex.retain_exclusive(&mut self.core);
+        self.fragment.retain_exclusive(&mut self.core);
+        self.object.retain_exclusive(&mut self.core);
+        self.mesh.retain_exclusive(&mut self.core);
     }
 
     /// [`draw`](Self::draw) with the heaps' textures resident.
@@ -6959,19 +7032,23 @@ impl RenderCommandEncoder {
         // The encoder's kept bind state, brought to the draw's (`live_bind.rs`), held for the
         // draw: no draw of the encoder runs inside another past here.
         let live = Arc::clone(&self.live);
-        let mut live = lock(&live);
+        let mut held = lock(&live);
+        let live = &mut *held;
         // A draw that reads its pass's texture after a barrier inside its instance reads it
         // through a snapshot where it can (`render/snapshot.rs`): asked of the plan, kept where
         // the plan reads so, else `None` and the split.
         let mut snapshot = self.snapshot_wanted(&pipeline, &reformats, capture.is_some());
-        let settled = self.settle_draw(
-            &mut live,
+        let Settled {
+            shape,
+            variant,
+            plan,
+        } = self.settle_draw(
+            live,
             (&pipeline, &settings),
             &pass_start,
             (&mut argument_samplers, &mut unlisted),
             (&function_tables, &mut snapshot),
         )?;
-        let (variant, plan) = (Arc::clone(&settled.variant), Arc::clone(&settled.plan));
         if plan.variant.depth16_bias_raises.is_some() {
             self.core.device().shared().counts.depth16_sided_draw();
         }
@@ -6987,9 +7064,8 @@ impl RenderCommandEncoder {
         let (variant, plan) = match capture {
             None => (variant, plan),
             Some(_) => {
-                let shape = &settled.shape;
                 let found = capture::form(&draw)
-                    .and_then(|form| pipeline.capture_variant(variant.key(), form, shape));
+                    .and_then(|form| pipeline.capture_variant(variant.key(), form, &shape));
                 match found {
                     Some(found) => found,
                     None => {
@@ -7084,9 +7160,10 @@ impl RenderCommandEncoder {
                 return Err(Error::NotImplemented(RuntimeGap::ImageblockMasters));
             }
         }
-        let commands = plan
-            .instantiate_draw(&live.state, &draw)
+        // Over the last draw's commands, in their storage (`LiveBind::commands`).
+        plan.instantiate_draw_into(&live.state, &draw, &mut live.commands)
             .map_err(Error::Bind)?;
+        let commands = &live.commands;
         // The phase of a draw read through snapshots, which its two draws set
         // (`render/snapshot.rs`).
         let phase_hole = match &snapshot {
@@ -7287,7 +7364,8 @@ impl RenderCommandEncoder {
         // A draw that reads and writes some of the instance's interlocked colors and writes none
         // of the others records in it, as one that reads them all would.
         if !self.layout.fetch_inputs && self.fits_storage(&fetched, graphics.color_outputs) {
-            fetched.clone_from(&self.current.shape.storage);
+            fetched.clear();
+            fetched.extend_from_slice(&self.current.shape.storage);
         }
         let shadow_use = graphics.shadow_stencil;
         // A draw whose fragment function tests the depth itself, against the pass's stand-in of
@@ -7394,7 +7472,7 @@ impl RenderCommandEncoder {
             Next::New { split: true, .. } => self.visibility.continuation(&device)?,
             Next::New { .. } | Next::Current => None,
         };
-        let layout = stood.as_ref().unwrap_or(&self.layout);
+        let layout = stood.as_deref().unwrap_or(&self.layout);
         let render_area = layout.extent;
         let inputs = input_attachments(layout, graphics)?;
         let storage_uses = storage_uses(layout, &storage)?;
@@ -7955,8 +8033,13 @@ impl RenderCommandEncoder {
         // Set 0's writes and the heap set's, in the last draw's storage (`LiveBind::writes`),
         // emptied as the draw returns: their keepers hold nothing past it.
         let mut writes = Emptied::new(&mut live.writes);
+        let objects = Arc::clone(variant.objects());
+        // Set 0 per draw, from the command buffer's arena under the bind's one lock of its state;
+        // set 1 the device's (written below, once nothing refuses).
+        let (bound, set) = {
             let mut state = self.core.command_buffer().state();
             let memo = Some(&mut self.bind_memo);
+            let bound = binding::bind(
                 call,
                 &device,
                 &mut state,
@@ -7964,9 +8047,12 @@ impl RenderCommandEncoder {
                 &command,
                 &tables,
                 (memo, &mut writes),
+            )?;
+            (bound, objects.set_zero(&mut state.descriptors)?)
         };
-        // The draw's push bytes, filled in place.
-        let push = binding::push_writes(commands.push_constants, &bound.holes)?;
+        // The draw's push bytes, filled in place, over the last draw's (`LiveBind::pushes`).
+        binding::push_writes_into(&commands.push_constants, &bound.holes, &mut live.pushes)?;
+        let push = &live.pushes;
         // A plan that draws one amplification at a time records the draw once per amplification,
         // in order, each after that amplification's push writes.
         let amplified = commands
@@ -7979,21 +8065,19 @@ impl RenderCommandEncoder {
             })
             .collect::<Result<Vec<_>, Error>>()?;
         let pushes = match amplified.is_empty() {
-            true => std::slice::from_ref(&push),
+            true => std::slice::from_ref(push),
             false => &amplified[..],
         };
         // An emulated tessellation draw records each chunk's draw from its work buffer, after the
         // push write that names the chunk, in order (`render/tessellation_scan.rs`).
         let chunked = match (&commands.tessellation_dispatch, &tessellation_work) {
             (Some(dispatch), Some(work)) => work
-                .draws(dispatch, &push)?
+                .draws(dispatch, push)?
                 .into_iter()
                 .map(|(writes, raw, command)| (writes, [(None, Some(raw), command)]))
                 .collect(),
             _ => Vec::new(),
         };
-        let objects = Arc::clone(variant.objects());
-        // Set 0 per draw; set 1 the device's (written below, once nothing refuses).
         let heap_writes: Vec<_> = writes.extract_if(.., |write| write.set > 0).collect();
         let pushed: &[binding::SetWrite] = match objects.pushes_set_zero() {
             true => {
@@ -8386,8 +8470,7 @@ impl RenderCommandEncoder {
         let made_ahead = matches!(draw_pipeline, DrawPipeline::Made(_));
         let inline = self.inline_begin(
             &next,
-            stood.as_ref(),
-            (!empty && !culled, made_ahead, capture.is_some()),
+            stood.as_deref(),
             feedback,
         )?;
         // And a later instance of such a pass after a split, where it can, the instance before's
@@ -8396,7 +8479,7 @@ impl RenderCommandEncoder {
             Some(_) => None,
             None => self.inline_split(
                 &next,
-                stood.as_ref(),
+                stood.as_deref(),
                 (!empty && !culled, made_ahead, capture.is_some()),
             ),
         };
@@ -8729,7 +8812,6 @@ impl RenderCommandEncoder {
         if capture.is_none() {
             self.core.executed(|| {
                 let executed = ExecutedPipeline::Render(Arc::clone(variant.shared_pipeline()));
-                let shape = Arc::clone(&settled.shape);
                 let execution = match later {
                     None => Execution::new(executed, shape, created),
                     Some(creation) => Execution::made_later(executed, shape, creation),
@@ -8743,10 +8825,10 @@ impl RenderCommandEncoder {
         };
         self.last_retained
             .retain_draw(&mut self.core, (pipeline, objects, made));
-        self.vertex.retain(&mut self.core);
-        self.fragment.retain(&mut self.core);
-        self.object.retain(&mut self.core);
-        self.mesh.retain(&mut self.core);
+        self.vertex.retain_exclusive(&mut self.core);
+        self.fragment.retain_exclusive(&mut self.core);
+        self.object.retain_exclusive(&mut self.core);
+        self.mesh.retain_exclusive(&mut self.core);
         for source in index.into_iter().chain(indirect) {
             self.core.retain_shared(source.buffer.held());
         }
@@ -8876,7 +8958,7 @@ impl RenderCommandEncoder {
         // variant; a pipeline that rasterizes nothing draws through no viewport.
         let base = &pipeline.base().graphics;
         let device = self.core.device();
-        let native = render_state::native_depth_range(device.compile_device().profile());
+        let native = render_state::native_depth_range(device);
         // A saturating or offsetting depth bias folds into a compensated depth, or is refused
         // there (`EncoderState::compensation`).
         let bias = self
@@ -8884,7 +8966,7 @@ impl RenderCommandEncoder {
             .draw_bias(topology, device.compile_device().profile())?;
         // A clamp mode one clamp of one depth collapses the Vulkan range to it where the
         // fragment function reads no depth of its position (`render_state::OneDepth`).
-        let one_depth = render_state::OneDepth::of(device.compile_device().profile(), base);
+        let one_depth = render_state::OneDepth::of(device, base);
         // Metal clamps each vertex's depth before the interpolation: the vertex stage's
         // compensation does too where it can, natively as well (`render_state::VertexClamp`).
         let vertex_clamp = render_state::VertexClamp::of(
@@ -9244,6 +9326,26 @@ impl RenderCommandEncoder {
     }
 }
 
+/// Color attachment indices, a bit each: the sets of colors a pass's end works out, which would
+/// otherwise allocate at every end. Every index is below [`MAX_COLOR_ATTACHMENTS`], as a pass's
+/// colors are.
+#[derive(Clone, Copy)]
+struct ColorIndices(u8);
+
+const _: () = assert!(MAX_COLOR_ATTACHMENTS <= u8::BITS as usize);
+
+impl ColorIndices {
+    /// The indices `indices` yields.
+    fn of(indices: impl IntoIterator<Item = usize>) -> ColorIndices {
+        ColorIndices((indices.into_iter()).fold(0, |bits, index| bits | 1 << index))
+    }
+
+    /// Whether it holds `index`.
+    fn contains(self, index: usize) -> bool {
+        index < MAX_COLOR_ATTACHMENTS && self.0 & 1 << index != 0
+    }
+}
+
 /// Everything one draw records into the secondary command buffer.
 struct Recording<'a> {
     raw: &'a ash::Device,
@@ -9398,18 +9500,7 @@ impl Recording<'_> {
                 if state == vk::DynamicState::COLOR_WRITE_MASK_EXT || !bound.dynamic(state, now) {
                     continue;
                 }
-                let faces = [
-                    (
-                        vk::StencilFaceFlags::FRONT,
-                        s.fixed.depth_stencil.front,
-                        s.stencil_reference[0],
-                    ),
-                    (
-                        vk::StencilFaceFlags::BACK,
-                        s.fixed.depth_stencil.back,
-                        s.stencil_reference[1],
-                    ),
-                ];
+                let (front, back) = (s.fixed.depth_stencil.front, s.fixed.depth_stencil.back);
                 recorded += 1;
                 match state {
                     vk::DynamicState::VIEWPORT => raw.cmd_set_viewport(cb, 0, &s.viewports),
@@ -9419,17 +9510,18 @@ impl Recording<'_> {
                         raw.cmd_set_blend_constants(cb, &s.blend_color)
                     }
                     vk::DynamicState::STENCIL_COMPARE_MASK => {
-                        for (face, ops, _) in faces {
-                            raw.cmd_set_stencil_compare_mask(cb, face, ops.compare_mask);
+                        for (face, mask) in faces(front.compare_mask, back.compare_mask) {
+                            raw.cmd_set_stencil_compare_mask(cb, face, mask);
                         }
                     }
                     vk::DynamicState::STENCIL_WRITE_MASK => {
-                        for (face, ops, _) in faces {
-                            raw.cmd_set_stencil_write_mask(cb, face, ops.write_mask);
+                        for (face, mask) in faces(front.write_mask, back.write_mask) {
+                            raw.cmd_set_stencil_write_mask(cb, face, mask);
                         }
                     }
                     vk::DynamicState::STENCIL_REFERENCE => {
-                        for (face, _, reference) in faces {
+                        let [front, back] = s.stencil_reference;
+                        for (face, reference) in faces(front, back) {
                             raw.cmd_set_stencil_reference(cb, face, reference);
                         }
                     }
@@ -9562,17 +9654,19 @@ unsafe fn record_extended(
                 (extended.stencil_test_enable)(cb, bool32(ds.stencil_test_enable))
             }
             vk::DynamicState::STENCIL_OP => {
-                for (face, ops) in [
-                    (vk::StencilFaceFlags::FRONT, ds.front),
-                    (vk::StencilFaceFlags::BACK, ds.back),
-                ] {
+                let op = |ops: metal2vulkan::metal::state::StencilOpState| {
+                    (ops.fail_op, ops.pass_op, ops.depth_fail_op, ops.compare_op)
+                };
+                for (face, (fail_op, pass_op, depth_fail_op, compare_op)) in
+                    faces(op(ds.front), op(ds.back))
+                {
                     (extended.stencil_op)(
                         cb,
                         face,
-                        ops.fail_op.into(),
-                        ops.pass_op.into(),
-                        ops.depth_fail_op.into(),
-                        ops.compare_op.into(),
+                        fail_op.into(),
+                        pass_op.into(),
+                        depth_fail_op.into(),
+                        compare_op.into(),
                     );
                 }
             }
@@ -9581,6 +9675,23 @@ unsafe fn record_extended(
         }
     }
     true
+}
+
+/// The faces a stencil state command sets, each with its value: both at once where the front and
+/// back values are the same, one command where there were two. The Vulkan specification,
+/// `VkStencilFaceFlagBits`: "`VK_STENCIL_FACE_FRONT_AND_BACK` is the combination of
+/// `VK_STENCIL_FACE_FRONT_BIT` and `VK_STENCIL_FACE_BACK_BIT`, and specifies that both sets of
+/// stencil state are updated."
+pub(super) fn faces<T: PartialEq + Copy>(
+    front: T,
+    back: T,
+) -> impl Iterator<Item = (vk::StencilFaceFlags, T)> {
+    let both = front == back;
+    let first = match both {
+        true => (vk::StencilFaceFlags::FRONT_AND_BACK, front),
+        false => (vk::StencilFaceFlags::FRONT, front),
+    };
+    std::iter::once(first).chain((!both).then_some((vk::StencilFaceFlags::BACK, back)))
 }
 
 /// `STORAGE` usage, which a storage attachment's image has.

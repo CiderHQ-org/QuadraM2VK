@@ -43,6 +43,7 @@ pub(crate) struct Counters {
     sampler_sets_shared: AtomicU64,
     sampler_sets_destroyed: AtomicU64,
     ahead_render_passes_made: AtomicU64,
+    render_passes_made: AtomicU64,
     ahead_framebuffers_made: AtomicU64,
     kept_backings_made: AtomicU64,
     color_resolve_passes_made: AtomicU64,
@@ -636,6 +637,11 @@ impl Counters {
         self.argument_samplers_taken.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// The runtime made a render pass (`render_target::create`).
+    pub(crate) fn render_pass_made(&self) {
+        self.render_passes_made.fetch_add(1, Ordering::Relaxed);
+    }
+
     /// A render encoder's bind worked out a texture slot's view that its bind memo did not keep
     /// (`binding::BindMemo`).
     pub(crate) fn bind_view_worked_out(&self) {
@@ -1202,9 +1208,14 @@ pub struct WorkCounts {
     /// it (a sweep or a settle). A set whose creation failed part way was never made, and
     /// counts in neither.
     pub sampler_sets_destroyed: u64,
-    /// Render passes commits made ahead for their render passes' host steps: the runs' passes
-    /// of instances the encoder gave none, and those of instances over memoryless backings.
+    /// Render passes commits took ahead for their render passes' host steps (made, or kept by
+    /// the device: `render_passes_made` counts those made): the runs' passes of instances the
+    /// encoder gave none, and those of instances over memoryless backings.
     pub ahead_render_passes_made: u64,
+    /// Render passes the runtime made (`vkCreateRenderPass2`): a device keeps each it makes, by
+    /// its shape, operations and layouts, so a pass an encoder begins as one before it makes
+    /// none (`render_target::KeptRenderPasses`, up to its count).
+    pub render_passes_made: u64,
     /// Framebuffers commits made ahead so: one per instance over memoryless backings.
     pub ahead_framebuffers_made: u64,
     /// Backings memoryless attachments' textures made and keep, one per texture, subresource
@@ -1495,7 +1506,8 @@ pub struct WorkCounts {
     /// unchanged since its encoder's last command retained it.
     pub argument_tables_retained: u64,
     /// Draws that looked their `VkPipeline` up in their variant's memo by key: none for a draw
-    /// whose key is the one its pipeline state's last draw found made, while that entry stays.
+    /// whose key is one of those its pipeline state's last draws found made, while that entry
+    /// stays.
     pub graphics_pipelines_looked_up: u64,
     /// Passes over color attachments the device renders linear only under
     /// `VK_NV_linear_color_attachment`'s rule (bound ones, `linear_attachment.rs`) that rendered
@@ -1795,6 +1807,7 @@ impl Device {
             sampler_sets_shared: counters.sampler_sets_shared.load(Ordering::Relaxed),
             sampler_sets_destroyed: counters.sampler_sets_destroyed.load(Ordering::Relaxed),
             ahead_render_passes_made: counters.ahead_render_passes_made.load(Ordering::Relaxed),
+            render_passes_made: counters.render_passes_made.load(Ordering::Relaxed),
             ahead_framebuffers_made: counters.ahead_framebuffers_made.load(Ordering::Relaxed),
             kept_backings_made: counters.kept_backings_made.load(Ordering::Relaxed),
             color_resolve_passes_made: counters.color_resolve_passes_made.load(Ordering::Relaxed),

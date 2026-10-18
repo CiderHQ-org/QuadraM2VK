@@ -292,8 +292,7 @@ impl RenderCommandEncoder {
             return Ok(None);
         }
         let device = self.core.device().clone();
-        // Its load operations, and stores as an instance that is not the last: the pass stores
-        // every attachment (the module docs).
+        self.kept_attachments = None;
         let at = Position {
             first: true,
             last: false,
@@ -343,7 +342,7 @@ impl RenderCommandEncoder {
                 offset: vk::Offset2D { x: 0, y: 0 },
                 extent: vk::Extent2D { width, height },
             })
-            .clear_values(&clear_values);
+            .clear_values(clear_values.as_slice());
         // SAFETY: `held` is recording outside a render pass, held for this pass alone; the pass
         // and framebuffer are live until the command buffer completes (the encoder holds them
         // to its end, which retains them), and every image rests in `GENERAL`.

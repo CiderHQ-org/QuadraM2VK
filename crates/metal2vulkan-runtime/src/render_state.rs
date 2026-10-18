@@ -116,8 +116,9 @@ use metal2vulkan::pipeline::{GraphicsState, RuntimeDependency, RuntimeFact, View
 /// Metal's most viewports and scissor rectangles.
 pub(super) const MAX_VIEWPORTS: usize = 16;
 
-/// A draw's viewports or scissor rectangles, which every draw makes: the one most draws use held
-/// in place, so such a draw allocates none, or a list of the others.
+/// A draw's viewports or scissor rectangles, which every draw makes, or an encoder's, which every
+/// render pass starts with: the one most use held in place, so such a draw or pass allocates none
+/// for them, or a list of the others.
 #[derive(Clone, Debug)]
 pub(super) enum ViewportList<T> {
     One(T),
@@ -181,8 +182,8 @@ pub enum RenderStateProblem {
 pub(super) struct EncoderState {
     /// The render area's width and height.
     extent: [u32; 2],
-    viewports: Vec<Viewport>,
-    scissors: Vec<ScissorRect>,
+    viewports: ViewportList<Viewport>,
+    scissors: ViewportList<ScissorRect>,
     cull_mode: CullMode,
     winding: Winding,
     /// `None` is Metal's default state, the default descriptor's.
@@ -202,15 +203,20 @@ impl EncoderState {
         let [width, height] = extent;
         EncoderState {
             extent,
-            viewports: vec![Viewport::new(
+            viewports: ViewportList::One(Viewport::new(
                 0.0,
                 0.0,
                 f64::from(width),
                 f64::from(height),
                 0.0,
                 1.0,
-            )],
-            scissors: vec![ScissorRect::new(0, 0, u64::from(width), u64::from(height))],
+            )),
+            scissors: ViewportList::One(ScissorRect::new(
+                0,
+                0,
+                u64::from(width),
+                u64::from(height),
+            )),
             cull_mode: CullMode::None,
             winding: Winding::Clockwise,
             depth_stencil: None,
@@ -237,7 +243,7 @@ impl EncoderState {
     ) -> Result<(), Error> {
         check_count(call, viewports.len())?;
         // A NaN origin x draws nothing, as plain Metal's: a viewport of no width.
-        let viewports: Vec<Viewport> = viewports
+        let viewports: ViewportList<Viewport> = viewports
             .iter()
             .map(|v| match v.origin_x.is_nan() {
                 true => Viewport {
@@ -248,7 +254,7 @@ impl EncoderState {
                 false => *v,
             })
             .collect();
-        for v in &viewports {
+        for v in viewports.iter() {
             let fields = [v.origin_x, v.origin_y, v.width, v.height, v.znear, v.zfar];
             if fields.iter().any(|f| !f.is_finite()) {
                 return Err(invalid(
@@ -1110,22 +1116,47 @@ impl EncoderState {
     }
 }
 
-/// Whether the device takes a viewport depth range past `[0, 1]` natively: it enabled
+/// What a device takes of viewport depth ranges past `[0, 1]` ([`native_depth_range`],
+/// [`unrestricted`]): facts of the profile its compile device was made with, which stays the
+/// device's for its life, so read once at its making (`DeviceShared::depth_ranges`) rather than
+/// looked up in the profile's sets at every draw.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct DepthRanges {
+    /// It enabled `VK_EXT_depth_range_unrestricted`, `depthClamp`, `VK_EXT_depth_clip_enable`'s
+    /// `depthClipEnable` and `VK_EXT_depth_clamp_control`'s `depthClampControl`.
+    pub(super) native: bool,
+    /// It enabled `VK_EXT_depth_range_unrestricted`.
+    pub(super) unrestricted: bool,
+}
+
+impl DepthRanges {
+    /// The facts of a device of `profile`.
+    pub(super) fn of(profile: &DeviceProfile) -> DepthRanges {
+        let enabled = profile.enabled();
+        let unrestricted = enabled
+            .extensions
+            .contains(&VkExtension::ExtDepthRangeUnrestricted);
+        let native = unrestricted
+            && [
+                VkFeature::DepthClamp,
+                VkFeature::DepthClipEnable,
+                VkFeature::DepthClampControl,
+            ]
+            .iter()
+            .all(|feature| enabled.features.contains(feature));
+        DepthRanges {
+            native,
+            unrestricted,
+        }
+    }
+}
+
+/// Whether `device` takes a viewport depth range past `[0, 1]` natively: it enabled
 /// `VK_EXT_depth_range_unrestricted`, `depthClamp`, `VK_EXT_depth_clip_enable`'s
 /// `depthClipEnable` and `VK_EXT_depth_clamp_control`'s `depthClampControl`
 /// (`EncoderState::depth_range`).
-pub(super) fn native_depth_range(profile: &DeviceProfile) -> bool {
-    let enabled = profile.enabled();
-    enabled
-        .extensions
-        .contains(&VkExtension::ExtDepthRangeUnrestricted)
-        && [
-            VkFeature::DepthClamp,
-            VkFeature::DepthClipEnable,
-            VkFeature::DepthClampControl,
-        ]
-        .iter()
-        .all(|feature| enabled.features.contains(feature))
+pub(super) fn native_depth_range(device: &Device) -> bool {
+    device.shared().depth_ranges.native
 }
 
 /// Why `device` does not take a viewport depth range past `[0, 1]`, `None` where it does:
@@ -1137,11 +1168,10 @@ pub(super) fn native_depth_range(profile: &DeviceProfile) -> bool {
 /// where the driver draws normalized depths past `[0, 1]` inexactly (MoltenVK,
 /// `driver_defects.rs`).
 pub(super) fn depth_ranges_refused(device: &Device) -> Option<Error> {
-    let profile = device.compile_device().profile();
-    if native_depth_range(profile) {
+    if native_depth_range(device) {
         return None;
     }
-    let features = &profile.enabled().features;
+    let features = &device.compile_device().profile().enabled().features;
     if !(features.contains(&VkFeature::ShaderClipDistance)
         && features.contains(&VkFeature::DepthClamp))
     {
@@ -1259,7 +1289,7 @@ impl VertexClamp {
         let clamps = state.clip_mode == DepthClipMode::Clamp;
         let drawn = !graphics.writes_depth && !graphics.rasterizer_discard;
         let factors = matches!(bias, Some(DepthBiasEffect::Factors { .. })) && offsets(bias);
-        let widens = clamp.takes && unrestricted(device.compile_device().profile());
+        let widens = clamp.takes && unrestricted(device);
         if announce && drawn && clamps && factors && !widens {
             let used = state.used_viewports(graphics.writes_viewport_index);
             let past = used.iter().find(|v| {
@@ -1337,7 +1367,7 @@ impl VertexClamp {
             )
         } else if meshes {
             // Without the native range the draw's compensation is refused for a mesh pipeline.
-            native_depth_range(profile)
+            native_depth_range(device)
                 .then_some("a mesh pipeline has no vertex function to clamp the depth")
         } else if !clip_distance {
             Some("the device has no shaderClipDistance for Metal's planes")
@@ -1469,13 +1499,10 @@ impl Compensation {
     }
 }
 
-/// Whether a device of `profile` enabled `VK_EXT_depth_range_unrestricted`: a Vulkan viewport
-/// depth range past `[0, 1]`.
-fn unrestricted(profile: &DeviceProfile) -> bool {
-    profile
-        .enabled()
-        .extensions
-        .contains(&VkExtension::ExtDepthRangeUnrestricted)
+/// Whether `device` enabled `VK_EXT_depth_range_unrestricted`: a Vulkan viewport depth range past
+/// `[0, 1]`.
+fn unrestricted(device: &Device) -> bool {
+    device.shared().depth_ranges.unrestricted
 }
 
 /// What a draw's device and pipeline let a depth clamp mode viewport whose one clamp holds one
@@ -1490,10 +1517,10 @@ pub(super) struct OneDepth {
 }
 
 impl OneDepth {
-    /// A draw of `graphics` on a device of `profile`.
-    pub(super) fn of(profile: &DeviceProfile, graphics: &GraphicsState) -> OneDepth {
+    /// A draw of `graphics` on `device`.
+    pub(super) fn of(device: &Device, graphics: &GraphicsState) -> OneDepth {
         OneDepth {
-            unrestricted: unrestricted(profile),
+            unrestricted: unrestricted(device),
             reads: graphics.reads_position_depth,
         }
     }
@@ -1674,13 +1701,13 @@ pub(super) fn announce_unclamped_bias(
     bias: Option<DepthBiasEffect>,
     compensated: bool,
 ) {
-    let profile = device.compile_device().profile();
-    let unrestricted = profile
-        .enabled()
-        .extensions
-        .contains(&VkExtension::ExtDepthRangeUnrestricted);
     let clip = state.clip_mode == DepthClipMode::Clip;
-    if unrestricted && clip && moves_depth(bias) && !compensated && !native_depth_range(profile) {
+    if unrestricted(device)
+        && clip
+        && moves_depth(bias)
+        && !compensated
+        && !native_depth_range(device)
+    {
         device.degrade(Degradation::BiasedDepthPastUnitRange, || {
             (
                 "a draw of triangles in depth clip mode under a depth bias".to_owned(),
@@ -1779,8 +1806,7 @@ pub(super) fn written_depth_clamp(
     if ranges.iter().any(|other| *other != range) {
         return kept("the draw's viewports clamp to different ranges, and the function reads one");
     }
-    let profile = device.compile_device().profile();
-    if native_depth_range(profile) {
+    if native_depth_range(device) {
         let clamp = [0.0, range[1].max(1.0)];
         return Ok(Some(WrittenDepthClamp {
             range,
@@ -1808,6 +1834,7 @@ pub(super) fn written_depth_clamp(
              outside the compensation's Vulkan range of [0, 1]",
         );
     }
+    let profile = device.compile_device().profile();
     let biased = metal2vulkan::metal::state::depth_bias(topology, 0.0, 0.0, 0.0, None, profile)
         .map_err(device_error)?
         .enable;
@@ -2337,10 +2364,12 @@ mod tests {
             )),
             vec![[0.0, 4.0, 8.0, -4.0, 0.0, 1.0]]
         );
-        state.viewports = vec![
+        state.viewports = [
             Viewport::new(0.0, 4.0, 4.0, -4.0, 0.0, 1.0),
             Viewport::new(2.0, 0.0, 2.0, 2.0, 0.0, 1.0),
-        ];
+        ]
+        .into_iter()
+        .collect();
         assert_eq!(
             fields(&EncoderState::vk_viewports(
                 state.used_viewports(false),
@@ -2371,7 +2400,7 @@ mod tests {
             ),
         ] {
             assert_eq!(set(&mut state, &[given]), Ok(()), "{given:?}");
-            assert_eq!(state.scissors, [kept], "{given:?}");
+            assert_eq!(*state.scissors, [kept], "{given:?}");
         }
         assert_eq!(
             set(&mut state, &[]),
@@ -2405,14 +2434,18 @@ mod tests {
         assert_eq!(pixels(4.5, 0.0, 1.0, 8.0)[0], [4, 6], "probe 4c");
         assert_eq!(pixels(3.25, 2.75, 1.5, 2.5), [[3, 5], [2, 6]], "probe 4c");
         let mut state = EncoderState::metal_defaults([8, 8]);
-        state.viewports = vec![Viewport::new(4.0, 0.0, 0.0, 8.0, 0.0, 1.0)];
+        state.viewports = [Viewport::new(4.0, 0.0, 0.0, 8.0, 0.0, 1.0)]
+            .into_iter()
+            .collect();
         assert_eq!(state.vk_scissors(false)[0].extent.width, 0);
         assert_eq!(
             EncoderState::vk_viewports(state.used_viewports(false), None, None)[0].width,
             1.0
         );
-        state.viewports = vec![Viewport::new(2.0, 2.0, 4.0, 4.0, 0.0, 1.0)];
-        state.scissors = vec![ScissorRect::new(3, 0, 5, 8)];
+        state.viewports = [Viewport::new(2.0, 2.0, 4.0, 4.0, 0.0, 1.0)]
+            .into_iter()
+            .collect();
+        state.scissors = [ScissorRect::new(3, 0, 5, 8)].into_iter().collect();
         let clipped = state.vk_scissors(false)[0];
         assert_eq!(
             (
@@ -2442,7 +2475,9 @@ mod tests {
             ),
             Ok(None)
         );
-        state.viewports = vec![Viewport::new(4.0, 0.0, -4.0, 4.0, 0.0, 1.0)];
+        state.viewports = [Viewport::new(4.0, 0.0, -4.0, 4.0, 0.0, 1.0)]
+            .into_iter()
+            .collect();
         let mirror = state
             .compensation(
                 false,
@@ -2458,7 +2493,9 @@ mod tests {
         assert_eq!(mirror.depth, None);
         let vk = EncoderState::vk_viewports(state.used_viewports(false), mirror.depth, None);
         assert_eq!([vk[0].x, vk[0].width, vk[0].min_depth], [0.0, 4.0, 0.0]);
-        state.viewports = vec![Viewport::new(0.0, 0.0, 4.0, 4.0, 0.5, 2.0)];
+        state.viewports = [Viewport::new(0.0, 0.0, 4.0, 4.0, 0.5, 2.0)]
+            .into_iter()
+            .collect();
         let clip = state
             .compensation(
                 false,
@@ -2498,7 +2535,9 @@ mod tests {
             .unwrap();
         assert_eq!(clamp.viewport.values, [1.0, 0.0, 3.0, 0.0]);
         assert_eq!(clamp.depth, Some([0.5, 1.0]));
-        state.viewports = vec![Viewport::new(4.0, 0.0, -4.0, 4.0, 2.0, -1.0)];
+        state.viewports = [Viewport::new(4.0, 0.0, -4.0, 4.0, 2.0, -1.0)]
+            .into_iter()
+            .collect();
         let both = state
             .compensation(
                 false,
@@ -2514,7 +2553,9 @@ mod tests {
         // One depth past `[0, 1]` without `VK_EXT_depth_range_unrestricted` (one inside it, 0 of
         // a range below 0 included, collapses: `one_depth_clamps_collapse_the_vulkan_range`).
         for (znear, zfar) in [(1.5, 3.0), (2.0, 2.0)] {
-            state.viewports = vec![Viewport::new(0.0, 0.0, 4.0, 4.0, znear, zfar)];
+            state.viewports = [Viewport::new(0.0, 0.0, 4.0, 4.0, znear, zfar)]
+                .into_iter()
+                .collect();
             assert_eq!(
                 state.compensation(
                     false,
@@ -2529,7 +2570,9 @@ mod tests {
         }
         state.clip_mode = DepthClipMode::Clip;
         let whole = Viewport::new(0.0, 0.0, 4.0, 4.0, 0.0, 1.0);
-        state.viewports = vec![Viewport::new(0.0, 0.0, 4.0, 4.0, 0.5, 2.0), whole];
+        state.viewports = [Viewport::new(0.0, 0.0, 4.0, 4.0, 0.5, 2.0), whole]
+            .into_iter()
+            .collect();
         assert!(
             state
                 .compensation(
@@ -2556,7 +2599,7 @@ mod tests {
         // Mirrored and unmirrored viewports: `sx` 1 under the mirrors' variant, viewport 0's bit
         // set; the first alone where the pipeline selects none.
         let mirrored = Viewport::new(4.0, 0.0, -4.0, 4.0, 0.0, 1.0);
-        state.viewports = vec![mirrored, whole];
+        state.viewports = [mirrored, whole].into_iter().collect();
         let mixed = state
             .compensation(
                 true,
@@ -2591,7 +2634,9 @@ mod tests {
         );
         // One compensated depth through both, viewport 1's bit set.
         let range = Viewport::new(0.0, 0.0, 4.0, 4.0, 0.5, 2.0);
-        state.viewports = vec![range, Viewport::new(4.0, 0.0, -4.0, 4.0, 0.5, 2.0)];
+        state.viewports = [range, Viewport::new(4.0, 0.0, -4.0, 4.0, 0.5, 2.0)]
+            .into_iter()
+            .collect();
         let both = state
             .compensation(
                 true,
@@ -2611,7 +2656,7 @@ mod tests {
             ([1.0, 0.5, 1.5, 1.0], 0b10, Some([0.0, 1.0]))
         );
         // Mirrors beside different depths stay refused.
-        state.viewports = vec![range, mirrored];
+        state.viewports = [range, mirrored].into_iter().collect();
         assert_eq!(
             state.compensation(
                 true,
@@ -2676,7 +2721,7 @@ mod tests {
             ((1.5, 3.0), 1.5),
             ((2.0, 2.0), 2.0),
         ] {
-            state.viewports = at(znear, zfar);
+            state.viewports = at(znear, zfar).into_iter().collect();
             let case = format!("{znear} {zfar}");
             let want = match depth <= 1.0 {
                 true => Ok(None),
@@ -2733,7 +2778,7 @@ mod tests {
                 VertexClamp::default(),
             )
         };
-        state.viewports = at(1.5, 3.0);
+        state.viewports = at(1.5, 3.0).into_iter().collect();
         assert_eq!(with(&state, false, factors), range());
         assert_eq!(with(&state, true, factors), range(), "natively");
         assert_eq!(with(&state, false, none), Ok(None));
@@ -2746,12 +2791,14 @@ mod tests {
         assert_eq!(with(&state, true, Saturated { high: true }), Ok(None));
         assert_eq!(with(&state, false, Offset(0.25)), bias_gap());
         for (znear, zfar) in [(-1.0, 0.0), (2.0, 2.0)] {
-            state.viewports = at(znear, zfar);
+            state.viewports = at(znear, zfar).into_iter().collect();
             assert_eq!(with(&state, false, factors), Ok(None), "{znear} {zfar}");
             assert_eq!(with(&state, true, factors), Ok(None), "{znear} {zfar}");
         }
         // A mirror keeps its `sx` beside the collapsed depth.
-        state.viewports = vec![Viewport::new(4.0, 0.0, -4.0, 4.0, 1.5, 3.0)];
+        state.viewports = [Viewport::new(4.0, 0.0, -4.0, 4.0, 1.5, 3.0)]
+            .into_iter()
+            .collect();
         let mirror = state
             .compensation(false, false, None, unrestricted, VertexClamp::default())
             .unwrap()
@@ -2763,7 +2810,7 @@ mod tests {
         assert_eq!(depths(&state, false), Ok([1.5, 1.5]));
         // Clip mode clamps no range to one depth.
         state.clip_mode = DepthClipMode::Clip;
-        state.viewports = at(1.5, 3.0);
+        state.viewports = at(1.5, 3.0).into_iter().collect();
         assert_eq!(depths(&state, false), Ok([1.5, 3.0]));
     }
 
@@ -2810,7 +2857,7 @@ mod tests {
         // Clip mode through -0.5 to 1.5: `a` is `n + o`, each vertex's depth plus `o` at least
         // `o`, natively too.
         let mut state = EncoderState::metal_defaults([4, 4]);
-        state.viewports = vec![viewport(-0.5, 1.5)];
+        state.viewports = [viewport(-0.5, 1.5)].into_iter().collect();
         for native in [false, true] {
             assert_eq!(
                 of(&state, native, Offset(0.25), narrow, takes),
@@ -2869,7 +2916,7 @@ mod tests {
         assert_eq!(of(&state, false, up, narrow, unclamped), gap);
         // Clamp mode through 1.5 to 3, whose one clamp is 1.5: biased, its vertices clamped to
         // `[0, 1]`, `z / w` to [-1, -1/3], through [1.5, 3]; without the extension refused.
-        state.viewports = vec![viewport(1.5, 3.0)];
+        state.viewports = [viewport(1.5, 3.0)].into_iter().collect();
         assert_eq!(
             of(&state, false, factors, wide, takes),
             Ok(Some((
@@ -2885,7 +2932,7 @@ mod tests {
         );
         // Clamp mode inside [0, 1]: no vertex clamp, the offset folded through the range,
         // natively too; one depth alone where the range is one.
-        state.viewports = vec![viewport(0.25, 0.75)];
+        state.viewports = [viewport(0.25, 0.75)].into_iter().collect();
         for (native, clamp) in [(false, unclamped), (true, takes)] {
             assert_eq!(
                 of(&state, native, Offset(0.25), narrow, clamp),
@@ -2898,7 +2945,7 @@ mod tests {
                 "{native}"
             );
         }
-        state.viewports = vec![viewport(0.5, 0.5)];
+        state.viewports = [viewport(0.5, 0.5)].into_iter().collect();
         assert_eq!(
             of(&state, false, Offset(0.25), narrow, takes),
             Ok(Some((
@@ -2932,7 +2979,9 @@ mod tests {
                 .map(|c| c.map(|c| c.viewport.values))
         };
         let mut state = EncoderState::metal_defaults([4, 4]);
-        state.viewports = vec![Viewport::new(0.0, 0.0, 4.0, 4.0, 0.5, 1.5)];
+        state.viewports = [Viewport::new(0.0, 0.0, 4.0, 4.0, 0.5, 1.5)]
+            .into_iter()
+            .collect();
         let up = Saturated { high: true };
         let down = Saturated { high: false };
         assert_eq!(values(&state, up), Ok(Some([1.0, 1.0, 0.0, 1.0])));
@@ -2945,7 +2994,9 @@ mod tests {
             values(&state, Offset(-0.25)),
             Ok(Some([1.0, 0.25, 1.0, 1.0]))
         );
-        state.viewports = vec![Viewport::new(0.0, 0.0, 4.0, 4.0, -0.5, 1.5)];
+        state.viewports = [Viewport::new(0.0, 0.0, 4.0, 4.0, -0.5, 1.5)]
+            .into_iter()
+            .collect();
         assert_eq!(values(&state, up), Ok(Some([1.0, 1.0, 0.0, 1.0])));
         assert_eq!(values(&state, Offset(0.25)), gap, "a negative depth");
         // The one clamp is [0, 1]: the larger depth, 1.5, is past it; the smaller is 0.
@@ -2954,7 +3005,9 @@ mod tests {
         assert_eq!(values(&state, down), Ok(Some([1.0, 0.0, 0.0, 0.0])));
         assert_eq!(values(&state, Offset(0.25)), gap, "an offset in clamp mode");
         // The one clamp is [0, 0.5]: the larger depth is its top.
-        state.viewports = vec![Viewport::new(0.0, 0.0, 4.0, 4.0, 0.5, -0.5)];
+        state.viewports = [Viewport::new(0.0, 0.0, 4.0, 4.0, 0.5, -0.5)]
+            .into_iter()
+            .collect();
         assert_eq!(values(&state, up), Ok(Some([1.0, 1.0, 0.0, 0.0])));
         let factors = Factors {
             constant: 1.0,
@@ -3021,7 +3074,7 @@ mod tests {
         let plain = OneDepth::default();
         let unclamped = VertexClamp::default();
         let mut state = EncoderState::metal_defaults([4, 4]);
-        state.viewports = vec![viewport(-0.5, 1.5)];
+        state.viewports = [viewport(-0.5, 1.5)].into_iter().collect();
         for native in [false, true] {
             let c = state
                 .compensation(false, native, None, plain, takes)
@@ -3067,7 +3120,7 @@ mod tests {
         // Clamp mode: the one clamp [0.5, 1] of 0.5 to 2, `z / w` to [-1, 1]; [0, 1] of -0.5 to
         // 1.5, `z / w` to [0, 1].
         state.clip_mode = DepthClipMode::Clamp;
-        state.viewports = vec![viewport(0.5, 2.0)];
+        state.viewports = [viewport(0.5, 2.0)].into_iter().collect();
         let c = state
             .compensation(false, true, None, plain, takes)
             .unwrap()
@@ -3075,7 +3128,7 @@ mod tests {
         assert_eq!(c.viewport.values, [1.0, 0.0, 3.0, 0.0]);
         assert_eq!(c.viewport.vertex_clamp, [-1.0, 1.0]);
         assert_eq!(c.depth, Some([0.5, 1.0]));
-        state.viewports = vec![viewport(-0.5, 1.5)];
+        state.viewports = [viewport(-0.5, 1.5)].into_iter().collect();
         let c = state
             .compensation(false, false, None, plain, takes)
             .unwrap()
@@ -3084,7 +3137,7 @@ mod tests {
         assert_eq!(c.viewport.vertex_clamp, [0.0, 1.0]);
         // Clip mode through 0.5 to 2, no negative depth: nothing to clamp, and none natively.
         state.clip_mode = DepthClipMode::Clip;
-        state.viewports = vec![viewport(0.5, 2.0)];
+        state.viewports = [viewport(0.5, 2.0)].into_iter().collect();
         assert_eq!(
             state.compensation(false, true, None, plain, takes),
             Ok(None)
@@ -3096,7 +3149,9 @@ mod tests {
         assert!(!c.viewport.compensation.vertex_clamp);
         // Viewports of different clamped depths: refused, natively too, where the caller keeps
         // the device's ranges unclamped.
-        state.viewports = vec![viewport(-0.5, 1.5), viewport(-1.0, 1.0)];
+        state.viewports = [viewport(-0.5, 1.5), viewport(-1.0, 1.0)]
+            .into_iter()
+            .collect();
         assert_eq!(
             state.compensation(true, true, None, plain, takes),
             Err(Error::NotImplemented(RuntimeGap::ViewportDepthRange))
@@ -3107,7 +3162,7 @@ mod tests {
         );
         // Mirrored and unmirrored viewports of one range keep the clamp's bounds.
         let mirrored = Viewport::new(4.0, 0.0, -4.0, 4.0, -0.5, 1.5);
-        state.viewports = vec![viewport(-0.5, 1.5), mirrored];
+        state.viewports = [viewport(-0.5, 1.5), mirrored].into_iter().collect();
         let c = state
             .compensation(true, true, None, plain, takes)
             .unwrap()
@@ -3132,28 +3187,42 @@ mod tests {
             [-4.0, 12.0, 16.0, -16.0]
         );
         // A one-pixel column: 1 + 2 / 1 needs 4; a quarter pixel's 9 needs 16.
-        state.viewports = vec![Viewport::new(4.5, 0.0, 1.0, 8.0, 0.0, 1.0)];
+        state.viewports = [Viewport::new(4.5, 0.0, 1.0, 8.0, 0.0, 1.0)]
+            .into_iter()
+            .collect();
         assert_eq!(state.point_guard(false, &limits), Some([4.0, 2.0]));
         let vk = EncoderState::vk_viewports(state.used_viewports(false), None, Some([4.0, 2.0]));
         assert_eq!([vk[0].x, vk[0].width], [3.0, 4.0]);
         assert_eq!(vk[0].x + vk[0].width / 2.0, 5.0, "the center stays");
-        state.viewports = vec![Viewport::new(4.0, 0.0, 0.25, 8.0, 0.0, 1.0)];
+        state.viewports = [Viewport::new(4.0, 0.0, 0.25, 8.0, 0.0, 1.0)]
+            .into_iter()
+            .collect();
         assert_eq!(state.point_guard(false, &limits), Some([16.0, 2.0]));
         // Mirrored and flipped viewports widen alike.
-        state.viewports = vec![Viewport::new(8.0, 8.0, -8.0, -8.0, 0.0, 1.0)];
+        state.viewports = [Viewport::new(8.0, 8.0, -8.0, -8.0, 0.0, 1.0)]
+            .into_iter()
+            .collect();
         assert_eq!(state.point_guard(false, &limits), Some([2.0, 2.0]));
         // Past the device's dimensions or bounds, or an origin no `float` holds.
-        state.viewports = vec![Viewport::new(0.0, 0.0, 16384.0, 8.0, 0.0, 1.0)];
+        state.viewports = [Viewport::new(0.0, 0.0, 16384.0, 8.0, 0.0, 1.0)]
+            .into_iter()
+            .collect();
         assert_eq!(state.point_guard(false, &limits), None);
-        state.viewports = vec![Viewport::new(30000.0, 0.0, 4000.0, 8.0, 0.0, 1.0)];
+        state.viewports = [Viewport::new(30000.0, 0.0, 4000.0, 8.0, 0.0, 1.0)]
+            .into_iter()
+            .collect();
         assert_eq!(state.point_guard(false, &limits), None);
-        state.viewports = vec![Viewport::new(0.1, 0.0, 64.0, 8.0, 0.0, 1.0)];
+        state.viewports = [Viewport::new(0.1, 0.0, 64.0, 8.0, 0.0, 1.0)]
+            .into_iter()
+            .collect();
         assert_eq!(state.point_guard(false, &limits), None);
         // Every viewport a selecting pipeline uses takes the widest scale.
-        state.viewports = vec![
+        state.viewports = [
             Viewport::new(0.0, 0.0, 8.0, 8.0, 0.0, 1.0),
             Viewport::new(4.0, 4.0, 1.0, 2.0, 0.0, 1.0),
-        ];
+        ]
+        .into_iter()
+        .collect();
         assert_eq!(state.point_guard(true, &limits), Some([4.0, 2.0]));
     }
 
@@ -3269,7 +3338,9 @@ mod tests {
         .unwrap();
         let profile = device.profile();
         let mut state = EncoderState::metal_defaults([4, 4]);
-        state.viewports = vec![Viewport::new(0.0, 0.0, 4.0, 4.0, 0.75, 0.25)];
+        state.viewports = [Viewport::new(0.0, 0.0, 4.0, 4.0, 0.75, 0.25)]
+            .into_iter()
+            .collect();
         let depths = |state: &EncoderState, topology| {
             state
                 .draw_viewports(false, topology, profile, false)
@@ -3302,9 +3373,13 @@ mod tests {
             clamp: [0.0f32, 1.0].map(f32::to_bits),
         };
         assert_eq!(native(&state), (Ok([1.125, 0.625]), Ok(Some(clipped))));
-        state.viewports = vec![Viewport::new(0.0, 0.0, 4.0, 4.0, -0.25, 0.25)];
+        state.viewports = [Viewport::new(0.0, 0.0, 4.0, 4.0, -0.25, 0.25)]
+            .into_iter()
+            .collect();
         assert_eq!(native(&state).0, gap, "a negative depth clamps at 0 first");
-        state.viewports = vec![Viewport::new(0.0, 0.0, 4.0, 4.0, 0.75, 0.25)];
+        state.viewports = [Viewport::new(0.0, 0.0, 4.0, 4.0, 0.75, 0.25)]
+            .into_iter()
+            .collect();
         state.clip_mode = DepthClipMode::Clamp;
         state.set_depth_bias(f32::INFINITY, 0.0, 0.0).unwrap();
         assert_eq!(depths(&state, T::TRIANGLE_LIST), Ok([0.75, 0.75]));
@@ -3352,7 +3427,9 @@ mod tests {
         let gap = Err(Error::NotImplemented(RuntimeGap::ViewportDepthRange));
         let mut state = EncoderState::metal_defaults([4, 4]);
         state.clip_mode = DepthClipMode::Clamp;
-        state.viewports = vec![Viewport::new(0.0, 0.0, 4.0, 4.0, 0.25, 0.75)];
+        state.viewports = [Viewport::new(0.0, 0.0, 4.0, 4.0, 0.25, 0.75)]
+            .into_iter()
+            .collect();
         let range = |state: &EncoderState, compensated, returned| {
             state.shader_tests_range(
                 false,
@@ -3366,7 +3443,9 @@ mod tests {
         assert_eq!(range(&state, false, true), Ok([0.25, 0.75]));
         assert_eq!(range(&state, true, false), gap, "the window depth");
         assert_eq!(range(&state, true, true), Ok([0.25, 0.75]), "returned");
-        state.viewports = vec![Viewport::new(0.0, 0.0, 4.0, 4.0, 0.5, 2.0)];
+        state.viewports = [Viewport::new(0.0, 0.0, 4.0, 4.0, 0.5, 2.0)]
+            .into_iter()
+            .collect();
         assert_eq!(range(&state, true, true), gap, "past [0, 1]");
     }
 }

@@ -189,6 +189,9 @@ pub(super) struct EncoderCore {
     segments: Vec<Segment>,
     /// The order of the encoder's commands, and its summary.
     uses: EncoderUses<ResourceKey>,
+    /// The uses of the command [`note_reaching`](Self::note_reaching) notes, with those of the
+    /// host memory beside them ([`aliased`](Self::aliased)): kept, so a draw makes no vector.
+    aliased_uses: Vec<Use<ResourceKey>>,
     /// What the encoder's commands use; `end` hands it to the command buffer.
     retained: Retained,
     /// What its dispatches and draws executed; `end` hands it to the command buffer.
@@ -198,6 +201,11 @@ pub(super) struct EncoderCore {
     /// The keys its commands' uses named, and its bindings' (`used_resources.rs`): `end` finds the
     /// heaps among them, and hands them to the command buffer.
     keys: BTreeSet<ResourceKey>,
+    /// The key of each use the last command [`touch_reaching`](Self::touch_reaching) touched took,
+    /// in order, and whether it named it (`Taken::name`): both only grow while the encoder is
+    /// open, so a use at that place of the same key, named only where that one was, is kept and
+    /// named already.
+    touched: Vec<(ResourceKey, bool)>,
     /// The heaps its commands used through what the encoder made resident; `end` hands them,
     /// and those of `keys`, to the command buffer, whose commit marks them used.
     heaps: Vec<Heap>,
@@ -307,12 +315,14 @@ impl EncoderCore {
             executions: Vec::new(),
             shadows: ShadowSync::default(),
             keys: BTreeSet::new(),
+            touched: Vec::new(),
             heaps: Vec::new(),
             holds: Holds::new(command_buffer.device()),
             taken: Taken::default(),
             fails_command_buffer: None,
             faults: false,
             twin_writes: Vec::new(),
+            aliased_uses: Vec::new(),
             id: CORES.fetch_add(1, Ordering::Relaxed),
             replaying: false,
             _not_sync: PhantomData,
@@ -380,12 +390,14 @@ impl EncoderCore {
             executions: Vec::new(),
             shadows: ShadowSync::default(),
             keys: BTreeSet::new(),
+            touched: Vec::new(),
             heaps: Vec::new(),
             holds: Holds::new(command_buffer.device()),
             taken: Taken::default(),
             fails_command_buffer: None,
             faults: false,
             twin_writes: Vec::new(),
+            aliased_uses: Vec::new(),
             id: CORES.fetch_add(1, Ordering::Relaxed),
             replaying: false,
             _not_sync: PhantomData,
@@ -763,12 +775,23 @@ impl EncoderCore {
     /// through the resident set alone: every other key is named (`Taken`), where the device has
     /// a buffer over host pages.
     fn touch_reaching(&mut self, uses: &[Use<ResourceKey>], resident: &BTreeSet<ResourceKey>) {
-        self.touch_keys(uses.iter().map(|used| used.key));
-        if self.device().shared().rebinds.any() {
-            for used in uses.iter().filter(|used| !resident.contains(&used.key)) {
-                self.taken.name(used.key);
+        let rebinds = self.device().shared().rebinds.any();
+        for (at, used) in uses.iter().enumerate() {
+            let key = used.key;
+            let named = rebinds && !resident.contains(&key);
+            let before = self.touched.get(at).copied();
+            if before.map(|(touched, _)| touched) != Some(key) && self.keys.insert(key) && rebinds {
+                self.hold(key);
+            }
+            if named && before != Some((key, true)) {
+                self.taken.name(key);
+            }
+            match self.touched.get_mut(at) {
+                Some(touched) => *touched = (key, named),
+                None => self.touched.push((key, named)),
             }
         }
+        self.touched.truncate(uses.len());
     }
 
     /// Keep `keys`, those of resources a command uses (its own uses', or its bindings', which
@@ -879,6 +902,7 @@ impl EncoderCore {
         }
         self.observe_fresh(uses, &[]);
         let Some(noted) = noted else {
+            self.record_aliased(stages, uses);
             self.touch_reaching(uses, resident);
             return Ok(());
         };
@@ -895,9 +919,22 @@ impl EncoderCore {
             shared.counts.command_noted_as_before();
             return Ok(());
         }
+        self.record_aliased(stages, uses);
         self.touch_reaching(uses, resident);
         noted.note(stages, (uses, resident), into);
         Ok(())
+    }
+
+    /// Record one command apart that runs in `stages` with `uses`, and the uses of the host
+    /// memory beside them ([`aliased`](Self::aliased)), worked out into the vector the encoder
+    /// keeps for them.
+    fn record_aliased(&mut self, stages: vk::PipelineStageFlags2, uses: &[Use<ResourceKey>]) {
+        let aliases = &self.open.command_buffer.device().shared().aliases;
+        let all = match aliases.augment_into(uses, &mut self.aliased_uses) {
+            true => &self.aliased_uses[..],
+            false => uses,
+        };
+        self.uses.record(stages, all, None);
     }
 
     /// The copies a command that uses the shadowed textures `shadows` and has `uses` needs

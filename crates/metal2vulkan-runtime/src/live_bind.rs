@@ -52,6 +52,7 @@
 //!   the draw is done with them ([`Emptied`]), so they hold nothing past it, as a new vector's did.
 
 use ash::vk;
+use metal2vulkan::bind::{BindShape, BindState, DrawCommands};
 use metal2vulkan::pipeline::PipelineInterface;
 use std::any::Any;
 use std::collections::btree_map::Entry;
@@ -170,6 +171,12 @@ pub(super) struct LiveBind {
     /// The last draw its encoder noted apart (`noted_apart.rs`), kept here so its storage goes
     /// from one encoder to the next.
     pub(super) noted: NotedApart,
+    /// The commands the last draw's plan instantiated, which the next draw's are written over
+    /// (`BindingPlan::instantiate_draw_into`), kept here so their storage goes from one draw and
+    /// one encoder to the next.
+    pub(super) commands: DrawCommands,
+    /// The last draw's push writes with its holes filled (`binding::push_writes`), kept likewise.
+    pub(super) pushes: Vec<PushWrite>,
     /// The last draw's uses (`binding::command_uses_into`), kept likewise.
     pub(super) uses: CommandUses,
     /// The storage of the last draw's descriptor writes (`binding::bind`), kept likewise and

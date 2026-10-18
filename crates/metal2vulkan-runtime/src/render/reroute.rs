@@ -242,7 +242,8 @@ impl RenderCommandEncoder {
                 return Ok(false);
             }
         };
-        let previous_layout = stood.map(|layout| std::mem::replace(&mut self.layout, layout));
+        let previous_layout = stood.map(|layout| std::mem::replace(&mut self.layout, *layout));
+        self.kept_attachments = None;
         let mut previous = std::mem::replace(&mut self.current, *instance);
         let mut again = Ok(());
         if let Some(draws) = previous.rerecord.as_mut() {
@@ -272,6 +273,7 @@ impl RenderCommandEncoder {
                 self.end_unrun(rerouted);
                 if let Some(layout) = previous_layout {
                     self.layout = layout;
+                    self.kept_attachments = None;
                 }
                 Ok(false)
             }

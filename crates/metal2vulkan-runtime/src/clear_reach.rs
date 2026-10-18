@@ -291,15 +291,50 @@ const MOST_RECTS: usize = 1024;
 #[derive(Clone, Debug, Default)]
 pub(super) struct DrawnArea {
     /// Each distinct `[x0, y0, x1, y1]`, half-open, inside the render area.
-    rects: BTreeSet<[u32; 4]>,
+    rects: Rects,
     whole: bool,
+}
+
+/// Distinct pixel rectangles: the first held in place, as a pass's draws mostly reach one (its
+/// render area), so such a pass allocates none for them; the others in a set.
+#[derive(Clone, Debug, Default)]
+struct Rects {
+    first: Option<[u32; 4]>,
+    /// Empty while `first` is `None`; never holds `first`.
+    rest: BTreeSet<[u32; 4]>,
+}
+
+impl Rects {
+    /// Add `rect`, where it is not here yet.
+    fn insert(&mut self, rect: [u32; 4]) {
+        match self.first {
+            None => self.first = Some(rect),
+            Some(first) if first == rect => {}
+            Some(_) => {
+                self.rest.insert(rect);
+            }
+        }
+    }
+
+    fn len(&self) -> usize {
+        usize::from(self.first.is_some()) + self.rest.len()
+    }
+
+    fn iter(&self) -> impl Iterator<Item = &[u32; 4]> {
+        self.first.iter().chain(&self.rest)
+    }
+
+    fn clear(&mut self) {
+        self.first = None;
+        self.rest.clear();
+    }
 }
 
 impl DrawnArea {
     /// An area that bounds nothing, an execution's commands' (which the host does not bound).
     pub(super) fn unbounded() -> DrawnArea {
         DrawnArea {
-            rects: BTreeSet::new(),
+            rects: Rects::default(),
             whole: true,
         }
     }
@@ -346,7 +381,9 @@ impl DrawnArea {
         if self.whole {
             return;
         }
-        self.rects.extend(other.rects.iter().copied());
+        for &rect in other.rects.iter() {
+            self.rects.insert(rect);
+        }
         if self.rects.len() > MOST_RECTS {
             self.everywhere();
         }
@@ -388,7 +425,7 @@ impl DrawnArea {
             rows,
             words: vec![0; (per_row as usize * rows as usize).div_ceil(32)],
         };
-        for &[x0, y0, x1, y1] in &self.rects {
+        for &[x0, y0, x1, y1] in self.rects.iter() {
             for ty in y0 / tile[1]..y1.div_ceil(tile[1]).min(rows) {
                 for tx in x0 / tile[0]..x1.div_ceil(tile[0]).min(per_row) {
                     let t = (ty * per_row + tx) as usize;

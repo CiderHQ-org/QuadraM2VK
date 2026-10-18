@@ -20,6 +20,7 @@
 //! attachment at all is kept, so the kept passes number at most the sample counts times the
 //! view masks drawn.
 
+use super::color_list::ColorList;
 use super::device::lock;
 use super::error::Error;
 use super::render_target::{self, PassShape, RenderPassObject};
@@ -54,16 +55,16 @@ pub(super) fn keeps(shape: &PassShape) -> bool {
 /// `view_mask`.
 pub(super) fn shape(samples: u32, view_mask: u32) -> PassShape {
     PassShape {
-        colors: Vec::new(),
+        colors: ColorList::new(),
         depth_stencil: None,
         samples,
-        color_resolves: Vec::new(),
+        color_resolves: ColorList::new(),
         depth_stencil_resolve: None,
         fetch_inputs: false,
-        no_inputs: Vec::new(),
-        storage: Vec::new(),
+        no_inputs: ColorList::new(),
+        storage: ColorList::new(),
         view_mask,
-        locations: Vec::new(),
+        locations: ColorList::new(),
     }
 }
 

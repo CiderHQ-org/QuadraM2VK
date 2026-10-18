@@ -220,13 +220,16 @@ impl ExtendedShadows {
 
     /// The settings before each of the pass's `count` instances, of the colors of `layout` (the
     /// pass's at the end of its encoder) that instance first holds the shadows of, and their
-    /// uses.
+    /// uses: no list at all where the pass sets no shadow, every instance's settings then empty.
     pub(super) fn settings(
         &self,
         device: &Device,
         layout: &PassLayout,
         count: usize,
     ) -> Result<(Vec<Vec<ShadowFill>>, Vec<Use<ResourceKey>>), Error> {
+        if self.fills.is_empty() {
+            return Ok((Vec::new(), Vec::new()));
+        }
         let mut settings: Vec<Vec<ShadowFill>> = (0..count).map(|_| Vec::new()).collect();
         let mut uses = Vec::new();
         for &(at, c) in &self.fills {
@@ -475,7 +478,7 @@ impl RenderCommandEncoder {
             self.extended.pending.extend(starting);
             return Ok(());
         }
-        let mut colors: Vec<u32> = self.current.shape.storage.clone();
+        let mut colors: Vec<u32> = self.current.shape.storage.to_vec();
         colors.extend(starting.iter().copied());
         colors.sort_unstable();
         colors.dedup();

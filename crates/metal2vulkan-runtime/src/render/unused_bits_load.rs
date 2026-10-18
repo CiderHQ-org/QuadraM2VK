@@ -329,7 +329,44 @@ pub(super) fn consumes_capture(layout: &PassLayout, ended: bool) -> bool {
 /// Whether `color` is of an extended-range or padded format, loaded and not discarded at the
 /// store, where the load pass does not take it (`degrade_unused_bits`).
 pub(super) fn untaken(color: &ColorTarget) -> bool {
-    loaded(color, true) && takes(color, true).is_none()
+/// The color attachments of a pass's layout that each of a draw's kept-attachment notices names, as
+/// `color {index}, {format:?}`: the extended-range or padded ones the load pass does not take
+/// ([`untaken`], `degrade_unused_bits`) and, on a driver whose pass does not store as Metal's
+/// ([`metals_store`]), the signed normalized ones ([`snorm_minimum_kept`],
+/// `degrade_snorm_minimum`) and the `RGB9E5Float` ones ([`shared_exponent_kept`],
+/// `degrade_shared_exponent`). They read the layout's colors, their textures' formats, samples,
+/// shadows and image plans, and the device's tile store policy and driver facts; all but the
+/// layout are fixed at creation, so an encoder decides them once for each layout it records
+/// under.
+#[derive(Debug, Default, PartialEq)]
+pub(super) struct KeptAttachments {
+    pub(super) unused_bits: Vec<String>,
+    pub(super) snorm_minimum: Vec<String>,
+    pub(super) shared_exponent: Vec<String>,
+}
+
+impl KeptAttachments {
+    /// The kept attachments of `layout`, a pass of `device`'s.
+    pub(super) fn of(layout: &PassLayout, device: &Device) -> Self {
+        let metals = metals_store(device);
+        let mut kept = Self::default();
+        for (index, color) in layout.colors.iter().enumerate() {
+            let Some(color) = color else {
+                continue;
+            };
+            let name = || format!("color {index}, {:?}", color.target.texture.pixel_format());
+            if untaken(color) {
+                kept.unused_bits.push(name());
+            }
+            if !metals && snorm_minimum_kept(color) {
+                kept.snorm_minimum.push(name());
+            }
+            if !metals && shared_exponent_kept(color) {
+                kept.shared_exponent.push(name());
+            }
+        }
+        kept
+    }
 }
 
 /// The texels of one attachment's region: its columns, the rows of each layer, its layers, and

@@ -1,4 +1,4 @@
-//! Range arithmetic at extremes, the residual, and the resident set.
+//! Range arithmetic at extremes, the residual, the resident set, and push fields' bytes.
 
 use super::*;
 
@@ -301,4 +301,22 @@ fn texel_views_count_whole_blocks_against_the_element_limit() {
             limit: 100
         })
     );
+}
+
+/// A push field's bytes are the bytes it was made of, however they were made: held in place up
+/// to `FieldBytes::INLINE` bytes, past it on the heap, a collect that crosses the bound included.
+#[test]
+fn field_bytes_hold_what_they_were_made_of() {
+    for len in [0, 1, 4, 31, 32, 33, 64, 200] {
+        let bytes: Vec<u8> = (0..len).map(|i| (i * 7 + 3) as u8).collect();
+        let of = FieldBytes::of(&bytes);
+        let collected: FieldBytes = bytes.iter().copied().collect();
+        for field in [&of, &collected] {
+            assert_eq!(&field[..], &bytes[..], "{len} bytes");
+            let inline = matches!(field, FieldBytes::Inline { .. });
+            assert_eq!(inline, len <= FieldBytes::INLINE, "{len} bytes");
+        }
+    }
+    let words = FieldBytes::words([1, 0x0403_0201, u32::MAX]);
+    assert_eq!(&words[..], &[1, 0, 0, 0, 1, 2, 3, 4, 255, 255, 255, 255]);
 }

@@ -2423,11 +2423,11 @@ impl Device {
     /// share memory with an attachment of `layout`'s render pass instance
     /// (`render_target::shares_attachment`). The check runs only while the kind would be
     /// announced: once it was, a device that announces it once skips it.
-    pub(super) fn degrade_attachment_reads<'a>(
+    pub(super) fn degrade_attachment_reads(
         &self,
         call: &'static str,
         layout: &PassLayout,
-        uses: impl IntoIterator<Item = &'a Use<ResourceKey>>,
+        uses: &[Use<ResourceKey>],
     ) -> Result<(), Error> {
         let kind = Degradation::AttachmentReadInPlace;
         if !self.shared().announced.pending(kind)
@@ -3883,12 +3883,16 @@ impl Device {
     /// target's made for custom sample positions (`render.rs`, `attachment_stand_in.rs`). A split
     /// the interlock alone makes on a device that runs it no slower than whole is not announced,
     /// nor the backing it gives a memoryless attachment.
-    pub(super) fn degrade_instances(
+    pub(super) fn degrade_instances<S: std::borrow::Borrow<PassShape>>(
         &self,
         layout: &PassLayout,
-        shapes: &[&PassShape],
+        shapes: &[S],
         causes: SplitCauses,
     ) {
+        // An instance's shape, whether the caller holds the shapes or references to them.
+        fn of<S: std::borrow::Borrow<PassShape>>(shape: &S) -> &PassShape {
+            shape.borrow()
+        }
         let SplitCauses {
             shadow,
             shader_tests,
@@ -3904,13 +3908,14 @@ impl Device {
         // The first color attachment whose role changes between two instances: left out of the
         // draws' subpass (the interlock), or read as an input attachment.
         let changed = shapes.windows(2).find_map(|pair| {
+            let pair = [of(&pair[0]), of(&pair[1])];
             let role = |shape: &PassShape, index: &u32| {
                 (
                     shape.storage.contains(index),
                     shape.no_inputs.contains(index),
                 )
             };
-            let indices = [&pair[0], &pair[1]]
+            let indices = pair
                 .into_iter()
                 .flat_map(|shape| shape.storage.iter().chain(&shape.no_inputs));
             indices.copied().find_map(|index| {
@@ -3919,9 +3924,9 @@ impl Device {
             })
         });
         // The pass's hidden depth and stencil, arriving after its first instance.
-        let hidden = shapes
-            .windows(2)
-            .any(|pair| pair[0].depth_stencil.is_none() && pair[1].depth_stencil.is_some());
+        let hidden = shapes.windows(2).any(|pair| {
+            of(&pair[0]).depth_stencil.is_none() && of(&pair[1]).depth_stencil.is_some()
+        });
         // On a device whose driver ran a pass the interlock splits no slower split than whole
         // (`DriverFact::InterlockedPassSplitNoSlower`), a split the interlock alone makes (each
         // instance's shape differs from the one before in the colors its subpass leaves out
@@ -3931,8 +3936,8 @@ impl Device {
             .properties()
             .driver_facts
             .contains(&DriverFact::InterlockedPassSplitNoSlower);
-        let storage_alone = |pair: &[&PassShape]| {
-            let (a, b) = (pair[0], pair[1]);
+        let storage_alone = |pair: &[S]| {
+            let (a, b) = (of(&pair[0]), of(&pair[1]));
             a.storage != b.storage
                 && PassShape {
                     storage: b.storage.clone(),
@@ -4022,7 +4027,7 @@ impl Device {
         let fetched = |index: usize| {
             shapes
                 .iter()
-                .any(|shape| shape.storage.iter().any(|&i| i as usize == index))
+                .any(|shape| of(shape).storage.iter().any(|&i| i as usize == index))
         };
         let colors = layout
             .colors
@@ -4045,7 +4050,8 @@ impl Device {
         });
         for (index, target, stand_in, memoryless) in colors.chain(depth_stencil) {
             let own = &stand_in.own;
-            let image = match target.texture.placed_bytes() {
+            // What the pass renders into, in words: made only where a notice is announced.
+            let image = || match target.texture.placed_bytes() {
                 Some(bytes) => format!("a scratch image of {bytes} bytes"),
                 None => "a scratch image".to_owned(),
             };
@@ -4063,6 +4069,7 @@ impl Device {
             // "through the pixel interlock" where no draw read it).
             if stand_in.cause == Cause::Positions {
                 self.degrade(Degradation::PositionsThroughScratch, || {
+                    let image = image();
                     let made = own.texture.image_plan().is_ok_and(|plan| {
                         plan.flags.contains(
                             metal2vulkan::vk::ImageCreateFlags::SAMPLE_LOCATIONS_COMPATIBLE_DEPTH_EXT,
@@ -4097,6 +4104,7 @@ impl Device {
                 });
             } else if stand_in.cause == Cause::Unattachable {
                 self.degrade(Degradation::UndeclaredUsageShadow, || {
+                    let image = image();
                     let attachment = match index {
                         Some(index) => format!("color attachment {index}"),
                         None => "depth/stencil attachment".to_owned(),
@@ -4112,6 +4120,7 @@ impl Device {
                 });
             } else if let Cause::Fetch { by } = &stand_in.cause {
                 self.degrade(Degradation::FetchThroughScratch, || {
+                    let image = image();
                     let (form, missing) = if layout.fetch_inputs {
                         ("as an input attachment", "input attachment")
                     } else if planes {
@@ -4153,6 +4162,7 @@ impl Device {
             {
                 // Not for a split the device chose (`chosen`).
                 self.degrade(Degradation::MemorylessBacked, || {
+                    let image = image();
                     let why = if index.is_some_and(fetched) {
                         "a framebuffer fetch through the pixel interlock reads it".to_owned()
                     } else if index.is_none() && shadow {

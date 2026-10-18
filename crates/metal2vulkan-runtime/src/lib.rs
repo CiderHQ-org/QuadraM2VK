@@ -49,6 +49,7 @@ mod capabilities;
 mod chroma_pairs;
 mod clear_reach;
 mod clear_value;
+mod color_list;
 mod color_reformat;
 mod color_resolve;
 mod command_buffer;

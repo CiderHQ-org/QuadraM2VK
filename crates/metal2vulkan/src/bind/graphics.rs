@@ -292,8 +292,8 @@ use std::collections::BTreeMap;
 use crate::bind::heap::{planner, HeapPlanner};
 use crate::bind::instantiate::{
     bind_buffers, descriptor_range, put, slot_field, BufferExtent, BufferRange, DescriptorBytes,
-    DescriptorRange, IndexBufferRef, IndirectRef, PushConstantWrite, PushHole, RangeError,
-    RootTable,
+    DescriptorRange, FieldBytes, IndexBufferRef, IndirectRef, PushConstantWrite, PushHole,
+    RangeError, RootTable,
 };
 use crate::bind::neutral::{zero_buffer_bytes, NeutralResource};
 use crate::bind::plan::compute::{internal, not_implemented, spec_key, tile_memory};
@@ -502,6 +502,37 @@ pub struct DrawCommands {
     /// chunk draws that replace `draw` ([`TessellationDispatch`] states the consumer contract).
     /// `None` for every other draw.
     pub tessellation_dispatch: Option<TessellationDispatch>,
+}
+
+/// No draw's commands: empty vectors and a draw of no vertices, which
+/// [`BindingPlan::instantiate_draw_into`] writes over.
+impl Default for DrawCommands {
+    fn default() -> DrawCommands {
+        DrawCommands {
+            push_constants: Vec::new(),
+            descriptor_bytes: Vec::new(),
+            buffer_offsets: Vec::new(),
+            draw: vk::DrawCommand::Draw {
+                vertex_count: 0,
+                instance_count: 0,
+                first_vertex: 0,
+                first_instance: 0,
+            },
+            indirect_needs_arguments: false,
+            extents: Vec::new(),
+            push_holes: Vec::new(),
+            descriptor_ranges: Vec::new(),
+            root_tables: Vec::new(),
+            vertex_strides: Vec::new(),
+            uses: Vec::new(),
+            index_overrun: None,
+            index_bounds_pass: false,
+            amplifications: Vec::new(),
+            specialization: None,
+            mesh_dispatch: None,
+            tessellation_dispatch: None,
+        }
+    }
 }
 
 /// The compute work of a mesh draw whose mesh function is emulated: its object threadgroups, where
@@ -2535,7 +2566,7 @@ fn shadow_template(p: &RenderPipeline) -> Option<ShadowTemplate> {
 /// depend on the depth test is refused as needing stencil export: the pass has a depth attachment,
 /// the depth comparison is not `Always`, and a face's depth-failure operation differs from its pass
 /// operation (the depth test runs after the function).
-fn shadow_stencil_words(t: &ShadowTemplate, state: &BindState) -> Result<Vec<u8>, BindError> {
+fn shadow_stencil_words(t: &ShadowTemplate, state: &BindState) -> Result<FieldBytes, BindError> {
     let ds = &state.depth_stencil;
     let faces = [&ds.front_face_stencil, &ds.back_face_stencil];
     if t.attached
@@ -2550,24 +2581,21 @@ fn shadow_stencil_words(t: &ShadowTemplate, state: &BindState) -> Result<Vec<u8>
             Capability::Extension(crate::device::requirements::VkExtension::ExtShaderStencilExport),
         )));
     }
-    let mut out = Vec::with_capacity(8);
-    for f in faces {
-        let word = crate::lower::fragment::face_word(
+    Ok(FieldBytes::words(faces.map(|f| {
+        crate::lower::fragment::face_word(
             f.stencil_compare_function.as_raw(),
             f.stencil_failure_operation.as_raw(),
             f.depth_stencil_pass_operation.as_raw(),
             f.read_mask,
             f.write_mask,
             t.attached,
-        );
-        out.extend_from_slice(&word.to_le_bytes());
-    }
-    Ok(out)
+        )
+    })))
 }
 
 /// The `PushField::ShaderTestsState` words of a draw under encoder state `state`: the depth compare
 /// function, write enable and clip mode, and viewport 0's depth range.
-fn shader_tests_words(state: &BindState) -> Vec<u8> {
+fn shader_tests_words(state: &BindState) -> FieldBytes {
     let ds = &state.depth_stencil;
     let clamp = state.depth_clip_mode_clamp;
     let word = crate::lower::fragment::depth_test_word(
@@ -2576,36 +2604,27 @@ fn shader_tests_words(state: &BindState) -> Vec<u8> {
         clamp,
     );
     let [near, far] = state.depth_range;
-    let mut out = Vec::with_capacity(16);
-    for w in [word, near.to_bits(), far.to_bits(), 0] {
-        out.extend_from_slice(&w.to_le_bytes());
-    }
-    out
+    FieldBytes::words([word, near.to_bits(), far.to_bits(), 0])
 }
 
 /// The `PushField::ShaderStencilState` words of a draw under encoder state `state`: each face's
 /// stencil word (`lower::fragment::stencil_test_word`), the front then the back, the references'
 /// low 8 bits (front in bits 0 to 7, back in bits 8 to 15), and a zero word.
-fn shader_stencil_words(state: &BindState) -> Vec<u8> {
+fn shader_stencil_words(state: &BindState) -> FieldBytes {
     let ds = &state.depth_stencil;
-    let mut out = Vec::with_capacity(16);
-    for f in [&ds.front_face_stencil, &ds.back_face_stencil] {
-        let word = crate::lower::fragment::stencil_test_word(
+    let [front_face, back_face] = [&ds.front_face_stencil, &ds.back_face_stencil].map(|f| {
+        crate::lower::fragment::stencil_test_word(
             f.stencil_compare_function.as_raw(),
             f.stencil_failure_operation.as_raw(),
             f.depth_failure_operation.as_raw(),
             f.depth_stencil_pass_operation.as_raw(),
             f.read_mask,
             f.write_mask,
-        );
-        out.extend_from_slice(&word.to_le_bytes());
-    }
+        )
+    });
     let [front, back] = state.stencil_references;
     let references = (front & 0xFF) | (back & 0xFF) << 8;
-    for w in [references, 0] {
-        out.extend_from_slice(&w.to_le_bytes());
-    }
-    out
+    FieldBytes::words([front_face, back_face, references, 0])
 }
 
 /// The address alignment and the element bytes the fixed-function attributes of `binding` read
@@ -2649,6 +2668,22 @@ impl BindingPlan {
         state: &BindState,
         draw: &DrawCall,
     ) -> Result<DrawCommands, BindError> {
+        let mut commands = DrawCommands::default();
+        self.instantiate_draw_into(state, draw, &mut commands)?;
+        Ok(commands)
+    }
+
+    /// [`instantiate_draw`](Self::instantiate_draw)'s commands, written over `commands`: every
+    /// field is set as `instantiate_draw` sets it, and the vectors (each push write's bytes and
+    /// each table's among them) keep the storage the commands written there before left, so a
+    /// consumer that keeps one `DrawCommands` from draw to draw allocates none of it again once
+    /// it holds as much. On an error `commands` holds no draw's commands.
+    pub fn instantiate_draw_into(
+        &self,
+        state: &BindState,
+        draw: &DrawCall,
+        commands: &mut DrawCommands,
+    ) -> Result<(), BindError> {
         let t = self
             .graphics
             .as_ref()
@@ -2686,7 +2721,7 @@ impl BindingPlan {
                 });
             }
         }
-        instantiate(t, state, draw)
+        instantiate(t, state, draw, commands)
     }
 }
 
@@ -4005,11 +4040,34 @@ fn deindexed_draw(
     }
 }
 
+/// The commands of `draw` of `state`, written over `out` (`BindingPlan::instantiate_draw_into`):
+/// each of its fields set, its vectors cleared or their values overwritten in place, never
+/// replaced.
 fn instantiate(
     t: &GraphicsTemplate,
     state: &BindState,
     draw: &DrawCall,
-) -> Result<DrawCommands, BindError> {
+    out: &mut DrawCommands,
+) -> Result<(), BindError> {
+    let DrawCommands {
+        push_constants,
+        descriptor_bytes,
+        buffer_offsets,
+        draw: draw_command,
+        indirect_needs_arguments,
+        extents,
+        push_holes,
+        descriptor_ranges,
+        root_tables,
+        vertex_strides,
+        uses,
+        index_overrun: overrun_out,
+        index_bounds_pass,
+        amplifications: amplifications_out,
+        specialization: specialization_out,
+        mesh_dispatch: mesh_dispatch_out,
+        tessellation_dispatch: tessellation_dispatch_out,
+    } = out;
     let overrun = index_overrun(t.robust_index_fetch, draw);
     let (command, base) = vk_draw(draw, overrun);
     let capture = match (t.capture, t.deindexed) {
@@ -4035,11 +4093,11 @@ fn instantiate(
         }
     };
     let command = mesh.as_ref().map_or(command, |m| m.command);
-    let bound = bind_buffers(&t.buffers, state)?;
-    let mut descriptor_ranges = bound.descriptor_ranges;
+    descriptor_ranges.clear();
+    extents.clear();
+    let bound = bind_buffers(&t.buffers, state, descriptor_ranges, extents)?;
     descriptor_ranges.extend(crate::bind::instantiate::texel_ranges(&t.resources, state)?);
     let tables = crate::bind::heap::table_bytes(&t.resources, state)?;
-    let mut extents = bound.extents;
     // A patch draw: a native pipeline's control stage's writes, or an emulated one's scan.
     let (control, scan) = match t.tessellation.map(|t| t.site) {
         Some(FactorSite::Scan { kernel, .. }) => {
@@ -4059,24 +4117,46 @@ fn instantiate(
     };
     let vertex = state.stages.get(&Stage::Vertex);
 
-    let mut push_constants = Vec::new();
-    let mut descriptor_bytes = Vec::new();
-    let mut push_holes = Vec::new();
-    let mut root_tables = Vec::new();
+    push_holes.clear();
+    root_tables.clear();
+    // The push writes and stage tables written so far, each over the one a draw before left at
+    // its place where there is one.
+    let (mut pushes, mut tables_written) = (0, 0);
     let mut reads_base = false;
     for st in &t.stages {
         let (push_start, push_size) = st.push_range.unwrap_or((0, 0));
-        let mut push = vec![0u8; push_size as usize];
-        let mut table = vec![
-            0u8;
-            if st.table.is_some() {
-                st.table_size as usize
-            } else {
-                0
+        // Each stage's push bytes and table, zeroed; empty where it has none.
+        let (mut no_push, mut no_table) = (Vec::new(), Vec::new());
+        let push = match push_size {
+            0 => &mut no_push,
+            size => {
+                let write = reused(push_constants, pushes, || PushConstantWrite {
+                    stages: st.flags,
+                    offset: push_start,
+                    bytes: Vec::new(),
+                });
+                pushes += 1;
+                write.stages = st.flags;
+                write.offset = push_start;
+                zeroed(&mut write.bytes, size as usize)
             }
-        ];
+        };
+        let table = match st.table {
+            Some((set, binding)) => {
+                let written = reused(descriptor_bytes, tables_written, || DescriptorBytes {
+                    set,
+                    binding,
+                    bytes: Vec::new(),
+                });
+                tables_written += 1;
+                written.set = set;
+                written.binding = binding;
+                zeroed(&mut written.bytes, st.table_size as usize)
+            }
+            None => &mut no_table,
+        };
         for f in &st.fields {
-            let bytes: Vec<u8> = match f.field {
+            let bytes: FieldBytes = match f.field {
                 PushField::RootTableAddress
                 | PushField::ExecutionStatusAddress
                 | PushField::CaptureAddress
@@ -4100,7 +4180,7 @@ fn instantiate(
                     continue;
                 }
                 PushField::CaptureLayout => match &capture {
-                    Some(c) => c.layout.iter().flat_map(|w| w.to_le_bytes()).collect(),
+                    Some(c) => FieldBytes::words(c.layout.iter().copied()),
                     None => return Err(internal("a capture layout without its capture form")),
                 },
                 PushField::ShadowStencilState => {
@@ -4122,12 +4202,12 @@ fn instantiate(
                     shader_stencil_words(state)
                 }
                 PushField::DispatchRegion => match mesh.as_ref().and_then(|m| m.region(st.stage)) {
-                    Some(region) => region.to_vec(),
+                    Some(region) => FieldBytes::of(&region),
                     None => return Err(internal("a dispatch region outside a mesh draw")),
                 },
-                PushField::ViewportCount => state.viewport_count.to_le_bytes().to_vec(),
+                PushField::ViewportCount => FieldBytes::of(&state.viewport_count.to_le_bytes()),
                 PushField::RenderTargetArrayLength => {
-                    state.render_target_array_length.to_le_bytes().to_vec()
+                    FieldBytes::of(&state.render_target_array_length.to_le_bytes())
                 }
                 // The identity where the state holds none: a plan states its variant, so
                 // instantiation under another shape asks for the other one first.
@@ -4144,11 +4224,12 @@ fn instantiate(
                     .flat_map(|v| v.to_le_bytes())
                     .collect(),
                 // No viewport mirrored where the state holds none.
-                PushField::ViewportMirrors => state
-                    .viewport_compensation
-                    .map_or(0, |c| c.mirrors)
-                    .to_le_bytes()
-                    .to_vec(),
+                PushField::ViewportMirrors => FieldBytes::of(
+                    &state
+                        .viewport_compensation
+                        .map_or(0, |c| c.mirrors)
+                        .to_le_bytes(),
+                ),
                 // No vertex's depth clamped where the state holds none.
                 PushField::VertexDepthClamp => state
                     .viewport_compensation
@@ -4163,23 +4244,20 @@ fn instantiate(
                     .iter()
                     .flat_map(|v| v.to_le_bytes())
                     .collect(),
-                PushField::StorageKeptChannels => t.storage_kept.to_le_bytes().to_vec(),
+                PushField::StorageKeptChannels => FieldBytes::of(&t.storage_kept.to_le_bytes()),
                 // The attachment's rule word, as link derived it from the pipeline's attachment.
                 PushField::ColorWriteRule(color) => {
                     match t.color_write_rules.iter().find(|(c, _)| *c == color) {
-                        Some((_, word)) => word.to_le_bytes().to_vec(),
+                        Some((_, word)) => FieldBytes::of(&word.to_le_bytes()),
                         None => return Err(internal("a color write rule link gave no word")),
                     }
                 }
                 // The blend color as an extended-range blend reads it, and one minus it.
-                PushField::BlendColor => {
+                PushField::BlendColor => FieldBytes::words(
                     crate::lower::arith::extended_range::blend_color::constant_words(
                         state.blend_color,
-                    )
-                    .iter()
-                    .flat_map(|w| w.to_le_bytes())
-                    .collect()
-                }
+                    ),
+                ),
                 // The blend color as the encoder set it, which a 16-bit float blend rounds.
                 PushField::HalfBlendColor => state
                     .blend_color
@@ -4196,22 +4274,19 @@ fn instantiate(
                 // The first amplification's; `amplifications` writes each before its draw.
                 PushField::AmplificationId
                 | PushField::AmplificationLayerOffset
-                | PushField::AmplificationViewportOffset => {
-                    amplification_word(f.field, 0, &t.amplifications)?
-                        .to_le_bytes()
-                        .to_vec()
-                }
+                | PushField::AmplificationViewportOffset => FieldBytes::of(
+                    &amplification_word(f.field, 0, &t.amplifications)?.to_le_bytes(),
+                ),
                 PushField::BaseVertexInstance => {
                     reads_base = true;
-                    let mut b = base[0].to_le_bytes().to_vec();
-                    b.extend_from_slice(&base[1].to_le_bytes());
-                    b
+                    FieldBytes::words(base)
                 }
                 PushField::VerticesPerPrimitive => {
                     let from_zero = capture.as_ref().is_some_and(|c| c.command.is_some());
-                    vertices_per_primitive(draw, state.primitive_type, from_zero)?
-                        .to_le_bytes()
-                        .to_vec()
+                    FieldBytes::of(
+                        &vertices_per_primitive(draw, state.primitive_type, from_zero)?
+                            .to_le_bytes(),
+                    )
                 }
                 // An emulated tessellation draw's first chunk (`TessellationDispatch::draw`
                 // writes each), and its index buffers' fields.
@@ -4231,7 +4306,7 @@ fn instantiate(
                         PushField::ControlPointIndexOffset => b.point_residual,
                         _ => 0,
                     };
-                    word.to_le_bytes().to_vec()
+                    FieldBytes::of(&word.to_le_bytes())
                 }
                 PushField::VertexBufferStride(layout) => {
                     let fixed = t.pulled_strides.iter().find(|(l, _)| *l == layout);
@@ -4256,12 +4331,12 @@ fn instantiate(
                             )))
                         }
                     };
-                    stride.to_le_bytes().to_vec()
+                    FieldBytes::of(&stride.to_le_bytes())
                 }
                 field => slot_field(field, &bound.residuals, &t.resources, state)
                     .ok_or_else(|| internal(format!("a render push field {field:?}")))?,
             };
-            put(&mut push, push_start, &mut table, f.loc, &bytes)?;
+            put(&mut push[..], push_start, &mut table[..], f.loc, &bytes)?;
         }
         if let (Some(first), Some(resident)) = (st.root_first, resident.as_ref()) {
             let statics: Vec<_> = bound
@@ -4272,26 +4347,14 @@ fn instantiate(
                 .collect();
             root_tables.push((st.flags, stage_root_table(&statics, first, resident)));
         }
-        if push_size > 0 {
-            push_constants.push(PushConstantWrite {
-                stages: st.flags,
-                offset: push_start,
-                bytes: push,
-            });
-        }
-        if let Some((set, binding)) = st.table {
-            descriptor_bytes.push(DescriptorBytes {
-                set,
-                binding,
-                bytes: table,
-            });
-        }
     }
+    push_constants.truncate(pushes);
+    descriptor_bytes.truncate(tables_written);
 
     // Vertex buffers: offsets, per-bind strides, the address rules, and the bytes the draw's
     // vertex and instance ranges fetch.
-    let mut buffer_offsets = Vec::new();
-    let mut vertex_strides = Vec::new();
+    buffer_offsets.clear();
+    vertex_strides.clear();
     for vb in &t.vertex_buffers {
         match vertex.and_then(|v| v.buffers.get(&vb.slot.index)) {
             Some(&BoundBuffer::Buffer {
@@ -4412,50 +4475,55 @@ fn instantiate(
         Some(m) => (m.dispatch, Some(m.specialization)),
         None => (None, None),
     };
-    Ok(DrawCommands {
-        push_constants,
-        descriptor_bytes,
-        buffer_offsets,
-        indirect_needs_arguments: arguments_elsewhere || index_unbounded,
-        index_bounds_pass: index_unbounded && !arguments_elsewhere,
-        draw: command,
-        extents,
-        push_holes,
-        descriptor_ranges,
-        root_tables,
-        vertex_strides,
-        uses: {
-            // The indexed capture form reads its indices in the vertex stage, by address, and
-            // binds no index buffer.
-            let mut uses = match capture.as_ref().and_then(|c| c.indices) {
-                Some(indices) => vec![indices],
-                None => draw_uses(draw, overrun, t.tessellation.as_ref()),
-            };
-            // A mesh draw that reads its arguments reads 12 bytes; an emulated one's scan reads
-            // them in the compute stage.
-            if let vk::DrawCommand::DrawMeshTasksIndirect { .. } = command {
-                uses.push(indirect_use(12));
-            }
-            let scanned = mesh_dispatch
-                .as_ref()
-                .is_some_and(|d| matches!(d.mesh, MeshGroups::Scanned { arguments: Some(_) }));
-            if scanned {
-                uses.push(ResourceUse {
-                    resource: UseTarget::Indirect,
-                    access: AccessSet::READ,
-                    class: AccessClass::Storage,
-                    stages: vk::PipelineStageFlags2::COMPUTE_SHADER,
-                    range: Some(ByteRange { offset: 0, len: 12 }),
-                });
-            }
-            uses
-        },
-        index_overrun: overrun,
-        amplifications,
-        mesh_dispatch,
-        specialization,
-        tessellation_dispatch,
-    })
+    // The indexed capture form reads its indices in the vertex stage, by address, and binds no
+    // index buffer.
+    uses.clear();
+    match capture.as_ref().and_then(|c| c.indices) {
+        Some(indices) => uses.push(indices),
+        None => draw_uses(uses, draw, overrun, t.tessellation.as_ref()),
+    }
+    // A mesh draw that reads its arguments reads 12 bytes; an emulated one's scan reads them in
+    // the compute stage.
+    if let vk::DrawCommand::DrawMeshTasksIndirect { .. } = command {
+        uses.push(indirect_use(12));
+    }
+    let scanned = mesh_dispatch
+        .as_ref()
+        .is_some_and(|d| matches!(d.mesh, MeshGroups::Scanned { arguments: Some(_) }));
+    if scanned {
+        uses.push(ResourceUse {
+            resource: UseTarget::Indirect,
+            access: AccessSet::READ,
+            class: AccessClass::Storage,
+            stages: vk::PipelineStageFlags2::COMPUTE_SHADER,
+            range: Some(ByteRange { offset: 0, len: 12 }),
+        });
+    }
+    *indirect_needs_arguments = arguments_elsewhere || index_unbounded;
+    *index_bounds_pass = index_unbounded && !arguments_elsewhere;
+    *draw_command = command;
+    *overrun_out = overrun;
+    *amplifications_out = amplifications;
+    *mesh_dispatch_out = mesh_dispatch;
+    *specialization_out = specialization;
+    *tessellation_dispatch_out = tessellation_dispatch;
+    Ok(())
+}
+
+/// The `at`th value of `list`, which holds at least `at`: the one a draw before left there, else
+/// `made`, pushed.
+fn reused<T>(list: &mut Vec<T>, at: usize, made: impl FnOnce() -> T) -> &mut T {
+    if list.len() == at {
+        list.push(made());
+    }
+    &mut list[at]
+}
+
+/// `bytes`, made `len` zero bytes in the storage it holds.
+fn zeroed(bytes: &mut Vec<u8>, len: usize) -> &mut Vec<u8> {
+    bytes.clear();
+    bytes.resize(len, 0);
+    bytes
 }
 
 /// The `u32` of amplification push field `field` for amplification `a` of a plan drawing
@@ -4698,7 +4766,8 @@ fn indirect_use(len: u64) -> ResourceUse {
     }
 }
 
-/// The draw's own resources: its index buffer (`INDEX_INPUT`; the indices of a direct draw from the
+/// The draw's own resources, pushed onto `uses`: its index buffer (`INDEX_INPUT`; the indices of a
+/// direct draw from the
 /// index offset, the rest of the buffer for an indirect one), a patch draw's patch index buffer
 /// (`TESSELLATION_CONTROL_SHADER`, an emulated tessellation pipeline's `VERTEX_SHADER`, as
 /// storage; the indices of a direct draw's patches, the rest of the buffer for an indirect one)
@@ -4711,10 +4780,11 @@ fn indirect_use(len: u64) -> ResourceUse {
 /// from the index offset to [`IndexBufferRef::fetch_end`] when it is `Robust`, and only the indices
 /// it draws when it is `Clamped` (none, from offset 0, when it draws none).
 fn draw_uses(
+    uses: &mut Vec<ResourceUse>,
     draw: &DrawCall,
     overrun: Option<IndexOverrun>,
     factors: Option<&FactorTemplate>,
-) -> Vec<ResourceUse> {
+) {
     let index = |range| ResourceUse {
         resource: UseTarget::IndexBuffer,
         access: AccessSet::READ,
@@ -4735,7 +4805,6 @@ fn draw_uses(
         },
         range,
     };
-    let mut uses = Vec::new();
     // Where a stage reads it: an emulated function may not.
     let reads_patch_indices = factors.is_some_and(|t| t.patch_indices.is_some());
     if let (
@@ -4787,20 +4856,20 @@ fn draw_uses(
         };
         uses.push(control(UseTarget::ControlPointIndices, range));
     }
-    uses.extend(match *draw {
+    match *draw {
         // A mesh draw's arguments are its pipeline's to decide (`instantiate`).
         DrawCall::Primitives { .. }
         | DrawCall::Patches { .. }
         | DrawCall::MeshThreadgroups { .. }
         | DrawCall::MeshThreads { .. }
-        | DrawCall::MeshThreadgroupsIndirect { .. } => Vec::new(),
+        | DrawCall::MeshThreadgroupsIndirect { .. } => {}
         DrawCall::Indexed {
             index_type,
             index_buffer,
             index_count,
             index_offset,
             ..
-        } => vec![index(index_bytes(index_type).map(|size| {
+        } => uses.push(index(index_bytes(index_type).map(|size| {
             ByteRange {
                 offset: 0,
                 len: match overrun {
@@ -4813,24 +4882,23 @@ fn draw_uses(
                     }
                 },
             }
-        }))],
+        }))),
         // An emulated tessellation pipeline's scan reads a patch draw's arguments, through the
         // copy into its work buffer the consumer records with it.
-        DrawCall::PatchesIndirect { .. } if scanned => vec![ResourceUse {
+        DrawCall::PatchesIndirect { .. } if scanned => uses.push(ResourceUse {
             resource: UseTarget::Indirect,
             access: AccessSet::READ,
             class: AccessClass::Storage,
             stages: vk::PipelineStageFlags2::COMPUTE_SHADER,
             range: Some(ByteRange { offset: 0, len: 16 }),
-        }],
+        }),
         DrawCall::Indirect { indexed: None, .. } | DrawCall::PatchesIndirect { .. } => {
-            vec![indirect_use(16)]
+            uses.push(indirect_use(16))
         }
         DrawCall::Indirect {
             indexed: Some(_), ..
-        } => vec![index(None), indirect_use(20)],
-    });
-    uses
+        } => uses.extend([index(None), indirect_use(20)]),
+    }
 }
 
 /// Bytes of one index of `ty`, when it is a fixed-size index type.

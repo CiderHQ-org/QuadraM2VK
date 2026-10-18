@@ -5,6 +5,40 @@ use super::*;
 use crate::bind::plan::{PlannedBuffer, ResourceTemplate};
 use crate::bind::state::{length_class, StageTable};
 use crate::pipeline::interface::DescriptorView;
+use std::cell::RefCell;
+
+thread_local! {
+    /// The commands every [`instantiate`] of a test writes over, from one call to the next.
+    static KEPT: RefCell<DrawCommands> = RefCell::new(DrawCommands::default());
+}
+
+/// The commands of `draw` ([`super::instantiate`]) written over no draw's, which must be what
+/// writing them over those of every draw of the test before it gives (and its error the same).
+fn instantiate(
+    t: &GraphicsTemplate,
+    state: &BindState,
+    draw: &DrawCall,
+) -> Result<DrawCommands, BindError> {
+    let mut fresh = DrawCommands::default();
+    let made = super::instantiate(t, state, draw, &mut fresh).map(|()| fresh);
+    KEPT.with(|kept| {
+        let mut kept = kept.borrow_mut();
+        let over = super::instantiate(t, state, draw, &mut kept).map(|()| kept.clone());
+        assert_eq!(over, made, "the commands written over those before");
+    });
+    made
+}
+
+/// The draw's own resources ([`super::draw_uses`]), in a list of their own.
+fn draw_uses(
+    draw: &DrawCall,
+    overrun: Option<IndexOverrun>,
+    factors: Option<&FactorTemplate>,
+) -> Vec<ResourceUse> {
+    let mut uses = Vec::new();
+    super::draw_uses(&mut uses, draw, overrun, factors);
+    uses
+}
 
 /// Every Metal draw maps to the Vulkan draw of the same arguments, and the base-vertex push field
 /// reports Vulkan's `BaseVertex` (first vertex, or the vertex offset of an indexed draw) and

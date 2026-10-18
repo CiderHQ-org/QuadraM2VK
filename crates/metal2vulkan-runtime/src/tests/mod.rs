@@ -35,6 +35,7 @@ mod compute;
 mod contexts;
 mod copy_plan;
 mod degradation;
+mod depth_ranges;
 mod depth_stencil_resolve;
 mod descriptor_arena;
 #[cfg(any(m2v_gpu, m2v_cpu_icd))]
@@ -116,6 +117,7 @@ mod queue;
 mod range;
 mod rate_map;
 mod reader_sizes;
+mod render;
 mod resource;
 mod resource_ids;
 mod rotated;

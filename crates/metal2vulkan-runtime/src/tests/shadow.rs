@@ -776,7 +776,12 @@ fn textures_over_two_buffers_of_one_memory_see_each_others_writes() {
     let c = shadow(other, 0..1024);
     let aliases: KeyMap<_, _> = [(second, Alias { key: first })].into_iter().collect();
     let augmented = |uses: &[Use<ResourceKey>]| {
-        host_aliases::augmented(&aliases, None, uses).unwrap_or_else(|| uses.to_vec())
+        let mut all = Vec::new();
+        match host_aliases::augmented(Some(&aliases), None, uses, &mut all) {
+            true => all,
+            false => uses.to_vec(),
+        }
+    };
     };
     let mut sync = ShadowSync::default();
     assert_eq!(

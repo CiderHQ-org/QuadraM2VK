@@ -1241,6 +1241,10 @@ pub(super) fn layout(
     // One entry each color attachment: room for them all at once, so no color target moves.
     let mut colors: Vec<Option<ColorTarget>> =
         Vec::with_capacity(descriptor.color_attachments.len());
+    // Each attachment's extent and samples, held in place: at most every color and the
+    // depth/stencil attachment.
+    let mut extents = [([0, 0], 0); MAX_COLOR_ATTACHMENTS + 1];
+    let mut attached = 0;
     let positioned = Some(!descriptor.sample_positions.is_empty());
     for (index, color) in descriptor.color_attachments.iter().enumerate() {
         let which = Attachment::Color(index as u32);
@@ -1352,7 +1356,8 @@ pub(super) fn layout(
                 None,
             ),
         };
-        extents.push((target.extent, target.samples));
+        extents[attached] = (target.extent, target.samples);
+        attached += 1;
         colors.push(Some(ColorTarget {
             target,
             load: color.load_action,
@@ -1428,8 +1433,10 @@ pub(super) fn layout(
     }
     let depth_stencil = depth_stencil(call, maker, descriptor)?;
     if let Some(ds) = &depth_stencil {
-        extents.push((ds.target.extent, ds.target.samples));
+        extents[attached] = (ds.target.extent, ds.target.samples);
+        attached += 1;
     }
+    let extents = &extents[..attached];
     if let Some(buffer) = &descriptor.visibility_result_buffer {
         if !buffer.device().same(device) {
             return Err(foreign());
@@ -1437,7 +1444,7 @@ pub(super) fn layout(
     }
     let (extent, samples) = area(
         call,
-        &extents,
+        extents,
         [
             descriptor.render_target_width,
             descriptor.render_target_height,
@@ -1447,7 +1454,7 @@ pub(super) fn layout(
     // A pass without attachments past 16384 a side: Metal makes the encoder and fails the command
     // buffer from it on (`CommandBufferError::RenderTargetSize`). Nothing of it runs, so it
     // records into the device's largest framebuffer.
-    let oversized = past_target_size(&extents, extent);
+    let oversized = past_target_size(extents, extent);
     let extent = match oversized {
         true => {
             let [width, height, _] = device.shared().max_framebuffer;

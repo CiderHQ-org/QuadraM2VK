@@ -322,14 +322,27 @@ impl<I> HostAliases<I> {
     /// keys its bytes share ([`Placements::sharing`]); `None` where no use takes another (`uses`
     /// as they are).
     pub(super) fn augment(&self, uses: &[Use<ResourceKey>]) -> Option<Vec<Use<ResourceKey>>> {
+        let mut all = Vec::new();
+        self.augment_into(uses, &mut all).then_some(all)
+    }
+
+    /// [`augment`](Self::augment) into `all`, emptied first: whether a use took another (`all`
+    /// then holds `uses` and the uses they took; else it stays empty), so a caller that keeps
+    /// `all` makes no vector at each call.
+    pub(super) fn augment_into(
+        &self,
+        uses: &[Use<ResourceKey>],
+        all: &mut Vec<Use<ResourceKey>>,
+    ) -> bool {
+        all.clear();
         let joined = self.any.load(Ordering::Relaxed);
         let crowded = self.crowded.load(Ordering::Relaxed);
         if !joined && !crowded {
-            return None;
+            return false;
         }
         let inner = lock(&self.inner);
         let placements = crowded.then_some(&inner.placements);
-        augmented(&inner.aliases, placements, uses)
+        augmented(aliases, placements, uses, all)
     }
 }
 
@@ -348,13 +361,18 @@ fn release<I>(memories: &mut Memories<Memory<I>>, over: Over) {
     }
 }
 
-/// [`HostAliases::augment`] over `aliases` and, where given, `placements`.
+/// [`HostAliases::augment_into`] over, where given, `aliases` (the buffers that joined a memory)
+/// and `placements`, into `all`, empty: the uses added follow `uses`, which go in at the first.
+/// Whether any was added.
 pub(super) fn augmented(
     aliases: &KeyMap<ResourceKey, Alias>,
     placements: Option<&Placements>,
     uses: &[Use<ResourceKey>],
-) -> Option<Vec<Use<ResourceKey>>> {
-    let mut added: Vec<Use<ResourceKey>> = Vec::new();
+    all: &mut Vec<Use<ResourceKey>>,
+) -> bool {
+        if all.is_empty() {
+            all.reserve(2 * uses.len());
+        }
     for used in uses {
         let UseRange::Bytes(bytes) = &used.range else {
             continue;
@@ -380,10 +398,7 @@ pub(super) fn augmented(
             }
         });
     }
-    if added.is_empty() {
-        return None;
-    }
-    Some(uses.iter().cloned().chain(added).collect())
+    !all.is_empty()
 }
 
 /// The bytes each buffer over host pages lies over now, by key, and the ranges of bytes some key

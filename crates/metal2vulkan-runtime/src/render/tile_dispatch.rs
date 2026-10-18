@@ -1081,7 +1081,7 @@ impl RenderCommandEncoder {
             .map(|used| used.key)
             .filter(|key| !uses.resident().contains(key));
         if self.core.skips(named) {
-            self.tile.retain(&mut self.core);
+            self.tile.retain_exclusive(&mut self.core);
             return Ok(());
         }
         // The shadowed textures the dispatch uses, copied around it (the module docs).
@@ -1225,8 +1225,7 @@ impl RenderCommandEncoder {
         }
         self.core.retain(kernel);
         self.core.retain(objects);
-        self.core.retain(pipelines);
-        self.tile.retain(&mut self.core);
+        self.tile.retain_exclusive(&mut self.core);
         self.core.retain(bound.samplers);
         // The pass's tile memory, untracked: live until the command buffer completes.
         if let Some(buffer) = tile_memory {

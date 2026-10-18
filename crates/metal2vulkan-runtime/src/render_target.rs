@@ -105,15 +105,18 @@
 //!   and `STORE`: render pass compatibility ignores the operations, so the draws' secondary
 //!   command buffer and the encoder's graphics pipelines record against it while the store
 //!   actions may still change.
-//! - **Made and kept.** The pass `end_encoding` begins and the framebuffer are made per encoder,
-//!   but for a kept pass; its command buffer holds them until it completes. The compatible pass of
-//!   a shape the device keeps ([`shared_compatible_pass`]): made when an encoder of the shape
-//!   first needs one and destroyed with the device, for at most [`KEPT_SHAPES`] shapes; an
-//!   encoder of a shape past them makes its own, which its command buffer holds so.
+//! - **Made and kept.** A device keeps every pass it makes (`create`, [`KeptRenderPasses`]):
+//!   the compatible pass of a shape, and each pass an instance begins, by its shape, its
+//!   attachments' operations and its layouts (all a pass is made of, beside the device's
+//!   profile), made when an encoder first needs it and destroyed with the device, for at most
+//!   [`KEPT_PASSES`] passes; one past them is made per encoder, which its command buffer holds
+//!   until it completes. A render pass is never changed once made, so one serves every encoder
+//!   and thread at once. The framebuffer is made per instance; its command buffer holds it.
 
 use super::attachment_stand_in::Cause;
 use super::attachmentless;
 use super::binding_view::VkView;
+use super::color_list::ColorList;
 use super::device::lock;
 use super::error::{internal, Error};
 use super::exit_guard;
@@ -122,6 +125,7 @@ use super::image_barrier::{image_barrier, ImageDst};
 use super::key_hash::KeyMap;
 use super::render_pass::{
     AspectClear, AspectTarget, ColorTarget, DepthStencilTarget, PassLayout, Target,
+    MAX_COLOR_ATTACHMENTS,
 };
 use super::render_values::{LoadAction, StoreAction};
 use super::resolve::{Resolve, ResolveMode, ResolveStep};
@@ -168,11 +172,11 @@ impl Feedback {
 /// color index's resolve format, and the depth/stencil resolve's format and modes).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(super) struct PassShape {
-    pub(super) colors: Vec<Option<metal2vulkan::vk::Format>>,
+    pub(super) colors: ColorList<Option<metal2vulkan::vk::Format>>,
     pub(super) depth_stencil: Option<metal2vulkan::vk::Format>,
     pub(super) samples: u32,
     /// As long as `colors`: the resolve attachment's format where the index resolves.
-    pub(super) color_resolves: Vec<Option<metal2vulkan::vk::Format>>,
+    pub(super) color_resolves: ColorList<Option<metal2vulkan::vk::Format>>,
     /// The draws' subpass's depth/stencil resolve ([`subpass_step`]): its attachment's format,
     /// and its depth and stencil resolve mode (`resolve.rs`).
     pub(super) depth_stencil_resolve: Option<(metal2vulkan::vk::Format, ResolveMode, ResolveMode)>,
@@ -182,11 +186,11 @@ pub(super) struct PassShape {
     /// The color indices, ascending, whose images take no input attachment usage (a caller's
     /// image, `texture/wrapped.rs`) where the subpass reads the others as input attachments: their
     /// input references are `VK_ATTACHMENT_UNUSED`.
-    pub(super) no_inputs: Vec<u32>,
+    pub(super) no_inputs: ColorList<u32>,
     /// The color indices, ascending, the draws' subpass leaves out (`VK_ATTACHMENT_UNUSED`): the
     /// attachments its pipelines read and write as storage images in the pixel interlock
     /// (`framebuffer_fetch.rs`), but for the [`anchor`](PassShape::anchor).
-    pub(super) storage: Vec<u32>,
+    pub(super) storage: ColorList<u32>,
     /// Every subpass's view mask: the views of the instance's amplified draws, 0 without
     /// multiview (the module docs).
     pub(super) view_mask: u32,
@@ -194,51 +198,47 @@ pub(super) struct PassShape {
     /// names, by fragment output location: the pass color each location stores into
     /// (`color_reformat::Routing`), `None` for no attachment. Empty where location `i` names
     /// color `i`.
-    pub(super) locations: Vec<Option<u32>>,
+    pub(super) locations: ColorList<Option<u32>>,
 }
 
 impl PassShape {
     /// The shape of `layout`.
     pub(super) fn of(layout: &PassLayout) -> Result<PassShape, Error> {
-        let mut no_inputs = Vec::new();
+        let mut no_inputs = ColorList::new();
         if layout.fetch_inputs {
             for (index, color) in layout.colors.iter().enumerate() {
                 if let Some(color) = color {
                     if !takes_input(&color.target)? {
-                        no_inputs.push(index as u32);
+                        no_inputs.push(index as u32)?;
                     }
                 }
             }
         }
         Ok(PassShape {
-            colors: layout
-                .colors
-                .iter()
-                .map(|color| color.as_ref().map(|c| c.target.format))
-                .collect(),
+            colors: ColorList::of(
+                (layout.colors.iter()).map(|color| color.as_ref().map(|c| c.target.format)),
+            )?,
             depth_stencil: layout.depth_stencil.as_ref().map(|ds| ds.target.format),
             samples: layout.samples,
-            color_resolves: layout
-                .colors
-                .iter()
-                .map(|color| subpass_resolve(color.as_ref()).map(|r| r.attachment.format))
-                .collect(),
+            color_resolves: ColorList::of(
+                (layout.colors.iter())
+                    .map(|color| subpass_resolve(color.as_ref()).map(|r| r.attachment.format)),
+            )?,
             depth_stencil_resolve: subpass_step(layout)
                 .map(|step| (step.resolve.attachment.format, step.depth, step.stencil)),
             fetch_inputs: layout.fetch_inputs,
             no_inputs,
-            storage: Vec::new(),
+            storage: ColorList::new(),
             view_mask: 0,
-            locations: Vec::new(),
+            locations: ColorList::new(),
         })
     }
 
-    /// This shape with `storage` (ascending) left out of the draws' subpass.
-    pub(super) fn with_storage(&self, storage: Vec<u32>) -> PassShape {
-        PassShape {
-            storage,
-            ..self.clone()
-        }
+    /// This shape with `storage` (ascending) left out of the draws' subpass; refused (an
+    /// invariant) past a pass's color attachments.
+    pub(super) fn with_storage(self, storage: &[u32]) -> Result<PassShape, Error> {
+        let storage = ColorList::of(storage.iter().copied())?;
+        Ok(PassShape { storage, ..self })
     }
 
     /// This shape with every subpass of `view_mask`.
@@ -247,9 +247,11 @@ impl PassShape {
     }
 
     /// This shape with the draws' subpass's color references naming `locations`
-    /// ([`locations`](PassShape::locations)).
-    pub(super) fn with_locations(self, locations: Vec<Option<u32>>) -> PassShape {
-        PassShape { locations, ..self }
+    /// ([`locations`](PassShape::locations)); refused (an invariant) past a pass's color
+    /// attachments.
+    pub(super) fn with_locations(self, locations: &[Option<u32>]) -> Result<PassShape, Error> {
+        let locations = ColorList::of(locations.iter().copied())?;
+        Ok(PassShape { locations, ..self })
     }
 
     /// The draws' subpass's color reference count: one per fragment output location a pipeline
@@ -333,7 +335,7 @@ pub(super) fn later_steps(layout: &PassLayout) -> impl Iterator<Item = &ResolveS
 }
 
 /// One attachment's operations: of its color or depth aspect, then of its stencil aspect.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 struct Ops {
     load: vk::AttachmentLoadOp,
     store: vk::AttachmentStoreOp,
@@ -779,75 +781,149 @@ pub(super) unsafe fn feedback_barriers(
 }
 
 /// The pass of `shape` with every operation `LOAD` and `STORE`: compatible with every pass of
-/// that shape. A shape without attachments takes its device's kept pass (`attachmentless.rs`).
+/// that shape, kept by its device ([`create`]). A shape without attachments takes its device's
+/// kept pass (`attachmentless.rs`).
 pub(super) fn compatible_pass(
     device: &Device,
     shape: &PassShape,
 ) -> Result<RenderPassObject, Error> {
-    match attachmentless::kept(device, shape)? {
-        Some(kept) => Ok(kept),
-        None => made_compatible_pass(device, shape),
+    if let Some(kept) = attachmentless::kept(device, shape)? {
+        return Ok(kept);
     }
-}
-
-/// The most shapes whose compatible pass a device keeps (the module docs): far more than a
-/// program's passes take, which a few formats and sample counts make.
-const KEPT_SHAPES: usize = 64;
-
-/// The compatible passes a device keeps, by shape ([`shared_compatible_pass`]).
-#[derive(Default)]
-pub(super) struct KeptCompatible(KeyMap<PassShape, vk::RenderPass>);
-
-impl KeptCompatible {
-    /// Destroy every kept pass; the device is idle, and is destroyed next.
-    pub(super) fn destroy(&self, raw: &ash::Device) {
-        for &pass in self.0.values() {
-            // SAFETY: the device is idle, so no pending command uses the pass, and a pipeline
-            // made with it does not keep it.
-            unsafe { release::object(raw, pass) };
-        }
+    // Found without writing its operations out.
+    if let Some(raw) = lock(&device.shared().render_passes).compatible(shape) {
+        return Ok(RenderPassObject::kept(device, raw));
     }
-}
-
-/// [`compatible_pass`], kept: the device's pass of `shape` (the module docs), made now where it
-/// keeps none. Every pass of a shape is compatible with every other, so one serves every encoder.
-pub(super) fn shared_compatible_pass(
-    device: &Device,
-    shape: &PassShape,
-) -> Result<Arc<RenderPassObject>, Error> {
-    let kept = &device.shared().compatible_passes;
-    if let Some(&raw) = lock(kept).0.get(shape) {
-        return Ok(Arc::new(RenderPassObject::kept(device, raw)));
-    }
-    let pass = compatible_pass(device, shape)?;
-    let mut passes = lock(kept);
-    // Another encoder's may have come first; a kept pass (without attachments) is kept already.
-    if pass.owner == Owner::Holders && passes.0.len() < KEPT_SHAPES && !passes.0.contains_key(shape)
-    {
-        let raw = pass.into_kept();
-        passes.0.insert(shape.clone(), raw);
-        return Ok(Arc::new(RenderPassObject::kept(device, raw)));
-    }
-    Ok(Arc::new(pass))
-}
-
-/// The pass of `shape` with every operation `LOAD` and `STORE`, made now.
-pub(super) fn made_compatible_pass(
-    device: &Device,
-    shape: &PassShape,
-) -> Result<RenderPassObject, Error> {
-    let colors = vec![KEEP; shape.colors.iter().flatten().count()];
-    let resolves = vec![KEEP; shape.color_resolves.iter().flatten().count()];
+    let (colors, resolves) = kept_operations(shape);
+    let rest = PassRest::compatible(shape);
     create(
         device,
         shape,
         &colors,
-        shape.depth_stencil.map(|_| KEEP),
+        rest.depth_stencil,
         &resolves,
-        shape.depth_stencil_resolve.map(|_| KEEP),
-        true,
-        Feedback::NONE,
+        rest.depth_stencil_resolve,
+        rest.resolving,
+        rest.feedback,
+        rest.depth,
     )
+}
+
+/// [`compatible_pass`], shared: every pass of a shape is compatible with every other, so one
+/// serves every encoder.
+pub(super) fn shared_compatible_pass(
+    device: &Device,
+    shape: &PassShape,
+) -> Result<Arc<RenderPassObject>, Error> {
+    compatible_pass(device, shape).map(Arc::new)
+}
+
+/// The pass of `shape` with every operation `LOAD` and `STORE`, made now, of its own (the pass a
+/// device keeps for a shape without attachments, `attachmentless.rs`).
+pub(super) fn made_compatible_pass(
+    device: &Device,
+    shape: &PassShape,
+) -> Result<RenderPassObject, Error> {
+    let (colors, resolves) = kept_operations(shape);
+    let rest = PassRest::compatible(shape);
+    make_pass(
+        device,
+        shape,
+        &colors,
+        rest.depth_stencil,
+        &resolves,
+        rest.depth_stencil_resolve,
+        rest.resolving,
+        rest.feedback,
+        rest.depth,
+    )
+}
+
+/// The color and resolve operations of a compatible pass of `shape`: [`KEEP`] for each present
+/// color attachment, and for each color resolve.
+fn kept_operations(shape: &PassShape) -> (Vec<Ops>, Vec<Ops>) {
+    let colors = vec![KEEP; shape.colors.iter().flatten().count()];
+    let resolves = vec![KEEP; shape.color_resolves.iter().flatten().count()];
+    (colors, resolves)
+}
+
+/// The most passes a device keeps (the module docs): far more than a program's passes take,
+/// which a few shapes, each begun with a few operations and layouts, make.
+const KEPT_PASSES: usize = 256;
+
+/// The render passes a device keeps ([`create`]), by shape, each with the rest of what it was
+/// made of.
+#[derive(Default)]
+pub(super) struct KeptRenderPasses {
+    by_shape: KeyMap<PassShape, Vec<KeptPass>>,
+    /// How many it keeps, of every shape.
+    count: usize,
+}
+
+/// One pass a device keeps: what [`create`] made it of beside its shape, and the pass.
+struct KeptPass {
+    colors: Vec<Ops>,
+    resolves: Vec<Ops>,
+    rest: PassRest,
+    raw: vk::RenderPass,
+}
+
+/// What [`create`] makes a pass of beside its shape and its color and resolve operations.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct PassRest {
+    depth_stencil: Option<Ops>,
+    depth_stencil_resolve: Option<Ops>,
+    resolving: bool,
+    feedback: Feedback,
+    depth: vk::ImageLayout,
+}
+
+impl PassRest {
+    /// A compatible pass's ([`compatible_pass`]): every attachment loaded and stored, in
+    /// `GENERAL`, resolving.
+    fn compatible(shape: &PassShape) -> PassRest {
+        PassRest {
+            depth_stencil: shape.depth_stencil.map(|_| KEEP),
+            depth_stencil_resolve: shape.depth_stencil_resolve.map(|_| KEEP),
+            resolving: true,
+            feedback: Feedback::NONE,
+            depth: vk::ImageLayout::GENERAL,
+        }
+    }
+}
+
+impl KeptRenderPasses {
+    /// The kept compatible pass of `shape`: its operations those of [`kept_operations`].
+    fn compatible(&self, shape: &PassShape) -> Option<vk::RenderPass> {
+        let rest = PassRest::compatible(shape);
+        let kept = |ops: &[Ops], count: usize| ops.len() == count && ops.iter().all(|o| *o == KEEP);
+        let colors = shape.colors.iter().flatten().count();
+        let resolves = shape.color_resolves.iter().flatten().count();
+        let mut found = self.by_shape.get(shape)?.iter();
+        let found = found.find(|k| k.rest == rest && kept(&k.colors, colors));
+        found.filter(|k| kept(&k.resolves, resolves)).map(|k| k.raw)
+    }
+
+    /// The kept pass of `shape` made of `colors`, `resolves` and `rest`.
+    fn get(
+        &self,
+        shape: &PassShape,
+        (colors, resolves): (&[Ops], &[Ops]),
+        rest: PassRest,
+    ) -> Option<vk::RenderPass> {
+        let kept = self.by_shape.get(shape)?.iter();
+        let mut kept = kept.filter(|k| k.rest == rest && k.colors == colors);
+        kept.find(|k| k.resolves == resolves).map(|k| k.raw)
+    }
+
+    /// Destroy every kept pass; the device is idle, and is destroyed next.
+    pub(super) fn destroy(&self, raw: &ash::Device) {
+        for kept in self.by_shape.values().flatten() {
+            // SAFETY: the device is idle, so no pending command uses the pass, and a pipeline
+            // made with it does not keep it.
+            unsafe { release::object(raw, kept.raw) };
+        }
+    }
 }
 
 /// The instance of `shape` at `at` of the pass `layout` begins, with its load and store
@@ -1081,16 +1157,16 @@ pub(super) fn later_resolve(
         .as_ref()
         .ok_or_else(|| internal("a depth/stencil resolve without its attachment"))?;
     let shape = PassShape {
-        colors: Vec::new(),
+        colors: ColorList::new(),
         depth_stencil: Some(ds.target.format),
         samples: layout.samples,
-        color_resolves: Vec::new(),
+        color_resolves: ColorList::new(),
         depth_stencil_resolve: Some((step.resolve.attachment.format, step.depth, step.stencil)),
         fetch_inputs: false,
-        no_inputs: Vec::new(),
-        storage: Vec::new(),
+        no_inputs: ColorList::new(),
+        storage: ColorList::new(),
         view_mask: 0,
-        locations: Vec::new(),
+        locations: ColorList::new(),
     };
     let pass = create(
         device,
@@ -1126,22 +1202,22 @@ pub(super) fn reach_pass(
     let load = vk::AttachmentLoadOp::LOAD;
     let store = vk::AttachmentStoreOp::STORE;
     let shape = PassShape {
-        colors: Vec::new(),
+        colors: ColorList::new(),
         depth_stencil: None,
         samples: target.samples,
-        color_resolves: Vec::new(),
+        color_resolves: ColorList::new(),
         depth_stencil_resolve: None,
         fetch_inputs: false,
-        no_inputs: Vec::new(),
-        storage: Vec::new(),
+        no_inputs: ColorList::new(),
+        storage: ColorList::new(),
         view_mask: 0,
-        locations: Vec::new(),
+        locations: ColorList::new(),
     };
     let (pass, usage, stages, read, write) = match depth_stencil {
         false => {
             let shape = PassShape {
-                colors: vec![Some(target.format)],
-                color_resolves: vec![None],
+                colors: ColorList::of([Some(target.format)])?,
+                color_resolves: ColorList::of([None])?,
                 ..shape
             };
             let ops = Ops {
@@ -1222,12 +1298,10 @@ pub(super) fn reach_pass(
 /// The pass of `shape` with `colors`' operations (one per present color attachment, in index
 /// order), `depth_stencil`'s, and the resolve attachments' (`resolves`, one per color index that
 /// resolves, then `depth_stencil_resolve`'s), every attachment in `GENERAL` but the `feedback`
-/// colors, in `ATTACHMENT_FEEDBACK_LOOP_OPTIMAL_EXT` throughout: the draws' subpass (the module
-/// docs). Made with `vkCreateRenderPass2` (core in Vulkan 1.2, which every runtime
-/// device has), whose subpass states the depth/stencil resolve. A color attachment the draws'
-/// subpass leaves out resolves nothing there (Vulkan resolves only a referenced attachment), nor
-/// does the sample planes' anchor (its samples are undefined there); the pass resolves nothing
-/// unless `resolving`.
+/// undefined there); the pass resolves nothing unless `resolving`. Kept by the device
+/// ([`KeptRenderPasses`]), at most [`KEPT_PASSES`] of them: the pass of the same shape,
+/// operations and layouts is the same object, made once (its creation reads nothing else but the
+/// device's profile, which is fixed); one past them is made of its own, for its holders.
 fn create(
     device: &Device,
     shape: &PassShape,
@@ -1237,6 +1311,62 @@ fn create(
     depth_stencil_resolve: Option<Ops>,
     resolving: bool,
     feedback: Feedback,
+) -> Result<RenderPassObject, Error> {
+    let rest = PassRest {
+        depth_stencil,
+        depth_stencil_resolve,
+        resolving,
+        feedback,
+        depth,
+    };
+    let kept = &device.shared().render_passes;
+    if let Some(raw) = lock(kept).get(shape, (colors, resolves), rest) {
+        return Ok(RenderPassObject::kept(device, raw));
+    }
+    let pass = make_pass(
+        device,
+        shape,
+        colors,
+        depth_stencil,
+        resolves,
+        depth_stencil_resolve,
+        resolving,
+        feedback,
+        depth,
+    )?;
+    let mut passes = lock(kept);
+    // Another encoder's may have come first: then this one is its holders'.
+    if passes.count < KEPT_PASSES && passes.get(shape, (colors, resolves), rest).is_none() {
+        let raw = pass.into_kept();
+        let entry = KeptPass {
+            colors: colors.to_vec(),
+            resolves: resolves.to_vec(),
+            rest,
+            raw,
+        };
+        passes
+            .by_shape
+            .entry(shape.clone())
+            .or_default()
+            .push(entry);
+        passes.count += 1;
+        return Ok(RenderPassObject::kept(device, raw));
+    }
+    Ok(pass)
+}
+
+/// [`create`]'s pass, made now with `vkCreateRenderPass2`, its holders' (counted:
+/// `WorkCounts::render_passes_made`).
+fn make_pass(
+    device: &Device,
+    shape: &PassShape,
+    colors: &[Ops],
+    depth_stencil: Option<Ops>,
+    resolves: &[Ops],
+    depth_stencil_resolve: Option<Ops>,
+    resolving: bool,
+    feedback: Feedback,
+    depth: vk::ImageLayout,
 ) -> Result<RenderPassObject, Error> {
     let general = vk::ImageLayout::GENERAL;
     // A feedback color is in its layout before, during and after the instance: the image
@@ -1420,6 +1550,7 @@ fn create(
     // SAFETY: `info` and every array and structure it points at are live for the call; the
     // device is Vulkan 1.2 or later (the compile layer's floor).
     let raw = unsafe { crate::creation::render_pass2(device.shared().vk(), &info) }?;
+    device.shared().counts.render_pass_made();
     Ok(RenderPassObject {
         device: device.clone(),
         raw,
@@ -1646,15 +1777,37 @@ fn made_framebuffer(
     })
 }
 
+/// The clear values of a pass's attachments, in its framebuffer's order (`clear_values`): each
+/// color's, then the depth/stencil attachment's, held in place rather than allocated at every
+/// pass.
+#[derive(Clone, Copy)]
+pub(super) struct ClearValues {
+    values: [vk::ClearValue; MAX_COLOR_ATTACHMENTS + 1],
+    len: usize,
+}
+
+impl ClearValues {
+    fn push(&mut self, value: vk::ClearValue) {
+        self.values[self.len] = value;
+        self.len += 1;
+    }
+
+    /// The values, in the framebuffer's order.
+    pub(super) fn as_slice(&self) -> &[vk::ClearValue] {
+        &self.values[..self.len]
+    }
+}
+
 /// The clear values of `layout`'s attachments, in the framebuffer's order (ignored where the load
 /// operation is not `CLEAR`).
-pub(super) fn clear_values(layout: &PassLayout) -> Vec<vk::ClearValue> {
-    let mut values: Vec<vk::ClearValue> = layout
-        .colors
-        .iter()
-        .flatten()
-        .map(|color| vk::ClearValue { color: color.clear })
-        .collect();
+pub(super) fn clear_values(layout: &PassLayout) -> ClearValues {
+    let mut values = ClearValues {
+        values: [vk::ClearValue::default(); MAX_COLOR_ATTACHMENTS + 1],
+        len: 0,
+    };
+    for color in layout.colors.iter().flatten() {
+        values.push(vk::ClearValue { color: color.clear });
+    }
     if let Some(ds) = &layout.depth_stencil {
         let mut value = vk::ClearDepthStencilValue::default();
         for aspect in [ds.depth.as_ref(), ds.stencil.as_ref()]
@@ -1695,14 +1848,29 @@ pub(super) fn attachment_uses_but(
     layout: &PassLayout,
     left: impl Fn(usize) -> bool,
 ) -> Result<Vec<Use<ResourceKey>>, Error> {
-    let mut uses = Vec::new();
-    let colors = layout.colors.iter().enumerate();
-    let kept = colors.filter(|&(index, _)| !left(index));
-    for color in kept.filter_map(|(_, color)| color.as_ref()) {
-        uses.extend(target_uses(&color.target, false)?);
+    let kept = || {
+        let colors = layout.colors.iter().enumerate();
+        colors
+            .filter(|&(index, _)| !left(index))
+            .filter_map(|(_, color)| color.as_ref())
+    };
+    // Room for every use at once, a read and a write of each attachment and resolve, so the list
+    // is allocated once.
+    let resolves = layout
+        .colors
+        .iter()
+        .flatten()
+        .filter(|c| c.resolve.is_some());
+    let targets = kept().count()
+        + usize::from(layout.depth_stencil.is_some())
+        + resolves.count()
+        + depth_stencil_steps(layout).count();
+    let mut uses = Vec::with_capacity(2 * targets);
+    for color in kept() {
+        add_target_uses(&mut uses, &color.target, false)?;
     }
     if let Some(ds) = &layout.depth_stencil {
-        uses.extend(target_uses(&ds.target, true)?);
+        add_target_uses(&mut uses, &ds.target, true)?;
     }
     let mut add =
         |target: &Target, stages, read, write| add_uses(&mut uses, target, stages, (read, write));
@@ -1738,24 +1906,38 @@ pub(super) fn attachment_uses_but(
 /// attachment of the pass of `layout` renders (its resolve textures included): a use of the
 /// attachment other than as an attachment, inside its render pass instance, which Vulkan leaves
 /// undefined (`texture/attached_reads.rs`). A use that reads a copy or a snapshot names another
-/// resource.
-pub(super) fn shares_attachment<'a>(
+/// resource. An attachment's memory is the key and range [`attachment_uses`] gives both its read
+/// and its write, taken here one attachment at a time, nothing collected: every draw asks while
+/// the notice is pending (`Device::degrade_attachment_reads`).
+pub(super) fn shares_attachment(
     layout: &PassLayout,
-    uses: impl IntoIterator<Item = &'a Use<ResourceKey>>,
+    uses: &[Use<ResourceKey>],
 ) -> Result<bool, Error> {
-    let mut used = uses
-        .into_iter()
-        .filter(|used| used.read != Access::NONE || used.write != Access::NONE)
-        .peekable();
-    if used.peek().is_none() {
+    let used = || {
+        uses.iter()
+            .filter(|used| used.read != Access::NONE || used.write != Access::NONE)
+    };
+    if used().next().is_none() {
         return Ok(false);
     }
-    let attached = attachment_uses(layout)?;
-    Ok(used.any(|used| {
-        attached
-            .iter()
-            .any(|a| a.key == used.key && a.range.overlaps(&used.range))
-    }))
+    let colors = layout.colors.iter().flatten();
+    let targets = colors
+        .clone()
+        .map(|color| &color.target)
+        .chain(layout.depth_stencil.as_ref().map(|ds| &ds.target))
+        .chain(colors.filter_map(|color| color.resolve.as_ref().map(|r| &r.attachment)))
+        .chain(depth_stencil_steps(layout).map(|step| &step.resolve.attachment));
+    for target in targets {
+        let levels = target.level..target.level + 1;
+        let layers = target.layer..target.layer + target.layers;
+        let a = target
+            .texture
+            .image_use(levels, layers, Access::NONE, false)?;
+        if used().any(|used| a.key == used.key && a.range.overlaps(&used.range)) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// The keys of the buffers whose bytes the pass's attachments lie in (their resolve textures
@@ -1783,27 +1965,36 @@ pub(super) fn target_uses(
     depth_stencil: bool,
 ) -> Result<Vec<Use<ResourceKey>>, Error> {
     let mut uses = Vec::with_capacity(2);
+    add_target_uses(&mut uses, target, depth_stencil)?;
+    Ok(uses)
+}
+
+/// Add to `uses` what [`target_uses`] gives.
+fn add_target_uses(
+    uses: &mut Vec<Use<ResourceKey>>,
+    target: &Target,
+    depth_stencil: bool,
+) -> Result<(), Error> {
     match depth_stencil {
         false => add_uses(
-            &mut uses,
+            uses,
             target,
             COLOR_STAGES,
             (
                 vk::AccessFlags2::COLOR_ATTACHMENT_READ,
                 vk::AccessFlags2::COLOR_ATTACHMENT_WRITE,
             ),
-        )?,
+        ),
         true => add_uses(
-            &mut uses,
+            uses,
             target,
             DEPTH_STAGES,
             (
                 vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_READ,
                 vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE,
             ),
-        )?,
+        ),
     }
-    Ok(uses)
 }
 
 /// Add to `uses` `target`'s level and layers, read (`read`) and written (`write`) in `stages`.

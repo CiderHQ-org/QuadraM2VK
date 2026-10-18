@@ -35,7 +35,7 @@ use super::Before;
 use crate::attachment_stand_in::StandInCopies;
 use crate::depth_stand_in::StandInCopies as DepthStandInCopies;
 use crate::device::functions::Vk;
-use crate::render_target::{self, FeedbackImage, FramebufferObject, RenderPassObject};
+use crate::render_target::{self, ClearValues, FramebufferObject, MovedImage, RenderPassObject};
 use crate::resolve::ResolveSource;
 use crate::sample_planes::PlanesCommands;
 use crate::shadow::ShadowCopy;
@@ -106,7 +106,7 @@ pub(super) struct PassSteps {
     pub(super) resolve_instance: Option<(RenderPassObject, FramebufferObject)>,
     /// The depth/stencil resolves past the first, each a pass and framebuffer of its own.
     pub(super) later_resolves: Vec<(RenderPassObject, FramebufferObject)>,
-    pub(super) clear_values: Vec<vk::ClearValue>,
+    pub(super) clear_values: ClearValues,
     pub(super) render_area: vk::Rect2D,
 }
 
@@ -191,7 +191,7 @@ impl PassSteps {
                 .render_pass(pass)
                 .framebuffer(framebuffer)
                 .render_area(self.render_area)
-                .clear_values(&self.clear_values);
+                .clear_values(self.clear_values.as_slice());
             raw.cmd_begin_render_pass(
                 command_buffer,
                 &begin,
@@ -283,7 +283,7 @@ impl PassSteps {
                     .render_pass(pass.raw)
                     .framebuffer(framebuffer.raw)
                     .render_area(self.render_area)
-                    .clear_values(&self.clear_values);
+                    .clear_values(self.clear_values.as_slice());
                 raw.cmd_begin_render_pass(command_buffer, &begin, vk::SubpassContents::INLINE);
                 raw.cmd_end_render_pass(command_buffer);
             }

@@ -1,5 +1,6 @@
 use super::image_plan::committed;
 use crate::attachmentless::keeps;
+use crate::color_list::ColorList;
 use crate::framebuffer_fetch::through_planes;
 use crate::render_target::PassShape;
 use metal2vulkan::vk::Format;
@@ -8,16 +9,16 @@ use metal2vulkan::vk::Format;
 /// draws' subpass leaves out `storage`.
 fn shape(samples: u32, colors: &[Option<Format>], depth: bool, storage: &[u32]) -> PassShape {
     PassShape {
-        colors: colors.to_vec(),
+        colors: ColorList::of(colors.iter().copied()).unwrap(),
         depth_stencil: depth.then_some(Format::D32_SFLOAT),
         samples,
-        color_resolves: vec![None; colors.len()],
+        color_resolves: ColorList::of(colors.iter().map(|_| None)).unwrap(),
         depth_stencil_resolve: None,
         fetch_inputs: false,
-        no_inputs: Vec::new(),
-        storage: storage.to_vec(),
+        no_inputs: ColorList::new(),
+        storage: ColorList::of(storage.iter().copied()).unwrap(),
         view_mask: 0,
-        locations: Vec::new(),
+        locations: ColorList::new(),
     }
 }
 
@@ -66,7 +67,9 @@ fn a_routed_subpass_references_the_color_each_location_names() {
         (0..3).map(|l| own.references(l)).collect::<Vec<_>>(),
         [false, true, false]
     );
-    let routed = shape(1, &[None, float], false, &[]).with_locations(vec![Some(1), None]);
+    let routed = shape(1, &[None, float], false, &[])
+        .with_locations(&[Some(1), None])
+        .unwrap();
     assert_eq!(
         (0..3).map(|l| routed.references(l)).collect::<Vec<_>>(),
         [true, false, false]

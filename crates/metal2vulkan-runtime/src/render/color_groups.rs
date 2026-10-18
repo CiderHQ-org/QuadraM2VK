@@ -604,6 +604,7 @@ impl RenderCommandEncoder {
     /// there as Metal checks it, and set by its own group's encoder), none in a later group's
     /// encoder (whose call changes nothing). Outside a grouped pass, the layout's at `index`.
     pub(super) fn color_slot(&mut self, index: u32) -> Option<&mut Option<ColorTarget>> {
+        self.kept_attachments = None;
         let Some(g) = self.grouped.as_mut() else {
             return self.layout.colors.get_mut(index as usize);
         };

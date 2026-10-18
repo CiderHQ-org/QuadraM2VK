@@ -1033,12 +1033,6 @@ impl ArgumentTable {
         );
     }
 
-    /// Each object bound, by slot, in the table's order: its buffers, then its textures, then
-    /// its sampler states, each by index.
-    fn bound(&self) -> impl DoubleEndedIterator<Item = ((SlotClass, u32), Bound<'_>)> {
-        bound_in(&self.buffers, &self.textures, &self.samplers)
-    }
-
     /// Hold everything bound until `core`'s command buffer completes: a command uses it, and
     /// the command buffer lists it among its used resources (`used_resources.rs`). Once while it
     /// binds the same objects: where `core` retained the table before and it binds exactly the
@@ -1050,7 +1044,24 @@ impl ArgumentTable {
     /// as one hold of them all went.
     pub(super) fn retain(&self, core: &mut EncoderCore) {
         let mut retained = lock(&self.retained.0);
+        let objects = (&self.buffers, &self.textures, &self.samplers);
+        retain_into(objects, self.stamp, &mut retained, core);
+    }
+
+    /// [`retain`](Self::retain) by its only holder: the borrow is exclusive, so no other thread
+    /// can reach the table's record of its last retain, which is read and written without taking
+    /// its lock (a render encoder's own tables, at each draw).
+    pub(super) fn retain_exclusive(&mut self, core: &mut EncoderCore) {
+        let ArgumentTable {
+            buffers,
+            textures,
+            samplers,
+            retained,
             stamp,
+            ..
+        } = self;
+        let retained = retained.0.get_mut().unwrap_or_else(PoisonError::into_inner);
+        retain_into((buffers, textures, samplers), *stamp, retained, core);
     }
 
     /// Let go of `object`, which the table bound at `slot` until a call replaced or unbound it:
@@ -1097,8 +1108,48 @@ impl ArgumentTable {
     }
 }
 
-/// The objects a table's `buffers`, `textures` and `samplers` bind, by slot, in the table's order
-/// ([`ArgumentTable::bound`]).
+/// [`ArgumentTable::retain`] of a table that binds `objects` (its buffers, textures and sampler
+/// states) under `stamp`, whose record of its last retain is `retained`.
+fn retain_into(
+    objects: (
+        &BTreeMap<u32, (Buffer, u64)>,
+        &BTreeMap<u32, Texture>,
+        &BTreeMap<u32, (SamplerState, Option<[f32; 2]>)>,
+    ),
+    stamp: Stamp,
+    retained: &mut RetainedBy,
+    core: &mut EncoderCore,
+) {
+    let (buffers, textures, samplers) = objects;
+    let bound = || bound_in(buffers, textures, samplers);
+    if retained.core == Some(core.id()) {
+        // No call changed what it binds since: the same objects, by the stamp.
+        if retained.stamp == Some(stamp) {
+            return;
+        }
+        let now = bound().map(|(slot, object)| (slot, object.address()));
+        if retained.bound.iter().copied().eq(now) {
+            retained.stamp = Some(stamp);
+            return;
+        }
+    }
+    let keys = buffers.values().map(|(b, _)| b.identity().key);
+    let texture_keys = textures.values().map(Texture::use_key);
+    core.touch_keys(keys.chain(texture_keys));
+    for (slot, object) in bound().rev() {
+        if !retained.holds(core, slot, object) {
+            core.retain_shared(object.held());
+        }
+    }
+    retained.bound.clear();
+    (retained.bound).extend(bound().map(|(slot, object)| (slot, object.address())));
+    retained.core = Some(core.id());
+    retained.stamp = Some(stamp);
+    core.device().shared().counts.argument_table_retained();
+}
+
+/// The objects a table's `buffers`, `textures` and `samplers` bind, by slot, in the table's order:
+/// its buffers, then its textures, then its sampler states, each by index.
 fn bound_in<'a>(
     buffers: &'a BTreeMap<u32, (Buffer, u64)>,
     textures: &'a BTreeMap<u32, Texture>,

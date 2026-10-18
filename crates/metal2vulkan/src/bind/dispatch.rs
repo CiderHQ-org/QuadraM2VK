@@ -59,7 +59,7 @@
 use crate::bind::indirect_clamp::IndirectClamp;
 use crate::bind::instantiate::{
     bind_buffers, put, slot_field, texel_ranges, BufferExtent, DescriptorBytes, DescriptorRange,
-    IndirectRef, PushConstantWrite, PushHole, RootEntry, RootTable,
+    FieldBytes, IndirectRef, PushConstantWrite, PushHole, RootEntry, RootTable,
 };
 use crate::bind::plan::compute::{internal, not_implemented, spec_key};
 use crate::bind::plan::{
@@ -581,14 +581,11 @@ pub(crate) fn regions(rules: &LocalRules, dispatch: &Dispatch) -> Result<Planned
 
 /// The `StageInRegion` push field's bytes (two `uvec4`): the origin and the size of region `r`,
 /// each padded with a zero `w`.
-fn stage_in_region_bytes(r: StageInRegion) -> Vec<u8> {
-    let mut out = Vec::with_capacity(32);
-    for v in [r.origin, r.size] {
-        for x in v.into_iter().chain([0]) {
-            out.extend_from_slice(&x.to_le_bytes());
-        }
-    }
-    out
+fn stage_in_region_bytes(r: StageInRegion) -> FieldBytes {
+    let words = [r.origin, r.size]
+        .into_iter()
+        .flat_map(|v| v.into_iter().chain([0]));
+    words.flat_map(|x| x.to_le_bytes()).collect()
 }
 
 impl BindingPlan {
@@ -811,10 +808,9 @@ fn instantiate(
     let compute = vk::ShaderStageFlags::COMPUTE;
 
     // Buffer slots: descriptor ranges and residuals, root entries, extents; texel buffers.
-    let bound = bind_buffers(&t.buffers, state)?;
-    let mut descriptor_ranges = bound.descriptor_ranges;
+    let (mut descriptor_ranges, mut extents) = (Vec::new(), Vec::new());
+    let bound = bind_buffers(&t.buffers, state, &mut descriptor_ranges, &mut extents)?;
     descriptor_ranges.extend(texel_ranges(&t.resources, state)?);
-    let extents = bound.extents;
 
     // The root table: the Psb entries and the resident set.
     let mut push_holes = Vec::new();
@@ -834,7 +830,7 @@ fn instantiate(
 
     // Push fields that do not change per region.
     for f in &t.fields {
-        let bytes: Vec<u8> = match f.field {
+        let bytes: FieldBytes = match f.field {
             // Only a preprocess writes region records.
             PushField::ReplayRegionAddress if records == Records::Binder => {
                 return Err(not_implemented(Feature::GpuEncodedIndirectCommands));
@@ -894,7 +890,7 @@ fn instantiate(
                     ) => s,
                     _ => 0,
                 };
-                stride.to_le_bytes().to_vec()
+                FieldBytes::of(&stride.to_le_bytes())
             }
             field => slot_field(field, &bound.residuals, &t.resources, state)
                 .ok_or_else(|| internal(format!("a compute push field {field:?}")))?,

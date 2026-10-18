@@ -608,6 +608,10 @@ let draw = DrawCall::Primitives {
 let commands = plan.instantiate_draw(&state, &draw)?;
 ```
 
+`instantiate_draw_into` writes the same commands over a `DrawCommands` you keep, in the storage
+its vectors already hold: keep one from draw to draw (`DrawCommands::default()` to start) and the
+draws allocate none of it again once it holds as much.
+
 A dispatch is one or more regions (a grid that is not whole threadgroups adds edge regions), each
 with its group count, specialization and push constants: create one `VkPipeline` per distinct
 specialization. A kernel that steps a stage-in attribute by thread position, or reads

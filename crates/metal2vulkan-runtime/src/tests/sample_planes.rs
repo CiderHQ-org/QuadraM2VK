@@ -4,6 +4,7 @@
 //! its anchor (`render_target.rs`); and which formats' copy views keep their components.
 
 use super::image_plan::committed;
+use crate::color_list::ColorList;
 use crate::framebuffer_fetch::{through_multisampled_storage, through_planes};
 use crate::render_target::PassShape;
 use crate::render_values::{LoadAction, StoreAction};
@@ -120,16 +121,16 @@ fn each_attachment_has_its_own_steps() {
 /// draws' subpass leaves out `storage`.
 fn shape(samples: u32, colors: &[Option<Format>], depth: bool, storage: &[u32]) -> PassShape {
     PassShape {
-        colors: colors.to_vec(),
+        colors: ColorList::of(colors.iter().copied()).unwrap(),
         depth_stencil: depth.then_some(Format::D32_SFLOAT),
         samples,
-        color_resolves: vec![None; colors.len()],
+        color_resolves: ColorList::of(colors.iter().map(|_| None)).unwrap(),
         depth_stencil_resolve: None,
         fetch_inputs: false,
-        no_inputs: Vec::new(),
-        storage: storage.to_vec(),
+        no_inputs: ColorList::new(),
+        storage: ColorList::of(storage.iter().copied()).unwrap(),
         view_mask: 0,
-        locations: Vec::new(),
+        locations: ColorList::new(),
     }
 }
 

@@ -130,18 +130,18 @@ pub(super) struct PassStartReads {
 /// copies of bytes the pass's fragment stages wrote, `None` where the stage reads the encoder's.
 #[derive(Default)]
 pub(super) struct PassStartTables {
-    vertex: Option<ArgumentTable>,
-    object: Option<ArgumentTable>,
-    mesh: Option<ArgumentTable>,
+    vertex: Option<Box<ArgumentTable>>,
+    object: Option<Box<ArgumentTable>>,
+    mesh: Option<Box<ArgumentTable>>,
 }
 
 impl PassStartTables {
     /// The table `stage` reads: the one with the copies, else `encoder`'s.
     pub(super) fn or<'a>(&'a self, stage: Stage, encoder: &'a ArgumentTable) -> &'a ArgumentTable {
         let table = match stage {
-            Stage::Vertex => self.vertex.as_ref(),
-            Stage::Object => self.object.as_ref(),
-            Stage::Mesh => self.mesh.as_ref(),
+            Stage::Vertex => self.vertex.as_deref(),
+            Stage::Object => self.object.as_deref(),
+            Stage::Mesh => self.mesh.as_deref(),
             _ => None,
         };
         table.unwrap_or(encoder)
@@ -189,10 +189,12 @@ impl PassStartReads {
         [vertex, object, mesh]: [&ArgumentTable; 3],
         interface: &PipelineInterface,
     ) -> Result<PassStartTables, Error> {
+        // Each table held apart, as a draw that reads none (most) moves them with nothing in them.
+        let table = |table: Option<ArgumentTable>| table.map(Box::new);
         Ok(PassStartTables {
-            vertex: self.table(core, Stage::Vertex, vertex, interface)?,
-            object: self.table(core, Stage::Object, object, interface)?,
-            mesh: self.table(core, Stage::Mesh, mesh, interface)?,
+            vertex: table(self.table(core, Stage::Vertex, vertex, interface)?),
+            object: table(self.table(core, Stage::Object, object, interface)?),
+            mesh: table(self.table(core, Stage::Mesh, mesh, interface)?),
         })
     }
 

@@ -500,8 +500,7 @@ impl RenderCommandEncoder {
     ) -> Result<(), Error> {
         self.sync_heaps();
         // An execution rewrites an extended-range or padded attachment as a draw does, of reset
-        // commands too (EV XRR2-x6j).
-        self.degrade_unused_bits();
+        self.degrade_kept_attachments();
         self.rewrites_unused_bits = true;
         self.degrade_extended_range_execution();
         // Its commands write the extended-range colors' codes alone: the shadows end.
@@ -1638,7 +1637,7 @@ impl RenderCommandEncoder {
             || graphics.shadow_stencil.is_some()
             || graphics.shader_tests.is_some()
             || plan.views != ViewSetup::default()
-            || self.current.shape.locations != settings.routing.locations
+            || *self.current.shape.locations != *settings.routing.locations
             || own_strides
         {
             return Ok((variant, None));
@@ -2132,6 +2131,7 @@ impl RenderExecution {
             // The encoder that executes the commands records the pass's load pass
             // (`defer_execution`); this one records only the commands' draws.
             rewrites_unused_bits: false,
+            kept_attachments: None,
             // The executing encoder announces for the execution (`defer_execution`).
             extended_written: BTreeSet::new(),
             // The commands' draws hold no shadow: the execution ended the pass's.
