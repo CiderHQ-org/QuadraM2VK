@@ -21,7 +21,7 @@
 //! filtered bilinearly over taps `i` and `i + 1` whatever its format, with the same fraction.
 //!
 //! **Small levels and mirrored axes** (Apple M3 Max, macOS 26.7, the primary Metal reference; the
-//! RT13-bc2 and RT13-bc3 probes, every lane of each run with and without Metal's validation layer,
+//! probes probes, every lane of each run with and without Metal's validation layer,
 //! `r8Unorm`, `rgba8Unorm`, and `rgba16Float` on random texels at dyadic coordinates from 2.5
 //! periods below to 3.5 above):
 //! - A 2D level below four texels on either axis (1x1 to 13x4, 15 sizes) is filtered by Metal's
@@ -70,7 +70,7 @@
 //!
 //! Everything else above is Metal's reading, except inferences:
 //! - The signed clamp's lower bound comes from the format's range (no reading went below `-1`).
-//! - The small-level and mirrored-axis rules of the formats RT13-bc2 and RT13-bc3 did not read
+//! - The small-level and mirrored-axis rules of the formats our probes did not read
 //!   (all but `R8Unorm`, `RGBA8Unorm`, `RGBA16Float`, and `R32Float`) are their families'.
 //! - `RG8UnormSRGB`, never probed, takes its family's treatment. So do `RG8Unorm`, `RG8Snorm`,
 //!   `RG16Unorm`, `BGRA8Unorm`, and `A8Unorm`, which take the exact rule no case reads on them.
@@ -224,7 +224,7 @@ pub(super) fn state(r: SamplerRef) -> Result<Option<SamplerState>, Error> {
 /// The state of a runtime sampler whose min or mag filter is Metal's `Cubic`, from its word's
 /// `SamplerWord::CUBIC_STATE` bits (`LoweringInputs::cubic_samplers`): Metal samples through such
 /// a sampler as through a constexpr bicubic sampler of the same address modes, border color, and
-/// coordinates, whatever its other filter and the level (EV GSM2-bcs2-m4: 990 runs of 8,192
+/// coordinates, whatever its other filter and the level (990 runs of 8,192
 /// lanes, nine formats, every address mode and border color, normalized and pixel coordinates,
 /// min/mag pairs `(2, 2)`, `(2, 1)`, `(1, 2)`, `(2, 0)` and `(0, 2)`, implicit, explicit and
 /// gradient levels, bit for bit; through an argument buffer alike). `clamp_to_zero` reads the
@@ -539,8 +539,8 @@ fn axis(
 /// `o` itself, added before the taps are addressed, but 0 on a repeating or mirrored axis whose
 /// sizes drop it (`position::offset_dropped`; the linear and bicubic filters, gathers and nearest
 /// samples alike), a runtime sampler's axis by the mode its word states, under which a
-/// `MirrorClampToEdge` axis's sizes drop it too, its pixel coordinates' as its normalized ones'
-/// (RRP-probe5-m4); by the parent's base-level size where `parent` holds.
+/// `MirrorClampToEdge` axis's sizes drop it too, its pixel coordinates' as its normalized ones'; by
+/// the parent's base-level size where `parent` holds.
 fn placed_offset(
     fb: &mut FunctionBuilder<'_>,
     t: &Tys,

@@ -1,7 +1,7 @@
 //! A device test of depth textures read through color texture types on the device the cfg selects,
 //! under the validation layer. Metal reads a depth texel through `texture2d<float>` as `(d, d, d,
 //! 1)`: a read, nearest, linear, gradient and implicit samples answer it, gathers of x, y and z
-//! answer the four depths and gathers of w four ones (EV SPN2-dc1-m4, Apple M4, `Depth16Unorm`,
+//! answer the four depths and gathers of w four ones (Apple M4, `Depth16Unorm`,
 //! `Depth32Float` and `Depth32Float_Stencil8`). Vulkan converts a depth texel to `(d, 0, 0, 1)`
 //! before the view's component mapping, which the sampled view's `(R, R, R, ONE)` replaces.
 //!

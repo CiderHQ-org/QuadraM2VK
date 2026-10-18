@@ -10,9 +10,9 @@
 //! `lr`), with a `float` and a `half` result; `lc` also through the fixture's constexpr linear
 //! clamp-to-edge sampler.
 //!
-//! Metal's answer: the SHA-256 of each case's 4,096 results ([`METAL`]; EV XRR-tx1-m4, an Apple
+//! Metal's answer: the SHA-256 of each case's 4,096 results ([`METAL`]; an Apple
 //! M4 under macOS 27.0.1, through the probe's constexpr samplers, plain and under Metal's
-//! validation layer alike), which the EV keeps. A differing case is printed with its first
+//! validation layer alike), which the probe keeps. A differing case is printed with its first
 //! results, on one `XR-TWO-PLANE-SAMPLES-DIFFERS` line.
 //!
 //! A fragment function's samples of such a texture run the variant that takes its slot, counted
@@ -259,7 +259,7 @@ fn draws_that_sample_a_two_plane_texture_are_counted() {
 }
 
 /// The generator gives the probe's texels and coordinates: the FNV-1a digests the probe printed
-/// of seed 4's planes and of seed 5's coordinates (EV XRR-tx1-m4's results).
+/// of seed 4's planes and of seed 5's coordinates (the probe's results).
 #[test]
 fn the_coordinates_are_the_probes() {
     let fnv = |bytes: &[u8]| {

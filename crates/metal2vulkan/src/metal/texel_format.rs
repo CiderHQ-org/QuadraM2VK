@@ -55,7 +55,7 @@
 //! ([`TexelFormat::PACKED`]), whose code scales recover the code from the device's value, beside
 //! their family:
 //!
-//! - **Metal's linear filter of them** (EVs TXN-pkprobe-m3 and -m4, an Apple M3 Max on macOS 26.7
+//! - **Metal's linear filter of them** (an Apple M3 Max on macOS 26.7
 //!   and an Apple M4 on macOS 27.0.1, byte-identical: random texels of the eight formats, 2,048
 //!   1D, 4,096 2D, and 4,096 3D samples each, `float` and `half` results, every channel). A packed
 //!   normalized format sums as an 8-bit one does, each channel on its own grid
@@ -78,6 +78,7 @@
 //! `ARGB8Unorm` takes a field too ([`PackedTexels::Argb8`]): Metal reads its one texel as `c / 255`
 //! correctly rounded, its bytes rotated in the view; its cube gathers and its linear filter are not
 //! measured, so it has no corner and no family. The unorm forms of BC1 to BC3 take the same field
+//! beside their cube corner: Metal reads their decoded 8-bit codes so, and a
 //! device's view of a decoded twin's codes may not (lavapipe's is an ulp high). So do the 8-bit
 //! linear ETC2 and EAC formats (`RGB8`, `RGB8A1`, `RGBA8`), beside their corner, and the linear
 //! PVRTC formats, alone: Metal reads their decoded 8-bit codes as `c / 255` correctly rounded too
@@ -116,8 +117,8 @@
 //! raw codes under the variant alone, adding `EXACT` there. A gather's `float` value is not
 //! measured, so it keeps the device's decode (`PrecisionNote::SrgbTexelDecode`). `RGBA8Unorm_sRGB`
 //! was read, and so were `BGRA8Unorm_sRGB`, `R8Unorm_sRGB`, and `RG8Unorm_sRGB` (the probe): they
-//! take its rule ([`srgb_raw`]). So do the sRGB forms of BC1 to BC3 and BC7 (an Apple M4, EV
-//! SID2-bcd2-m4: every color channel of their random blocks' reads is the step of the unorm form's
+//! take its rule ([`srgb_raw`]). So do the sRGB forms of BC1 to BC3 and BC7 (an Apple M4: every
+//! color channel of their random blocks' reads is the step of the unorm form's
 //! 8-bit code, alpha `c / 255`), read through their unorm views: exact where the device decodes the
 //! unorm form's codes as Metal does (BC7's on every venue measured, as Direct3D specifies its
 //! decode bit for bit; BC1 to BC3's where the driver has `DriverFact::ColorBlockDecodeIsMetals`,
@@ -131,16 +132,16 @@
 //!
 //! **Depth formats**. A depth texture has no `half` result, and no linear filter is emulated on
 //! one, so its class is read by a read, plain gather or sample of one texel with a `float` result
-//! (`Depth16Unorm`'s every code `c / 65535` correctly rounded, read and nearest-sampled, EV
-//! SID-d16r1-m4), and by a cube's gather and comparison gather, whose tap past both edges of a face
-//! is the format's (Apple M4, the RT13-cg-probe-m4 and RT13-cg2-probe-m4). `Depth32Float` takes
-//! `R32Float`'s bits (the 32-bit float family, [`BicubicTexels::LINEAR`]): that tap is the `x`
-//! face's texel. `Depth16Unorm` takes `R16Unorm`'s ([`BicubicTexels::UNORM`],
-//! [`BicubicTexels::EXACT`], [`BicubicTexels::WIDE16`]): that tap is the made-up texel of the three
-//! faces' codes. `Depth32Float_Stencil8` reads its `x` face's texel there, compared as given
-//! (below); every other depth format is [`TexelFormat::OTHER`].
+//! (`Depth16Unorm`'s every code `c / 65535` correctly rounded, read and nearest-sampled), and by a
+//! cube's gather and comparison gather, whose tap past both edges of a face
+//! is the format's (Apple M4, the probes). `Depth32Float` takes `R32Float`'s bits (the 32-bit float
+//! family, [`BicubicTexels::LINEAR`]): that tap is the `x` face's texel. `Depth16Unorm` takes
+//! `R16Unorm`'s ([`BicubicTexels::UNORM`], [`BicubicTexels::EXACT`], [`BicubicTexels::WIDE16`]):
+//! that tap is the made-up texel of the three faces' codes. `Depth32Float_Stencil8` reads its `x`
+//! face's texel there, compared as given (below); every other depth format is
+//! [`TexelFormat::OTHER`].
 //!
-//! **Cube gather corners** (the WRN-fc-probe and WRN-fc2-probe, Apple M4 on macOS 27.0.1, with and
+//! **Cube gather corners** (the probes, Apple M4 on macOS 27.0.1, with and
 //! without Metal's validation layer; the Apple M3 Max's run of the second on macOS 26.7 equals the
 //! M4's byte for byte). Outside the measured families, a cube gather's tap past both edges of a
 //! face is measured for these formats, on random texels and blocks of faces of 3 to 8 texels at 600
@@ -228,7 +229,7 @@ impl TexelFormat {
     /// A `half` read, sample or gather of a texture of a class with any of them hands back no
     /// NaN, on Metal or a device, so the device's encoding of a NaN texel cannot show there.
     /// Every other class may hold one: the half-float, small-float and 32-bit float formats, and
-    /// those outside the families. Plain Metal on an Apple M4 (EV DGC-hrn1-m4, macOS 27.0.1)
+    /// those outside the families. Plain Metal on an Apple M4 (macOS 27.0.1)
     /// hands back a 16-bit float texel's own NaN bits, and `0x7e00` for every NaN of a 32-bit
     /// float or `RG11B10Float` texel; `RGB9E5Float` decodes its every code to a finite value.
     pub const NAN_FREE: u32 =
@@ -304,7 +305,7 @@ impl CubeCorner {
     ];
 
     /// The corner of `pf`'s cube gather, where it is measured outside the families (the
-    /// WRN-fc-probe and WRN-fc2-probe, Apple M4 on macOS 27.0.1). ASTC's HDR formats were read
+    /// probes, Apple M4 on macOS 27.0.1). ASTC's HDR formats were read
     /// through `ASTC_4x4_HDR`'s void-extent blocks; the other block sizes and blocks take its
     /// corner by family, as every float format's is its `x` face's texel.
     pub fn of(pf: PixelFormat) -> Option<CubeCorner> {
@@ -389,6 +390,11 @@ pub enum PackedTexels {
     /// NaN reads `0x7fc00000` (Metal's, every NaN code of `RG11B10Float`'s rows).
     SmallFloat = 5,
     /// Every channel of 8 bits, held in its bytes' rotation: `ARGB8Unorm`, whose reads Metal
+    /// answers `c / 255` correctly rounded (and its plane views over a buffer), where lavapipe's
+    /// are an ulp high. Its class has no family, as its border passes through the rotation. Also
+    /// the unorm forms of BC1 to BC3, whose blocks Metal decodes to 8-bit codes it reads as
+    /// `c / 255` correctly rounded, where lavapipe's view of a decoded twin's codes
+    /// (`R8G8B8A8_UNORM`) is an ulp high: beside their cube corner, with no family, Metal's linear
     /// filter of them not being measured. And the 8-bit linear ETC2 and EAC formats (beside their
     /// corner) and the linear PVRTC formats (alone), whose decoded 8-bit codes Metal reads so too
     /// (an Apple M3 Max, `bind::EtcDecode`, `bind::PvrtcDecode`), and which a twin holds as
@@ -398,15 +404,15 @@ pub enum PackedTexels {
     /// texel as its converted color, each channel a step `k / 2048` of `[0, 1]`, and alpha as 1,
     /// which the view's half-float channels hold exactly: a read's value is the device's, as a
     /// small float's is, so the field has no code scales. Metal's linear filter sums the steps on
-    /// that grid, each 2D term `k · w` truncated by `2^7` (EVs TXN2-ycf1-m3 and -m4, an Apple M3
-    /// Max on macOS 26.7 and an Apple M4 on macOS 27.0.1, byte-identical, every channel of
-    /// `YCBCR8_420_2P`; EV TXN2-ycf2-m4, every 8- and 10-bit format, packed or not, at each
-    /// subsampling and range; [`filter_truncation`](Self::filter_truncation)).
+    /// that grid, each 2D term `k · w` truncated by `2^7` (an Apple M3 Max on macOS 26.7 and an
+    /// Apple M4 on macOS 27.0.1, byte-identical, every channel of `YCBCR8_420_2P`; every 8- and
+    /// 10-bit format, packed or not, at each subsampling and range;
+    /// [`filter_truncation`](Self::filter_truncation)).
     YCbCr2048 = 7,
     /// The `_sRGB` twins' and the unpacked 12-bit YCbCr formats' channels as their view holds them:
     /// steps `k / 8192` of `[0, 1]`, alpha 1, which Metal's linear filter sums as
     /// [`YCbCr2048`](Self::YCbCr2048)'s on the grid `8192`, a `half` result the step's value
-    /// rounded with ties away from zero (EV TXN2-ycf2-m4, every channel of every format).
+    /// rounded with ties away from zero (every channel of every format).
     YCbCr8192 = 8,
     /// The extended-range (`_XR`) YCbCr formats' channels, but the packed 12-bit ones': signed
     /// steps `k / 8192` within `[-2, 2]`, alpha 1, which Metal's linear filter sums as
@@ -455,8 +461,8 @@ impl PackedTexels {
         })
     }
 
-    /// The field of a two-plane YCbCr format of layout `y`, by the grid of Metal's reads (EV
-    /// TXN2-ycf2-m4): the 8- and 10-bit converted formats' `1/2048`, the `_sRGB` twins' and the
+    /// The field of a two-plane YCbCr format of layout `y`, by the grid of Metal's reads: the 8-
+    /// and 10-bit converted formats' `1/2048`, the `_sRGB` twins' and the
     /// 12-bit formats' `1/8192`, the extended-range ones' signed `1/8192`, and the 10-bit codes'
     /// `RGB10A2Unorm`'s. None where the filter is not measured exactly: the packed 12-bit formats
     /// (Metal's sample of them is no bilinear sum of their reads), the PQ and HLG twins (whose
@@ -530,10 +536,10 @@ impl PackedTexels {
     }
 
     /// Whether the field is a two-plane YCbCr format's: its view holds Metal's reads exactly, and a
-    /// `half` result of its linear filter is the step's value rounded with ties away from zero (EV
-    /// TXN2-ycf2-m4 on the grid `8192`, where a step's value may lie between two halves; the grid
-    /// `2048`'s are halves), as is a `half` read or nearest sample of one texel (EV TXN2-ycr1-m4,
-    /// every channel of `YCBCR8_420_2P_sRGB`, `YCBCR10_420_2P_sRGB` and three 12-bit and
+    /// `half` result of its linear filter is the step's value rounded with ties away from zero (on
+    /// the grid `8192`, where a step's value may lie between two halves; the grid `2048`'s are
+    /// halves), as is a `half` read or nearest sample of one texel (every channel of
+    /// `YCBCR8_420_2P_sRGB`, `YCBCR10_420_2P_sRGB` and three 12-bit and
     /// extended-range formats on the grid `8192`).
     pub fn ycbcr(self) -> bool {
         matches!(
@@ -546,7 +552,7 @@ impl PackedTexels {
     /// ([`ycbcr`](Self::ycbcr)), whose formats Metal makes a texture of only over an IOSurface
     /// plane, which takes one level, as do its views. Metal's linear sample of such a texture
     /// through a mip filter is its sample through none, bit for bit, whatever the level, bias or
-    /// gradient (EVs TXN2-ycm1-m4 and -m3, an Apple M4 on macOS 27.0.1 and an Apple M3 Max on macOS
+    /// gradient (an Apple M4 on macOS 27.0.1 and an Apple M3 Max on macOS
     /// 26.7): the emulation of a runtime sampler's linear sample reaches its mip filter on such a
     /// class (`lower::sampler::linear`).
     pub fn one_level(self) -> bool {
@@ -641,7 +647,7 @@ fn two_plane_family(pf: PixelFormat, field: Option<PackedTexels>) -> u32 {
         None if y.reads == YCbCrReads::Codes && y.bits == 8 => BicubicTexels::UNORM,
         _ => return 0,
     };
-    // Red, green and blue: every two-plane format reads alpha 1 (EV TXN2-ycf2-m4).
+    // Red, green and blue: every two-plane format reads alpha 1.
     let flags = sign | BicubicTexels::EXACT | 0b0111 << BicubicTexels::PRESENT;
     BicubicTexels(flags)
         .with_border(pf, TextureSwizzleChannels::DEFAULT)
@@ -1092,6 +1098,7 @@ mod tests {
         }
     }
 
+    /// An RGBX format converts as its RGBA twin with red, green and blue (every
     /// read, sample, gather and bicubic sample equals the twin's but for alpha 1): its family,
     /// an `_sRGB` one's raw codes through the twin's raw view.
     #[test]
@@ -1293,7 +1300,7 @@ mod tests {
                 }
             }
         }
-        // The two-plane YCbCr formats by the grid of Metal's reads (EV TXN2-ycf2-m4): 9 on
+        // The two-plane YCbCr formats by the grid of Metal's reads: 9 on
         // `1/2048`, 12 on `1/8192`, 9 on the signed `1/8192`, 6 of 10-bit codes; the 3 of 8-bit
         // codes `RGBA8Unorm`'s family without a field; the 30 others (PQ, HLG, packed 12 bits) no
         // class.

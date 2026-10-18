@@ -5,7 +5,7 @@
 //! invocation ORs into its pixel's word the samples it ran for and counts itself, as a Metal probe
 //! on an M4 drew it. Each such pass records, makes its pipelines against, and begins the pass its
 //! device keeps for its sample count (`runtime/attachmentless.rs`); MoltenVK rasterized one sample
-//! in a pass made per encoder (EV `RT6-atl-gpu-mvk`).
+//! in a pass made per encoder.
 
 use super::{buffer_with, read_buffer, validated_device, Messages, ScratchCache, WAIT};
 use crate::air_library::AirLibrary;
@@ -215,12 +215,11 @@ fn failing_pass(
 }
 
 /// A pass without attachments whose target width or height is past 16384 is encoded, and Metal
-/// fails its command buffer from the pass on (EVs RRS-probe-13-m4 and -13b-m4, an M4, and
-/// RRS-probe-13-m3 and -13b-m3, the M3 Max, alike, with and without API validation): the blit
-/// before it runs and the event signaled before it fires, while the pass's draw, the blit after it
-/// and the event signaled after it do not; the command buffer completes with an error,
-/// `MTLCommandBufferErrorInternal` (1); the queue's next command buffer runs. A pass of 16384 a
-/// side runs whole.
+/// fails its command buffer from the pass on (an M4, and the M3 Max, alike, with and without API
+/// validation): the blit before it runs and the event signaled before it fires, while the pass's
+/// draw, the blit after it and the event signaled after it do not; the command buffer completes
+/// with an error, `MTLCommandBufferErrorInternal` (1); the queue's next command buffer runs. A pass
+/// of 16384 a side runs whole.
 #[test]
 fn a_pass_without_attachments_past_16384_fails_its_command_buffer() {
     let cache = ScratchCache::new().unwrap();
@@ -279,15 +278,14 @@ fn a_pass_without_attachments_past_16384_fails_its_command_buffer() {
 }
 
 /// A pass without attachments at a default raster sample count other than 1, 2 and 4 is Metal's
-/// on every device, whatever samples the driver rasterizes, by the count's low 8 bits (EVs
-/// RCH-msaa-m4 to RCH-msaa4-m4, plain Metal on an Apple M4 under macOS 27.0.1, and EV RCH-s0-m4
-/// with the consumer's run of its probe on the M3 Max under macOS 26.7 alike): at 3, 5, 6, 7
-/// and 257 the encoder is made and the command buffer runs whole; at 16, 17, 64, 127 and 300
-/// the encoder is made and Metal fails the command buffer from the pass on with
-/// `MTLCommandBufferErrorInternal`, as past 16384 a side (the blit before the pass and the
-/// signal before it alone, then the next command buffer); at 0 (the descriptor's default), 8,
-/// 9, 15, 128, 255, 512 and `u64::MAX` Metal ends the process making the encoder (`Invalid`).
-/// No pipeline is drawn: no render pipeline of those counts is made
+/// on every device, whatever samples the driver rasterizes, by the count's low 8 bits (plain Metal
+/// on an Apple M4 under macOS 27.0.1, and our probe with the consumer's run of its probe on the
+/// M3 Max under macOS 26.7 alike): at 3, 5, 6, 7 and 257 the encoder is made and the command buffer
+/// runs whole; at 16, 17, 64, 127 and 300 the encoder is made and Metal fails the command buffer
+/// from the pass on with `MTLCommandBufferErrorInternal`, as past 16384 a side (the blit before the
+/// pass and the signal before it alone, then the next command buffer); at 0 (the descriptor's
+/// default), 8, 9, 15, 128, 255, 512 and `u64::MAX` Metal ends the process making the encoder
+/// (`Invalid`). No pipeline is drawn: no render pipeline of those counts is made
 /// (`runtime_lane::raster_sample_counts`).
 #[test]
 fn a_pass_without_attachments_takes_metal_s_default_sample_counts() {

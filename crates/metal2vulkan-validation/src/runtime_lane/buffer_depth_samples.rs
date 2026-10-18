@@ -3,7 +3,7 @@
 //! `runtime::sample_copy`, carries into and out of the texture's aspect), on the device the cfg
 //! selects, under the validation layer, against Metal's answer.
 //!
-//! **Metal's answer** (EV FRT4-dm1-m4, our own probe, an Apple M4 under macOS 27.0.1, every case
+//! **Metal's answer** (our own probe, an Apple M4 under macOS 27.0.1, every case
 //! below): each copy unit of the buffer lands in its sample by the layout measured for colour,
 //! texel `(x, y)` sample `s` at `offset + y * bytesPerRow + (x * n + s) * bpp`, the samples outside
 //! a region keep the clear, and the copy back out returns the buffer bit for bit, every edge value
@@ -214,7 +214,7 @@ impl Changes {
         if back == word {
             return true;
         }
-        // A depth image that may clamp (ANV's, EV ZIN2-dm3-anv): a value past 1 lands as 1, and
+        // A depth image that may clamp (ANV's): a value past 1 lands as 1, and
         // a NaN or a value with the sign bit set (-0 and negative denormals included) as +0.
         if self.clamped {
             let clamped = match is_nan(word) || sign != 0 {
@@ -238,7 +238,7 @@ impl Changes {
             Some(DriverId::NVIDIA_PROPRIETARY) => {
                 (is_denormal(word) && back == sign) || (is_nan(word) && back == 0xff80_0000)
             }
-            // MoltenVK's (EV ZIN2-dm3-mvk4): a positive NaN writes nothing, the sample keeping
+            // MoltenVK's: a positive NaN writes nothing, the sample keeping
             // what it held; a value with the sign bit set (-0, -inf, a negative NaN) lands as +0;
             // a value past 1 and +inf as 1.
             Some(DriverId::MOLTENVK) => match (is_nan(word), sign != 0) {

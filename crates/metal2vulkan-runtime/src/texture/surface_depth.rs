@@ -1,7 +1,7 @@
 //! A depth or stencil texture over a plane of a surface with planes, in a render pass. Plain
-//! Metal (an M4 under macOS 27.0.1, EVs SID-pdl1-m4 to SID-pdl7-m4) loads and stores such a
-//! texture in a pass in its tiled layout (`heap_tiled.rs`, `TiledLayout::element`, one aspect's
-//! unit an element: `copy_plan::surface_depth_unit`) from the plane's offset rounded down to 128,
+//! Metal (an M4 under macOS 27.0.1) loads and stores such a texture in a pass in its tiled layout
+//! (`heap_tiled.rs`, `TiledLayout::element`, one aspect's unit an element:
+//! `copy_plan::surface_depth_unit`) from the plane's offset rounded down to 128,
 //! writing the elements' bytes alone, where its reads, samples, blits and CPU access take the
 //! plane linearly (`linear_plan.rs`). The stencil of `Depth32Float_Stencil8` is not in the plane:
 //! a pass loads it as 0 (`render_pass::surface_stencil_loads` makes such a load a clear to 0) and
@@ -17,7 +17,7 @@
 //! other aspect is never copied: it starts as zeros and a pass's store of it reaches no byte.
 //! An `X32_Stencil8` view of a `Depth32Float_Stencil8` texture, whose stencil the plane does not
 //! hold, renders into a private image of its own, which no byte reaches: Metal's pass on it loads
-//! 0 and changes no byte, and a kernel reads 0 through it (EV SID-pdl7-m4). Refused as the
+//! 0 and changes no byte, and a kernel reads 0 through it. Refused as the
 //! runtime's gap (`NotImplemented(SurfaceDepthStencil)`): a device the moves do not fit, and a
 //! view in another format of a plane that holds its stencil (an `X32_Stencil8` texture's view
 //! as `Depth32Float_Stencil8`, unmeasured). A blit through a view takes the plane's unit

@@ -3,8 +3,8 @@
 //! draws the public case `fragment-positions-in-a-half-quality- rate-mapped-pass`'s pipeline (its
 //! generated fullscreen triangle and `fragment_rate_map_position`, which writes each fragment's
 //! `[[position]]`) in passes of its own, over a map of a 64-pixel screen at quality 0.5, whose
-//! physical size is 33 by 33, and over the identity of that screen, as probes RT11-metal-probe-16
-//! and -16b drew them on an M3 Max and an M4:
+//! physical size is 33 by 33, and over the identity of that screen, as our probes drew them on an
+//! M3 Max and an M4:
 //!
 //! - Into attachments of 33, 48 and 64 pixels, the default viewport (the screen) shades the 33 by
 //!   33 physical pixels and none past them, each at its centre; a viewport over the screen's left
@@ -19,10 +19,10 @@
 //!   map whose layers differ, and a pass without attachments larger than the screen. A scissor
 //!   that cuts into the viewport over a map that is not the identity is `NotImplemented`, as the
 //!   region path does not draw it.
-//! - A pass over a map of no layers runs its clear and store, and its draws write nothing, as EV
-//!   RRS3-rm0draw1's cases drew on an M4 wherever the map was made while no map of layers had been
-//!   released. Made after one was, Metal draws physical rows 0 to 15 (an M4 and an M3 Max alike, EV
-//!   RRS3-rm0m3), the runtime nothing, and announces it.
+//! - A pass over a map of no layers runs its clear and store, and its draws write nothing, as our
+//!   probe's cases drew on an M4 wherever the map was made while no map of layers had been
+//!   released. Made after one was, Metal draws physical rows 0 to 15 (an M4 and an M3 Max alike),
+//!   the runtime nothing, and announces it.
 
 use super::degrade_notices::{
     assert_made_once, counts, made_render_kinds, shared_in_system_memory,
@@ -369,7 +369,7 @@ fn announced_after_release(messages: &Messages) -> bool {
     counts(&messages.take_notices()).contains_key(&Degradation::ZeroLayerMapAfterRelease)
 }
 
-/// EV RRS3-rm0draw1's eleven cases and EV RRS3-rm0m3's release before the map (an M4 with macOS
+/// Our probe's eleven cases and its release before the map (an M4 with macOS
 /// 27.0.1, each in a process of its own, three times, the same bytes each time), each on a device
 /// of its own: a pass over a map of no layers made while no map of layers was released runs its
 /// clear and store and its draw writes nothing, at 8 pixels with and without a scissor, at 64, a
@@ -493,7 +493,7 @@ fn a_pass_over_a_map_of_no_layers_draws_nothing() {
         }
         assert!(!announced_after_release(messages), "seq");
     });
-    // `zero_before_release` (EV RRS3-rm0m3): a map of none made before a map of one layer is
+    // `zero_before_release`: a map of none made before a map of one layer is
     // released draws nothing on Metal after the release too, and announces nothing here.
     fresh(|fixture, messages| {
         let empty = fixture.map_of(64, &[]);

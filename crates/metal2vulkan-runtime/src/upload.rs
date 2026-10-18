@@ -31,7 +31,7 @@
 //!   twice as many, up to [`CHUNK_BYTES`]; a region of more than half of that takes a chunk of its
 //!   own. A new chunk is cleared whole (a new buffer reads zero), so a command buffer of a few
 //!   commands clears a few KiB, not 64 (clearing 64 KiB took 11.5 us of an RTX 3090's host-visible
-//!   memory and 2.6 us of a Radeon 780M's, EV PERF-raw1).
+//!   memory and 2.6 us of a Radeon 780M's).
 //! - **Alignment.** Every region starts at a multiple of the device's upload alignment (16 bytes,
 //!   and the storage and uniform buffer offset alignments), so it can be bound at its offset and
 //!   its device address is 16-aligned. A root table and the resident set it searches start at a

@@ -10,11 +10,10 @@
 //! `|c - 384|`, signed; a write rounds the magnitude (below 2 first) to `2^-13`, nearest even (an
 //! exact product and `RoundEven`), and the offset is the largest whose first index is at most
 //! that ([`search`]), at most 384 below the zero code. Both tables were read from an Apple M3 Max
-//! and an Apple M4 (EVs TXN-xrprobe-m3 and -m4, byte-identical): every code read, and every
-//! threshold between two adjacent codes found by bisection over the `f32`s, every half, and a
-//! dense grid written. The MSL transfer `((x + 0.055) / 1.055)^2.4` rounded to `2^-13` gives
-//! every decode step; it misses 32 of the 639 encode thresholds, which Metal places by its own
-//! arithmetic.
+//! and an Apple M4 (byte-identical): every code read, and every threshold between two adjacent
+//! codes found by bisection over the `f32`s, every half, and a dense grid written. The MSL transfer
+//! `((x + 0.055) / 1.055)^2.4` rounded to `2^-13` gives every decode step; it misses 32 of the 639
+//! encode thresholds, which Metal places by its own arithmetic.
 
 use crate::lower::arith::legal::{FloatFmt, Form, Held};
 use crate::lower::arith::math::round_exact_product_lanes;
@@ -178,7 +177,7 @@ fn per_lane(fb: &mut FunctionBuilder<'_>, v: [u32; 4]) -> BResult<Value> {
 /// (`half`) each lane is rounded to `half` with ties away from zero, held as the `f32` of that
 /// value: Metal rounds every tie so (an `_sRGB` color step `s / 8192` of an odd multiple of half
 /// a `half` ulp: each of the 13,458 ties of `BGRA10_XR_sRGB`'s and 25,502 of `BGR10_XR_sRGB`'s
-/// reads, EV TXN-xrprobe-m3), and a linear lane's `(c - 384) / 510` is never a tie.
+/// reads), and a linear lane's `(c - 384) / 510` is never a tie.
 pub fn decode(
     fb: &mut FunctionBuilder<'_>,
     form: ExtendedRange,
@@ -263,7 +262,7 @@ pub fn step_grids(fb: &mut FunctionBuilder<'_>, form: ExtendedRange) -> BResult<
 }
 
 /// Metal's tile value of raw texel `raw` of a color attachment of `form` (a framebuffer fetch's
-/// read; EVs XRR-rtp1-m3 and -m4, byte-identical, a `float` and a `half` read alike): a `vec4` of
+/// read; byte-identical, a `float` and a `half` read alike): a `vec4` of
 /// `f32`, red first, each lane a `half` value. The tile holds no color code above 1022: a linear
 /// form's code and `BGRA10_XR_sRGB`'s are clamped to 1022 and decoded ([`decode`]),
 /// `BGR10_XR_sRGB`'s and the two-plane twin's decoded and then clamped to the linear values of
@@ -305,7 +304,7 @@ pub fn tile_value(
 /// clamped to the blend's source range (`BGRA10_XR_sRGB`'s [`SRGB_SOURCE_RANGE`], every other
 /// form's [`SOURCE_RANGE`]), alpha to `[0, 1]`, a NaN to the low end (`blend::clamped`, the
 /// blend's own clamp of its source), and `BGR10_XR`'s alpha is one: the tile holds what a write
-/// wrote, unclamped, and stores its encode, but every read clamps (EV XSH-pxs-m4 on an Apple
+/// wrote, unclamped, and stores its encode, but every read clamps (on an Apple
 /// M4: unblended `half` writes past the range, NaNs and the infinities, each read back by a
 /// fetch and blended over, for every form; their codes are the writes' own encodes, code 1023
 /// for 2.0 where the read is 1022's value). [`tile_value`] of a texel's codes is such a read
@@ -342,10 +341,9 @@ fn value_of_codes(
 ) -> BResult<Value> {
     let (u, f) = (words(), floats());
     // A padded format's lane reads `c / 1023` correctly rounded, its `half` to nearest even
-    // (EV XRR2-x6f-m4: every code; `c / 1023` is never a `half` tie), `RG10Unorm_X12_sRGB`'s
-    // too (EVs XRR2-x6c and -x6fs). `R10Unorm_X6_sRGB`'s red reads its code's decode step
-    // `s / 8192` (EV XRR2-x6c: every code), its `half` with ties away from zero (EV XRR2-x6fs:
-    // every code).
+    // (every code; `c / 1023` is never a `half` tie), `RG10Unorm_X12_sRGB`'s too.
+    // `R10Unorm_X6_sRGB`'s red reads its code's decode step `s / 8192` (every code), its `half`
+    // with ties away from zero (every code).
     if form.padded() {
         let d = splat(fb, u, 1023)?;
         let v = ratio_to_f32(fb, u, c, d)?;
@@ -436,7 +434,7 @@ pub fn encode(
     table: Option<GlobalId>,
 ) -> BResult<Value> {
     // A padded format's code is the exact product of the value clamped to [0, 1] with 1023,
-    // rounded to nearest (EV XRR2-x6c-m4: every value of a grid and around every midpoint), in
+    // rounded to nearest (every value of a grid and around every midpoint), in
     // its word's top 10 bits, the low 6 bits zero.
     if form.padded() {
         let (u, f) = (words(), floats());
@@ -478,11 +476,10 @@ fn bfloat_lanes(form: ExtendedRange) -> &'static [u32] {
 /// Metal's value of raw texel `raw` of a bfloat form ([`decode`]; `metal::format::ExtendedRange`'s
 /// `R16Bfloat`): each channel's code shifted up 16 bits as a `float`, any NaN code (its magnitude
 /// past `0x7f80`) the quiet NaN `0x7fc00000`; a channel the form lacks 0 and alpha 1; a `half`
-/// result of a read or a gather each lane rounded to nearest even (EV FPV-pf5-m4, an Apple M4:
-/// every code of each bfloat format, `float` and `half` reads, `read_write`, nearest and linear
-/// samples alike; EV FPV-pf8-m4, gathers); a sample's `half` result rounds toward zero instead
-/// ([`bfloat_sample_half`]). Integer operations on the bits alone, so no float mode changes the
-/// answer.
+/// result of a read or a gather each lane rounded to nearest even (an Apple M4: every code of each
+/// bfloat format, `float` and `half` reads, `read_write`, nearest and linear samples alike;
+/// gathers); a sample's `half` result rounds toward zero instead ([`bfloat_sample_half`]). Integer
+/// operations on the bits alone, so no float mode changes the answer.
 fn bfloat_value(
     fb: &mut FunctionBuilder<'_>,
     form: ExtendedRange,
@@ -510,7 +507,7 @@ fn bfloat_value(
 
 /// `v`, a bfloat sample's `vec4` of `float` values ([`decode`] without `half`, or the border
 /// texel), as the sample's `half` result: each lane rounded toward zero, a finite value past
-/// `65504` saturating there, an infinity and a NaN kept (EV FPV-pf8-m4, an Apple M4 under macOS
+/// `65504` saturating there, an infinity and a NaN kept (an Apple M4 under macOS
 /// 27.0.1: 18,432 positions of an 8 x 4 texture of each bfloat format holding NaN, infinite,
 /// overflowing and `half`-denormal codes, nearest and linear filters under every address mode,
 /// each `half` result the `float` result's toward zero, where a read's and a gather's round to
@@ -521,7 +518,7 @@ pub(crate) fn bfloat_sample_half(fb: &mut FunctionBuilder<'_>, v: Value) -> BRes
 
 /// The raw texel a kernel's write of `v` (a `vec4` of `f32`; a `half` value held widened)
 /// stores to a bfloat form ([`encode`]): each lane's top 16 bits (toward zero), a NaN the quiet
-/// NaN `0x7fc0`, the components past the form's zero (EV FPV-pf5-m4, an Apple M4: per bfloat code
+/// NaN `0x7fc0`, the components past the form's zero (an Apple M4: per bfloat code
 /// the `float`s of its bits and three neighbours of each tie, and every `half` code, into each
 /// bfloat format). Integer operations on the bits alone.
 fn bfloat_texel(fb: &mut FunctionBuilder<'_>, form: ExtendedRange, v: Value) -> BResult<Value> {
@@ -543,7 +540,7 @@ fn bfloat_texel(fb: &mut FunctionBuilder<'_>, form: ExtendedRange, v: Value) -> 
 /// The raw texel a render pass stores to an attachment of the bfloat form `form` whose tile holds
 /// `v` (a `vec4` of `half` values held as `f32`; `stage_io::extended_color::bfloat_output`): each
 /// lane's bfloat code nearest, ties to even, a NaN `0x7fc0`, the components past the form's zero
-/// (EV FPV-pf5-m4, an Apple M4 under macOS 27.0.1: every `half` code output into each bfloat
+/// (an Apple M4 under macOS 27.0.1: every `half` code output into each bfloat
 /// format). Not a kernel write's code, which drops the low 16 bits ([`bfloat_texel`]). Integer
 /// operations on the bits alone; no sum wraps (the largest magnitude below a NaN's is the
 /// infinity's).
@@ -575,11 +572,11 @@ pub(crate) fn bfloat_stored(
 
 /// [`encode`] of `v` into a texel of a linear or `_sRGB` form that keeps the channels `kept`
 /// (red, green, blue, alpha) of `old`, the raw texel the write overwrites, as Metal's blended
-/// write under a write mask keeps them (EVs XRB-sw1-m4 and XRB-sw2-m4: every masked
-/// configuration, each texel): each kept channel's code as [`decode`] reads it (a color code as
-/// it is, 1023 too; `BGRA10_XR`'s alpha clamped to `[384, 894]`; a two-plane texel's alpha
-/// byte), packed as a write packs it: plane 0's and `BGR10_XR`'s top two bits as the write sets
-/// them (zeros and ones), `BGRA10_XR`'s six low bits zero.
+/// write under a write mask keeps them (every masked configuration, each texel): each kept
+/// channel's code as [`decode`] reads it (a color code as it is, 1023 too; `BGRA10_XR`'s alpha
+/// clamped to `[384, 894]`; a two-plane texel's alpha byte), packed as a write packs it: plane 0's
+/// and `BGR10_XR`'s top two bits as the write sets them (zeros and ones), `BGRA10_XR`'s six low
+/// bits zero.
 pub fn encode_keeping(
     fb: &mut FunctionBuilder<'_>,
     form: ExtendedRange,
@@ -734,11 +731,11 @@ fn pack(fb: &mut FunctionBuilder<'_>, form: ExtendedRange, code: Value) -> BResu
 
 /// The codes a write of `v` (clamped to `[0, 1]`, a NaN 0) to a padded `_sRGB` form stores
 /// through its `table` ([`declare_padded`]), `k` the linear codes `RG10Unorm_X12` would store
-/// (EVs XRR2-x6c, -x6fs and -x6m, an Apple M4 and an Apple M3 Max, byte-identical: values next
-/// to every threshold, every `half`, and a grid). `R10Unorm_X6_sRGB`'s red is the largest code
-/// whose first encode index is at most `RoundEven(v · 8192)` (exact: `v` below 1 times `2^13`),
-/// as an extended-range `_sRGB` channel's offset is ([`search`]); `RG10Unorm_X12_sRGB`'s red
-/// and green are the table's code of each linear code. The other lanes stay `k`'s.
+/// (an Apple M4 and an Apple M3 Max, byte-identical: values next to every threshold, every `half`,
+/// and a grid). `R10Unorm_X6_sRGB`'s red is the largest code whose first encode index is at most
+/// `RoundEven(v · 8192)` (exact: `v` below 1 times `2^13`), as an extended-range `_sRGB` channel's
+/// offset is ([`search`]); `RG10Unorm_X12_sRGB`'s red and green are the table's code of each linear
+/// code. The other lanes stay `k`'s.
 fn padded_srgb_codes(
     fb: &mut FunctionBuilder<'_>,
     form: ExtendedRange,

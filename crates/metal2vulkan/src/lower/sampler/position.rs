@@ -114,15 +114,15 @@
 //! border. On a `MirrorClampToEdge` axis (which no constexpr sampler states) Metal's position is a
 //! clamping axis's, `u N` unwrapped, its taps mirrored once and clamped as Vulkan's
 //! `MIRROR_CLAMP_TO_EDGE` mirrors and clamps them, and a texel offset is dropped by the sizes that
-//! drop it on a repeating axis (TXN-gprobe: every gather of 13x11, 7x5 and 16x8 textures through a
-//! slot's and an argument buffer's runtime sampler, with offsets of 2 and -3, on an Apple M3 Max
-//! and an Apple M4 alike), a pixel coordinate's as a normalized one's, and a nearest sample's, a
-//! linear one's and a comparison's as a gather's (RRP-probe5-m4): a nearest sample snaps such an
-//! axis as a repeating one ([`snapped_by_word`]), and a pixel word's texel centre moves back by a
+//! drop it on a repeating axis (every gather of 13x11, 7x5 and 16x8 textures through a slot's and
+//! an argument buffer's runtime sampler, with offsets of 2 and -3, on an Apple M3 Max and an Apple
+//! M4 alike), a pixel coordinate's as a normalized one's, and a nearest sample's, a linear one's
+//! and a comparison's as a gather's: a nearest sample snaps such an axis as a repeating one
+//! ([`snapped_by_word`]), and a pixel word's texel centre moves back by a
 //! dropped offset (`emit::pixel_centre`). On a device with Metal's own sampler, only a pixel word's
 //! gather is snapped, and a linear pixel word's sample snaps onto its footprint cell
 //! ([`celled_by_word`]), as a constexpr pixel sampler's does there (that sample reads Metal's rule
-//! at the coordinate as given: TXN-gprobe's 10,250 lanes of a runtime pixel sampler on both chips).
+//! at the coordinate as given: our probe's 10,250 lanes of a runtime pixel sampler on both chips).
 
 use crate::air::abi::{AddressMode, Coordinates, Filter, MipFilter, SamplerState};
 use crate::air::intrinsics::{ImageDim, ImageShape};
@@ -941,8 +941,8 @@ pub fn snapped_on(
 /// axis whose size drops a constant texel offset (`offsets`, per plane axis an `f32` or `None`;
 /// [`offset_dropped`]) moves the centre back by it, as [`snapped_axis`] does: a leveled snap's by
 /// the level's size and the base level's, `base` (`size_lanes` components; `None`: the level is the
-/// base level), a mirror-clamped axis's as a repeating one's (RRP-probe5-m4 and RRP-probe7-m4), and
-/// by the slot's `SpecKey::OffsetBaseAxes` tests `parent` (`texture::OffsetBase`).
+/// base level), a mirror-clamped axis's as a repeating one's, and by the slot's
+/// `SpecKey::OffsetBaseAxes` tests `parent` (`texture::OffsetBase`).
 pub fn snapped_by_word(
     fb: &mut FunctionBuilder<'_>,
     (word, leveled): (SValue, bool),
@@ -1031,13 +1031,13 @@ fn word_holds(fb: &mut FunctionBuilder<'_>, word: SValue, mask: u32) -> BResult<
 /// ([`AxisSnap::Gather`]), its base texel `i0` at Metal's position `X`, the coordinate as given
 /// (`given`, `lanes` floats) where the word states pixel coordinates, else [`position_by_mode`]'s
 /// by the axis's mode: a `MirrorClampToEdge` axis's is a clamping axis's, `u N` unwrapped, whose
-/// taps the device mirrors once and clamps as Metal does (TXN-gprobe, Apple M3 Max and M4). `i0` is
-/// clamped into `[-2N - 10, 2N + 8]`, which holds every position of a repeating or mirrored axis,
-/// and past which, with any offset in Metal's gather range `[-8, 7]`, both texels of a clamping or
+/// taps the device mirrors once and clamps as Metal does (Apple M3 Max and M4). `i0` is clamped
+/// into `[-2N - 10, 2N + 8]`, which holds every position of a repeating or mirrored axis, and past
+/// which, with any offset in Metal's gather range `[-8, 7]`, both texels of a clamping or
 /// mirror-clamped axis read the same edge texel or border, as the exact `i0`'s do. A repeating,
 /// mirrored or mirror-clamped axis whose size drops a constant texel offset (`offsets`, per plane
 /// axis an `f32` or `None`; [`offset_dropped`]) moves the centre back by it, as [`snapped_axis`]
-/// does, a pixel word's mirror-clamped axis's too (RRP-probe5-m4). On a device that samples through
+/// does, a pixel word's mirror-clamped axis's too. On a device that samples through
 /// Metal's own sampler (`metal`) only a pixel coordinate is snapped, and no offset moves it:
 /// Metal's own sampler drops an offset of the normalized centre where it drops the pixel
 /// coordinate's; a normalized one is the coordinate the device reads otherwise (`scaled`, `lanes`
@@ -1083,12 +1083,11 @@ pub fn gathered_by_word(
         let at = match offsets.get(a as usize).copied().flatten() {
             // Metal's own sampler places the offset of the normalized coordinate it is handed as
             // Metal places a pixel coordinate's (a pixel word's axis clamps, or mirrors once and
-            // clamps, which drops the offset at the sizes a normalized one does: RRP-probe5-m4).
+            // clamps, which drops the offset at the sizes a normalized one does).
             Some(_) if metal => at,
             Some(o) => {
                 // Metal drops the offset on a repeating, mirrored, or mirror-clamped axis whose
-                // size drops it (the mirror clamp's measured by TXN-gprobe, a pixel word's by
-                // RRP-probe5-m4).
+                // size drops it (the mirror clamp's and a pixel word's measured by our probes).
                 let repeats = fb.binary(BinOp::IEqual, mode, repeat)?;
                 let mirrors = fb.binary(BinOp::IEqual, mode, mirror)?;
                 let clamps = fb.binary(BinOp::IEqual, mode, mirror_clamp)?;
@@ -1119,7 +1118,7 @@ pub fn gathered_by_word(
 /// the device reads otherwise (`scaled`). A pixel sampler clamps every axis or mirrors it once and
 /// clamps it (`runtime::sampler`'s rule), and Metal's own sampler places a texel offset of the
 /// normalized cell as Metal places the pixel coordinate's (kept on a clamping axis, dropped by a
-/// mirror-clamped one's sizes alike, RRP-probe5-m4), so no offset moves the cell.
+/// mirror-clamped one's sizes alike), so no offset moves the cell.
 pub fn celled_by_word(
     fb: &mut FunctionBuilder<'_>,
     word: SValue,
@@ -1156,7 +1155,7 @@ pub fn celled_by_word(
 /// texel offset (`offsets`, per plane axis an `f32` or `None`) that Metal drops: on an axis the
 /// word states `MirrorClampToEdge` whose base level's size `size` (`size_lanes` components) drops
 /// it ([`offset_dropped`]; Metal mirrors a pixel coordinate's taps once and clamps them, placing
-/// its offset as a repeating axis does, RRP-probe5-m4). Every other axis keeps its centre: a pixel
+/// its offset as a repeating axis does). Every other axis keeps its centre: a pixel
 /// sampler's other axes clamp, where Metal keeps the offset.
 pub fn pixel_centre_by_word(
     fb: &mut FunctionBuilder<'_>,

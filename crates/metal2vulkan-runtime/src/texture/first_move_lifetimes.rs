@@ -1,7 +1,7 @@
 //! The lifetimes a new image's waiting first move depends on, checked on the image itself, so a
 //! lapse fails here on every device rather than as undefined behaviour one driver happens to crash
-//! on (a barrier on a destroyed image: RADV's SIGSEGV in EV STL-ps1-radv; lavapipe under the
-//! validation layer passed it, STL-ps1-lvpx86):
+//! on (a barrier on a destroyed image: RADV's SIGSEGV in our probe; lavapipe under the
+//! validation layer passed it):
 //!
 //! - a move of a `VkImage` a detach let go of is dropped, never recorded;
 //! - a host call's copy of an image over host pages makes the image's waiting move first, which
@@ -227,7 +227,7 @@ fn a_host_copy_makes_the_waiting_move_of_an_image_over_host_pages() {
 }
 
 /// An image in a buffer's memory holds the memory, not the buffer: with the texture and the buffer
-/// dropped, the buffer goes, as Metal frees it at their release (EV XRB-bft1-m4), and the image
+/// dropped, the buffer goes, as Metal frees it at their release, and the image
 /// (which a batch that took its move holds alone) keeps the buffer's memory until it goes.
 #[test]
 fn an_image_in_a_buffer_s_memory_holds_the_memory_not_the_buffer() {

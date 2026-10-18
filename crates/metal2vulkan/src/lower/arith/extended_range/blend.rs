@@ -3,13 +3,12 @@
 //! ([`super::tile_value`]), and stores the kernel write's encode of the result ([`super::encode`],
 //! [`super::encode_keeping`] under a write mask).
 //!
-//! **The measurement.** EVs XRB-sw1-m4 and XRB-sw2-m4 (an Apple M4, macOS 27.0.1, plain Metal):
-//! configurations of every factor and operation of the color channels and of alpha, the blend
-//! color, write masks, and `half` and `float` outputs, each over random sources (NaNs, the
-//! infinities, denormals, values past every range) and random texels of `BGRA10_XR`, `BGR10_XR`
-//! and `RGB10A8_2P_XR10`; the M3 Max under macOS 26.7 (25G229) gave every configuration of
-//! XRB-sw1 the M4's bytes (15,762 of 15,762), so one model holds on both chips and both OS
-//! levels.
+//! **The measurement.** Our probes (an Apple M4, macOS 27.0.1, plain Metal): configurations of
+//! every factor and operation of the color channels and of alpha, the blend color, write masks, and
+//! `half` and `float` outputs, each over random sources (NaNs, the infinities, denormals, values
+//! past every range) and random texels of `BGRA10_XR`, `BGR10_XR` and `RGB10A8_2P_XR10`; the M3 Max
+//! under macOS 26.7 (25G229) gave every configuration of our probe the M4's bytes (15,762 of
+//! 15,762), so one model holds on both chips and both OS levels.
 //!
 //! **The rule** for a `half4` output into a linear form. Metal clamps the source first, a color
 //! lane to [`super::SOURCE_RANGE`] (a NaN to its low end) and alpha to `[0, 1]` (a NaN to 0), and
@@ -41,7 +40,7 @@
 //! (`DestinationAlpha` one, `OneMinusDestinationAlpha` zero).
 //!
 //! **A `float4` output into a linear form** (the same sweeps' `float4` configurations, and every
-//! `float4` row of the lane table's linear forms, EV XRB-xrt1-m4: [`Blend::for_output`]). Metal
+//! `float4` row of the lane table's linear forms: [`Blend::for_output`]). Metal
 //! clamps its color lanes to [`FLOAT_SOURCE_RANGE`] (a NaN to its low end) and blends them
 //! unrounded ([`Atom::Sf`]); its alpha, and a color lane's read of the source's alpha, are its
 //! `half` (nearest even), clamped as a `half4` output's. A product, a sum, or `1 - x` that reads an
@@ -59,35 +58,32 @@
 //!   color factors' one minus the source alpha added first in a difference), and ranks a few
 //!   pairs otherwise ([`kept_whole`], the `Add` ranks).
 //!
-//! **A module without fast math** (`air.compile.fast_math_disable`, [`BlendMath::Rounded`]; EVs
-//! XRB-sw1s-m4 and XRB-sw2s-m4, the sweeps built under `-fmetal-math-mode=safe`, every key of each,
-//! and XRB-pf4-safe-m4, a computed `float4`'s 21 tuples into each linear form). Metal's compiler
-//! folds the blend into the function without fusing it: the output is rounded to `half` (a `float4`
-//! one too) and clamped as a `half4` output's, each term's product rounded to `half` (a factor of
-//! one its operand, of zero no term), and the two terms' sum rounded; `min` and `max` as the fast
-//! forms. Every `1 - x` is `h(1 - x)` of the `half` it reads, the blend color's color lanes' too
-//! ([`Node::OneMinus`]). An `_sRGB` form's blends take the same forms, of a `float4` output too,
-//! rounded to `half` first (EV XRB-xrts-m4, the lane table's probe built under safe math, and
-//! XRB-xrtr-m4 under relaxed math, the same bytes: every configuration made into each of the six
-//! forms).
+//! **A module without fast math** (`air.compile.fast_math_disable`, [`BlendMath::Rounded`]; the
+//! sweeps built under `-fmetal-math-mode=safe`, every key of each, and a computed `float4`'s 21
+//! tuples into each linear form). Metal's compiler folds the blend into the function without fusing
+//! it: the output is rounded to `half` (a `float4` one too) and clamped as a `half4` output's, each
+//! term's product rounded to `half` (a factor of one its operand, of zero no term), and the two
+//! terms' sum rounded; `min` and `max` as the fast forms. Every `1 - x` is `h(1 - x)` of the `half`
+//! it reads, the blend color's color lanes' too ([`Node::OneMinus`]). An `_sRGB` form's blends take
+//! the same forms, of a `float4` output too, rounded to `half` first (the lane table's probe built
+//! under safe math, and our probe under relaxed math, the same bytes: every configuration made
+//! into each of the six forms).
 //!
 //! Without fast math the model also holds where the fast forms are not built: a mask of one color
 //! channel, the color channels' `BlendColor` with `OneMinusBlendColor` under a difference, and any
-//! blend into an `_sRGB` form, masked too (EVs XRB-sw1s-m4 and -sw2s-m4 for the linear forms,
-//! XRB-xrts-m4 for every form), and the second source's factors, which read the function's index-1
-//! output rounded to `half` and clamped as the first ([`Atom::S1`]; EVs XRB-sw1s-m4, -sw2s-m4,
-//! -sw1r-m4 and -sw2r-m4: every key that names one, and XRB-xrtd-m4's table of every form). A blend
+//! blend into an `_sRGB` form, masked too (for the linear forms, for every form), and the second
+//! source's factors, which read the function's index-1 output rounded to `half` and clamped as the
+//! first ([`Atom::S1`]: every key that names one, and our probe's table of every form). A blend
 //! into `BGRA10_XR_sRGB` clamps the blend color's color channels to that form's source range, as it
 //! does the source ([`super::SRGB_SOURCE_RANGE`]; the binder's row holds the color clamped to both
 //! ranges' hull, [`super::blend_color::constant_words`]), where `OneMinusBlendColor` reads it; but
 //! `BlendColor` itself reads a color channel at or past `super::blend_color::SRGB_DIRECT_BOUND` (an
 //! `f32` 45 steps below the range's top) as `1.66796875`, a `half` below the top, which the binder
-//! marks past the hull's top (`super::blend_color::PAST_DIRECT_BOUND`; EVs XRB-xrts-m4, XRB-bcs-m4
-//! and XRB-bcs2-m4). A color class that reads `BlendColor` and `OneMinusBlendColor` both reads the
-//! one minus of `BlendColor`'s read (`h(1 - 1.66796875)` past the same bound; the safe table's
-//! configurations 17 and 40 and the second source's 20, EVs XRB-xrts-m4 and XRB-xrtd-m4, and EV
-//! XRB-bcs3-m4's sweep), while a color class reading the one minus alone reads it of the clamped
-//! color beside an alpha class reading `BlendColor` too (EV XRB-bcs3-m4).
+//! marks past the hull's top (`super::blend_color::PAST_DIRECT_BOUND`). A color class that reads
+//! `BlendColor` and `OneMinusBlendColor` both reads the one minus of `BlendColor`'s read
+//! (`h(1 - 1.66796875)` past the same bound; the safe table's configurations 17 and 40 and the
+//! second source's 20, our probes' sweep), while a color class reading the one minus alone reads it
+//! of the clamped color beside an alpha class reading `BlendColor` too.
 //!
 //! **Not built** ([`ExtendedRangeBlend`]) under fast math: a factor of the second source (under a `float4`
 //! output's model, in any of the four factors); the color channels' `BlendColor` with
@@ -270,8 +266,8 @@ pub struct Blend {
 
 /// The range Metal clamps a `float4` output's color lanes to before blending into an attachment
 /// of a linear form: the decimal literals `-0.752941` and `1.25098` as `float`, three `float`
-/// steps inside the codes' values `-384 / 510` and `638 / 510` (EVs XRB-sw1-m4 and XRB-sw2-m4:
-/// every source beyond them or a NaN, which lands on the low end, of either sweep).
+/// steps inside the codes' values `-384 / 510` and `638 / 510` (every source beyond them or a NaN,
+/// which lands on the low end, of either sweep).
 pub(crate) const FLOAT_SOURCE_RANGE: (f32, f32) =
     (f32::from_bits(0xBF40_C0BE), f32::from_bits(0x3FA0_201D));
 
@@ -376,8 +372,7 @@ fn alpha_rank(f: BlendFactor) -> u8 {
 
 /// An 8-bit unorm attachment's factor rank, of a color factor or alpha's where `alpha`, in the
 /// arithmetic `arith`: of an added pair, the destination's product is rounded first where the
-/// source factor's rank is at least the destination factor's, else the source's (EVs FB8-sw2-m3
-/// and FB8-rnd1-m3).
+/// source factor's rank is at least the destination factor's, else the source's.
 fn unorm8_rank(f: BlendFactor, alpha: bool, arith: BlendArith) -> u8 {
     use BlendFactor as F;
     let float = arith == BlendArith::Float;
@@ -1089,31 +1084,30 @@ impl Blend {
     /// factor into each format, and the blend color one). Without fast math
     /// the model's rounded forms ([`BlendMath::Rounded`], the module docs): each factor, each
     /// product and the sum rounded to the arithmetic's type, nearest even, the blend color rounded
-    /// to `half` (a `half4` output) before its one minus (EV FLT-hb2-m3; and EVs FBL-sw1-m3 and
-    /// FBL-sw2-m3, plain Metal on the M3 Max under macOS 27.0.1: every one of 677 blend states of
-    /// one key for color and alpha and 1,350 of a key beside one minus the source alpha's, over
-    /// 16,384 pixels of loaded `half4` and `float4` outputs, every channel of each 16-bit float
-    /// format, and the 677 under four write masks that keep some channels of `RGBA16Float`). There a
-    /// factor of zero keeps its product `x · 0` in the sum, as IEEE 754 adds: a NaN where `x` is an
-    /// infinity or a NaN, else the other term, a zero sum `-0` only where both terms are `-0` (two
-    /// zero factors alike), every NaN the one Metal stores, `0x7e00` (EV FBL-zf1-m3: plain Metal on
-    /// the M3 Max under macOS 27.0.1, each operation with a zero factor beside each factor, color
-    /// and alpha, into `RGBA16Float` and `RG16Float` from `half4` and `float4` outputs, three seeds
-    /// of 16,384 pixels whose sources and texels hold signed zeros, infinities and NaNs among them:
-    /// every lane). `SourceAlphaSaturated` takes Metal's minimum under either math, a NaN operand
-    /// giving the other and two zeros `+0` ([`metal_min`]). Under fast math the fast forms of the
-    /// module docs, with nothing clamped: the blend color's one
-    /// minus `h(1 - c)` of a color channel and `h(1 - h(a))` of alpha in `half`, `1 - c` in `float`
-    /// (the same sweeps built under `MTLMathModeFast`: every class of the forms [`Blend::fitted`]
-    /// names, each channel of every state; the sum and lerp forms fit most states but not all). A
-    /// blend constant's difference (`BlendColor` with `OneMinusBlendColor`, `BlendAlpha` with
-    /// `OneMinusBlendAlpha`, under `Subtract` or `ReverseSubtract`) fuses the minuend's product and
-    /// rounds the subtrahend's first, the color channels' one minus beside `BlendColor` being of
-    /// its read, `h(1 - h(c))` in `half` (EV FBL-sw1-m3: each such state of both sweeps, every
-    /// channel of `half4` and `float4` outputs, signed zeros included; and EV FBL-nw1-m3 through
-    /// narrower outputs). A factor of the second source is no form here
-    /// (`Feature::ExtendedRangeBlend` `DualSource`): its output is not planned beside the storage
-    /// form's write.
+    /// to `half` (a `half4` output) before its one minus (and our probes, plain Metal on the M3 Max
+    /// under macOS 27.0.1: every one of 677 blend states of one key for color and alpha and 1,350
+    /// of a key beside one minus the source alpha's, over 16,384 pixels of loaded `half4` and
+    /// `float4` outputs, every channel of each 16-bit float format, and the 677 under four write
+    /// masks that keep some channels of `RGBA16Float`). There a factor of zero keeps its product
+    /// `x · 0` in the sum, as IEEE 754 adds: a NaN where `x` is an infinity or a NaN, else the
+    /// other term, a zero sum `-0` only where both terms are `-0` (two zero factors alike), every
+    /// NaN the one Metal stores, `0x7e00` (plain Metal on the M3 Max under macOS 27.0.1, each
+    /// operation with a zero factor beside each factor, color and alpha, into `RGBA16Float` and
+    /// `RG16Float` from `half4` and `float4` outputs, three seeds of 16,384 pixels whose sources
+    /// and texels hold signed zeros, infinities and NaNs among them: every lane).
+    /// `SourceAlphaSaturated` takes Metal's minimum under either math, a NaN operand giving the
+    /// other and two zeros `+0` ([`metal_min`]). Under fast math the fast forms of the module docs,
+    /// with nothing clamped: the blend color's one minus `h(1 - c)` of a color channel and
+    /// `h(1 - h(a))` of alpha in `half`, `1 - c` in `float` (the same sweeps built under
+    /// `MTLMathModeFast`: every class of the forms [`Blend::fitted`] names, each channel of every
+    /// state; the sum and lerp forms fit most states but not all). A blend constant's difference
+    /// (`BlendColor` with `OneMinusBlendColor`, `BlendAlpha` with `OneMinusBlendAlpha`, under
+    /// `Subtract` or `ReverseSubtract`) fuses the minuend's product and rounds the subtrahend's
+    /// first, the color channels' one minus beside `BlendColor` being of its read, `h(1 - h(c))` in
+    /// `half` (each such state of both sweeps, every channel of `half4` and `float4` outputs,
+    /// signed zeros included; and our probe through narrower outputs). A factor of the second
+    /// source is no form here (`Feature::ExtendedRangeBlend` `DualSource`): its output is not
+    /// planned beside the storage form's write.
     pub fn half_float(
         eq: &BlendEquation,
         pf: PixelFormat,
@@ -1147,9 +1141,8 @@ impl Blend {
     /// lacks counts as written), computed by [`blend_unorm8`] over the output clamped to `[0, 1]`
     /// and the destination's code decoded in that type, the result stored by Metal's unorm write.
     /// Without fast math the rounded forms (the module docs). Under fast math the 16-bit float
-    /// blend's forms, but as Metal's compiler builds an 8-bit unorm attachment's blend (EVs
-    /// FB8-sw2-m3, FB8-rnd1-m3 and FB8-mk1-m3, plain Metal on the M3 Max under macOS 27.0.1,
-    /// `lower::fragment::fetch`'s module docs):
+    /// blend's forms, but as Metal's compiler builds an 8-bit unorm attachment's blend (plain Metal
+    /// on the M3 Max under macOS 27.0.1, `lower::fragment::fetch`'s module docs):
     ///
     /// - an inner sum adds the destination's atoms before the source's ([`Atom::order`]);
     /// - a lerp takes `y` from the destination's product first, and alpha takes no lerp of the
@@ -1157,12 +1150,11 @@ impl Blend {
     /// - of an added pair the product rounded first follows [`unorm8_rank`];
     /// - alpha shares the one minus the blend alpha, the source alpha and the destination alpha
     ///   (`SourceAlphaSaturated`'s too) that stored color lanes compute, and with no color
-    ///   channel stored the one minus an alpha the color channels' destination factor is
-    ///   (EV FB8-ao1-m3), where the color channels' operation is no minimum or maximum, which
-    ///   computes no factor (EV FB8-mm1-m3): it takes no lerp of a shared blend or destination
-    ///   alpha, and its sums keep a shared one minus whole where they add it from the
-    ///   destination's product;
-    /// - a write mask of one color channel plans that channel as a scalar (EV FB8-sc1-m3): its
+    ///   channel stored the one minus an alpha the color channels' destination factor is, where the
+    ///   color channels' operation is no minimum or maximum, which computes no factor: it takes no
+    ///   lerp of a shared blend or destination alpha, and its sums keep a shared one minus whole
+    ///   where they add it from the destination's product;
+    /// - a write mask of one color channel plans that channel as a scalar: its
     ///   alpha reads are no splats, but it keeps whole, and takes no lerp of, a one minus an alpha
     ///   that its destination factor is or that alpha's factors compute, alpha stored or not; its
     ///   sums add the destination alpha before the destination's lane, then the source alpha
@@ -1204,7 +1196,7 @@ impl Blend {
         }
         let family = Family::Unorm8(arith);
         let b = planned_for(eq, (has_alpha, family), written, (false, math))?;
-        // A format without alpha sums its two products in forms of its own (EV FB8-r8-m3): of
+        // A format without alpha sums its two products in forms of its own: of
         // its fast-math forms only a single or fused product, zero, and a minimum or maximum are
         // measured.
         let measured = |a: &Arith| {
@@ -1931,7 +1923,7 @@ impl<'a> Class<'a> {
 }
 
 /// Metal's `min(x, y)` in `SourceAlphaSaturated` (lanes of form `f`): a NaN operand gives the other,
-/// and two zeros `+0` (EV FBL-zf1-m3: a 16-bit float attachment's blends, every lane of
+/// and two zeros `+0` (a 16-bit float attachment's blends, every lane of
 /// `min(sa, 1 - da)` where `sa` is `-0` beside the `+0` of a destination alpha of one, or either a
 /// NaN, under safe math; under fast math the same rule leaves no lane of `RGBA16Float` but a
 /// zero's sign off Metal's, and fewer of those than the device's `FMin` of `-0` first). The
@@ -2065,7 +2057,7 @@ pub fn blend(
 }
 
 /// The arithmetic Metal blends a 16-bit float attachment in: the type of the function's output
-/// (EV FBL-sw1-m3: a `half4` output's blend rounds each step to `half`, a `float4` one's to
+/// (a `half4` output's blend rounds each step to `half`, a `float4` one's to
 /// `float`, and the result converts to `half` as Metal's unblended write of a `float` does).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BlendArith {
@@ -2084,13 +2076,13 @@ pub enum BlendArith {
 /// the source is the value the function returns, and `color`, the encoder's blend color (a `uvec4`
 /// of its `f32`s' bits, `PushField::HalfBlendColor`, where `b` reads it,
 /// [`Blend::reads_constant`]), is what `BlendColor` reads, rounded to `half`, nearest even, in
-/// `half` arithmetic (EV FLT-hb2-m3: the one fit of `RGBA16Float`'s blue lane under a blend color
-/// of 0.9), and `OneMinusBlendColor` its one minus: without fast math of that read, under fast math
-/// `h(1 - c)` of a color channel's `f32` and `h(1 - h(a))` of alpha, but of that read beside
-/// `BlendColor` in a color class (EV FBL-sw1-m3). The `Min` and `Max` operations are the device's
-/// `FMin` and `FMax`, whose answer at a NaN is not Metal's measured one; `SourceAlphaSaturated`'s
-/// minimum is Metal's ([`metal_min`]). A `float` multiply-add is correctly
-/// rounded where no part of it underflows (`fma::float_fma_exact`).
+/// `half` arithmetic (the one fit of `RGBA16Float`'s blue lane under a blend color of 0.9), and
+/// `OneMinusBlendColor` its one minus: without fast math of that read, under fast math `h(1 - c)`
+/// of a color channel's `f32` and `h(1 - h(a))` of alpha, but of that read beside `BlendColor` in a
+/// color class. The `Min` and `Max` operations are the device's `FMin` and `FMax`, whose answer at
+/// a NaN is not Metal's measured one; `SourceAlphaSaturated`'s minimum is Metal's ([`metal_min`]).
+/// A `float` multiply-add is correctly rounded where no part of it underflows
+/// (`fma::float_fma_exact`).
 pub fn blend_half_float(
     fb: &mut FunctionBuilder<'_>,
     b: &Blend,
@@ -2146,10 +2138,9 @@ pub fn blend_half_float(
 /// correctly rounded to the arithmetic's type ([`unorm8_tile_value`]), the value a fetch reads.
 /// `color`, the encoder's blend color (a `uvec4` of its `f32`s' bits, `PushField::HalfBlendColor`,
 /// where `b` reads it, [`Blend::reads_constant`]), is what `BlendColor` reads, clamped to `[0, 1]`
-/// and rounded to `half` in `half` arithmetic (EV FB8-bc1-m3: blend colors past both ends of every
-/// channel), and `OneMinusBlendColor` reads the one minus of that read under either math,
-/// `h(1 - h(c))` (`f(1 - c)` in `float`; EV FB8-sw2-m3). A NaN blend color, which no probe drew,
-/// reads 0.
+/// and rounded to `half` in `half` arithmetic (blend colors past both ends of every channel), and
+/// `OneMinusBlendColor` reads the one minus of that read under either math, `h(1 - h(c))`
+/// (`f(1 - c)` in `float`). A NaN blend color, which no probe drew, reads 0.
 pub fn blend_unorm8(
     fb: &mut FunctionBuilder<'_>,
     b: &Blend,

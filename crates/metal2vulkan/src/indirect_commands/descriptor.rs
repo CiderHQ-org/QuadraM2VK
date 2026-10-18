@@ -140,8 +140,7 @@ impl CommandDescriptor {
     /// Whether the records of a buffer of this descriptor hold `action`: a compute buffer's a
     /// dispatch of either kind, and a render buffer's a draw of a kind it allows or of a kind
     /// whose record a kind it allows holds, as Metal's records do, which it sizes by the largest
-    /// kind a buffer allows (EVs ICBV-kinds-m3 and -m4 of a kernel's commands, ICBV-hostkinds-m3
-    /// and -m4 of the CPU's setters).
+    /// kind a buffer allows (our probes of a kernel's commands and of the CPU's setters).
     pub fn holds(&self, action: &Action) -> bool {
         match *self {
             Self::Compute { .. } => match action {

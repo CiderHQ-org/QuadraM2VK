@@ -23,7 +23,7 @@
 //! Each sample is one command buffer of [`PASSES`] passes of one mode, the modes alternating, 20
 //! samples a mode after 3 warm ones (`CAPTURE-COST`, a pass's share of each): the host's time to
 //! encode it, the command buffer's GPU time (MoltenVK's GPU times of a render pass are not the
-//! pass's, EV RCH-inv2-m4), and the host's time from the commit to the completion; medians and
+//! pass's), and the host's time from the commit to the completion; medians and
 //! fastest. Measures; asserts only that each mode took its path.
 
 use super::degrade_notices::counts;

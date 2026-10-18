@@ -2,7 +2,7 @@
 //! buffer the pass keeps every tile's memory in, which its tile functions' and fragment functions'
 //! threadgroup arguments reach.
 //!
-//! Measured on an M4 and an M3 Max (EV `REF-tg-probe`, identical answers):
+//! Measured on an M4 and an M3 Max (identical answers):
 //!
 //! - **One allocation per tile** of the pass's `threadgroupMemoryLength` bytes, which persists
 //!   across the pass's tile dispatches: a dispatch reads what an earlier one over the same tile
@@ -10,13 +10,13 @@
 //! - **One table for every stage**: an argument set at `offset` has its word 0 at that byte of the
 //!   tile's memory, so arguments placed at overlapping offsets alias (Metal's validation says
 //!   "there is an overlap"; Metal runs it as written).
-//! - **The setter's checks** (probe RT11-metal-probe-10, which stops each in Metal's validation):
+//! - **The setter's checks** (which stops each in Metal's validation):
 //!   an index below 31, a length and an offset that are multiples of 16, and an argument that ends
 //!   inside the pass's `threadgroupMemoryLength`. Each is refused here (`Invalid`), and a
 //!   dispatch of a function whose argument the encoder never set is the binder's
 //!   `MissingThreadgroupMemory`, where Metal's validation stops the dispatch.
 //!
-//! Measured on an M4 (EV `CFIT-m4-probe4c`) for a fragment function's threadgroup arguments: they
+//! Measured on an M4 for a fragment function's threadgroup arguments: they
 //! are the same memory of the fragment's tile, which every fragment of the tile shares, a tile
 //! dispatch reads what the draws before it wrote, the draws after it read what it wrote, and a draw
 //! reads what the draws before it wrote (the later of two draws' stores is the one that stays).

@@ -130,13 +130,13 @@ fn words(buffer: &Buffer) -> Vec<u32> {
         .collect()
 }
 
-/// What Metal answers for tables and handles (probes `RT7-ftable-probe{1,2}`): a handle for each
-/// function the kernel links in `functions` or `binary_functions`, the same handle for the same
-/// function, none for a private function, an unlinked one or the kernel; a table is a `Shared`,
-/// tracked resource of 256 bytes and 8 per entry outside any heap, always non-volatile, with an
-/// ID of the tables' own space from 1; a kernel without linked functions makes tables too.
-/// Refused as Metal's validation stops it: an entry past the table's size and a handle of
-/// another state; refused as no buffer holds its words, a table past `max_buffer_length`.
+/// What Metal answers for tables and handles: a handle for each function the kernel links in
+/// `functions` or `binary_functions`, the same handle for the same function, none for a private
+/// function, an unlinked one or the kernel; a table is a `Shared`, tracked resource of 256 bytes
+/// and 8 per entry outside any heap, always non-volatile, with an ID of the tables' own space from
+/// 1; a kernel without linked functions makes tables too. Refused as Metal's validation stops it:
+/// an entry past the table's size and a handle of another state; refused as no buffer holds its
+/// words, a table past `max_buffer_length`.
 #[test]
 fn tables_and_handles_answer_as_metal_s_do() {
     on_device(|device| {
@@ -316,14 +316,12 @@ fn a_kernel_calls_the_functions_its_table_holds() {
 
 /// A handle of another kernel's state set in a table calls the table's kernel's function at the
 /// position the handle has in its own state, as plain Metal's does where its validation stops
-/// the call (probe `RT7-ftable-probe1` `handle_of_another_pipeline`, an M3 Max and an M4), Metal
-/// numbering a state's private functions first (probe `RT7-ftable-probe2`
-/// `number_private_unnumbered`): `table_add` second of the other state's callable functions
-/// calls `table_mul`, the table's state's second; behind one private function, its third. A
-/// position past the table's state's functions calls its last one, and is a null entry where it
-/// links none, as plain Metal's (EVs RFC-probe2-m4, RFC-probe3-m4). A state that lists a private
-/// function in a numbered list too, whose numbering Metal's probes did not measure, is refused as
-/// Metal's validation stops it.
+/// the call (an M3 Max and an M4), Metal numbering a state's private functions first: `table_add`
+/// second of the other state's callable functions calls `table_mul`, the table's state's second;
+/// behind one private function, its third. A position past the table's state's functions calls its
+/// last one, and is a null entry where it links none, as plain Metal's. A state that lists a
+/// private function in a numbered list too, whose numbering Metal's probes did not measure, is
+/// refused as Metal's validation stops it.
 #[test]
 fn a_handle_of_another_kernel_calls_this_kernel_s_function_at_its_position() {
     on_device(|device| {
@@ -502,13 +500,13 @@ fn a_buffer_at_a_vertex_table_index_reads_as_a_null_table() {
 }
 
 /// A vertex function calls the functions its stage's table holds, as a kernel does and as
-/// Metal's did (EVs ICBV-vft-m3 and -m4, the M3 Max and the M4): vertex `vid` calls entry
-/// `vid % 5` of a vertex-stage table holding `table_add`, `table_mul`, a null entry, `table_sub`
-/// and `table_half`. A call through an entry of another type is undefined, so the words of entry 4
-/// are not compared (Metal's were `vid - 3`, the runtime's are 0). An empty table and an unbound
-/// one answer as plain Metal's did (its debug layer stops both draws: "missing Visible Function
-/// Table binding at index 1 for ops[0]"), and an entry set after the draw was encoded and before
-/// the commit is the one it calls, as Metal's tables are read when the draw runs.
+/// Metal's did (the M3 Max and the M4): vertex `vid` calls entry `vid % 5` of a vertex-stage table
+/// holding `table_add`, `table_mul`, a null entry, `table_sub` and `table_half`. A call through an
+/// entry of another type is undefined, so the words of entry 4 are not compared (Metal's were
+/// `vid - 3`, the runtime's are 0). An empty table and an unbound one answer as plain Metal's did
+/// (its debug layer stops both draws: "missing Visible Function Table binding at index 1 for
+/// ops[0]"), and an entry set after the draw was encoded and before the commit is the one it calls,
+/// as Metal's tables are read when the draw runs.
 #[test]
 fn a_vertex_function_calls_the_functions_its_stage_s_table_holds() {
     on_device(|device| {
@@ -582,10 +580,10 @@ fn a_vertex_function_calls_the_functions_its_stage_s_table_holds() {
 
 /// A buffer bound where the kernel reads a table reads as a null table, as plain Metal reads it
 /// where its validation stops the dispatch ("incorrect Visible Function Table binding at index 1
-/// ... found buffer"; probe `RT7-ftable-probe1` `query_buffer_at_index`, an M3 Max and an M4):
-/// every thread writes 0xffffffff, whatever words the buffer holds. A table where the kernel writes
-/// a buffer refuses the dispatch (plain Metal's answer was not measured), recording nothing. A
-/// later binding of the other kind at the index replaces the earlier one, as on Metal.
+/// ... found buffer"; an M3 Max and an M4): every thread writes 0xffffffff, whatever words the
+/// buffer holds. A table where the kernel writes a buffer refuses the dispatch (plain Metal's
+/// answer was not measured), recording nothing. A later binding of the other kind at the index
+/// replaces the earlier one, as on Metal.
 #[test]
 fn a_buffer_at_a_table_index_reads_as_a_null_table() {
     on_device(|device| {
@@ -646,8 +644,7 @@ fn a_buffer_at_a_table_index_reads_as_a_null_table() {
 /// An offset set at an index holding a table makes the kernel read the null table there (size 0,
 /// every entry null: every thread writes 0xffffffff), at any offset, 0 included, and a second
 /// offset keeps it null, until the table is bound again, as plain Metal reads it (an M4 under
-/// macOS 27.0.1, EVs RRP-probe1-m4 and RRP-probe2-m4 `vft_off*`; Metal's debug layer raises an
-/// exception at the offset).
+/// macOS 27.0.1; Metal's debug layer raises an exception at the offset).
 #[test]
 fn an_offset_at_a_table_index_reads_the_null_table() {
     on_device(|device| {
@@ -1034,11 +1031,11 @@ fn without_the_array_s_features_a_table_past_the_storage_range_is_called_through
     );
 }
 
-/// What Metal answers for binary functions and required threadgroup sizes (EVs RTL-816-m3/-m4
-/// and RTL-816d-m3/-m4; the M3 Max and the M4 alike):
+/// What Metal answers for binary functions and required threadgroup sizes (the M3 Max and the M4
+/// alike):
 /// - A stage's `binary_functions` and a made state's additions must be compiled to a binary.
 /// - Without the state's support flag, an added function's handle calls the kernel's last other
-///   callable function (EVs RFC-probe2-m4, RFC-probe3-m4).
+///   callable function.
 /// - The added state has a handle for each of the base state's functions and each added one, and
 ///   calls both.
 /// - A required size Metal refuses refuses the creation; a dispatch of another size runs the size
@@ -1107,8 +1104,7 @@ fn binary_functions_and_required_threads_answer_as_metal_s_do() {
 
         // Functions added to a made state. Without the support flag, which Metal's validation
         // stops, plain Metal's handle of an added function calls the kernel's last other
-        // callable function (EVs RFC-probe2-m4 `bf_off_two`, RFC-probe3-m4
-        // `bf_off_one_add_two`), also through a state made from that one.
+        // callable function, also through a state made from that one.
         let base = LinkedFunctions::new().with_function(plain("table_mul").linked_function());
         let unsupported = create(&descriptor(base.clone()))
             .unwrap()
@@ -1240,8 +1236,7 @@ fn binary_functions_and_required_threads_answer_as_metal_s_do() {
 }
 
 /// A table bound where a kernel only reads a buffer reads as an unbound buffer, zeros, as plain
-/// Metal read a table there (EVs RFC-probe1-m4 `ft_table_at_buffer_compute`, RFC-probe2-m4
-/// `ft_table_at_buffer_wide`, an M4), where its validation stops the dispatch ("incorrect Buffer
+/// Metal read a table there (an M4), where its validation stops the dispatch ("incorrect Buffer
 /// binding"). The kernel is the owned `a1_bool_from_float` fixture's: thread `i` converts the
 /// float and half patterns of buffers 0 and 1 to `bool` and writes one word of the results to
 /// buffer 2, 0 for zeros alone. The table's words (a null entry and a set one) would set bits.
@@ -1292,8 +1287,7 @@ fn a_table_at_a_buffer_index_reads_as_an_unbound_buffer() {
 
 /// A handle of another drawing state's vertex function calls the table's state's vertex function
 /// at the handle's position, numbered private functions first, as plain Metal's table does where
-/// its validation stops `setFunction:atIndex:` (EVs RFC-probe1-m4 `ft_handle_other_render`,
-/// RFC-probe2-m4 `ft_private_shift_vertex`, an M4). The other state links `table_mul` private,
+/// its validation stops `setFunction:atIndex:` (an M4). The other state links `table_mul` private,
 /// then `table_sub` and `table_add`: its `table_add` is at position 2, where the table's state
 /// links `table_sub`, so every vertex writes `vid - 3`. A kernel's handle stays refused
 /// (unmeasured).
@@ -1336,11 +1330,10 @@ fn a_handle_of_another_vertex_function_calls_this_state_s_function_at_its_positi
 
 /// Without `support_adding_vertex_binary_functions`, which Metal's validation stops, plain Metal
 /// makes the state with functions added to its vertex stage, and its handle of an added function
-/// calls the stage's last other callable function, as a kernel's does (EV RFC-probe4-m4
-/// `vtx_off_two`, `vtx_off_one_add_two`, and alike `frag_off_two`, `tile_off_two`, an M4). The
-/// base links `table_mul`, then `table_add`: `table_sub`'s handle calls `table_add`, so every
-/// vertex writes `vid + 3`, and so do `table_sub`'s and `table_half`'s through a state made from
-/// that one; with the flag `table_sub`'s calls `table_sub`.
+/// calls the stage's last other callable function, as a kernel's does (and alike `frag_off_two`,
+/// `tile_off_two`, an M4). The base links `table_mul`, then `table_add`: `table_sub`'s handle calls
+/// `table_add`, so every vertex writes `vid + 3`, and so do `table_sub`'s and `table_half`'s
+/// through a state made from that one; with the flag `table_sub`'s calls `table_sub`.
 #[test]
 fn functions_added_to_a_vertex_stage_without_its_flag_call_its_last_function() {
     use metal2vulkan::metal::FunctionOptions;
@@ -1395,9 +1388,8 @@ fn functions_added_to_a_vertex_stage_without_its_flag_call_its_last_function() {
 
 /// Functions added to a stage a drawing state lacks (the fragment stage of a state without a
 /// fragment function, and the tile stage) are left out, with no handle, as plain Metal makes the
-/// state where its validation stops it (EVs RFC-probe1-m4 `bf_fragment_to_vertex_only`,
-/// `bf_tile_to_drawing`); the state's vertex function keeps its handle. A function not compiled
-/// to a binary stays refused there, as it is for a stage the state has.
+/// state where its validation stops it; the state's vertex function keeps its handle. A function
+/// not compiled to a binary stays refused there, as it is for a stage the state has.
 #[test]
 fn functions_added_to_a_stage_a_drawing_state_lacks_are_left_out() {
     use metal2vulkan::metal::FunctionOptions;
@@ -1519,14 +1511,14 @@ fn tile_words_with(
 }
 
 /// A tile function calls the functions its stage's table holds, as a kernel and a vertex
-/// function do and as Metal's did (EVs ICR-tilevft2-m3 and -m4, the M3 Max and an M4): thread
-/// `i` of the owned `vft_tile_caller`'s two tiles calls entry `i % 5` of a tile-stage table
-/// holding `table_add`, `table_mul`, a null entry, `table_sub` and `table_half`. A call through
-/// an entry of another type is undefined, so the words of entry 4 are not compared. An entry set
-/// after the dispatch was encoded and before the commit is the one it calls, as Metal's tables are
-/// read when the dispatch runs. An empty table, an unbound one, and a buffer bound at the table's
-/// index answer as plain Metal's did where its debug layer stops the dispatch (EV ICR-tilevft2-m4):
-/// 0xfffffffe, and 0xffffffff for both others.
+/// function do and as Metal's did (the M3 Max and an M4): thread `i` of the owned
+/// `vft_tile_caller`'s two tiles calls entry `i % 5` of a tile-stage table holding `table_add`,
+/// `table_mul`, a null entry, `table_sub` and `table_half`. A call through an entry of another type
+/// is undefined, so the words of entry 4 are not compared. An entry set after the dispatch was
+/// encoded and before the commit is the one it calls, as Metal's tables are read when the dispatch
+/// runs. An empty table, an unbound one, and a buffer bound at the table's index answer as plain
+/// Metal's did where its debug layer stops the dispatch: 0xfffffffe, and 0xffffffff for both
+/// others.
 #[test]
 fn a_tile_function_calls_the_functions_its_stage_s_table_holds() {
     on_device(|device| {
@@ -1600,8 +1592,7 @@ fn a_tile_function_calls_the_functions_its_stage_s_table_holds() {
 
 /// Without `support_adding_binary_functions`, which Metal's validation stops, plain Metal makes
 /// a tile state with functions added to its tile stage, and its handle of an added function
-/// calls the stage's last other callable function, as a vertex function's does (EV
-/// RFC-probe4-m4 `tile_off_two`, `tile_off_one_add_two`, an M4;
+/// calls the stage's last other callable function, as a vertex function's does (an M4;
 /// `functions_added_to_a_vertex_stage_without_its_flag_call_its_last_function`). The base links
 /// `table_mul`, then `table_add`: `table_sub`'s handle calls `table_add`, so every thread writes
 /// `i + 3`, and so do `table_sub`'s and `table_half`'s through a state made from that one; with

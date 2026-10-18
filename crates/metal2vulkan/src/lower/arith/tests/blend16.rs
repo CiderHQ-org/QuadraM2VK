@@ -7,20 +7,20 @@
 //! its one minus `h(1 - h(c))`, each sum and product rounded to `half`; in `float` (a `float4`
 //! output) they read `c` and `f(1 - c)`, the result the `float` the caller converts.
 //!
-//! EV FBL-sw1-m3: plain Metal on the M3 Max under macOS 27.0.1, our own MSL, every channel of
-//! 16,384 random pixels of each such state of the 677 and 1,350 state sweeps, `half4` and `float4`
-//! outputs, under the blend color (0.3, 0.6, 0.9, 0.45), where blue's `h(1 - h(c))` and
-//! `h(1 - c)` differ: this form holds Metal's bits in every channel, signed zeros included (EV
-//! FBL-nw1-m3: through narrower outputs too). The second blend color puts every color channel
-//! where the two differ. Before the form was built, the color channels' blend color difference
-//! took the rounded form (both products rounded, one minus of the color's `f32`), which differs
-//! from Metal's in some channels, and neither difference counted as fitted.
+//! Plain Metal on the M3 Max under macOS 27.0.1, our own MSL, every channel of 16,384 random pixels
+//! of each such state of the 677 and 1,350 state sweeps, `half4` and `float4` outputs, under the
+//! blend color (0.3, 0.6, 0.9, 0.45), where blue's `h(1 - h(c))` and `h(1 - c)` differ: this form
+//! holds Metal's bits in every channel, signed zeros included (through narrower outputs too). The
+//! second blend color puts every color channel where the two differ. Before the form was built, the
+//! color channels' blend color difference took the rounded form (both products rounded, one minus
+//! of the color's `f32`), which differs from Metal's in some channels, and neither difference
+//! counted as fitted.
 //!
 //! Without fast math a zero factor keeps its product (`a_safe_blend_keeps_a_zero_factors_product`):
 //! each product rounded, `x · 0` a NaN where `x` is an infinity or a NaN and else a zero of the
 //! signed operand's sign, their IEEE 754 sum rounded (`-0` only where both terms are `-0`), every
 //! NaN the quiet `0x7FC00000`, and `SourceAlphaSaturated`'s minimum Metal's: a NaN operand gives
-//! the other, two zeros `+0` (EV FBL-zf1-m3: plain Metal on the M3 Max under macOS 27.0.1, each
+//! the other, two zeros `+0` (plain Metal on the M3 Max under macOS 27.0.1, each
 //! operation with a zero factor beside each factor, color and alpha, into `RGBA16Float` and
 //! `RG16Float` from `half4` and `float4` outputs, sources and texels holding signed zeros,
 //! infinities and NaNs: every lane). Before the form was built, a zero factor dropped its term,
@@ -61,7 +61,7 @@ fn operand(rng: &mut Rng, float: bool) -> u64 {
     u64::from(((sign * v * 2f64.powi(exponent)) as f32).to_bits())
 }
 
-/// Metal's difference (EV FBL-sw1-m3) in lane `l` (alpha the last) of source `s` over destination
+/// Metal's difference in lane `l` (alpha the last) of source `s` over destination
 /// `d`, factors `fs` and `fd` under `op`, blend color `bc`, in `arith`: the `f32` bits of the
 /// `half` (`BlendArith::Half`) or the `float`.
 fn metal(
@@ -205,7 +205,7 @@ fn rounded(arith: BlendArith, x: f64) -> f64 {
     }
 }
 
-/// Metal's `min` in `SourceAlphaSaturated` (EV FBL-zf1-m3): a NaN operand gives the other, two
+/// Metal's `min` in `SourceAlphaSaturated`: a NaN operand gives the other, two
 /// zeros `+0`.
 fn metal_min(x: f64, y: f64) -> f64 {
     match (x.is_nan(), y.is_nan()) {
@@ -216,7 +216,7 @@ fn metal_min(x: f64, y: f64) -> f64 {
     }
 }
 
-/// Metal's blend without fast math (EV FBL-zf1-m3) in lane `l` (alpha the last) of source `s` over
+/// Metal's blend without fast math in lane `l` (alpha the last) of source `s` over
 /// destination `d`, factors `fs` and `fd` under `op`, blend color `bc`, in `arith`: each product
 /// rounded, a zero factor's kept, the IEEE 754 sum rounded; the `f32` bits of the `half` or the
 /// `float`, every NaN `0x7FC00000`.

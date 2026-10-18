@@ -706,7 +706,7 @@ fn two_remaining_outputs_at_one_color_are_an_invalid_request() {
 /// The same kernel with the read unguarded reads an element of the gated-off table whatever the
 /// constant: every element of the table is the absent handle, so the read is an absent read, which
 /// fails the command buffer that runs it. Metal dropped the whole body of a kernel that reads such
-/// an element unconditionally, its stores to a present buffer included (SPC-metal): the fallout of
+/// an element unconditionally, its stores to a present buffer included: the fallout of
 /// undefined behaviour, which no translation reproduces, and which reports no result as good.
 #[test]
 fn an_observed_element_of_an_absent_texture_table_is_an_absent_read() {

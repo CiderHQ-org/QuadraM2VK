@@ -1,7 +1,7 @@
 //! Render targets of Apple's extended-range formats on the device the cfg selects, under the
 //! validation layer: what a draw and a clear store, against Metal's measured texels.
 //!
-//! Metal's answers: EVs XRR-rtp1-m3 and -m4 (an Apple M3 Max on macOS 26.7 and an Apple M4 on
+//! Metal's answers: our probes (an Apple M3 Max on macOS 26.7 and an Apple M4 on
 //! macOS 27.0.1, byte-identical, plain and under Metal's validation layer alike), whose probe was
 //! written for this repository:
 //!
@@ -24,11 +24,11 @@
 //!   list; the model's bytes give the same digest.
 //!
 //! - **Clear routes**. A `Clear` of a `BGR10_XR` or `BGRA10_XR` target and their `_sRGB` twins
-//!   stores the texel of Metal's route for its texture and pass (`ClearRoute`, measured by EVs
-//!   XSH-clr2-m4 and XSH-clr3-m4, whose model the product's
-//!   `clears_store_metal_s_texels_on_each_route` checks): straight from the `float` for a
-//!   16 x 16 private target of plain usage in a pass with no draw call, and through `half` for
-//!   an 8 x 8 one, one of `ShaderWrite` usage, and one whose pass draws into another attachment.
+//!   stores the texel of Metal's route for its texture and pass (`ClearRoute`, measured by our
+//!   probes, whose model the product's `clears_store_metal_s_texels_on_each_route` checks):
+//!   straight from the `float` for a 16 x 16 private target of plain usage in a pass with no draw
+//!   call, and through `half` for an 8 x 8 one, one of `ShaderWrite` usage, and one whose pass
+//!   draws into another attachment.
 //!
 //! A difference is printed on `XR-TARGETS-DIFFERS` lines, the first texels of each output with
 //! their inputs, the stored texel and the model's.

@@ -6,7 +6,7 @@
 //! macOS 26.7) computes such a product deterministically across runs, processes, inputs, and
 //! dispatch shapes, with the cells of every lane that does not take part (not live, or past the
 //! threadgroup's thread count) read as zero, so an infinite cell meeting one makes NaN: that is
-//! [`metal`] below, and the literal readings of the authored cases and of DSM-inf-probe's
+//! [`metal`] below, and the literal readings of the authored cases and of our probe's
 //! uncommitted ones are checked against it. On every profile whose kernels emulate their
 //! simdgroups (`lavapipe`, `vk12-floor`) each fixture compiles, passes L3, and runs on the CPU
 //! interpreter at 8, 16, and 32 subgroup lanes in both scheduling orders, giving that answer:
@@ -187,7 +187,7 @@ fn inputs(which: Input) -> [M8; 3] {
 
 /// Metal's cells for lane `l` of a simdgroup whose lanes `part` take part in the multiply-add:
 /// `c + a·b` with the `a` and `b` cells of every other lane `+0`, so an infinite cell whose step
-/// meets another lane's zero cell makes NaN (DSM-inf-probe).
+/// meets another lane's zero cell makes NaN.
 fn metal(m: &[M8; 3], part: Lanes<'_>, l: u32) -> [f64; 2] {
     tile(m, part, l, 8, 0.0)
 }
@@ -226,9 +226,8 @@ fn canon(w: [u32; 4]) -> [u32; 4] {
     })
 }
 
-/// The literal readings DSM-metal-probe and DSM-inf-probe took on Metal (both passes
-/// byte-identical): `(case, input, part, lane, float cells)`. The half cells are the same
-/// values.
+/// The literal readings our probes took on Metal (both passes byte-identical): `(case, input, part,
+/// lane, float cells)`. The half cells are the same values.
 #[test]
 fn the_model_is_metals_reading() {
     let half = |l: u32| l < 16;
@@ -250,7 +249,7 @@ fn the_model_is_metals_reading() {
         ("2b60dd21", Input::A, &half, 15, [286.0, 287.0]),
         // b577c71f: a threadgroup of 48, simdgroup 0 whole.
         ("b577c71f", Input::A, &all, 31, [349.0, 351.0]),
-        // DSM-inf-probe's uncommitted cases: a whole simdgroup reads +inf; lanes 0-15 live, and
+        // Our probe's uncommitted cases: a whole simdgroup reads +inf; lanes 0-15 live, and
         // a threadgroup of 16, read NaN where the infinite cell meets a zero one.
         ("150d4c95", Input::Infinity, &all, 8, [inf, inf]),
         ("a62e77f4", Input::Infinity, &half, 0, [nan, nan]),
@@ -589,12 +588,12 @@ fn uniform_flow_takes_absent_lanes_as_zero_cells() {
 /// float cells, and whether the case separates the zero's signs.
 type Reading<'a> = (&'a str, Input, Lanes<'a>, u32, [f64; 2], bool);
 
-/// Metal's readings of the owned no-fast-math cases (EV DSM2-metal-probe, two passes,
-/// byte-identical), `(case, input, part, lane, float cells)`; the half cells are the same values.
-/// With a `-0` accumulator and every other term `-0`, a lane that does not take part shows its
-/// zero cell's sign: `+0`, not live or absent, on the `b` side (rows 0-1 read `z`, rows 2-3 `-z`)
-/// and on the `a` side (columns 2-3 read `z`, columns 6-7 `-z`). The cases marked `true`
-/// separate the signs: a `-0` zero cell would give the opposite bits.
+/// Metal's readings of the owned no-fast-math cases (two passes, byte-identical), `(case, input,
+/// part, lane, float cells)`; the half cells are the same values. With a `-0` accumulator and every
+/// other term `-0`, a lane that does not take part shows its zero cell's sign: `+0`, not live or
+/// absent, on the `b` side (rows 0-1 read `z`, rows 2-3 `-z`) and on the `a` side (columns 2-3 read
+/// `z`, columns 6-7 `-z`). The cases marked `true` separate the signs: a `-0` zero cell would give
+/// the opposite bits.
 #[test]
 fn the_zero_cell_is_plus_zero_in_metals_readings() {
     let all = |_: u32| true;

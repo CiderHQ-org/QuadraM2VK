@@ -2230,12 +2230,12 @@ fn a_phi_takes_in_each_changed_operand_alone() {
 }
 
 /// The trace's slowest synthetic shapes, timed (not asserted: wall time depends on the machine).
-/// The census EV runs it in release: a ring of phis each stepped around its own loop, whose values
-/// change about 64 times each; a load and a write at each of many member slots; a `select` chain
-/// over many parameters; a deep tree of named types; and a `phi` whose many incoming values change
-/// one at a time.
+/// The census run takes it in release: a ring of phis each stepped around its own loop, whose
+/// values change about 64 times each; a load and a write at each of many member slots; a `select`
+/// chain over many parameters; a deep tree of named types; and a `phi` whose many incoming values
+/// change one at a time.
 #[test]
-#[ignore = "timing for the census EV, in release"]
+#[ignore = "timing for the census run, in release"]
 fn the_trace_s_slowest_shapes_in_release() {
     let ring = |count: usize, space: u32| {
         let mut body = "  br label %b0\n".to_string();

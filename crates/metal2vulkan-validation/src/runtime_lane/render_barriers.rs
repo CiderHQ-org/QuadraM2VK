@@ -4,9 +4,8 @@
 //! fullscreen triangle over a 2x2 pass without attachments; each fragment ORs its sample into its
 //! pixel's word and counts itself in word 4, so every draw writes the same five words. The
 //! synchronization validation does not see a race between two draws of one render pass instance
-//! (layer 1.4.341 on lavapipe reported none between two such draws without a barrier, EV
-//! `CFIT-rb-lvpx86`), so the checks here are the counts, the split and the layer's other
-//! reports, not a hazard report.
+//! (layer 1.4.341 on lavapipe reported none between two such draws without a barrier), so the
+//! checks here are the counts, the split and the layer's other reports, not a hazard report.
 //!
 //! - A barrier that orders nothing (an empty scope, no stage before or after, a scope of the
 //!   render targets alone after no fragment stage or before none at or before it, no resource)
@@ -384,7 +383,7 @@ fn a_split_keeps_samples_metal_does_not_store() {
 /// 1 to 3); and into a memoryless `Depth32Float` attachment cleared to 1.0 beside a stored
 /// color, white at depth 0.5 under `Less` with depth writes, then the per-sample colors at 0.75,
 /// which the first command's depth fails, so every texel stays white. Plain Metal orders a
-/// command after its barrier (EV RFC-probe3-m4), whose draws are then the encoder's own two
+/// command after its barrier, whose draws are then the encoder's own two
 /// draws of one pass. The runs load and store such an attachment between them, or, where its
 /// image is lazily allocated (MoltenVK), render it into a backing, announced
 /// (`memoryless-backed`).

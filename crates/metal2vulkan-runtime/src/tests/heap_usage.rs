@@ -1,5 +1,5 @@
 //! Metal's heap answers by usage: which usages Metal keeps uncompressed, and the model's plain and
-//! compressed answers, against our probe EV API-hsa1-m4 (an Apple M4 under macOS 27.0.1; the
+//! compressed answers, against our probe (an Apple M4 under macOS 27.0.1; the
 //! consumer's M3 Max rows under 26.7 alike).
 
 use crate::metal_level::MetalLevel;

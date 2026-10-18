@@ -88,8 +88,8 @@
 //! the product of two `half`s is exact in `float`, not in `half`. So the stage rounds a scaled
 //! `integer` level up itself, which is exact in `half` (at most 64) and which Vulkan's own
 //! rounding leaves as it is: `0x47F3` by `0x3007`, 1.000445, is level 2 on every device, where
-//! MoltenVK drew one segment from the unrounded product (its `half` is 1.0; EVs RDW-lane2-mvk3
-//! and -mvk4, `patches::scale_product_unrounded`). A `pow2` level is a power of two already. A
+//! MoltenVK drew one segment from the unrounded product (its `half` is 1.0;
+//! `patches::scale_product_unrounded`). A `pow2` level is a power of two already. A
 //! scaled fractional level stays the product, which such a driver rounds to `half` (noted with
 //! the scale, `PrecisionNote::TessellationFactorScale`).
 //!

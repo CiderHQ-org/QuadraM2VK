@@ -1,6 +1,6 @@
 //! The extended-range blend table: Metal's fixed-function blend into each of Apple's extended-range
 //! formats, from `half4` and `float4` outputs, under a compact table of blend configurations over
-//! fixed synthetic inputs, measured once with plain Metal (EV XRB-xrt1-m4) and committed as
+//! fixed synthetic inputs, measured once with plain Metal and committed as
 //! `validation/fixtures/public/xr_blend_table.txt`.
 //!
 //! Each configuration draws into its own band of [`WIDTH`] x [`BAND_HEIGHT`] texels ([`BAND`]
@@ -15,24 +15,23 @@
 //! runs the table through the CPU interpreter, and validation's lane draws it on a device. The
 //! table records the digests of the probe's inputs, which both check first.
 //!
-//! The same probe built without fast math (EV XRB-xrts-m4 under `-fmetal-math-mode=safe`; EV
-//! XRB-xrtr-m4 under `relaxed` gave every band the same bytes) is committed beside it as
+//! The same probe built without fast math (under `-fmetal-math-mode=safe`; under `relaxed` gave
+//! every band the same bytes) is committed beside it as
 //! `validation/fixtures/public/xr_blend_table_safe.txt` ([`safe_table`]).
 //!
 //! The same probe's table of the second source's configurations (factors that read the function's
 //! second output, `[[color(0), index(1)]]`, its own outputs [`second_sources`]), built without fast
-//! math (EV XRB-xrtd-m4 under `-fmetal-math-mode=safe`; EV XRB-xrtdr-m4 under `relaxed` gave every
-//! band the same bytes), is committed as `validation/fixtures/public/xr_blend_table_dual.txt`
-//! ([`dual_table`]).
+//! math (under `-fmetal-math-mode=safe`; under `relaxed` gave every band the same bytes), is
+//! committed as `validation/fixtures/public/xr_blend_table_dual.txt` ([`dual_table`]).
 //!
 //! The same configurations and inputs under fast math with the `float4` output computed (the source
-//! times a loaded vector of ones, EV XRB-xrtc-m4), each row's outcome made, `announced` (made,
+//! times a loaded vector of ones), each row's outcome made, `announced` (made,
 //! announcing `extended-range-float-blend-source`), or a gap, are committed as
 //! `validation/fixtures/public/xr_blend_table_computed.txt` ([`computed_table`]).
 //!
 //! The second source's function drawn with blending disabled under every channel (its second output
-//! read by no blend), one band per format and output type over the same inputs (EV XRB-xrtdu-m4,
-//! `-fmetal-math-mode=safe`), is committed as
+//! read by no blend), one band per format and output type over the same inputs
+//! (`-fmetal-math-mode=safe`), is committed as
 //! `validation/fixtures/public/xr_blend_table_dual_unblended.txt` ([`dual_unblended_table`]).
 
 use std::path::PathBuf;
@@ -464,11 +463,10 @@ pub fn parse(path: PathBuf) -> Table {
 mod tests {
     use super::*;
 
-    /// The generator draws the probe's inputs (EV XRB-xrt1-m4's digests in the table, EV
-    /// XRB-xrts-m4's in the table without fast math, EV XRB-xrtd-m4's, the second outputs' too, in
-    /// the second source's, and EV XRB-xrtc-m4's `float4` ones in the computed table), and each
-    /// table names every configuration of every case once, the same configurations in each but the
-    /// second source's.
+    /// The generator draws the probe's inputs (the probe's digests in the table, in the table
+    /// without fast math, in the second source's, the second outputs' too, and its `float4` ones in
+    /// the computed table), and each table names every configuration of every case once, the same
+    /// configurations in each but the second source's.
     #[test]
     fn the_inputs_are_the_probes() {
         let (fast, safe, dual) = (table(), safe_table(), dual_table());

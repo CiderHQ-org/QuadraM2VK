@@ -329,7 +329,7 @@ fn fences_order_untracked_buffers() {
 
 /// A managed buffer's CPU writes reach the GPU and its GPU writes reach the CPU, with
 /// `did_modify_range` refusing a managed buffer's range past it, and both calls doing nothing on
-/// a buffer of another storage mode, as plain Metal does (SPH-managed1-m4).
+/// a buffer of another storage mode, as plain Metal does.
 #[test]
 fn managed_buffers_round_trip() {
     on_device(|device| {
@@ -567,7 +567,7 @@ fn blits_refuse_what_metal_refuses() {
 /// synchronization validation reports the hazard. (A start barrier that waited for earlier work
 /// would order them, and the layer would report nothing.) Ignored by default: only a run with
 /// synchronization validation on (`METAL2VULKAN_LANE_VALIDATION=sync`, `LaneChecks`, or the
-/// layer's own `VK_KHRONOS_VALIDATION_VALIDATE_SYNC=true`) checks hazards; the lavapipe EV runs it.
+/// layer's own `VK_KHRONOS_VALIDATION_VALIDATE_SYNC=true`) checks hazards; a lavapipe run takes it.
 ///
 /// The layer reports the hazard only when the second command buffer is submitted before the
 /// completion turn has seen the first complete; once it has, the layer knows the first fill
@@ -579,7 +579,7 @@ fn blits_refuse_what_metal_refuses() {
 /// - The fills cover [`RACE`] bytes, so the first takes milliseconds on the GPU while the second
 ///   is submitted. With 8 MiB fills, the M3, the M4 and the RTX 3090 often finished the first
 ///   before the second went: on the M3, 1 run of 5 reported the hazard both without the hold
-///   (RT10-sbw5) and with it (RT10-sbh5).
+///   and with it.
 #[test]
 #[ignore = "needs the validation layer's synchronization validation"]
 fn the_start_barrier_waits_for_nothing() {

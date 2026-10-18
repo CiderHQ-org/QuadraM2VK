@@ -524,14 +524,13 @@ fn by_identity(desc: &DeviceDescription) -> Vec<DriverWorkaround> {
 /// The operation classes measured exact in a vertex function on a driver that takes
 /// `DriverDeviation::MetalVertexSimdgroups`: with the vertex stage forced into the profile,
 /// MoltenVK 1.4.1 ran `rvc_simd_vertex`'s `simd_sum`, `simd_shuffle`, `simd_shuffle_xor` and
-/// `simd_ballot` as Metal does (EVs RVC-probe2-m4 and RVC-m3all, 200 of 200 words on the M4 and the
-/// M3 Max), and with the votes added, `gsm2_vertex_votes_shifts`' `simd_all` and `simd_any` over
-/// full and partial simdgroups (EVs GSM2-vv-m4 and GSM2-vv-m3, the four cases matching in both legs
-/// on both chips).
+/// `simd_ballot` as Metal does (200 of 200 words on the M4 and the M3 Max), and with the votes
+/// added, `gsm2_vertex_votes_shifts`' `simd_all` and `simd_any` over full and partial simdgroups
+/// (the four cases matching in both legs on both chips).
 ///
 /// The clustered class stays out: with it added, MoltenVK 1.4.1 refused `gsm2_quad_ops`' vertex
 /// functions, whose quad reductions then lowered to it ("Subgroup builtins are not available in
-/// this type of function", SPIRV-Cross's MSL conversion; EV GSM2-qd3-m4). They now take the ballot
+/// this type of function", SPIRV-Cross's MSL conversion). They now take the ballot
 /// and shuffles, so no quad or simdgroup operation of a vertex function on the `Direct` tier needs
 /// it.
 const MEASURED_VERTEX_OPS: OpBits = OpBits(

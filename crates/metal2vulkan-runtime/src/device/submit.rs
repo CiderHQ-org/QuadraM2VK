@@ -188,7 +188,7 @@ impl Device {
         // The first work goes in a command buffer and a `VkSubmitInfo` of its own, just before
         // the work's, in its `vkQueueSubmit`: MoltenVK runs each `VkSubmitInfo` as a Metal
         // command buffer of its own, and lost a copy into a new image recorded in the same one as
-        // the image's move (EVs STL-p4a-mvk4, STL-p4b-mvk4).
+        // the image's move.
         let lead = taken.has_first();
         if lead {
             // SAFETY: as below, for the first work's command buffer.

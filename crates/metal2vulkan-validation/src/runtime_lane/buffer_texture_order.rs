@@ -556,16 +556,16 @@ fn with_undeclared_usage(name: &str, usage: TextureUsage, width: u64, pad: u64) 
 }
 
 /// A 2D texture over a buffer used beyond its declared usage runs as plain Metal runs it (an M4
-/// under macOS 27.0.1, EV CFR-probe3-m4 `wro_*`, `rwo_*`: a `ShaderRead` texture over a buffer
-/// written through `access::write` and `access::read_write`, and a `ShaderWrite` one read through
-/// `access::read`, `access::read_write` and `sample()`, each as the texture with both usages;
-/// Metal's validation stops each; the reims-vgpu consumer's plane views of its two-plane XR10
-/// textures, made `ShaderRead` and written by its paging kernel): [`TEXTURE_WRITER`]'s texture
-/// made `ShaderRead` alone, and [`SAMPLER`]'s texture 0 made `ShaderWrite` alone, at a layout the
-/// device may alias and at one it shadows. An aliasing texture takes the usage with its linear
-/// image (a linear image is never compressed and its memory is the buffer's); a shadow takes it
-/// where that costs the shadow nothing, and elsewhere the binding takes a second shadow of the
-/// bytes with the usage (`undeclared-usage-shadow`). Each runs as Metal's; the form each layout
+/// under macOS 27.0.1: a `ShaderRead` texture over a buffer written through `access::write` and
+/// `access::read_write`, and a `ShaderWrite` one read through `access::read`, `access::read_write`
+/// and `sample()`, each as the texture with both usages; Metal's validation stops each; the
+/// reims-vgpu consumer's plane views of its two-plane XR10 textures, made `ShaderRead` and written
+/// by its paging kernel): [`TEXTURE_WRITER`]'s texture made `ShaderRead` alone, and [`SAMPLER`]'s
+/// texture 0 made `ShaderWrite` alone, at a layout the device may alias and at one it shadows. An
+/// aliasing texture takes the usage with its linear image (a linear image is never compressed and
+/// its memory is the buffer's); a shadow takes it where that costs the shadow nothing, and
+/// elsewhere the binding takes a second shadow of the bytes with the usage
+/// (`undeclared-usage-shadow`). Each runs as Metal's; the form each layout
 /// took is printed.
 #[test]
 fn textures_over_buffers_run_beyond_their_declared_usage() {
@@ -691,13 +691,13 @@ fn beyond_usage(name: &str, usage: TextureUsage) -> (Vec<u8>, Vec<u8>, bool) {
 }
 
 /// A texture of its own used beyond its declared usage runs as plain Metal runs it (an M4 under
-/// macOS 27.0.1, EV RRP-probe1-m4 `mu_writeto_readonly`, `mu_readfrom_writeonly`: a write to a
-/// `ShaderRead` texture stores and a read of a `ShaderWrite` one reads, each as the texture with
-/// both usages; Metal's validation stops each): [`TEXTURE_WRITER`]'s texture 0 made `ShaderRead`
-/// alone, and [`SAMPLER`]'s made `ShaderWrite` alone, each a [`BEYOND_SIDE`]-square `RGBA8Unorm`
-/// texture ([`beyond_usage`]), give the texels and the output the same texture with both usages
-/// gives. Where the image takes the usage free it has it; elsewhere the binding takes a shadow,
-/// announced once (`undeclared-usage-shadow`). The form each case took is printed.
+/// macOS 27.0.1: a write to a `ShaderRead` texture stores and a read of a `ShaderWrite` one reads,
+/// each as the texture with both usages; Metal's validation stops each): [`TEXTURE_WRITER`]'s
+/// texture 0 made `ShaderRead` alone, and [`SAMPLER`]'s made `ShaderWrite` alone, each a
+/// [`BEYOND_SIDE`]-square `RGBA8Unorm` texture ([`beyond_usage`]), give the texels and the output
+/// the same texture with both usages gives. Where the image takes the usage free it has it;
+/// elsewhere the binding takes a shadow, announced once (`undeclared-usage-shadow`). The form each
+/// case took is printed.
 #[test]
 fn textures_run_beyond_their_declared_usage() {
     let both = TextureUsage::SHADER_READ | TextureUsage::SHADER_WRITE;

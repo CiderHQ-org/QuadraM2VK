@@ -898,7 +898,7 @@ pub(super) unsafe fn graphics_pipeline_library_supported(
 /// is core, and has the feature (`supported`, asked only then). Below Vulkan 1.3 too, where it
 /// lists `VK_KHR_format_feature_flags2`, which it enables with it
 /// (`enables::linear_color_attachment_names`); the runtime's instance is at Vulkan 1.2 unless the
-/// consumer asks another, so NVIDIA's devices never enabled it (the consumer's ZIN2-mc1).
+/// consumer asks another, so NVIDIA's devices never enabled it (the consumer's probe).
 pub(crate) fn linear_color_attachment(
     api: ApiVersion,
     listed: &BTreeSet<CString>,

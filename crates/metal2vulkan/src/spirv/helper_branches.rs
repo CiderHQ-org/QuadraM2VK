@@ -4,7 +4,7 @@
 //! Apple's compiler loses every texture write a simdgroup (8 by 4 pixels) makes after a
 //! `[[clang::optnone]]` function is called in a branch that only its non-live threads enter, in a
 //! fragment function that samples a texture through an argument buffer: the quad helpers past a
-//! primitive's right and bottom edges (the EV DSX-rog8-m4: 1,040 to 1,063 of 2,584 texels lost a
+//! primitive's right and bottom edges (the probe: 1,040 to 1,063 of 2,584 texels lost a
 //! run, in 98 or 99 blocks, with no discard at all), and the threads a discard demotes. With the
 //! call plain, in straight-line code, with no sample, or with the resources bound directly, every
 //! write landed, and color outputs landed in every form. SPIRV-Cross (MoltenVK 1.4.1's, as
@@ -23,7 +23,7 @@
 //! SPIRV-Cross reads from the `gl_HelperInvocation` it sets at entry from
 //! `simd_is_helper_thread()` and at each discard) where the false arm is the safe one, or'ed with
 //! "a helper" where the true arm is, and a switch's selector is the safe case's literal for a
-//! helper (EV RCH-hguard1-m4 measured both conditions' forms in plain Metal on an M4). Selections
+//! helper (measured both conditions' forms in plain Metal on an M4). Selections
 //! are guarded innermost first; an arm whose calls an inner guard keeps helpers out of has none
 //! left.
 //!
@@ -55,21 +55,20 @@
 //!
 //! Unless a tangled instruction follows the call: the defect loses nothing where the helpers make
 //! an implicit-LOD sample, a derivative, an LOD query or a simdgroup operation after the call. In
-//! plain Metal on an M4 (EVs RCH-arm2-m4 and RCH-arm3-m4), 0 of 2,584 texels were lost with any of
-//! them after the call in its arm (a sample at a coordinate the call computes or of its own,
-//! `dfdx`, `fwidth`, either LOD query, `simd_sum`, `simd_broadcast`, a ballot, a ballot and
-//! shuffles, `quad_shuffle`, `quad_sum`), with a sample reading the call's value after the branch's
-//! merge, and with one in a branch inside the arm; 1,046 to 1,063 were lost with the same
-//! instruction before the call, with a helper test after it, or with nothing after it, the written
-//! texture read-write or write-only alike. So a call counts only where a path from it ends (a
-//! return, kill or termination) without passing a tangled instruction that reads what the call
-//! computes, through the instructions after it. Reading it is what keeps the instruction after the
-//! call in the Metal code: SPIRV-Cross moves a single-use expression to its use, so a tangled
-//! instruction merely later in the module may come before the call there (EV RCH-hres1-m4's `hoist`
-//! forms). It is followed through `Function` and `Private` variables too, but not back from a later
-//! block's phi or store. A call outside every selection and loop of a callee counts at its call
-//! sites. An arm a guard sends helpers past holds no tangled instruction, so the guards are as
-//! before.
+//! plain Metal on an M4, 0 of 2,584 texels were lost with any of them after the call in its arm (a
+//! sample at a coordinate the call computes or of its own, `dfdx`, `fwidth`, either LOD query,
+//! `simd_sum`, `simd_broadcast`, a ballot, a ballot and shuffles, `quad_shuffle`, `quad_sum`), with
+//! a sample reading the call's value after the branch's merge, and with one in a branch inside the
+//! arm; 1,046 to 1,063 were lost with the same instruction before the call, with a helper test
+//! after it, or with nothing after it, the written texture read-write or write-only alike. So a
+//! call counts only where a path from it ends (a return, kill or termination) without passing a
+//! tangled instruction that reads what the call computes, through the instructions after it.
+//! Reading it is what keeps the instruction after the call in the Metal code: SPIRV-Cross moves a
+//! single-use expression to its use, so a tangled instruction merely later in the module may come
+//! before the call there (the probe's `hoist` forms). It is followed through `Function` and
+//! `Private` variables too, but not back from a later block's phi or store. A call outside every
+//! selection and loop of a callee counts at its call sites. An arm a guard sends helpers past holds
+//! no tangled instruction, so the guards are as before.
 
 use std::collections::{BTreeMap, BTreeSet};
 

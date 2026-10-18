@@ -9,7 +9,7 @@
 //! · 2^-150`, which that grid rounds up to `2^-126`, is a zero (a probe case c10cba13, 64 lanes of
 //! 512, every lane matched). Vulkan bounds `OpFDiv` at 2.5 ulp for a divisor in `[2^-126, 2^126]`
 //! and not at all beyond, and devices use that latitude: RADV answers `3 / 3` with `0x3f7fffff` and
-//! a divisor past `2^126` with a zero (EV RDX-radv).
+//! a divisor past `2^126` with a zero.
 //!
 //! Each profile calls one module-scope routine per lane count ([`Routine`], as the wide divisions
 //! are), by one of two [`Path`]s:
@@ -39,7 +39,7 @@
 //!   as `quotient` answers them. Every lane takes this one path: a divisor far from one costs what
 //!   a divisor near it does (an earlier form ran the sequence on the operands themselves, in range
 //!   only for `|y|` in `[2^-31, 2^33)`, and sent any other lane through `quotient` as well, 17
-//!   times `OpFDiv`'s GPU time on RADV for a divisor near `2^40`, EV FMX2-radv2).
+//!   times `OpFDiv`'s GPU time on RADV for a divisor near `2^40`).
 //!
 //! Metal divides `half` the same way under every flag set, `arcp` included: the quotient rounded
 //! once from the exact one, `half` denormals kept (a probe cases 4c363561 under fast math and

@@ -143,7 +143,7 @@ fn generated(n: usize) -> Vec<[f64; 4]> {
         .collect()
 }
 
-/// The probe's NaN and edge colors (EV FRT-fil3-m4): each of 24 NaNs and 26 doubles at rounding
+/// The probe's NaN and edge colors: each of 24 NaNs and 26 doubles at rounding
 /// edges in every channel, then in each channel apart over (0.25, 0.5, 0.75, 1).
 fn edge_colors() -> Vec<[f64; 4]> {
     const NAN_BITS: [u64; 24] = [
@@ -223,8 +223,7 @@ fn fnv(bytes: impl Iterator<Item = u8>) -> u64 {
 }
 
 /// Metal's texels, FNV-1a of each format's texels in color order: its raw value, the sweep's
-/// (EV FRT-fil1-m4) and the NaN and edge colors' (EV FRT-fil3-m4), on an Apple M4 under macOS
-/// 27.0.1.
+/// and the NaN and edge colors', on an Apple M4 under macOS 27.0.1.
 const METAL: [(u32, u64, u64); 70] = [
     (1, 0xac652e68d8828b8b, 0x4ddf512a557ec47b),
     (10, 0x4bfbe07fba17a0e7, 0x35a785406c3be905),
@@ -316,7 +315,7 @@ fn every_measured_fill_texel_is_metal_s() {
 }
 
 /// Unsigned normalized: a 4- or 8-bit channel rounds the exact product half up, any other width
-/// the product's `float` (EV FRT-fil2-m4's thresholds).
+/// the product's `float` (the probe's thresholds).
 #[test]
 fn unorm_rounds_its_product_by_width() {
     // 0.5/65535's `float` times 65535 rounds to 0.5 in `float`, which rounds up; a clear stores 0.
@@ -334,7 +333,7 @@ fn unorm_rounds_its_product_by_width() {
 }
 
 /// sRGB: the code whose decoded value is nearest; a clear's encoding curve rounds 0.9429933939
-/// to 0xf9, the fill to 0xf8 (EV FRT-fil1-m4).
+/// to 0xf9, the fill to 0xf8.
 #[test]
 fn srgb_takes_the_nearest_decoded_code() {
     assert_eq!(code(P::R8UnormSRGB, 0.9429933939111084), 0xf8);
@@ -375,7 +374,7 @@ fn float_nans_keep_their_payload() {
 
 /// RG11B10Float: nearest even, saturating; below the smallest normal the `float` is first cut
 /// to a multiple of 2^-37, so 2^-21 (1 + 2^-17), past the half step, still stores 0, and the
-/// least `float` storing 1 is 2^-21 (1 + 2^-16) (EV FRT-fil2-m4); NaN all ones.
+/// least `float` storing 1 is 2^-21 (1 + 2^-16); NaN all ones.
 #[test]
 fn small_floats_round_to_even_after_a_cut() {
     let red = |x: f64| code(P::RG11B10Float, x) & 0x7ff;
@@ -391,8 +390,7 @@ fn small_floats_round_to_even_after_a_cut() {
     assert_eq!(red(f64::NAN), 0x7ff);
 }
 
-/// Extended range: `⌊(v + 384/510) · 510 + ½⌋` in `float` steps; 0.25 stores 511, not 512
-/// (EV FRT-fil1-m4).
+/// Extended range: `⌊(v + 384/510) · 510 + ½⌋` in `float` steps; 0.25 stores 511, not 512.
 #[test]
 fn extended_range_fills_are_packed() {
     assert_eq!(hex(&bytes(P::BGR10XR, [0.25; 4])), "fffdf71f");
@@ -416,8 +414,8 @@ fn shared_exponents_round_half_up() {
     assert_eq!(texel(-1.0), 0);
 }
 
-/// A padded 10-bit format's fills have no defined result (one texel for every color, EV
-/// FRT-fil1-m4, of bytes that differ between machines and runs): no packing.
+/// A padded 10-bit format's fills have no defined result (one texel for every color, of bytes that
+/// differ between machines and runs): no packing.
 #[test]
 fn padded_formats_have_no_fill_packing() {
     for pf in [
@@ -431,7 +429,7 @@ fn padded_formats_have_no_fill_packing() {
 }
 
 /// The texel a color fill without a pixel format wrote into a texture of each format on an M4
-/// under macOS 27.0.1 (EV XRR2-fill3-m4, our probe `tfl3`): the colors (0.25, 0.5, 0.75, 1),
+/// under macOS 27.0.1 (our probe `tfl3`): the colors (0.25, 0.5, 0.75, 1),
 /// (2, -1, 0.5, 0.3) and (0, 0, 0, 0). The fill with the texture's own format wrote the same.
 #[test]
 fn metal_fill_texels_are_reproduced() {
@@ -531,7 +529,7 @@ fn argb8_fill_texels_put_alpha_first() {
     assert_eq!(argb, [rgba[3], rgba[0], rgba[1], rgba[2]]);
 }
 
-/// The RGBX formats' color fills on an M4 under macOS 27.0.1 (EV FPV-pf2-m4, our probe
+/// The RGBX formats' color fills on an M4 under macOS 27.0.1 (our probe
 /// `fpv1`: every texel of a 64 x 16 shared texture filled with each color): the twin's red,
 /// green and blue, and an X field of zeros, or of the alpha for the float formats.
 #[test]
@@ -592,7 +590,7 @@ fn words(bytes: &[u8]) -> Vec<u16> {
 }
 
 /// Each channel's `float`, then the bfloat code nearest it, ties to even, an overflow the
-/// infinity; a NaN keeps its sign and the top of its payload, quieted (EV FPV-pf8-m4: Metal's
+/// infinity; a NaN keeps its sign and the top of its payload, quieted (Metal's
 /// fills of 22 colors and of every `half` value, an Apple M4 under macOS 27.0.1). One word for
 /// each channel the format has.
 #[test]
@@ -655,7 +653,7 @@ const CROSS_TARGETS: [(PixelFormat, usize); 18] = [
     (P::RGB9E5Float, 4),
 ];
 
-/// Metal's fills of a color packed in another format (EV FRT-fil4-m4, an Apple M4 under macOS
+/// Metal's fills of a color packed in another format (an Apple M4 under macOS
 /// 27.0.1): for each packing format's raw value, FNV-1a of the texels its 128 colors left in
 /// textures of each of [`CROSS_TARGETS`], color after color, target after target.
 const METAL_CROSS: [(u32, u64); 70] = [
@@ -733,7 +731,7 @@ const METAL_CROSS: [(u32, u64); 70] = [
 
 /// A fill of a color packed in another format (`fillTexture:...:color:pixelFormat:`) writes that
 /// format's texel repeated from the texel's first byte and cut at the texture's texel, whatever
-/// the two formats' sizes (EV FRT-fil4-m4: 128 colors packed in each of 70 formats, the
+/// the two formats' sizes (128 colors packed in each of 70 formats, the
 /// extended-range, `_sRGB` and bfloat ones among them, into textures of 18 formats of 1 to 16
 /// bytes, every texel Metal's).
 #[test]

@@ -5,8 +5,8 @@
 //! of another class than its format's (float or half, int, uint) in the format's own class, and
 //! hands back the words as the declared type: a 32-bit word as is, a `half` result of an integer
 //! format each word's low 16 bits, an integer format's linear sample its nearest one (our probe,
-//! EVs FPV-xc1-m4 and FPV-xc1-m3, 536 of 536 cross-class results). The function reads such a
-//! texture under its slot's `cross_class` variant (`VariantKey::cross_class`), which declares the
+//! 536 of 536 cross-class results). The function reads such a texture under its slot's
+//! `cross_class` variant (`VariantKey::cross_class`), which declares the
 //! image in the bound class and hands back the words.
 //!
 //! This lane asks, for each format of [`FORMATS`] and each declared type of another class,
@@ -21,7 +21,7 @@
 //! `cross-class-texture-neutral`, the slot's neutral (whose zero texels would differ besides).
 //!
 //! A `ushort` result is read too: an integer format's words' low 16 bits, a float format's `half`
-//! result's bits (EV XCR-p2-m3).
+//! result's bits.
 //!
 //! A slot whose access has no exact answer (a `uint` read of a depth texture here) binds the
 //! declared type's neutral, and the device announces `cross-class-texture-neutral` once
@@ -44,7 +44,7 @@
 //! only against the native slot's: Metal gathers an `RGBA8Unorm_sRGB` texture through a `float`,
 //! `int`, or `uint` slot as the table's decode of each footprint texel's code, the same bits
 //! through each (the probe's texture and positions, 240 of 240 words through each class on an M4
-//! and an M3, EVs FPV-xc1-m4 and FPV-xc1-m3).
+//! and an M3).
 
 use super::degrade_notices::on_device;
 use super::{buffer_with, read_buffer, Messages};
@@ -172,7 +172,7 @@ impl Ty {
 
     /// The type of the native slot whose answer this type's result over a texture of class
     /// `class` takes: a float format's `half` result for a `ushort` one (Metal's 16-bit integer
-    /// result of a float texel is its `half` bits, EV XCR-p2-m3), else [`native`](Self::native).
+    /// result of a float texel is its `half` bits), else [`native`](Self::native).
     fn answered_by(self, class: SampledType) -> Ty {
         match (self, class) {
             (Ty::Ushort, SampledType::Float) => Ty::Half,
@@ -681,7 +681,7 @@ fn cross_class_runtime_samples_and_gathers_are_the_native_words() {
     });
 }
 
-/// The probe's gather positions (our fpv10 probe's, which EVs FPV-xc1-m4 and FPV-xc1-m3 ran):
+/// The probe's gather positions (our probe's, run on an M4 and an M3):
 /// on each row, at its texels' centres and three eighths of a texel below them, on columns -1,
 /// 0, 2, 4, 7, and 8, at their centres and a quarter of a texel left of them; the first 60. No
 /// subtexel rounding moves a footprint: every coordinate is exact in `f32`, and each lands a
@@ -729,8 +729,7 @@ fn metal_srgb_gather(bytes: &[u8], lane: [u32; 4]) -> [u32; 4] {
 /// A gather of an `RGBA8Unorm_sRGB` texture's red component through a slot of each class is
 /// Metal's: each word the footprint texel's code decoded through Metal's table, the same bits
 /// through a `float`, an `int`, and a `uint` slot (our probe's texture and positions: 240 of 240
-/// words through each on an M4 and an M3, EVs FPV-xc1-m4 and FPV-xc1-m3). No access announces
-/// the device's decode.
+/// words through each on an M4 and an M3). No access announces the device's decode.
 #[test]
 fn an_srgb_gather_through_each_class_is_metals_table_decode() {
     on_device(|device, messages| {

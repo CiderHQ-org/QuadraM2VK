@@ -48,6 +48,7 @@ const KIB: u64 = 1024;
 
 /// The devices measured, each with the build and the evidence it was measured on.
 const MEASURED: [Measured; 9] = [
+    // AMD Radeon 780M (RADV PHOENIX), RADV Mesa 26.2.4-arch3.1: 64 and 96 KiB correct over 262144
     // threads; 128 KiB wrong over 4096. RADV Mesa 26.0.8-1ubuntu0.3 (homelab-um780): 4 to 96 KiB
     // correct over 262144 threads. Hawk Point's 780M (0x1900) is the same GPU, read as 0x15bf.
     Measured {
@@ -65,27 +66,27 @@ const MEASURED: [Measured; 9] = [
         device: 0x744c,
         bytes: 96 * KIB,
     },
-    // Intel Iris Xe Graphics (RPL-P), ANV Mesa 26.2.4-arch3.1 (EV UNI-B4-pm-anv): 4
-    // to 32 KiB correct over 262144 threads; 48 KiB wrong over 4096. The Intel venue's two devices
-    // derive one translation key, so each takes the lower of the two values.
+    // Intel Iris Xe Graphics (RPL-P), ANV Mesa 26.2.4-arch3.1: 4 to 32 KiB correct over 262144
+    // threads; 48 KiB wrong over 4096. The Intel venue's two devices derive one translation key, so
+    // each takes the lower of the two values.
     Measured {
         driver: vk::DriverId::INTEL_OPEN_SOURCE_MESA,
         vendor: 0x8086,
         device: 0xa7a0,
         bytes: 32 * KIB,
     },
-    // Intel Graphics (RPL-S, a UHD 770), ANV Mesa 26.2.4-arch3.1 (EV
-    // UNI-B6-pm-rpls): 4 to 256 KiB correct over 262144 threads; 512 KiB refused at its first
-    // dispatch (VK_ERROR_UNKNOWN). It takes the RPL-P's lower 32 KiB, its venue's.
+    // Intel Graphics (RPL-S, a UHD 770), ANV Mesa 26.2.4-arch3.1: 4 to 256 KiB correct over 262144
+    // threads; 512 KiB refused at its first dispatch (VK_ERROR_UNKNOWN). It takes the RPL-P's lower
+    // 32 KiB, its venue's.
     Measured {
         driver: vk::DriverId::INTEL_OPEN_SOURCE_MESA,
         vendor: 0x8086,
         device: 0xa780,
         bytes: 32 * KIB,
     },
-    // NVIDIA GeForce RTX 5080 Laptop GPU, NVIDIA 615.71.09 (EV UNI-B4-pm-nv5080): 4
-    // to 32 KiB correct over 262144 threads; 48 KiB hung over 4096 threads (no completion within
-    // 50 s, Xid 109 CTX SWITCH TIMEOUT).
+    // NVIDIA GeForce RTX 5080 Laptop GPU, NVIDIA 615.71.09: 4 to 32 KiB correct over 262144
+    // threads; 48 KiB hung over 4096 threads (no completion within 50 s, Xid 109 CTX SWITCH
+    // TIMEOUT).
     Measured {
         driver: vk::DriverId::NVIDIA_PROPRIETARY,
         vendor: 0x10de,
@@ -101,16 +102,15 @@ const MEASURED: [Measured; 9] = [
         device: 0x2204,
         bytes: 128 * KIB,
     },
-    // Apple M4, MoltenVK 1.4.1 under macOS 27.0.1 (EV UNI-B3-pm-mvkm4): 64 to
-    // 192 KiB correct over 262144 threads; 256 KiB refused at pipeline creation
-    // (VK_ERROR_INITIALIZATION_FAILED).
+    // Apple M4, MoltenVK 1.4.1 under macOS 27.0.1: 64 to 192 KiB correct over 262144 threads; 256
+    // KiB refused at pipeline creation (VK_ERROR_INITIALIZATION_FAILED).
     Measured {
         driver: vk::DriverId::MOLTENVK,
         vendor: APPLE_VENDOR_ID,
         device: 0x1b00_0209,
         bytes: 192 * KIB,
     },
-    // Apple M3 Max, MoltenVK 1.4.1 under macOS 26.7 (EV UNI-B7-pm-mvkm3): 4 to 192 KiB correct
+    // Apple M3 Max, MoltenVK 1.4.1 under macOS 26.7: 4 to 192 KiB correct
     // over 262144 threads; 256 KiB refused at pipeline creation (VK_ERROR_INITIALIZATION_FAILED).
     Measured {
         driver: vk::DriverId::MOLTENVK,
@@ -119,10 +119,9 @@ const MEASURED: [Measured; 9] = [
         bytes: 192 * KIB,
     },
     // lavapipe, Mesa 26.0.8-1ubuntu0.3 (LLVM 21.1.8), whose identity (device ID 0) is one on every
-    // CPU, so it takes the lower of its measured values. x86_64 on an i9-13900 (EV
-    // UNI-B5-pm-lvpx86): 4 to 48 KiB correct over 262144 threads; 64 KiB not measured (pipeline
-    // creation passed 35 s, the size cut at 60 s). arm64 in a Mac mini's Linux VM (EV
-    // UNI-B3-pm-lvparm): 64 KiB correct over 262144 threads; 96 KiB not measured.
+    // CPU, so it takes the lower of its measured values. x86_64 on an i9-13900: 4 to 48 KiB correct
+    // over 262144 threads; 64 KiB not measured (pipeline creation passed 35 s, the size cut at 60
+    // s). arm64 in a Mac mini's Linux VM: 64 KiB correct over 262144 threads; 96 KiB not measured.
     Measured {
         driver: vk::DriverId::MESA_LLVMPIPE,
         vendor: 0x10005,

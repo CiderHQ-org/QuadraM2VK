@@ -703,7 +703,7 @@ fn a_threadgroup_range_runs_its_threadgroups_of_the_whole_grid() {
 /// A tile function whose threadgroup is the tile (`threadgroupSizeMatchesTileSize`) runs its
 /// threads per tile, 8x8 here, in workgroups of that size, but every region carries the 16x16
 /// tile as Metal's threadgroup and the tiles times the tile as the grid (`MultiRegion` 1), as
-/// plain Metal answers them (EV TTG-tat5 on an M3 Max and an M4); a region of the tiles alike.
+/// plain Metal answers them (on an M3 Max and an M4); a region of the tiles alike.
 #[test]
 fn a_tile_sized_threadgroup_carries_the_tile_in_every_region() {
     let mut t = template();

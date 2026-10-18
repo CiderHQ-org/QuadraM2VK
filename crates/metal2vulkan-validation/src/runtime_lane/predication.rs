@@ -1,8 +1,7 @@
 //! Command predication (`encode_start_if`, `encode_start_else`, `encode_end_if`, and the loops'
 //! starts and ends) on the device the cfg selects, under the validation layer, against what Metal
-//! answered on an M4 under macOS 27.0.1 (EVs PRD-spec1-m4, PRD-spec2-m4 and PRD-spec3-m4). The
-//! owned synthetic kernel `prd_mark` adds 1 to word `t` of a log, so the log shows which dispatches
-//! ran, each once:
+//! answered on an M4 under macOS 27.0.1. The owned synthetic kernel `prd_mark` adds 1 to word `t`
+//! of a log, so the log shows which dispatches ran, each once:
 //!
 //! - streams of records and marks as the probes wrote them ([`run`]'s notation): blocks nested,
 //!   with Elses, spanning a unit's encoders of one dispatch type, and killed by misused records,
@@ -271,14 +270,13 @@ fn run(device: &Device, script: &str) -> (Vec<u32>, String) {
 }
 
 /// Streams Metal ran on an M4 under macOS 27.0.1 ([`run`]'s notation), the tags that ran and
-/// what the Ends answered: from EV PRD-spec1-m4 (`else0t` to `elsenest`), PRD-spec2-m4 (`span_*`
-/// to `kill_open`, `while_kill`) and PRD-spec3-m4 (`n04`, `k*`, `r*`), each case under its
-/// probe's name (`while_kill` without its counter, which its killed body never ran; `while0` and
-/// `do0`, PRD-spec1-m4's, of a loop whose condition fails at once, without theirs). Only streams
-/// the runtime takes are here: none with an unbalanced record or a live block open where its
-/// unit ends. `elsenest` and `else2_skipped` logged no answers; theirs
-/// are Metal's rule for Ends where no misuse killed a block (each answers YES; every If of
-/// `cmp`'s 63 rows) and inside a killed one (EV PRD-spec3-m4).
+/// what the Ends answered: from our probes (`else0t` to `elsenest`, `span_*` to `kill_open`,
+/// `while_kill`, `n04`, `k*`, `r*`), each case under its probe's name (`while_kill` without its
+/// counter, which its killed body never ran; `while0` and `do0`, of a loop whose condition fails at
+/// once, without theirs). Only streams the runtime takes are here: none with an unbalanced record
+/// or a live block open where its unit ends. `elsenest` and `else2_skipped` logged no answers;
+/// theirs are Metal's rule for Ends where no misuse killed a block (each answers YES; every If of
+/// `cmp`'s 63 rows) and inside a killed one.
 const SCRIPTS: &[(&str, &str, &[u32], &str)] = &[
     ("else0t", "T9 I1 T1 E T8", &[1, 8, 9], "1"),
     ("else0f", "T9 I0 T1 E T8", &[8, 9], "1"),
@@ -382,7 +380,7 @@ fn streams_run_what_metal_ran() {
     });
 }
 
-/// Which branch each of `cmp`'s rows took on Metal (EV PRD-spec1-m4): `T` the If's, `E` the
+/// Which branch each of `cmp`'s rows took on Metal: `T` the If's, `E` the
 /// Else's, for the rows [`cmp_rows`] lists, in order.
 const CMP_BRANCHES: &str = "ETETETTEETTEEETETTETEETEETEETEETEETETEETEETEEETEETEETEETEEETEET";
 
@@ -431,10 +429,10 @@ fn the_condition_compares_as_metal_does() {
     });
 }
 
-/// The word is read when the GPU reaches the record, as Metal reads it (EV PRD-spec1-m4
-/// `readserial`, `readconc`, `precommit`, `readblit`): after a dispatch just before it wrote
-/// it, with no barrier, in a serial and in a concurrent encoder; after a CPU write made between
-/// the encoding and the commit; and after a blit earlier in the command buffer filled it.
+/// The word is read when the GPU reaches the record, as Metal reads it: after a dispatch just
+/// before it wrote it, with no barrier, in a serial and in a concurrent encoder; after a CPU write
+/// made between the encoding and the commit; and after a blit earlier in the command buffer filled
+/// it.
 #[test]
 fn the_word_is_read_when_the_gpu_reaches_the_record() {
     on_device(|device| {
@@ -615,9 +613,9 @@ impl Forms {
 }
 
 /// Inside a failing block no dispatch runs, of any form, and inside a holding one each runs once,
-/// as on Metal (EV PRD-spec1-m4 `formst`, `formsf`): a failing If's block and a holding If's
-/// Else's run nothing; the failing If's Else's and the holding If's run each form. A setter
-/// inside a failing block takes effect: the state and tag it set mark after the block.
+/// as on Metal: a failing If's block and a holding If's Else's run nothing; the failing If's Else's
+/// and the holding If's run each form. A setter inside a failing block takes effect: the state and
+/// tag it set mark after the block.
 #[test]
 fn every_dispatch_form_runs_as_its_block_says() {
     on_device(|device| {
@@ -652,11 +650,10 @@ fn every_dispatch_form_runs_as_its_block_says() {
 
 /// What the runtime refuses, recording nothing, where Metal's answer is not one it can give: an
 /// unbalanced record (an End or Else with no block open, a Start or an `encodeEndDoWhile` on a nil
-/// buffer with none; EV PRD-spec3-m4), a word past its buffer's end, and a fourth loop open (item
-/// 7); the work around them runs. A live block open where its unit ends refuses the commit: at a
-/// change of dispatch type (EV PRD-spec2-m4 `span_sc_t`, whose EndIf then has no block open), at a
-/// blit encoder (EV PRD-spec1-m4 `acrossblitt`), and at the command buffer's end (EV PRD-spec2-m4
-/// `open_next_cb`).
+/// buffer with none), a word past its buffer's end, and a fourth loop open (item 7); the work
+/// around them runs. A live block open where its unit ends refuses the commit: at a change of
+/// dispatch type (whose EndIf then has no block open), at a blit encoder, and at the command
+/// buffer's end.
 #[test]
 fn what_the_runtime_refuses() {
     on_device(|device| {
@@ -795,7 +792,7 @@ fn put(encoder: &mut ComputeCommandEncoder, put: &ComputePipelineState, marks: &
     encoder.dispatch_threads(one(), one()).unwrap();
 }
 
-/// Loops run as Metal's ran on an M4 under macOS 27.0.1 (EV PRD-spec1-m4), each counting in the
+/// Loops run as Metal's ran on an M4 under macOS 27.0.1, each counting in the
 /// log what the probe counted: `while0` to `while5` (`while (log[0] != n) mark 0`), `do0` to
 /// `do5` (`do mark 0 while (log[0] < n)`), at 64 runs, the copies the runtime lays down, too;
 /// `whileconc` in a concurrent encoder (its body writes the word, no barrier); `loopnest3`

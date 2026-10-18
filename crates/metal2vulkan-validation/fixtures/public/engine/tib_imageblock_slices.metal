@@ -1,7 +1,6 @@
 // Owned fixture: a kernel's explicit imageblock written to a texture through a slice with
 // fewer lanes than the texture's format has channels. Metal writes the slice's lanes and then
-// zeros, whatever the format (EVs TIB-slice-m4 and TIB-slice-m3): a 1-lane half slice lands in an
-// RGBA16Float texel as (v, 0, 0, 0).
+// zeros, whatever the format: a 1-lane half slice lands in an RGBA16Float texel as (v, 0, 0, 0).
 //
 // Each threadgroup is 4x4 threads over a 4x4 imageblock; every thread fills its own cell from its
 // grid position, then the threadgroup's first thread writes the whole slice at the threadgroup's

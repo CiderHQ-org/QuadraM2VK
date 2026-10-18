@@ -1,7 +1,7 @@
 //! What a new resource reads before anything writes it, on the device the cfg selects, under the
 //! validation layer.
 //!
-//! **Metal's answer** (an Apple M4 under macOS 27.0.1, plain, our own probe; EV ZIN-zp1-m4): each
+//! **Metal's answer** (an Apple M4 under macOS 27.0.1, plain, our own probe): each
 //! case made first, six times right after a resource of its shape was written and released, and
 //! six times right after a buffer of its allocated size was, in three fresh processes and one
 //! after 768 MiB of written and released memory, 52 reads a case:
@@ -13,8 +13,8 @@
 //!   planes); a texture over a new buffer; a new heap's bytes.
 //! - **A fixed pattern, every read:** `Private` textures Metal compresses (`RGBA8Unorm` reads
 //!   `ff00ffff` in every texel; depth reads all ones), in each level whose shorter side is 16 or
-//!   more (EVs ZIN-zf1-m4, ZIN-zf2-m4). The runtime gives that pattern, and zero where the device
-//!   cannot write it exactly, announcing `fresh-pattern-zeroed` where a command first reads that
+//!   more. The runtime gives that pattern, and zero where the device cannot write it exactly,
+//!   announcing `fresh-pattern-zeroed` where a command first reads that
 //!   content unwritten, never as the texture is made: each case expects the pattern, or zero where
 //!   the device announced the kind at its read.
 //!
@@ -65,7 +65,7 @@ const OLD: u8 = 0xa5;
 /// lane site `degrade_notices` lists.
 pub(super) const FRESH_PATTERNS: [Degradation; 1] = [Degradation::FreshPatternZeroed];
 
-/// Metal's pattern of `RGBA8Unorm` (EV ZIN-zf1-m4): opaque magenta.
+/// Metal's pattern of `RGBA8Unorm`: opaque magenta.
 const MAGENTA: &[u8] = &[0xff, 0x00, 0xff, 0xff];
 
 /// A lane device announcing `fresh-pattern-zeroed` at each texture it is for.
@@ -321,7 +321,7 @@ fn shapes() -> Vec<(Shape, Vec<u8>)> {
             storage,
         );
         mips.descriptor.mipmap_level_count = 7;
-        // Levels 64, 32 and 16 (EV ZIN-zf1-m4).
+        // Levels 64, 32 and 16.
         shapes.push((mips.patterned(MAGENTA, 3), old.clone()));
         let mut volume = Shape::new(
             "3D RGBA8Unorm",
@@ -475,8 +475,8 @@ fn new_textures_read_metal_s_answer_after_written_ones_are_released() {
     quiet(lane, &messages);
 }
 
-/// Metal's pattern of each format its probes read (EVs ZIN-zf1-m4 and ZIN-zf2-m4: a new
-/// `Private` 64² texture, every texel), and the bytes of a texel.
+/// Metal's pattern of each format its probes read (a new `Private` 64² texture, every texel), and
+/// the bytes of a texel.
 const PATTERNS: &[(PixelFormat, &[u8])] = &[
     (PixelFormat::A8Unorm, &[0xff]),
     (PixelFormat::R8Unorm, &[0xff]),
@@ -627,8 +627,8 @@ fn new_private_textures_read_metal_s_pattern_by_format() {
 }
 
 /// New `Private` mipmapped `RGBA8Unorm` chains read Metal's pattern in each level whose shorter
-/// side is 16 or more, zero in the rest (EVs ZIN-zf1-m4 and ZIN-zf2-m4: a 64² chain's levels 64,
-/// 32 and 16; 100x40's 100x40 and 50x20; 16x256's and 17²'s first), level by level.
+/// side is 16 or more, zero in the rest (a 64² chain's levels 64, 32 and 16; 100x40's 100x40 and
+/// 50x20; 16x256's and 17²'s first), level by level.
 #[test]
 fn new_private_chains_read_the_pattern_in_their_wide_levels() {
     let (messages, cache, lane) = pattern_lane();
@@ -856,11 +856,11 @@ fn a_new_multisampled_texture_reads_zero() {
 /// loaded and resolved: `RGBA8Unorm` opaque magenta, written by a clear; `RGBA16Float`'s pattern
 /// holds NaNs (halves `ffff 0000 ffff ffff`), whose bits no clear of a multisampled float image
 /// controls, so it is copied from an unsigned-integer scratch cleared to its bits. Metal's resolve
-/// of those samples stores zero (EVs ZIN-zms2-m4 and ZIN-zms4-m4, an M4 under macOS 27.0.1; the
-/// consumer's M3 Max alike), and so does MoltenVK's, which is Metal's; a device whose resolve keeps
-/// the NaNs (NaN in red, blue and alpha, zero in green) is printed, the resolve's rule and not this
-/// pattern's. Where the device makes no such scratch the texture reads zero and the device
-/// announces `fresh-pattern-zeroed` where the pass loads it, not as it is made (the module docs).
+/// of those samples stores zero (an M4 under macOS 27.0.1; the consumer's M3 Max alike), and so
+/// does MoltenVK's, which is Metal's; a device whose resolve keeps the NaNs (NaN in red, blue and
+/// alpha, zero in green) is printed, the resolve's rule and not this pattern's. Where the device
+/// makes no such scratch the texture reads zero and the device announces `fresh-pattern-zeroed`
+/// where the pass loads it, not as it is made (the module docs).
 #[test]
 fn new_multisampled_textures_read_the_pattern_or_announce_zero() {
     let (messages, cache, lane) = pattern_lane();
@@ -939,7 +939,7 @@ fn new_multisampled_textures_read_the_pattern_or_announce_zero() {
 }
 
 /// A new `Private` 4x 8² `RGBA16Float` target's samples hold Metal's pattern (halves `ffff 0000
-/// ffff ffff`, EV ZIN-zms1-m4), read through a blit copy into a `PixelFormatView` texture and its
+/// ffff ffff`), read through a blit copy into a `PixelFormatView` texture and its
 /// unsigned view; or, on a device whose multisampled copies convert float NaNs (the pattern comes
 /// from a copy), each NaN half another NaN and `device-nan-encoding` announced at that first read;
 /// or zero where the device announced `fresh-pattern-zeroed`. Prints `FRESH-MSAA-SAMPLES`.

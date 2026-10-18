@@ -11,15 +11,14 @@
 //! factors past what one descriptor binds. Metal's validation stops an offset or a stride that is
 //! not a multiple of 4, but plain Metal reads an offset of 2 at that byte (probe 10
 //! `factor_offset_2` drew the factors 2 bytes past a 2-byte pad), and an odd one from the byte
-//! below (EV IRX-pat2-m4: 1 from 0, 3 from 2, 7 from 6), so the binder reads from the offset
-//! rounded down to a multiple of 2, and the control stage from any even byte. Plain Metal steps the
-//! instances by a stride rounded down to a multiple of 4 (Metal probes, two instances: strides 2
-//! and 14 drew what 0 and 12 draw, 6 and 10 what 4 and 8 draw; EV IRX-pat3-m4: 13 and 15 what 12,
-//! 17 and 19 what 16; probe 10's `factor_stride_2` drew one instance, which reads no stride), as
-//! the binder steps them.
+//! below (1 from 0, 3 from 2, 7 from 6), so the binder reads from the offset rounded down to a
+//! multiple of 2, and the control stage from any even byte. Plain Metal steps the instances by a
+//! stride rounded down to a multiple of 4 (Metal probes, two instances: strides 2 and 14 drew what
+//! 0 and 12 draw, 6 and 10 what 4 and 8 draw: 13 and 15 what 12, 17 and 19 what 16; probe 10's
+//! `factor_stride_2` drew one instance, which reads no stride), as the binder steps them.
 //!
-//! Metal multiplies the factors by the scale rounded to `half` (EVs ICBV-scale2-m3 and -m4, the
-//! M3 Max and the M4, with and without API validation, which stops none of these): 2.0005 and 1.3
+//! Metal multiplies the factors by the scale rounded to `half` (the M3 Max and the M4, with and
+//! without API validation, which stops none of these): 2.0005 and 1.3
 //! drew what factors of 2 draw, a scale that is subnormal as a `half` (2^-15, 2^-24, 10^-6) what
 //! its product draws, and one that is infinite as a `half` (70000) what the maximum factor draws,
 //! as the binder takes them. One that is 0 as a `half` (2^-30) culls every patch.

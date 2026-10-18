@@ -3,9 +3,8 @@
 //! A cube sample, gather, or level-of-detail query reads the face of its direction's major axis,
 //! the component of largest magnitude, at the face coordinates `s_c / |m_a|` and `t_c / |m_a|`.
 //! Vulkan leaves two things there to the device that Metal decides its own way (Apple M4, macOS
-//! 27.0.1, rgba32_float cubes of 8x8 and 5x5 faces, nearest samples; WRG-cube-tie-probe,
-//! WRG-cube-edge-probe, and WRG-cube-sub-probe, each run with and without Metal's validation
-//! layer, byte-identical):
+//! 27.0.1, rgba32_float cubes of 8x8 and 5x5 faces, nearest samples; each run with and without
+//! Metal's validation layer, byte-identical):
 //!
 //! - **The face at a tie.** Where two or three components share the largest magnitude, Vulkan's
 //!   "Cube Map Face Selection" only recommends `z` over `y` over `x`; Metal picks `x` over `y`
@@ -30,8 +29,8 @@
 //! `+x` at texel `(0, 0)` on every face size below `2^24`; and each minor component tying the
 //! major magnitude otherwise is one ulp smaller in magnitude (its bits less one), so no tie is
 //! left for a device to break. At a tie at `2^-125` itself the shrunk component would fall below
-//! `2^-125`, where Apple's texture unit reads it as zero (MoltenVK read the face's centre there,
-//! WRG-cube-apple), so the major component grows one ulp in magnitude instead (its bits plus
+//! `2^-125`, where Apple's texture unit reads it as zero (MoltenVK read the face's centre there),
+//! so the major component grows one ulp in magnitude instead (its bits plus
 //! one). On Metal's face a tied component is the edge coordinate `±1`, which becomes `±(1 - e)`
 //! with `e <= 2^-23` either way: the texel the edge reads through a nearest sample on every face
 //! size below `2^23`, and the footprint it reads through a gather or a linear filter on every size
@@ -41,7 +40,7 @@
 //! (`PrecisionNote::DeviceGatherFootprint`, `PrecisionNote::FloatSampleFilter`).
 //!
 //! **A huge major magnitude.** Devices misread a direction whose major magnitude is near the top
-//! of the range (the WRG-1013v lanes, `wrg_cube_ties` at 8x8 and 5x5): RADV (AMD Radeon 780M)
+//! of the range (the probe lanes, `wrg_cube_ties` at 8x8 and 5x5): RADV (AMD Radeon 780M)
 //! read `(2^126, 2^125, 0)` at the face's centre, where Metal reads `t = 1/4`, as a reciprocal of
 //! AMD's doubled major axis (`v_cubema`) flushed to zero would; ANV (Intel Iris Xe) and NVIDIA
 //! (RTX 5080 laptop) read face `+z` along every direction with a major magnitude of `2^127` or
@@ -77,11 +76,11 @@
 //! axis's face coordinate `F / 2` of exactly 1 (a minor component equal to the major magnitude,
 //! after the reciprocal) to 0, so `X = 0`: the face's other edge. The sampler's `s` address governs
 //! the face's `s` axis and its `t` address the `t` axis; its `r` address governs neither, and a
-//! size that is a power of two never wraps (the cube probes RT13-cg-probe-m4 and RT13-cg2-probe-m4,
-//! Apple M4 on macOS 27.0.1: gathers, linear samples, and nearest samples of identity cubes of 3,
-//! 5, and 6 texels wrap on every such lane under `repeat` on both axes, on the `s` axis alone under
-//! `s_address::repeat`, and on the `t` axis alone under `t_address::repeat`, and of 4 and 8 texels
-//! on none; `mirrored_repeat`, `clamp_to_zero`, and a border read as clamping everywhere). A tied
+//! size that is a power of two never wraps (our cube probes, Apple M4 on macOS 27.0.1: gathers,
+//! linear samples, and nearest samples of identity cubes of 3, 5, and 6 texels wrap on every such
+//! lane under `repeat` on both axes, on the `s` axis alone under `s_address::repeat`, and on the
+//! `t` axis alone under `t_address::repeat`, and of 4 and 8 texels on none; `mirrored_repeat`,
+//! `clamp_to_zero`, and a border read as clamping everywhere). A tied
 //! minor component, which `metal_ties` shrinks by an ulp, still sums to `F = 2` (`1 + (1 - 2^-24)`
 //! rounds to 2 with ties to even), so it wraps as Metal's tie does.
 //!
@@ -226,7 +225,7 @@ pub(super) fn metal_ties(fb: &mut FunctionBuilder<'_>, p: SValue) -> BResult<SVa
     let tie_z = tie(fb, az, minor_z)?;
     // A tied component shrinks where its magnitude stays at least `2^-125`. At a tie at `2^-125`
     // itself it would fall below, where Apple's texture unit reads it as zero (MoltenVK samples
-    // there, WRG-cube-apple), so the major component grows one ulp in magnitude instead.
+    // there), so the major component grows one ulp in magnitude instead.
     let above = fb.binary(BinOp::FOrdGreaterThan, top, least_read)?;
     let shrink_y = fb.binary(BinOp::LogicalAnd, tie_y, above)?;
     let shrink_z = fb.binary(BinOp::LogicalAnd, tie_z, above)?;

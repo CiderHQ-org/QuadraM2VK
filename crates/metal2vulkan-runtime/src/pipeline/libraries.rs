@@ -240,7 +240,7 @@ impl Linked {
     /// Whether the libraries of its shaders, its pre-rasterization and fragment shader parts,
     /// are made: a key whose shaders' libraries are made links on the caller's thread, where its
     /// vertex input and fragment output libraries, which hold no shader, are made in well under a
-    /// millisecond if they are not made yet (EV PRDG-mk1-5080: 0.0 ms each on an RTX 5080, the
+    /// millisecond if they are not made yet (0.0 ms each on an RTX 5080, the
     /// link 0.0 ms, the pre-rasterization library 3 to 7 ms, the fragment shader library the
     /// whole pipeline's 20 to 38 s).
     pub(crate) fn shaders_made(&self) -> bool {

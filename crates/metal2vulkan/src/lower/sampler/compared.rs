@@ -4,25 +4,24 @@
 //! sampler or a runtime sampler slot.
 //!
 //! **Why.** A device compares a `Depth16Unorm` texel against a reference by its own rule, and
-//! Vulkan pins only the reference's clamp into `[0, 1]`: on 9,024 comparisons each (EVs
-//! MSFZ-d16-*), RADV differs from Metal on 71 (a NaN reference compares as 0), ANV on 584 (its
-//! rounding threshold lies below the half-way point and moves with the code; a NaN as 0), the
-//! RTX 3090 on 474 (its threshold lies up to 0.51 of a step above the half-way point; a NaN as 0),
-//! and x86 lavapipe on 1,203 (it compares the clamped reference with the texel as floats; a NaN
-//! as 1); MoltenVK on Apple's GPU matches. Metal compares codes: the reference's is its exact
-//! product with 65535 rounded to nearest (`linear::compare`'s `reference`), and a NaN fails every
-//! ordered test. A `Depth32Float` texel compares as given, denormals included, which x86
-//! lavapipe's float comparison misses (it flushes them; `linear::compare`'s keys do not), and
-//! `depth32Float_stencil8` compares as `depth32Float` (EV MSFZ-m4-d32s8). `Depth24Unorm_Stencil8`
-//! is not an Apple-family format: its comparison, made here as a float format's, is not measured.
+//! Vulkan pins only the reference's clamp into `[0, 1]`: on 9,024 comparisons each, RADV differs
+//! from Metal on 71 (a NaN reference compares as 0), ANV on 584 (its rounding threshold lies below
+//! the half-way point and moves with the code; a NaN as 0), the RTX 3090 on 474 (its threshold lies
+//! up to 0.51 of a step above the half-way point; a NaN as 0), and x86 lavapipe on 1,203 (it
+//! compares the clamped reference with the texel as floats; a NaN as 1); MoltenVK on Apple's GPU
+//! matches. Metal compares codes: the reference's is its exact product with 65535 rounded to
+//! nearest (`linear::compare`'s `reference`), and a NaN fails every ordered test. A `Depth32Float`
+//! texel compares as given, denormals included, which x86 lavapipe's float comparison misses (it
+//! flushes them; `linear::compare`'s keys do not), and `depth32Float_stencil8` compares as
+//! `depth32Float`. `Depth24Unorm_Stencil8` is not an Apple-family format: its comparison, made here
+//! as a float format's, is not measured.
 //!
 //! **How.** The texels are read without comparison through a binding whose sampler does not
 //! compare (`BindingKey::compare` false, so a `Depth32Float` texture held with a twin reads its
 //! `R32_SFLOAT` image): a gather's four depths, the taps Metal's footprint names, or a nearest
 //! sample's one depth. The shader then compares each with the reference through
 //! `linear::compare::TapCompare`, the entry point every comparison the shader makes takes. A tap
-//! outside a border axis reads the border's depth, which Metal compares as a texel's
-//! (RT13-px4-probe-m4).
+//! outside a border axis reads the border's depth, which Metal compares as a texel's.
 //!
 //! **By fetches**. A device's sample or gather may read a denormal `R32_SFLOAT` texel as zero, and
 //! its fetch keeps it, so where Metal's footprint and level are known the shader fetches the depths
@@ -46,15 +45,14 @@
 //! without either): level 0 without a mip filter, and under a nearest one the level Metal's rule
 //! reads, clamped into the levels the word's clamp leaves (`fetched::FetchLevel::Word`). Metal
 //! reads a comparison's level through a runtime or argument buffer's sampler as a sample's, its
-//! clamp held as `f32`s (EV TXN-cmplvl2-m4). At an implicit level or gradients in a fragment
-//! function it fetches level 0's texel where the word states no mip filter, and under a nearest one
-//! samples without comparison through the slot's binding without comparison ([`Compared::plain`]),
-//! as it does not know the level Metal reads. A dynamic offset or a `min_lod_clamp` leaves the
-//! reads to the device. Metal is taken to compare through a runtime sampler as through a constexpr
-//! sampler of the same state, as it filters (EV MSFZ-m4-probe1); the runtime lane's
-//! `depth_compares` runs both kinds of sampler on each device, Metal's own through MoltenVK. The
-//! module records `DeviceDepthComparison` only where the word reaches the device's comparison or
-//! level ([`Compared::device_when`]).
+//! clamp held as `f32`s. At an implicit level or gradients in a fragment function it fetches level
+//! 0's texel where the word states no mip filter, and under a nearest one samples without
+//! comparison through the slot's binding without comparison ([`Compared::plain`]), as it does not
+//! know the level Metal reads. A dynamic offset or a `min_lod_clamp` leaves the reads to the
+//! device. Metal is taken to compare through a runtime sampler as through a constexpr sampler of
+//! the same state, as it filters; the runtime lane's `depth_compares` runs both kinds of sampler on
+//! each device, Metal's own through MoltenVK. The module records `DeviceDepthComparison` only where
+//! the word reaches the device's comparison or level ([`Compared::device_when`]).
 //!
 //! **A heap texture**. The function does not know the format of an argument buffer's texture, so
 //! the binder states its depth class in the texture's handle-table entry (`Depth16Unorm`'s codes,
@@ -654,11 +652,10 @@ pub(super) fn blended(
 }
 
 /// Metal's blend of two levels' passes `[p0, p1]` (each `0.0` or `1.0`) by `1 - q` and `q` (`q`
-/// on sixty-fourths, `m / 64`), as `blended` takes it (EVs TXN-cmplvl2-m4 and TXN-cmplvl3-m4):
-/// an `r8Unorm` texture's blend of the passes as codes 0 and 255, as a linear comparison
-/// sums its taps' (`linear::compare`), its sum `255 (p0 (64 - m) + p1 m) / 64` rounded once onto
-/// sixteenths of a code, ties up, `n = (255 s + 2) / 4` of `s = p0 (64 - m) + p1 m`, and `n /
-/// 4080` correctly rounded to `f32`.
+/// on sixty-fourths, `m / 64`), as `blended` takes it: an `r8Unorm` texture's blend of the passes
+/// as codes 0 and 255, as a linear comparison sums its taps' (`linear::compare`), its sum `255 (p0
+/// (64 - m) + p1 m) / 64` rounded once onto sixteenths of a code, ties up, `n = (255 s + 2) /
+/// 4` of `s = p0 (64 - m) + p1 m`, and `n / 4080` correctly rounded to `f32`.
 fn blend_passes(
     fb: &mut FunctionBuilder<'_>,
     t: &Tys,

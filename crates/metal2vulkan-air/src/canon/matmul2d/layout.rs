@@ -1,4 +1,4 @@
-//! Metal's cooperative-tensor layouts, as measured (EV TNS-metal1, TNS-metal2).
+//! Metal's cooperative-tensor layouts, as measured.
 //!
 //! A cooperative tensor's elements are spread over the scope's threads in 8 x 8 blocks. Within a
 //! block, lane `L` of a simdgroup holds two adjacent elements, at block row `row(L)` and block
@@ -262,7 +262,7 @@ mod tests {
         }
     }
 
-    /// The probes' readings (TNS-metal2): the blocks of simdgroup 0 and 3 of the 64 x 64 x 32
+    /// The probes' readings: the blocks of simdgroup 0 and 3 of the 64 x 64 x 32
     /// destination, simdgroup 1 of the 8 x 128 x 32 one, and lane 9's first elements.
     #[test]
     fn layouts_match_the_readings() {

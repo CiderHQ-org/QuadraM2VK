@@ -4,24 +4,23 @@
 //! `tob_renders` (a rectangle whose fragment reads, at its position, a texture whose texels name
 //! themselves, so each rendered texel names the pass position it was drawn at).
 //!
-//! Every byte of the plane is checked against Metal's rule, measured on an M4 under macOS 27.0.1
-//! (EVs ZCI2-rotprobe-m4 to ZCI2-rotprobe5-m4): a pass's texel `(x, y)` of a `W x H` texture lands
-//! at `(H - 1 - y, x)` of an `H x W` plane for rotation 1 and 4, at `(W - 1 - x, H - 1 - y)` for 2
-//! and at `(y, W - 1 - x)` for 3; a load sees the plane turned back at rotations 1 to 3, so texels
-//! the pass leaves keep their bytes, and the plane transposed at rotation 4, so they land mirrored
-//! left to right, in each 32x32 tile of the frame a draw reaches (EVs TTG-rot1-m4, TTG-rot2-m4 and
-//! the M3 Max's alike), the runtime turning every tile of a pass that draws (announced once,
-//! `RotatedLoadTiles`) and none of one that does not, as Metal; a resolve lands as a store does;
-//! the bytes between the plane's rows stay. A rotated texture of a padded 10-bit or extended-range
-//! format that such a pass loads keeps its codes with the bits they leave unused as Metal's tile
-//! store makes them. CPU access and blits address the plane as the texture's own extent at the
-//! plane's rows, turned or not, a quarter turn's rows overlapping where they are longer than the
-//! plane's pitch (a write's later row keeping the bytes two rows share), refused where they run
-//! past the buffer; a fragment's `read()` sees the stored frame unturned. A view of the texture in
-//! another 8-bit RGBA format acts as the texture does (EVs TTG-rot4-m4, TTG-rot4-m3, TTG-rot5-m4);
-//! other views are refused. The creators refuse what Metal asserts on, and the shadows a rotated
-//! texture is read and rendered through are announced once (`ShadowedTexture`; a resolve's own
-//! notices, which differ by device, are not this lane's).
+//! Every byte of the plane is checked against Metal's rule, measured on an M4 under macOS 27.0.1: a
+//! pass's texel `(x, y)` of a `W x H` texture lands at `(H - 1 - y, x)` of an `H x W` plane for
+//! rotation 1 and 4, at `(W - 1 - x, H - 1 - y)` for 2 and at `(y, W - 1 - x)` for 3; a load sees
+//! the plane turned back at rotations 1 to 3, so texels the pass leaves keep their bytes, and the
+//! plane transposed at rotation 4, so they land mirrored left to right, in each 32x32 tile of the
+//! frame a draw reaches (our probes and the M3 Max's alike), the runtime turning
+//! every tile of a pass that draws (announced once, `RotatedLoadTiles`) and none of one that does
+//! not, as Metal; a resolve lands as a store does; the bytes between the plane's rows stay. A
+//! rotated texture of a padded 10-bit or extended-range format that such a pass loads keeps its
+//! codes with the bits they leave unused as Metal's tile store makes them. CPU access and blits
+//! address the plane as the texture's own extent at the plane's rows, turned or not, a quarter
+//! turn's rows overlapping where they are longer than the plane's pitch (a write's later row
+//! keeping the bytes two rows share), refused where they run past the buffer; a fragment's `read()`
+//! sees the stored frame unturned. A view of the texture in another 8-bit RGBA format acts as the
+//! texture does; other views are refused. The creators refuse what Metal asserts on, and the
+//! shadows a rotated texture is read and rendered through are announced once (`ShadowedTexture`; a
+//! resolve's own notices, which differ by device, are not this lane's).
 //!
 //! `rotated_surface_frame_costs` times frames at the consumer's surface size, 1920x1080, rotated
 //! and not, and prints them (`ROTATION-COST`).
@@ -484,9 +483,8 @@ fn passes_store_load_and_resolve_rotated_textures_as_metal_turns_them() {
 /// their stored position. A pass that loads it and draws nothing leaves every byte in place; one
 /// that loads it and draws its top-left corner leaves, at rotation 4, every other texel mirrored
 /// left to right (the plane's texel (0, 0) holding (31, 0)'s bytes, and (20, 30) holding (11,
-/// 30)'s), and every texel in place at the others: Metal's answer, the tile reached (EVs
-/// TTG-rot1-m4 and TTG-rot1-m3). The pass that draws at rotation 4 announces `RotatedLoadTiles`
-/// once; the passes before it, none.
+/// 30)'s), and every texel in place at the others: Metal's answer, the tile reached. The pass that
+/// draws at rotation 4 announces `RotatedLoadTiles` once; the passes before it, none.
 #[test]
 fn loads_of_rotation_4_land_mirrored_and_passes_without_draws_keep_every_texel() {
     let cache = ScratchCache::new().unwrap();
@@ -641,7 +639,7 @@ fn unused_bits_cases() -> [UnusedBitsCase; 3] {
 /// a load and a store put them (at rotation 4 the mirror [`loaded_from`] gives), the bits they
 /// leave unused as Metal's store makes them (a padded word's low six bits zeroed, `BGR10_XR`'s bits
 /// 30 and 31 set), the bytes between rows kept. That is Metal's store in each tile the draw
-/// reaches (EVs XRR2-xrb2 and XRR2-xrb3 on an M4 and the consumer's runs of them on an M3 Max; the
+/// reaches (on an M4 and the consumer's runs of them on an M3 Max; the
 /// turns): the runtime rewrites the twin of the pass's frame after its copy in, so no pass
 /// announces `extended-range-bits-kept`. In a frame of two tiles the one the draw does not reach is
 /// rewritten as well, where Metal keeps its texels' bytes (`unreached-tiles-rewritten`, announced
@@ -798,14 +796,13 @@ fn rows_read(plane: &[u8], (w, h): (u64, u64), bpr: u64) -> Vec<u8> {
         .collect()
 }
 
-/// The uses other than a render pass's, as plain Metal addresses them (EV ZCI2-rotprobe5-m4):
-/// CPU access and blits, in and out, address the plane as the texture's own extent at the plane's
-/// rows, turned or not, a quarter turn's rows overlapping where they are longer than the plane's
-/// pitch and a write's later row keeping the bytes two rows share; refused
-/// (`NotImplemented(RotatedTexture)`) where those rows run past the buffer, and made over a
-/// buffer that holds them. A fragment's `read()` sees the stored frame unturned (positions past
-/// it, which Metal reads as 0, are printed, not checked), and a kernel's write of a texel reaches
-/// no byte (EV ZCI2-rotprobe6-m4) while its write of the plane's bytes lands.
+/// The uses other than a render pass's, as plain Metal addresses them: CPU access and blits, in and
+/// out, address the plane as the texture's own extent at the plane's rows, turned or not, a quarter
+/// turn's rows overlapping where they are longer than the plane's pitch and a write's later row
+/// keeping the bytes two rows share; refused (`NotImplemented(RotatedTexture)`) where those rows
+/// run past the buffer, and made over a buffer that holds them. A fragment's `read()` sees the
+/// stored frame unturned (positions past it, which Metal reads as 0, are printed, not checked), and
+/// a kernel's write of a texel reaches no byte while its write of the plane's bytes lands.
 #[test]
 fn other_uses_address_the_plane_as_metal_does() {
     let cache = ScratchCache::new().unwrap();
@@ -931,7 +928,7 @@ fn other_uses_address_the_plane_as_metal_does() {
              {past_frame:08x?}"
         );
         // A kernel writing texel (0, 0) and four of the plane's bytes another way: Metal drops
-        // the texel's write (EV ZCI2-rotprobe6-m4), and the bytes' lands.
+        // the texel's write, and the bytes' lands.
         write(&plane, &named);
         lane.two_ways(&texture, &plane, bpr as u32);
         let mut want = named.clone();
@@ -947,13 +944,13 @@ fn other_uses_address_the_plane_as_metal_does() {
 /// Views (`newTextureViewWithPixelFormat:`) of a rotated 64x16 texture, every rotation, each of
 /// [`VIEWED`] viewed as each, the texture made with and without `PixelFormatView` usage, over a
 /// plane whose rows are wider than its texels: plain Metal makes the view, of the texture's frame
-/// extent, rotation and framebuffer-only flag, and it acts as the texture does in its own format
-/// (EVs TTG-rot4-m4, TTG-rot4-m3, TTG-rot5-m4). A pass through it that clears and draws everything,
-/// and one that loads and draws its top-left corner, leave each plane byte where the texture's
-/// would (rotation 4's mirror too, announced once as `RotatedLoadTiles`), a fragment's `read()`
-/// through it sees the stored frame unturned, and `getBytes` the plane's rows. An `_sRGB` format's
-/// drawn and read texels convert out and back, each byte within 1. A view as another format, or of
-/// another type, of a rotated texture is refused (`NotImplemented(RotatedTexture)`).
+/// extent, rotation and framebuffer-only flag, and it acts as the texture does in its own format. A
+/// pass through it that clears and draws everything, and one that loads and draws its top-left
+/// corner, leave each plane byte where the texture's would (rotation 4's mirror too, announced once
+/// as `RotatedLoadTiles`), a fragment's `read()` through it sees the stored frame unturned, and
+/// `getBytes` the plane's rows. An `_sRGB` format's drawn and read texels convert out and back,
+/// each byte within 1. A view as another format, or of another type, of a rotated texture is
+/// refused (`NotImplemented(RotatedTexture)`).
 #[test]
 fn views_of_rotated_textures_act_as_their_texture_does() {
     let cache = ScratchCache::new().unwrap();
@@ -1127,7 +1124,7 @@ fn creators_refuse_what_metal_asserts_on() {
     );
     // A heap's texture, and the heap size query, which Metal answers for a rotated
     // framebuffer-only descriptor as for a plain one, and asserts on for a rotation without
-    // framebufferOnly (EV ZCI2-rotprobe6-m4).
+    // framebufferOnly.
     let heap = device
         .new_heap(&HeapDescriptor::new(
             HeapType::Automatic,

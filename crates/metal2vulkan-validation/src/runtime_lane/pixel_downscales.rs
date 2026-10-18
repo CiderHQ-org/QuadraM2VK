@@ -4,7 +4,7 @@
 //! the cfg selects, under the validation layer, against plain Metal's answers, at each of
 //! [`SIZES`].
 //!
-//! Metal's answers (EV SID-pxd2-m4: our own probe, an Apple M4 under macOS 27.0.1, two
+//! Metal's answers (our own probe, an Apple M4 under macOS 27.0.1, two
 //! processes, identical): a `RGBA8Unorm` texture of xorshift32 bytes ([`texels`]) sampled
 //! through a runtime sampler state of linear min and mag filters, no mip filter, clamp to edge on
 //! every axis and `normalizedCoordinates` NO:
@@ -20,12 +20,12 @@
 //!
 //! The consumer's r25 found the pass's source a 1440x1080 texture: the sizes sweep that one,
 //! 1080 rows under other widths that are not powers of two, and each axis apart (the
-//! orchestrator, 2026-10-09). Plain Metal answered every size (EV SID-pxd4-m4), and MoltenVK on
-//! an M4 and lavapipe answered Metal's at every one (EVs SID-pxd5-mvk4 and SID-pxd5-lvpx86).
+//! orchestrator, 2026-10-09). Plain Metal answered every size, and MoltenVK on an M4 and lavapipe
+//! answered Metal's at every one.
 //!
 //! On a device with `VkProperty::MetalSampler` the module hands such a sample to Metal's own
 //! normalized sampler at its cell (`position::celled_by_word`), which Metal answers as the pixel
-//! sampler (EV SID-pxd1-m4: 0 of 97,200 texel channels differ at every perturbation tried, and in
+//! sampler (0 of 97,200 texel channels differ at every perturbation tried, and in
 //! the draw): every configuration must be Metal's and nothing is announced. Elsewhere a
 //! configuration that is not Metal's must have been announced (`pixel-sampler-scaling`, or
 //! `float-sample-filter` where the device converts the texels).
@@ -85,8 +85,8 @@ const TARGET: u64 = 256;
 /// One size's answers: each configuration's name and hash.
 type Answers = [(&'static str, &'static str); 4];
 
-/// Plain Metal's answers by the texture's size (the module docs): EV SID-pxd2-m4's for 1536x1152,
-/// and EV SID-pxd4-m4's (the same probe at each size, an Apple M4 under macOS 27.0.1, two
+/// Plain Metal's answers by the texture's size (the module docs): our probe's for 1536x1152 and for
+/// the other sizes (the same probe at each size, an Apple M4 under macOS 27.0.1, two
 /// processes, identical; its pixel sampler equal to the snapped normalized control at every
 /// size) for every size, 1536x1152's the same again.
 const METAL: [((u64, u64), Answers); 7] = [

@@ -67,9 +67,9 @@ fn off_granule(error: Error) -> bool {
     )
 }
 
-/// Buffers and heaps made at a caller's address answer it, as Metal's do on an M3 Max and an M4
-/// (probes `RT7-place-probe1` to `4`): zero, copied and no-copy buffers, aligned and not, and a
-/// placement heap whose buffer at an offset has the heap's address plus the offset.
+/// Buffers and heaps made at a caller's address answer it, as Metal's do on an M3 Max and an M4:
+/// zero, copied and no-copy buffers, aligned and not, and a placement heap whose buffer at an
+/// offset has the heap's address plus the offset.
 #[test]
 fn pinned_buffers_and_heaps_answer_their_addresses() {
     on_device(|device| {

@@ -2,7 +2,7 @@
 //! ask of 2026-10-09) on the device the cfg selects, under the validation layer, against plain
 //! Metal's answers.
 //!
-//! Metal's answers (EV SID-pix1-m4: our own probe, an Apple M4 under macOS 27.0.1, two processes,
+//! Metal's answers (our own probe, an Apple M4 under macOS 27.0.1, two processes,
 //! identical): a 5x3 `RGBA8Unorm` and a 5x3 `RGBA16Float` texture, sampled at level 0 on a grid of
 //! 80 x 10 coordinates in and outside the texture (each texel edge and centre, one ulp either
 //! side, quarter and 1/512 steps; [`grid`]) through a runtime sampler state of
@@ -47,7 +47,7 @@ use std::collections::{BTreeMap, BTreeSet};
 const W: u64 = 5;
 const H: u64 = 3;
 
-/// Plain Metal's answers: each configuration's results hashed (EV SID-pix1-m4, the module docs).
+/// Plain Metal's answers: each configuration's results hashed (the module docs).
 const METAL: [(&str, &str); 60] = [
     (
         "rgba8_slot_nearest_edge",

@@ -3,7 +3,7 @@
 //! texel at the level it reads.
 //!
 //! Metal's level rule holds for a runtime sampler with its level clamp as `f32`s, where a constexpr
-//! sampler's are `half`s (EV UNV-metal-probe-2, Apple M4 on macOS 27.0.1, all 37,080 lanes): Metal
+//! sampler's are `half`s (Apple M4 on macOS 27.0.1, all 37,080 lanes): Metal
 //! rounds the level `x` to `half` (a NaN reads 0), clamps it into the sampler's clamp and the
 //! texture's levels, and with `L = floor(x)` and `q = floor(64 (x - L)) / 64` reads level `L + 1`
 //! under a nearest mip filter where `q > 1/2`, else `L`, and blends `L` and `L + 1` with weight `q`
@@ -60,7 +60,7 @@ const POSITION_LEVELS: u32 = 4;
 /// The `v` of every positions lane: on level `L` of height `H`, `0.3 H` lies inside a texel.
 const ROW: f32 = 0.3;
 
-/// The level clamps EV UNV-metal-probe-2 read through runtime samplers, as `f32`s: no clamp,
+/// The level clamps our probe read through runtime samplers, as `f32`s: no clamp,
 /// clamps whose bounds lie on and off Metal's sixty-fourths and at and just below a nearest mip
 /// filter's half-way points, an empty-width clamp, and clamps past the texture's levels.
 fn clamps() -> [(f32, f32); 18] {

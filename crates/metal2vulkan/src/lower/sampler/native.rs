@@ -50,7 +50,7 @@
 //! before.
 //!
 //! **The bound** (the deviation probe, `probes/shb-dev` at the scratch commit `aa944573d` with its
-//! `cell` variant, this module's coordinate; EVs `SHB-dw-*` against EV `SHB-dm1`: 19x13 textures of
+//! `cell` variant, this module's coordinate; our probes compared: 19x13 textures of
 //! the four formats, 4,096 coordinates, a third of them near the 1/256 grid, under clamp to edge,
 //! repeat, mirrored repeat and clamp to zero, against an Apple M4 on macOS 27.0.1): the largest
 //! difference of any channel of a `float` result, in codes (1/255), was 0.849 on NVIDIA's 615.71.09

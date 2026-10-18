@@ -1,7 +1,6 @@
-//! `sparse`: Metal's sparse answers that need no device, each against what an M4 answered
-//! (SPR-probe1-m4, SPR-probe2-m4): tiles, mip tails, conversions, the page values, and what a
-//! device's sparse support refuses; and how Metal's units lie in the device's, which texels a batch
-//! zeroes and a move copies.
+//! `sparse`: Metal's sparse answers that need no device, each against what an M4 answered: tiles,
+//! mip tails, conversions, the page values, and what a device's sparse support refuses; and how
+//! Metal's units lie in the device's, which texels a batch zeroes and a move copies.
 
 use crate::error::{Error, RuntimeGap};
 use crate::sparse::device::{wanted, SparseDevice};
@@ -43,8 +42,7 @@ fn the_page_values_are_metal_s() {
     assert_eq!(SparseTextureRegionAlignmentMode::Inward.raw(), 1);
 }
 
-/// The tiles an M4 answered, by format, sample count and page (SPR-probe1-m4 `tiles` and
-/// `shapes`, SPR-probe2-m4 `type_*` and `badpage`).
+/// The tiles an M4 answered, by format, sample count and page.
 #[test]
 fn tiles_are_metal_s_rule() {
     use PixelFormat as P;
@@ -90,16 +88,15 @@ fn tiles_are_metal_s_rule() {
     }
 }
 
-/// `firstMipmapInTail` and `tailSizeInBytes` as an M4 answered them (SPR-probe1-m4 `shapes`, each
-/// page size; SPR-probe3-m4 `tails`: textures of a few levels, whose rule runs over the full
-/// chain): (type, format, extent, levels, page, first, tail bytes), one sample.
+/// `firstMipmapInTail` and `tailSizeInBytes` as an M4 answered them (each page size: textures of a
+/// few levels, whose rule runs over the full chain): (type, format, extent, levels, page, first,
+/// tail bytes), one sample.
 #[test]
 fn mip_tails_are_metal_s_rule() {
     use PixelFormat as P;
     use TextureType as T;
     #[rustfmt::skip]
     let cases: &[(TextureType, PixelFormat, [u64; 3], u64, u64, u64, u64)] = &[
-        // SPR-probe1-m4 `shapes`.
         (T::Type2D, P::R32Float, [256, 128, 1], 1, K16, 1, 0),
         (T::Type2D, P::R32Float, [16, 16, 1], 1, K16, 0, 16384),
         (T::Type2D, P::R32Float, [64, 64, 1], 1, K16, 1, 0),
@@ -196,7 +193,6 @@ fn mip_tails_are_metal_s_rule() {
         (T::Type3D, P::RGBA8Unorm, [128, 128, 128], 8, K256, 0, 33554432),
         (T::Cube, P::R32Float, [256, 256, 1], 9, K256, 1, 262144),
         (T::CubeArray, P::R32Float, [256, 256, 1], 1, K256, 1, 0),
-        // SPR-probe3-m4 `tails`.
         (T::Type2D, P::R32Float, [8192, 128, 1], 1, K16, 1, 0),
         (T::Type2D, P::R32Float, [8192, 128, 1], 2, K16, 2, 360448),
         (T::Type2D, P::R32Float, [8192, 128, 1], 3, K16, 2, 360448),
@@ -292,7 +288,7 @@ fn mip_tails_are_metal_s_rule() {
             "{what}"
         );
     }
-    // Multisampled textures, of one level (SPR-probe1-m4 `shapes`, 16-KiB pages).
+    // Multisampled textures, of one level (16-KiB pages).
     for (pf, extent) in [(P::R32Float, [256, 256, 1]), (P::RGBA8Unorm, [256, 256, 1])] {
         let tile = tile_texels(pf, 4, K16);
         assert_eq!(first_mipmap_in_tail(extent, 1, tile), 1);
@@ -301,7 +297,7 @@ fn mip_tails_are_metal_s_rule() {
     }
 }
 
-/// The conversions an M4 answered (SPR-probe1-m4 `convert`, 64x64 tiles): outward covers, inward
+/// The conversions an M4 answered (64x64 tiles): outward covers, inward
 /// takes the tiles inside with a size that wraps when none is.
 #[test]
 fn conversions_are_metal_s() {
@@ -349,9 +345,8 @@ fn conversions_are_metal_s() {
 }
 
 /// A tile with an axis of 0 writes nothing into the caller's regions, as plain Metal writes
-/// nothing (an M4 under macOS 27.0.1 and an M3 Max under 26.7, EVs RRP-probe1-m4 and
-/// RRP-probe1-m3 `sp_tilesize0`, the region 5, 7 by 20, 30 into regions filled with `0xab`
-/// bytes); a 16 by 16 tile converts it as Metal did.
+/// nothing (an M4 under macOS 27.0.1 and an M3 Max under 26.7, the region 5, 7 by 20, 30 into
+/// regions filled with `0xab` bytes); a 16 by 16 tile converts it as Metal did.
 #[test]
 fn a_tile_with_an_axis_of_0_converts_nothing() {
     use SparseTextureRegionAlignmentMode::{Inward, Outward};

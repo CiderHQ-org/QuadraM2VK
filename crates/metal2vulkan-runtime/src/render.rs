@@ -20,7 +20,7 @@
 //!   instances or mesh threadgroups records nothing either, as plain Metal draws nothing there,
 //!   where its validation stops a draw of no instances or patches (Metal probe cases `draw_zero`,
 //!   `zero_instances` and `zero_patches` on an M4). Such an empty draw is checked only as plain
-//!   Metal checks one (EV RFX-probe2-m4, an M4): without a pipeline state, with a tile pipeline's,
+//!   Metal checks one (an M4): without a pipeline state, with a tile pipeline's,
 //!   with a state of another kind (patches with a drawing state, primitives with a mesh state) and
 //!   a patch draw without a tessellation factor buffer it stops the process, so those stay refused;
 //!   past them plain Metal draws nothing whatever the encoder's bindings and amplification count,
@@ -32,8 +32,7 @@
 //! - **Misaligned offsets**. Metal's validation stops a draw whose index buffer offset is not a
 //!   multiple of the index size, whose indirect arguments' offset or patch index buffer offset is
 //!   not a multiple of 4; plain Metal reads each from the offset rounded down to that multiple
-//!   (Metal probe cases `ind_offset_misaligned` and `ind_indexed_offset_misaligned` on an M4; probe
-//!   `RT7-icb-probe7-m4` `idx_offset_misaligned_u16`, `_u32`, `patch_index_offset_misaligned`; a
+//!   (Metal probe cases `ind_offset_misaligned` and `ind_indexed_offset_misaligned` on an M4; a
 //!   probe for control-point indices), as the draws here do.
 //! - **Encoder state** starts at Metal's default render encoder state, and its setters take and
 //!   refuse what Metal's do (`render_state.rs`, measured): viewports and scissor rectangles (the
@@ -469,9 +468,8 @@ pub enum DrawProblem {
     /// a probe: "renderPipelineState must be created using a MTLRenderPipelineDescriptor.", and
     /// Metal without its validation stops the process). A draw of primitives with a tessellation
     /// pipeline, which Metal's validation stops too, draws nothing, as plain Metal draws it (the
-    /// same probe), and so does a mesh draw of no threadgroups with a drawing state (EV
-    /// RFX-probe2-m4); an empty draw of patches or primitives of another kind stops plain Metal
-    /// too, and stays refused.
+    /// same probe), and so does a mesh draw of no threadgroups with a drawing state; an empty draw
+    /// of patches or primitives of another kind stops plain Metal too, and stays refused.
     DrawKind,
     /// A patch draw while the encoder has no tessellation factor buffer (measured: Metal's
     /// validation stops it, and Metal without it stops the process).
@@ -486,9 +484,8 @@ pub enum DrawProblem {
     NotTileState,
     /// `dispatch_threads_per_tile` with threads per tile wider or taller than the pass's tile
     /// (measured: "threadsPerTile.width(32) must be <= 16"). Plain Metal runs them, their
-    /// imageblock cells past the tile landing in the neighbouring tiles' pixels (probe
-    /// RT11-metal-probe-10 `d_32in16`): a layout of Metal's tile memory the runtime does not
-    /// model, so refused.
+    /// imageblock cells past the tile landing in the neighbouring tiles' pixels: a layout of
+    /// Metal's tile memory the runtime does not model, so refused.
     ThreadsPerTilePastTile {
         /// The threads per tile's width and height.
         threads: [u32; 2],
@@ -549,7 +546,7 @@ pub enum DrawProblem {
     },
     /// An indirect render command's indexed draw whose `count` indices from `offset` (rounded
     /// down to a multiple of the index size, as Metal reads it) run past its index buffer's
-    /// `length` (measured, probe `RT7-icb-probe7-m4`: `indexBufferOffset(0) + (indexCount(6) * 4)
+    /// `length` (measured: `indexBufferOffset(0) + (indexCount(6) * 4)
     /// must be <= [indexBuffer length](16)`); plain Metal draws from whatever memory follows the
     /// buffer (`idx_past_end`: undefined, so refused).
     IndexBufferRange {
@@ -966,7 +963,7 @@ pub(super) const PASS_DRAW_STAGES: vk::PipelineStageFlags2 = vk::PipelineStageFl
 /// The stages of `PASS_DRAW_STAGES` that run a draw's fragments. On Metal's Apple GPUs they run
 /// after the object and mesh stages of every later draw of the pass: a mesh draw's object and mesh
 /// functions read none of an earlier draw's fragment writes, behind a command's barrier or not
-/// (EV IRX-mfrag-m4, an M4).
+/// (an M4).
 pub(super) const FRAGMENT_DRAW_STAGES: vk::PipelineStageFlags2 = vk::PipelineStageFlags2::from_raw(
     vk::PipelineStageFlags2::FRAGMENT_SHADER.as_raw()
         | vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS.as_raw()
@@ -1189,7 +1186,7 @@ pub struct RenderCommandEncoder {
     /// The tracked writes of the pass's tile dispatches, which Metal orders before no later
     /// draw's fetch of its arguments or indices: no barrier clears them (Metal refuses a memory
     /// barrier after the tile stage, and the draw read the bytes from before the write in every
-    /// run measured, with a barrier before the dispatch too: RRS-tilew).
+    /// run measured, with a barrier before the dispatch too).
     unordered_dispatches: UnorderedWrites<ResourceKey>,
     /// A memory barrier over buffers or textures was encoded: an indexed indirect draw after it
     /// reads bytes a draw wrote since it in place (`draw_source.rs`'s racing copy is taken only
@@ -2303,7 +2300,7 @@ impl RenderCommandEncoder {
     /// `Unknown`; without a depth attachment nothing changes, as plain Metal does where its
     /// validation stops the call (measured on an M4); one that does not resolve where a resolve
     /// texture is named leaves that texture untouched and stores the depth by the action, as plain
-    /// Metal does where its validation stops it (EV RFX-probe2-m4). Refused (`Invalid`, measured):
+    /// Metal does where its validation stops it. Refused (`Invalid`, measured):
     /// an action over one the descriptor knew, `Unknown` itself, a resolving action without a
     /// resolve texture, `Store` for a memoryless attachment, and `Store` where the stencil
     /// attachment is the same texture resolved by `MultisampleResolve`.
@@ -2552,7 +2549,7 @@ impl RenderCommandEncoder {
     /// `setDepthStencilState:`: `state` is a `&DepthStencilState`, or `None` for nil, which
     /// makes the encoder's state Metal's default again (a depth compare of `Always` without
     /// writes, and no stencil test), as plain Metal draws after nil where its validation stops
-    /// it (EV CFR-probe4-m4). Refused: a state of another device. A draw refuses a state that
+    /// it. Refused: a state of another device. A draw refuses a state that
     /// writes depth in a pass without a depth attachment, or uses the stencil in one without a
     /// stencil attachment (measured).
     pub fn set_depth_stencil_state<'a>(
@@ -2629,11 +2626,11 @@ impl RenderCommandEncoder {
     /// patch draw reads, `None` for `nil`, from the offset rounded down to a multiple of 2, each
     /// instance's at the instance stride rounded down to a multiple of 4: Metal's validation stops
     /// an offset or a stride that is not a multiple of 4, but plain Metal reads an offset of 2 at
-    /// that byte (Metal probe case `factor_offset_2` on an M4), an odd one from the byte below (EV
-    /// IRX-pat2-m4: 1 read from 0, 3 from 2, 7 from 6), and steps the instances by a stride rounded
-    /// down to a multiple of 4 (Metal probes: strides 2 and 14 drew what 0 and 12 draw, 6 and 10
-    /// what 4 and 8 draw; EV IRX-pat3-m4: 13 and 15 what 12 draws, 17 and 19 what 16 draws).
-    /// Refused (`Invalid`) for a buffer of another device, keeping the buffer set before.
+    /// that byte (Metal probe case `factor_offset_2` on an M4), an odd one from the byte below (1
+    /// read from 0, 3 from 2, 7 from 6), and steps the instances by a stride rounded down to a
+    /// multiple of 4 (Metal probes: strides 2 and 14 drew what 0 and 12 draw, 6 and 10 what 4 and 8
+    /// draw: 13 and 15 what 12 draws, 17 and 19 what 16 draws). Refused (`Invalid`) for a buffer of
+    /// another device, keeping the buffer set before.
     pub fn set_tessellation_factor_buffer(
         &mut self,
         buffer: Option<&Buffer>,
@@ -2658,7 +2655,7 @@ impl RenderCommandEncoder {
     /// `setTessellationFactorScale:` (`tessellation.rs`), which a pipeline that enables
     /// `tessellationFactorScaleEnabled` multiplies its factors by, rounded to `half` as Metal
     /// rounds it (one infinite as a `half` takes the factors to the maximum, and one that is 0,
-    /// negative or NaN as a `half` culls every patch; EVs ICBV-scale2-m3 and -m4, and a Metal probe
+    /// negative or NaN as a `half` culls every patch; and a Metal probe
     /// on an M4). Every scale is taken, as plain Metal takes those its validation stops (0, a
     /// negative one, NaN, an infinity and a subnormal `float`; Metal probes on an M4): each culls
     /// or draws as its `half` does under a pipeline that enables the scale, and a pipeline that
@@ -2723,7 +2720,7 @@ impl RenderCommandEncoder {
     /// instance of 0). Index positions past the buffer's length draw as the module docs say, and
     /// the indices are read from the offset's low 32 bits rounded down to a multiple of the index
     /// size, as plain Metal reads them (an M4 read an offset of 2^32 + 16 into a buffer past 4 GiB
-    /// at 16, EV STL-off2-m4). A draw of no indices or no instances records nothing. Refused as the
+    /// at 16). A draw of no indices or no instances records nothing. Refused as the
     /// module docs say, and for an index buffer of another device.
     pub fn draw_indexed_primitives(
         &mut self,
@@ -2748,7 +2745,7 @@ impl RenderCommandEncoder {
         });
         const CALL: &str = "draw_indexed_primitives";
         self.core.check_device(CALL, index_buffer.device())?;
-        // Metal reads from the offset's low 32 bits (EV STL-off2-m4).
+        // Metal reads from the offset's low 32 bits.
         let index_buffer_offset = u64::from(index_buffer_offset as u32);
         let index_buffer_offset =
             index_buffer_offset - index_buffer_offset % index_size(index_type);
@@ -2886,8 +2883,8 @@ impl RenderCommandEncoder {
             self.robust_index_fetch() && self.core.device().shared().sized_index_bind.is_none();
         // Bytes a draw or tile dispatch of the encoder wrote, before any memory barrier, which
         // Metal does not order before this draw's read, are read through a copy taken before the
-        // pass: the bytes from before the write, Metal's answer in every run measured (RRS-race
-        // and, for a tile dispatch, RRS-tilew). After a barrier Metal's answer to a draw's write
+        // pass: the bytes from before the write, Metal's answer in every run measured (our probes,
+        // a tile dispatch's too). After a barrier Metal's answer to a draw's write
         // varied: those are read in place (refused where the index bounds pass reads them,
         // `draw`). A tile dispatch's write after a barrier, which Metal's draw does not read
         // either, is refused: the copy before the pass misses what the barrier ordered.
@@ -3099,12 +3096,12 @@ impl RenderCommandEncoder {
     /// `p` is the index (of the pipeline's type) at position `p · N + k` of the control-point index
     /// buffer from its offset (measured), `N` the pipeline's control points where its function
     /// states them, an offset that is not a multiple of the index size rounded down to one, as
-    /// plain Metal reads it (EVs ICBV-hostkinds-m3 and -m4), where its validation stops the draw. A
-    /// pipeline whose type is `None`, which Metal's validation stops, draws the patches' own
-    /// control points, the buffer unread, as plain Metal draws them (Metal probe case
-    /// `indexed_without_type` on an M4). Refused as `draw_patches` is, for a control-point index
-    /// buffer of another device, and as Metal's validation refuses it (`Invalid`, measured):
-    /// `(patch_start + patch_count) · N` indices past the buffer from the offset.
+    /// plain Metal reads it, where its validation stops the draw. A pipeline whose type is `None`,
+    /// which Metal's validation stops, draws the patches' own control points, the buffer unread, as
+    /// plain Metal draws them (Metal probe case `indexed_without_type` on an M4). Refused as
+    /// `draw_patches` is, for a control-point index buffer of another device, and as Metal's
+    /// validation refuses it (`Invalid`, measured): `(patch_start + patch_count) · N` indices past
+    /// the buffer from the offset.
     pub fn draw_indexed_patches(
         &mut self,
         number_of_patch_control_points: u32,
@@ -3274,8 +3271,8 @@ impl RenderCommandEncoder {
 
     /// The control points a patch draw naming `given` draws: its pipeline state's, where the
     /// state's post-tessellation vertex function states them (`[[patch(_, N)]]`), as Metal draws
-    /// them whatever the draw names (Metal probe cases `control_points_4` and `_0` on an M4; probe
-    /// `RT7-icb-probe7-m4` for a command); `given` elsewhere.
+    /// them whatever the draw names (Metal probe cases `control_points_4` and `_0` on an M4; for a
+    /// command); `given` elsewhere.
     fn patch_control_points(&self, given: u32) -> u32 {
         match self.pipeline.as_ref().map(RenderPipelineState::kind) {
             Some(RenderStateKind::Graphics(state)) => {
@@ -3326,10 +3323,10 @@ impl RenderCommandEncoder {
     /// tessellation one with a control-point index type, as Metal's validation refuses it
     /// (`Invalid`, measured): for a direct draw reading `indices`, indices past the buffer from
     /// the offset. An offset that is not a multiple of the type's size is read from the offset
-    /// rounded down to one, as plain Metal reads it (EVs ICBV-hostkinds-m3 and -m4, the M3 Max
-    /// and the M4 alike: 32-bit indices at offsets 2 and 6, 16-bit at 1 and 3, direct and
-    /// indirect), where its validation stops the draw ("controlPointIndexBufferOffset(1) must be
-    /// a multiple of 2 bytes"). Any other pipeline state the draw refuses.
+    /// rounded down to one, as plain Metal reads it (the M3 Max and the M4 alike: 32-bit indices at
+    /// offsets 2 and 6, 16-bit at 1 and 3, direct and indirect), where its validation stops the
+    /// draw ("controlPointIndexBufferOffset(1) must be a multiple of 2 bytes"). Any other pipeline
+    /// state the draw refuses.
     fn check_control_point_indices(
         &self,
         call: &'static str,
@@ -3447,9 +3444,9 @@ impl RenderCommandEncoder {
     /// `endEncoding`: begin the pass with its load and store operations, run the draws, and end it.
     /// A store action still `Unknown` is `DontCare`, as plain Metal stores it where its validation
     /// stops it: a color attachment's (measured on an M4), and a depth or stencil attachment's,
-    /// resolving or not (EVs RFX-probe2-m4 and RFX-probe3-m4); a resolve texture is left untouched,
-    /// as plain Metal leaves it. The encoder is consumed either way, so a refusal leaves its
-    /// command buffer abandoned, as Metal stops there.
+    /// resolving or not; a resolve texture is left untouched, as plain Metal leaves it. The encoder
+    /// is consumed either way, so a refusal leaves its command buffer abandoned, as Metal stops
+    /// there.
     pub fn end_encoding(self) -> Result<(), Error> {
         // And the pass's later color groups, where it draws in groups (`render/color_groups.rs`).
         let (core, residency, log) = self.end_pass()?.with_later_groups()?;
@@ -3573,8 +3570,8 @@ impl RenderCommandEncoder {
         // A color attachment's store action still `Unknown` stores nothing, as plain Metal's
         // `DontCare` (Metal probe case `store_unknown` on an M4, which its validation stops). So
         // does one that resolves, and an aspect of the depth/stencil attachment, resolving or not,
-        // which leave a resolve texture untouched (EVs RFX-probe2-m4 and RFX-probe3-m4, color,
-        // depth and stencil alike): their resolves go.
+        // which leave a resolve texture untouched (color, depth and stencil alike): their resolves
+        // go.
         for color in layout.colors.iter_mut().flatten() {
             if color.store == StoreAction::Unknown {
                 color.store = StoreAction::DontCare;
@@ -3652,9 +3649,8 @@ impl RenderCommandEncoder {
         }
         // An extended-range attachment's clear takes Metal's straight route where Metal keeps its
         // level compressed and the pass has no draw call, where a `half` NaN clear keeps its sign
-        // (`nan_clear::keeps_nan_sign`), and goes through `half` elsewhere (bfloat: EVs
-        // FRT-bcs1-m4 and FRT-bcs2-m4, the consumer's M3 Max alike; `BGR10_XR` and `BGRA10_XR`:
-        // EVs XSH-clr2-m4 and XSH-clr3-m4).
+        // (`nan_clear::keeps_nan_sign`), and goes through `half` elsewhere (bfloat: the consumer's
+        // M3 Max alike; `BGR10_XR` and `BGRA10_XR`).
         for color in layout.colors.iter_mut().flatten() {
             let straight = color.load == LoadAction::Clear && keeps_nan_sign(&color.target, called);
             if let Some(value) = color.straight_clear.filter(|_| straight) {
@@ -6388,6 +6384,8 @@ impl RenderCommandEncoder {
     /// an extended-range or padded 10-bit format (and does not discard it at the store), whatever
     /// the draw's state, naming every such attachment the load pass does not take, `kept`
     /// (`render/unused_bits_load.rs`): Metal's pass, once it draws, rewrites the bits their codes
+    /// leave unused in each tile a draw reaches, the texels the draws do not write too, where such
+    /// an attachment keeps those.
     fn degrade_unused_bits(device: &Device, kept: &[String]) {
         if kept.is_empty() {
             return;
@@ -6470,7 +6468,7 @@ impl RenderCommandEncoder {
     /// written, or whose clear Metal's tile memory holds between two codes (`cleared_off_codes`),
     /// naming those colors; then note the extended-range colors the draw may write. Metal's tile
     /// memory holds such a color as `half` through the pass and rounds it to its codes once, at the
-    /// store (EV XRB-rplxr3-mvk4 on an Apple M4, and the same probes on an Apple M3 Max), where the
+    /// store (on an Apple M4, and the same probes on an Apple M3 Max), where the
     /// runtime stores the codes at each draw. Not a color whose `half` shadow the draw held
     /// (`render/extended_shadow.rs`), which reads what Metal's tile memory holds.
     fn degrade_extended_range_blends(&mut self) {
@@ -6726,7 +6724,7 @@ impl RenderCommandEncoder {
             return Err(draw_problem(call, DrawProblem::SampleCount));
         }
         // Its formats are the pass's, so a state without an explicit imageblock packs as the
-        // pass (measured on an M3 Max and an M4, probe RT11-metal-probe-13).
+        // pass (measured on an M3 Max and an M4).
         if graphics.fragment_imageblock.is_some() {
             let pipeline = state.imageblock_sample_length()?;
             let pass = self.pass_sample_length()?;
@@ -7033,8 +7031,8 @@ impl RenderCommandEncoder {
         empty: bool,
     ) -> Result<(), Error> {
         self.sync_heaps();
-        // And whether it rasterizes, without which its primitives reach no tile (EV RRS3-reach4c,
-        // `no_raster_t11`). And whether it chooses its viewport.
+        // And whether it rasterizes, without which its primitives reach no tile (`no_raster_t11`).
+        // And whether it chooses its viewport.
         let (reads, rasterizes, selects) =
             match self.pipeline.as_ref().map(RenderPipelineState::kind) {
                 Some(RenderStateKind::Graphics(state)) => (
@@ -7056,7 +7054,7 @@ impl RenderCommandEncoder {
                 drawn?;
             }
         }
-        // Every draw, one of nothing too (EV XRR2-x6j); an execution's commands announce at the
+        // Every draw, one of nothing too; an execution's commands announce at the
         // execution (`executions.rs`).
         if !self.replaying {
             self.degrade_kept_attachments();
@@ -7148,7 +7146,7 @@ impl RenderCommandEncoder {
         let meshes = pipeline.descriptor().vertex().is_none();
         if meshes != matches!(assembly, Assembly::Meshes) {
             // A mesh draw of no threadgroups with a drawing state draws nothing, as plain Metal
-            // draws it (EV RFX-probe2-m4 `empty_meshes_vertex_state`; its validation stops it).
+            // draws it (its validation stops it).
             if empty && matches!(assembly, Assembly::Meshes) {
                 return Ok(());
             }
@@ -7183,7 +7181,7 @@ impl RenderCommandEncoder {
         }
         // An empty draw draws nothing once the checks plain Metal keeps for one passed (a
         // pipeline state, not a tile one, of the draw's kind, and a patch draw's factor buffer:
-        // without each, plain Metal stops the process at an empty draw too, EV RFX-probe2-m4).
+        // without each, plain Metal stops the process at an empty draw too).
         // Plain Metal draws nothing whatever the rest of the encoder's state (unbound buffers,
         // vertex buffers and textures, an amplification count above the state's most), which
         // its validation stops, so nothing past here is checked.
@@ -10471,7 +10469,7 @@ fn late_store(
     check_memoryless(call, which, memoryless, None, action)?;
     // One that does not resolve where the attachment resolves leaves the resolve texture
     // untouched and stores the attachment by the action, as plain Metal does where its
-    // validation stops it (EV RFX-probe2-m4, color, depth and stencil alike): the caller drops
+    // validation stops it (color, depth and stencil alike): the caller drops
     // the attachment's resolve.
     if !resolves && action.resolves() {
         return Err(store_problem(

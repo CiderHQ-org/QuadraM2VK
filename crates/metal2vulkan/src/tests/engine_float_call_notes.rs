@@ -539,7 +539,7 @@ fn call_kernel(name: &str, symbol: &str, arity: usize, fmf: FastMath) -> Kernel 
 /// without `nnan` and `ninf`, a call without flags) still records them, and `fast::sinpi`, the
 /// device's near-equivalent, records its note in either. `mix` and `fast::sinpi` record no
 /// `DeviceDenormals` there and require the measured fact. Off MoltenVK, Metal's fused `mix` reads
-/// its denormals as Metal's does (EV DNR-dn2-m3) on every route, and requires the fact exactly
+/// its denormals as Metal's does on every route, and requires the fact exactly
 /// where `OpFmaKHR` reads them so.
 #[test]
 fn a_fast_math_entry_on_moltenvk_records_no_note_for_metals_own_operations() {

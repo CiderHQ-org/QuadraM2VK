@@ -14,9 +14,9 @@ fn device() -> Arc<UniqueIdentifiers> {
     Arc::default()
 }
 
-/// Indirect command buffers lie as Metal's do (ICR-icbspace3-m4, ICR-icbspace4-m4 and
-/// ICR-icbspace4-m3): buffers of one 16-KiB page take 32 KiB each from `0x18000`; one given
-/// back leaves a gap the next that fits takes, and a larger one goes past the live ones.
+/// Indirect command buffers lie as Metal's do: buffers of one 16-KiB page take 32 KiB each from
+/// `0x18000`; one given back leaves a gap the next that fits takes, and a larger one goes past the
+/// live ones.
 #[test]
 fn buffers_take_the_lowest_gap_that_holds_them_and_a_page() {
     let ids = device();

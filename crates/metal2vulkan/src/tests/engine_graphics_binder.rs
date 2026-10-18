@@ -2548,6 +2548,7 @@ fn a_written_sparse_texture_binds() {
 
 /// A 4:2:2 texture (`GBGR422`, `BGRG422`) at a storage slot its function only writes
 /// (`storage_texture_write`) binds the slot's neutral with an `IncompatibleBinding` note: plain
+/// Metal completes the writes and stores nothing. At a slot that samples it (`sampling`'s
 /// `sample_level`) the plan samples the decoded twin's view of Metal's texels, `R8G8B8A8_UNORM`
 /// (`FormatEmulation::Decoded`).
 #[test]

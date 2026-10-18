@@ -2,7 +2,7 @@
 //! layer: the bits each format stores.
 //!
 //! What plain Metal does (the M3 Max under macOS 26.7, measured by the consumer, and the M4
-//! under macOS 27.0.1, EV SID-nan1-m4, alike: `Shared` and `Private`, `write` and `read_write`):
+//! under macOS 27.0.1, alike: `Shared` and `Private`, `write` and `read_write`):
 //! a 16-bit float texel stores the half's own bits, a signalling NaN's included (`0x7d49` stays
 //! `0x7d49`); a 32-bit float texel stores the half's exact widening, but `0x7fc00000` for every
 //! NaN; an `RG11B10Float` texel stores [`METAL_RG11B10`], each NaN channel the format's
@@ -50,7 +50,7 @@ fn texel(x: usize) -> [u16; 4] {
     std::array::from_fn(|c| V[(x + c) % V.len()])
 }
 
-/// Metal's `RG11B10Float` words of the texels [`texel`] writes, as EV SID-nan1-m4 stored them
+/// Metal's `RG11B10Float` words of the texels [`texel`] writes, as our probe stored them
 /// (`write` and `read_write`, `Shared` and `Private`, and the `float` write of each half
 /// widened by the shader, identical).
 const METAL_RG11B10: [u32; 25] = [

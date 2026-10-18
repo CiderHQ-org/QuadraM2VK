@@ -3,7 +3,7 @@
 //!
 //! The RTX 3090's compiler (NVIDIA 615.71.09) drops the zero-extending mask after a signed clamp
 //! of a sum or difference of two values sign-extended from `N` bits to exactly `N` bits' range,
-//! so the result comes out sign-extended (WRG-0d-probe-3090). Its narrow `add_sat` and `sub_sat`
+//! so the result comes out sign-extended. Its narrow `add_sat` and `sub_sat`
 //! no longer emit that shape, but source arithmetic still does: an `int` clamp of such a sum, then
 //! a truncation. On the GA10x generation the profile carries
 //! `DriverWorkaround::NarrowMaskAfterSignedClamp`, and the mask is `OpBitFieldUExtract`.

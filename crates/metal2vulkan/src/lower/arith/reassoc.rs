@@ -22,11 +22,10 @@
 //! **Measured** on an Apple M4 (macOS 27.0.1) and the M3 Max (macOS 26.7), byte for byte alike,
 //! with our own probes: 448 lanes of `half` and `float` kernel sums (orders, signs, vectors), 168
 //! fragment lanes of sample and select sums, and a gradient filter's two sums of six of nine
-//! samples in twelve sample orders, each sum as written (EVs DGC-rsc1-m4 to DGC-rsc4-m4; the M3
-//! package of the same metallibs). The rank above fits 708 of the 712 lanes; the four others are
-//! one sample order whose two leaves tie in rank where Metal orders them as their latest memory
-//! reads. The owned fixture `sum_regroup`, as the frontend compiles it, gives Metal's bits on
-//! every pixel for its four pinned sums (EV DGC-fx1-m4).
+//! samples in twelve sample orders, each sum as written (the M3 package of the same metallibs). The
+//! rank above fits 708 of the 712 lanes; the four others are one sample order whose two leaves tie
+//! in rank where Metal orders them as their latest memory reads. The owned fixture `sum_regroup`,
+//! as the frontend compiles it, gives Metal's bits on every pixel for its four pinned sums.
 //!
 //! **The rewrite.** [`apply`] rewrites each sum whose grouping is pinned before selection, so the
 //! lowering reads Metal's grouping as plain AIR. Pinned: the rank order is the order of the

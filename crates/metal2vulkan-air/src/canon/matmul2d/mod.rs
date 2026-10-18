@@ -13,8 +13,8 @@
 //!   static), and the coordinate helper computes an element's place from the lane's index in its
 //!   simdgroup and the simdgroup's index in the threadgroup, which the expansion adds to the kernel
 //!   as two builtin parameters ([`Lanes`]).
-//! - **`run`** computes each destination element the thread holds as Metal was measured to
-//!   (TNS-metal2, TNS-dev1): `acc = C` in `multiply_accumulate` mode and zero (`+0` over floats)
+//! - **`run`** computes each destination element the thread holds as Metal was measured to:
+//!   `acc = C` in `multiply_accumulate` mode and zero (`+0` over floats)
 //!   in `multiply` mode, then for `k` ascending below the descriptor's `k`, over integers
 //!   `acc += a * b`, wrapping, and over floats `acc = fma(a, b, acc)`, one rounding per step
 //!   (`llvm.fma.f32`), with or without relaxed precision. An element of `A` or `B` past its

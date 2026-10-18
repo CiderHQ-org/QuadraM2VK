@@ -171,7 +171,7 @@ fn fit_is_shape_samples_numeric_type_usage_and_aspect() {
     assert_eq!(fit(&shape(T::Type2D, rgba, 1, WRITE), &s2d), Fit::Holds);
     assert_eq!(fit(&shape(T::Type2D, rgba, 1, READ), &s2d), Fit::No);
     // Apple's private `BlockWritesOnly` is a usage Metal's validation takes a write through, as
-    // `ShaderWrite` (EV XRR2-usw1; CoreAnimation's blur textures are `0x10005`).
+    // `ShaderWrite` (CoreAnimation's blur textures are `0x10005`).
     let blocked = TextureUsage::BLOCK_WRITES_ONLY;
     for usage in [blocked, READ | TextureUsage::RENDER_TARGET | blocked] {
         assert_eq!(fit(&shape(T::Type2D, rgba, 1, usage), &s2d), Fit::Holds);

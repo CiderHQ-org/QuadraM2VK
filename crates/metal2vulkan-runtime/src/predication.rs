@@ -2,7 +2,7 @@
 //! `encodeStartIf:offset:comparison:referenceValue:`, `encodeStartElse` and `encodeEndIf`, and its
 //! loops, `encodeStartWhile:offset:comparison:referenceValue:` to `encodeEndWhile` and
 //! `encodeStartDoWhile` to `encodeEndDoWhile:offset:comparison:referenceValue:`, as Metal runs
-//! them (measured on an M4 under macOS 27.0.1, EVs PRD-spec1-m4, PRD-spec2-m4 and PRD-spec3-m4).
+//! them (measured on an M4 under macOS 27.0.1).
 //!
 //! # What Metal does
 //!

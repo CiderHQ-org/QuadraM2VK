@@ -19,7 +19,7 @@ fn the_compressed_blit_kernel_is_valid_on_every_committed_profile() {
 }
 
 /// Exactly `BGRA10_XR`, its `_sRGB` twin, `RG11B10Float` and `RGB9E5Float` take a rule: the
-/// census of EV FXR-fxr5-m4 found every other format's blits keep their bytes.
+/// census of our probe found every other format's blits keep their bytes.
 #[test]
 fn four_formats_take_a_rule() {
     let ruled: Vec<PixelFormat> = PixelFormat::ALL
@@ -38,7 +38,7 @@ fn four_formats_take_a_rule() {
     );
 }
 
-/// Words Metal's blits wrote for words they read (EV FXR-fxr5-m4, an Apple M4 under macOS
+/// Words Metal's blits wrote for words they read (an Apple M4 under macOS
 /// 27.0.1: a 64 x 64 texture of `ShaderRead` usage, random bytes blitted in and out), each the
 /// `odd` word of its texel or not: the CPU rule answers each.
 #[test]

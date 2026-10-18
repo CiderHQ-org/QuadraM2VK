@@ -16,7 +16,7 @@
 //!   same (an Apple M3 Max under macOS 26.7, a probe). A compressed region starts on a block and
 //!   covers whole blocks, except where it reaches the level's edge. Plain Metal copies a region off
 //!   its blocks as the blocks it starts in: the origin rounded down to its block and the size
-//!   rounded up to whole blocks, each on its own (EV SPCrp-probe1-m4), so does the runtime, ending
+//!   rounded up to whole blocks, each on its own, so does the runtime, ending
 //!   at the level's edge where the blocks pass it, in every copy between buffers and textures,
 //!   between textures, and of the CPU.
 //! - **Buffer layouts:** the offset and `bytesPerRow` are multiples of the copy unit;
@@ -28,12 +28,12 @@
 //!   `DepthFromDepthStencil` or `StencilFromDepthStencil`; no other texture takes an option. The
 //!   stencil view of a combined one (`X32Stencil8`) copies its stencil whatever the option, as
 //!   plain Metal does (a probe; its validation stops `DepthFromDepthStencil`). Plain Metal copies
-//!   the other forms its validation stops, and so does the runtime (an M4 under macOS 27.0.1, EV
-//!   SPCrp-probe1-m4): a combined depth/stencil texture without an option copies its depth, and an
-//!   option that names an aspect the format lacks is ignored (a colour format copies its texels,
-//!   `Depth32Float` its depth, `Stencil8` its stencil). `RowLinearPVRTC` lays a PVRTC texture's
-//!   blocks out row by row, and another format ignores it, as plain Metal does (EV SPCrp-probe7-m4;
-//!   its validation stops it on another compressed format).
+//!   the other forms its validation stops, and so does the runtime (an M4 under macOS 27.0.1): a
+//!   combined depth/stencil texture without an option copies its depth, and an option that names an
+//!   aspect the format lacks is ignored (a colour format copies its texels, `Depth32Float` its
+//!   depth, `Stencil8` its stencil). `RowLinearPVRTC` lays a PVRTC texture's blocks out row by row,
+//!   and another format ignores it, as plain Metal does (its validation stops it on another
+//!   compressed format).
 //! - **Texture to texture:** sample counts match, and the formats are equal (macOS 27.0.1's
 //!   validation) or of one copy unit (macOS 26.7's; both copy the bytes without validation). The
 //!   runtime takes macOS 26.7's rule. A depth-only or stencil-only format, or the stencil view
@@ -85,10 +85,10 @@ pub enum BlitOption {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum CopyProblem {
     /// `replaceRegion` or `getBytes` of a private texture. Plain Metal answers by the texture's
-    /// private layout, which no descriptor rule predicts (an M4 under macOS 27.0.1, EVs
-    /// SPH-cpu1-m4 and SPH-cpu2-m4): a texture of up to 8 KiB copies as a shared one, most of 16
-    /// KiB and more end the process, a 64x64 one with `ShaderWrite` of 4 bytes a texel copies
-    /// nothing, and a combined depth/stencil one copies nothing at 2x2.
+    /// private layout, which no descriptor rule predicts (an M4 under macOS 27.0.1): a texture of
+    /// up to 8 KiB copies as a shared one, most of 16 KiB and more end the process, a 64x64 one
+    /// with `ShaderWrite` of 4 bytes a texel copies nothing, and a combined depth/stencil one
+    /// copies nothing at 2x2.
     CpuAccessPrivate,
     /// A level or slice past the texture, or a region past its level (a compressed region past
     /// the level's last block).
@@ -108,14 +108,14 @@ pub enum CopyProblem {
     /// Bytes past the end of the buffer: of a no-copy buffer read from, past the end of its
     /// host pages, which plain Metal reads up to. Past that, and past another buffer's length,
     /// plain Metal reads zeros, bytes a write past the length left, or another resource's bytes (an
-    /// M4 under macOS 27.0.1, EV SPCrp-probe4-m4 `p_*`).
+    /// M4 under macOS 27.0.1).
     BufferRange,
     /// Two textures whose formats a copy does not take. Plain Metal copies the source's bytes
     /// in the GPU's own texel layout, which differs between formats of different units (an M4
-    /// under macOS 27.0.1, EV SPCrp-probe1-m4 `fmt_*`): no defined answer.
+    /// under macOS 27.0.1): no defined answer.
     Format,
     /// Two textures of different sample counts. Plain Metal copies the bytes of the GPU's own
-    /// sample layout (EV SPCrp-probe1-m4 `sc_*`): no defined answer.
+    /// sample layout: no defined answer.
     SampleCount,
     /// A copy of whole textures with no levels of one size, where plain Metal aborts; or a copy
     /// between compressed levels of different sizes, not measured. (Other levels of different
@@ -196,8 +196,7 @@ pub(super) fn block_extent(pf: PixelFormat) -> Option<[u32; 2]> {
         P::ASTC12x10LDR | P::ASTC12x10SRGB | P::ASTC12x10HDR => [12, 10],
         P::ASTC12x12LDR | P::ASTC12x12SRGB | P::ASTC12x12HDR => [12, 12],
         // Formats the runtime holds no texture of (`NotImplemented`): their extents give the
-        // descriptor the type rules Metal applies to them, every compressed format's (EV
-        // GSM2-a8r-m4).
+        // descriptor the type rules Metal applies to them, every compressed format's.
         P::ASTC4x2LDR | P::ASTC4x2SRGB | P::ASTC4x2HDR => [4, 2],
         P::ASTC8x4LDR | P::ASTC8x4SRGB | P::ASTC8x4HDR => [8, 4],
         _ => return None,
@@ -211,17 +210,17 @@ pub(super) fn block_bytes(pf: PixelFormat) -> Option<u32> {
     if is_pvrtc(pf) {
         return Some(BLOCK_BYTES);
     }
-    // Plain Metal copies a 4:2:2 texture's 2-byte texels at any x, width, offset and pitch (EV
-    // RRP-probe11-m4; its validation asks for 2 x 1 blocks of 4 bytes), which its carrier holds
+    // Plain Metal copies a 4:2:2 texture's 2-byte texels at any x, width, offset and pitch (its
+    // validation asks for 2 x 1 blocks of 4 bytes), which its carrier holds
     // one to an image texel (`chroma_pairs.rs`).
     if is_four_two_two(pf) {
         return Some(TEXEL_BYTES);
     }
     // A two-plane YCbCr texture's texels are its surface's luma codes, a code's bytes a texel (1
-    // for `YCBCR8_420_2P`, 2 for the 10-bit formats), which Metal's blits and CPU calls move (EVs
-    // XRR2-ycc2-m4 and TXN2-ycr2-m4, `ycbcr.rs`). A packed one's blits with a buffer move bytes
-    // at places that follow no rule found, by the buffer's bytes per row (EV TXN2-ycp1-m4): no
-    // block, so they are refused (`NotImplemented(Format)`).
+    // for `YCBCR8_420_2P`, 2 for the 10-bit formats), which Metal's blits and CPU calls move
+    // (`ycbcr.rs`). A packed one's blits with a buffer move bytes at places that follow no rule
+    // found, by the buffer's bytes per row: no block, so they are refused
+    // (`NotImplemented(Format)`).
     if let Some(codes) = ycbcr_format(pf).and_then(YCbCrCodes::of) {
         return (!codes.packed).then_some(codes.bytes);
     }
@@ -243,8 +242,8 @@ pub(super) fn depth_bytes(format: Format) -> Option<u32> {
 /// The unit a depth or stencil texture of `pf` over a plane of a surface with planes keeps in
 /// the plane, which its blits with a buffer and its shadow's copies move (`linear_plan.rs`): its
 /// depth where the format has one (`Depth16Unorm`'s 2 bytes, a 32-bit float depth's 4), else its
-/// stencil (a byte), as Metal's GPU lays them in the plane (an M4 under macOS 27.0.1, EVs
-/// SID-pdl1-m4 to SID-pdl6-m4). `None` for a format of neither aspect or of a 24-bit depth.
+/// stencil (a byte), as Metal's GPU lays them in the plane (an M4 under macOS 27.0.1). `None` for a
+/// format of neither aspect or of a 24-bit depth.
 pub(super) fn surface_depth_unit(pf: PixelFormat) -> Option<CopyUnit> {
     let held = aspects(pf)?;
     let (aspect, bytes) = match pf {
@@ -316,7 +315,7 @@ pub(super) fn copy_unit(
             aspect: ImageAspectFlags::STENCIL,
         });
     }
-    // Plain Metal's aspect (an M4 under macOS 27.0.1, EV SPCrp-probe1-m4; its validation stops
+    // Plain Metal's aspect (an M4 under macOS 27.0.1; its validation stops
     // all but the named aspect of a combined format): a combined format without an option copies
     // its depth, and an option naming an aspect the format lacks is ignored.
     let has = |a: ImageAspectFlags| mapping.aspects.contains(a);
@@ -388,7 +387,7 @@ pub(super) fn level_extent(record: &ViewRecord, level: u32) -> [u32; 3] {
 /// region in the image's levels and layers, as the blocks it starts in.
 ///
 /// A compressed region off its blocks is copied as plain Metal copies it (an M4 under macOS
-/// 27.0.1, EV SPCrp-probe1-m4; its validation stops it): the origin rounded down to its block and
+/// 27.0.1; its validation stops it): the origin rounded down to its block and
 /// the size rounded up to whole blocks, each on its own (an origin of 5 and a size of 4 copy the
 /// one block from 4), ending at the level's edge where the blocks pass it. The region's blocks, and
 /// so its buffer layout ([`shape`]), are the same.
@@ -555,16 +554,15 @@ impl HostLayout {
 /// copies nothing.
 ///
 /// A `bytes_per_row` off Metal's rules is the host's pitch as plain Metal takes it (an M4 under
-/// macOS 27.0.1, EVs SPCrp-probe1-m4 and SPCrp-probe3-m4; its validation stops it): any pitch of a
-/// row or more exactly, off the copy unit too; 0, every row at the image's first byte
-/// (`replaceRegion` reads each row there, `getBytes` writes each there in order, so the last row
-/// stays); between 0 and a row, nothing copied, whatever the rows (the AGX driver logs a failed
-/// assertion and goes on). Refused (`BytesPerRow`, not measured): a pitch off Metal's rules of a
-/// texture over a buffer, and a pitch of 0 for a region of more than one row and more than one
-/// image.
+/// macOS 27.0.1; its validation stops it): any pitch of a row or more exactly, off the copy unit
+/// too; 0, every row at the image's first byte (`replaceRegion` reads each row there, `getBytes`
+/// writes each there in order, so the last row stays); between 0 and a row, nothing copied,
+/// whatever the rows (the AGX driver logs a failed assertion and goes on). Refused (`BytesPerRow`,
+/// not measured): a pitch off Metal's rules of a texture over a buffer, and a pitch of 0 for a
+/// region of more than one row and more than one image.
 ///
-/// `bytes_per_image` is taken as plain Metal takes it (an M4 under macOS 27.0.1, EV
-/// SPH-bpi1-m4; its validation stops all but a multiple of the copy unit that covers the region's
+/// `bytes_per_image` is taken as plain Metal takes it (an M4 under macOS 27.0.1; its validation
+/// stops all but a multiple of the copy unit that covers the region's
 /// rows): a region of one image ignores it; the images of a region of more than one are exactly
 /// `bytes_per_image` apart, off the copy unit and below an image too, and `getBytes` writes them in
 /// order, a later image's bytes over an earlier one's ([`HostLayout::unpack`]).

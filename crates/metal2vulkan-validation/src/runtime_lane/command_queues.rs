@@ -2,8 +2,14 @@
 //! device the cfg selects, under the validation layer.
 //!
 //! The answers expected are Metal's, measured on an M3 Max with macOS 26.7 and an M4 with macOS
+//! 27.0.1, with and without API validation: a queue holds 64 uncompleted command buffers, or the
 //! count it was made with; a make past them blocks until one completes (after its completed
 //! handlers, not waiting for its release: probe `slotdealloc`, the M3 Max under macOS 27.0.1) or is
+//! dropped uncommitted, and never answers nil; a count of 0 stops Metal's validation, where the
+//! runtime refuses it typed; and another queue's makes go on. Where Metal's blocked make never
+//! returns, from a handler of the full queue itself, the runtime refuses it (`WaitWouldDeadlock`).
+//! No wait here can hang: each blocked make runs on a thread of its own and is answered within
+//! [`WAIT`].
 
 use super::host_memory::Mapping;
 use super::{validated_device, Messages, ScratchCache};
@@ -22,7 +28,7 @@ const WAIT: Duration = Duration::from_secs(60);
 /// How long a make must stay blocked to count as blocked.
 const BLOCKED: Duration = Duration::from_millis(300);
 
-/// Metal's default `maxCommandBufferCount`, measured (`RT10-qlprobe`).
+/// Metal's default `maxCommandBufferCount`, measured.
 const METAL_DEFAULT: usize = 64;
 
 /// How long the completed handler of

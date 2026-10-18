@@ -1,7 +1,7 @@
 //! Border texels through swizzled textures on the device the cfg selects, under the validation
 //! layer.
 //!
-//! Metal's answer, measured on an Apple M4 (EV UNV-metal-probe-1: eleven formats, six swizzles,
+//! Metal's answer, measured on an Apple M4 (eleven formats, six swizzles,
 //! the three border colours and clamp-to-zero, constexpr and runtime samplers alike, 1056 border
 //! values, every one of them this rule's): a border texel is the border colour in the format's
 //! channels, a missing red, green or blue read as 0 and a missing alpha as 1, and then the
@@ -13,10 +13,9 @@
 //! `[[sampler(0)]]`, here a state of each border colour, of clamp-to-zero with each border
 //! colour, and of clamp-to-zero on one axis beside clamp-to-border on the other, one dispatch
 //! each. Metal's clamp-to-zero reads the sampler's border colour as clamp-to-border does (an
-//! Apple M3 Max and an M4, EVs TXN-bzprobe-m3 and -m4), the mixed samplers' too (EVs TXN-bzmix-m3
-//! and -m4). The float texture is each of `formats` made with each of `swizzles`. Lanes sample
-//! inside, at a texel centre, and outside on both sides, where nearest and linear read only border
-//! texels.
+//! Apple M3 Max and an M4), the mixed samplers' too. The float texture is each of `formats` made
+//! with each of `swizzles`. Lanes sample inside, at a texel centre, and outside on both sides,
+//! where nearest and linear read only border texels.
 
 use super::degrade_notices::on_device;
 use super::{buffer_with, read_buffer};
@@ -143,7 +142,7 @@ fn swizzles() -> [(&'static str, TextureSwizzleChannels); 6] {
 /// The runtime samplers: a name, the address mode of `s` and of `t` and `r`, and the border
 /// colour. Lanes leave the texture along `s` alone. The mixed ones clamp to zero on one axis and
 /// to the border on the other, which plain Metal makes and reads the border colour through on
-/// every border axis (EVs TXN-bzmix-m3 and -m4).
+/// every border axis.
 const SAMPLERS: [(&str, [SamplerAddressMode; 2], SamplerBorderColor); 10] = {
     use SamplerAddressMode::{ClampToBorderColor as Border, ClampToZero as Zero};
     use SamplerBorderColor::{OpaqueBlack, OpaqueWhite, TransparentBlack};

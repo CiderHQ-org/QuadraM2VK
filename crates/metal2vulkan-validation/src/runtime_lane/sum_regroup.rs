@@ -6,7 +6,7 @@
 //! texture of fixed random halfs (magnitudes in [2^-4, 2^4), either sign), keeps a neighbour only
 //! inside the bounds (0, 0) to (64, 64), weighs the four edges by two, and writes the bits of two
 //! `half` sums of six leaves. Metal regroups each sum by its ranks (the fixture's docs); its
-//! answer on an Apple M4 (EV DGC-fx1-m4) is each sum in the grouping the fixture names, every
+//! answer on an Apple M4 is each sum in the grouping the fixture names, every
 //! addition rounded to `half`, ties to even, signed zeros included. [`expected`] computes it on
 //! the host from the same texels.
 //!
@@ -95,7 +95,7 @@ impl std::ops::Neg for H {
     }
 }
 
-/// The texels: four random halfs each, row by row (the generator of the EV's runner).
+/// The texels: four random halfs each, row by row (the generator of the probe's runner).
 fn texels() -> Vec<u16> {
     let mut state: u64 = 202_610_092;
     let mut next = || {

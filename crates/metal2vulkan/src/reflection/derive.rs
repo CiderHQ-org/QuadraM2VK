@@ -82,8 +82,7 @@ pub(crate) fn needs_resolution(ep: &EntryPoint, structs: &[StructInfo]) -> bool 
 
 /// Whether a function made with constant values answers which of its arguments it reads from its
 /// specialized code: its module declares function constants (`abi`), which Metal's compile of the
-/// function folds. Measured on the M3 Max and the M4 alike (EVs RFL-reflr2-m3 and
-/// RFL-reflr2b-m4, fixture `reflection/specialized_reads`; EVs RRX-refl2-m3 and RRX-refl2-m4,
+/// function folds. Measured on the M3 Max and the M4 alike (fixture `reflection/specialized_reads`;
 /// fixture `reflection/specialized_inputs`): an argument the constants leave unread is inactive or
 /// unused though the AIR does not mark it `air.arg_unused` (a vertex input, a kernel's stage input,
 /// a post-tessellation function's per-patch input or its control points, and a binding of every
@@ -250,9 +249,8 @@ impl Cx<'_> {
 
     /// An index or count the metadata states. One a function constant computes (a library's
     /// answer, before any value is given) is refused: Metal's library states values no value of
-    /// the constant gives (EVs RTL-refl-m3c and -m4c: 28, 4294967236 and 18 for `base`,
-    /// `base + 2` and `base * 2` on both chips). A pipeline's answer reads the specialized
-    /// entry, whose integers are constants.
+    /// the constant gives (28, 4294967236 and 18 for `base`, `base + 2` and `base * 2` on both
+    /// chips). A pipeline's answer reads the specialized entry, whose integers are constants.
     fn int(&self, param: u32, v: AbiInt, ty: Option<&DiagName>) -> Result<u32, Error> {
         match v {
             AbiInt::Const(x) => Ok(x),
@@ -345,8 +343,8 @@ impl Cx<'_> {
             ),
             // An imageblock: a tile function's implicit one, and an explicit one in a tile
             // function or a compute kernel, measured index 0, read-only, whichever the function
-            // does with it (EVs RTL-refl-m3b and -m4b for the explicit ones); a fragment
-            // function's imageblock data likewise, as `ImageblockData`.
+            // does with it (for the explicit ones); a fragment function's imageblock data likewise,
+            // as `ImageblockData`.
             ParamRole::Imageblock(ib) => (
                 match ib.kind {
                     ImageblockKind::Implicit | ImageblockKind::Explicit => BindingType::Imageblock,
@@ -367,8 +365,7 @@ impl Cx<'_> {
             ParamRole::MeshGridProperties | ParamRole::Mesh(_) => return Ok(None),
             // An object or mesh function's payload (`MTLBindingTypeObjectPayload`): at index
             // `0xFFFFFFFF`, read-write in the object function that writes it and read-only in a
-            // mesh function, with the payload type's size and alignment (EVs RFL-reflr2-m3 and
-            // RFL-reflr2b-m4, fixture `mesh_functions`).
+            // mesh function, with the payload type's size and alignment (fixture `mesh_functions`).
             ParamRole::Payload { .. } => {
                 let access = match self.ep.stage {
                     Stage::Object { .. } => BindingAccess::ReadWrite,
@@ -514,7 +511,7 @@ impl Cx<'_> {
         let gap = || self.gap(Some(arg), Some(&m.type_name));
         match &m.kind {
             // An argument buffer's member the AIR gives no argument index: Apple's compiler gave
-            // every member one in each shape measured (EV UNI-reflfix-13: plain-data structs held
+            // every member one in each shape measured (plain-data structs held
             // by value and arrays of them, explicit ids with a gap, padding), so what Metal
             // answers for one is unmeasured.
             MemberKind::Plain if argument_buffer => Err(gap()),
@@ -579,12 +576,11 @@ impl Cx<'_> {
                         (DataType::ComputePipeline, TypeDetail::Plain)
                     }
                     // Measured as a compute pipeline state is: one, and an array of two with the
-                    // stride of an array of resources (EVs RTL-refl-m3b and -m4b).
+                    // stride of an array of resources.
                     ParamRole::RenderPipelineState(_) => {
                         (DataType::RenderPipeline, TypeDetail::Plain)
                     }
-                    // A visible function table, likewise (EVs RFL-refltab-m3 and
-                    // RFL-refltab3-m4, the fixture `tables_in_arguments`).
+                    // A visible function table, likewise (the fixture `tables_in_arguments`).
                     ParamRole::FunctionTable(_) => {
                         (DataType::VisibleFunctionTable, TypeDetail::Plain)
                     }
@@ -628,9 +624,9 @@ impl Cx<'_> {
     /// through parameter `arg`) of elements `element_size` bytes. A library's answer is the
     /// element size. A pipeline's is 0 when every member of the struct is a resource (a texture,
     /// sampler, pointer, ...), as for an array of resources, and the element size when a member
-    /// is a constant (EVs UNI-reflfix-10 and -15: argument_buffers' `pairs`, encoder_arrays'
-    /// `a0` to `a4`, `a7` and `a8`, encoders' `a8`, on an M3 Max and an M4). A pipeline's stride
-    /// of a struct whose members are no constant but hold a struct is unmeasured: refused.
+    /// is a constant (argument_buffers' `pairs`, encoder_arrays' `a0` to `a4`, `a7` and `a8`,
+    /// encoders' `a8`, on an M3 Max and an M4). A pipeline's stride of a struct whose members are
+    /// no constant but hold a struct is unmeasured: refused.
     fn struct_array_stride(
         &self,
         arg: u32,

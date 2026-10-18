@@ -3,8 +3,8 @@
 //!
 //! - **When.** As a compute encoder's (`indirect_execute.rs`), an execution runs the records as
 //!   they stand when the command buffer is committed: Metal's sees CPU writes made after the
-//!   call and before commit (probe `RT7-icb-probe6`), and the GPU's writes before it where an
-//!   encoder made the buffer resident for writing. So the call records nothing for the commands:
+//!   call and before commit, and the GPU's writes before it where an encoder made the buffer
+//!   resident for writing. So the call records nothing for the commands:
 //!   the instance it is encoded in ends its secondary command buffer there and goes on in a new
 //!   one, the execution's own secondary standing between the two ([`Piece`](super::Piece)).
 //!   A secondary command buffer must be recorded before a primary executes it, so a pass with an
@@ -61,35 +61,34 @@
 //!   counted in the execution report), and an unset buffer reads zero, as Metal's did. A command
 //!   with no draw, no pipeline state, no vertices, indices, patches or instances runs nothing, and
 //!   its neighbours run.
-//! - **Indexed and patch draws** (probe `RT7-icb-probe7-m4`). Their index, patch index
-//!   and tessellation factor buffers are addresses too, resolved as the buffers are, so one of
-//!   its own that no encoder made resident draws, as Metal drew from an index buffer it did not
-//!   hold resident; a miss runs nothing and counts. Indices past the index buffer draw as the
-//!   encoder's. A patch draw takes its own factor buffer, never the encoder's, and its pipeline's
-//!   control points whatever the record holds, as Metal's did.
+//! - **Indexed and patch draws**. Their index, patch index and tessellation factor buffers are
+//!   addresses too, resolved as the buffers are, so one of its own that no encoder made resident
+//!   draws, as Metal drew from an index buffer it did not hold resident; a miss runs nothing and
+//!   counts. Indices past the index buffer draw as the encoder's. A patch draw takes its own factor
+//!   buffer, never the encoder's, and its pipeline's control points whatever the record holds, as
+//!   Metal's did.
 //! - **Control-point indices** (probes, an M4). An indexed patch draw reads them as the encoder's
 //!   `draw_indexed_patches` does, of its pipeline's index type, from its control-point index
 //!   buffer, an address resolved as the others are; as Metal's did, an index past that buffer's end
 //!   reads 0, and so does every index without a buffer (a null one, or a plain patch draw on a
 //!   pipeline with an index type); an indexed patch draw on a pipeline without one draws the
 //!   patches' own control points. An offset that is not a multiple of the index size is read from
-//!   the offset rounded down to one, as Metal reads it (EVs ICBV-ipatch2-m3 and -m4; probe 9b's
-//!   offsets read out of the control points' range so).
-//! - **A patch draw's factor scale** (probe `RT7-icb-probe8-m4`, an M4). Metal multiplies
-//!   the factors by a kernel's scale whatever the pipeline, though a state made with
-//!   `supportIndirectCommandBuffers` never enables the scale: 2 drew what factors of 2 draw, 0.5
-//!   what factors of 0.5 draw (integer partitioning rounds it up to 1), and 0, -1 and NaN drew
-//!   nothing. Metal rounds the scale to `half` first (EVs ICBV-scale-m3 and -m4, the M3 Max and
-//!   the M4 alike): 1.0004 drew what 1 draws, 1.3 and 2.0005 what 2 draws, a scale subnormal as a
-//!   `half` what its product draws, one infinite as a `half` (70000, `+∞`) what the maximum factor
-//!   draws, and one that is 0 as a `half` (2^-30) nothing. So a scale that is not positive, or is
-//!   0 as a `half`, runs nothing, and one that is another `half` than 1 draws on the state's
-//!   factor-scaling twin (`GraphicsState::factor_scaling`) with the encoder's scale the
+//!   the offset rounded down to one, as Metal reads it (probe 9b's offsets read out of the control
+//!   points' range so).
+//! - **A patch draw's factor scale** (an M4). Metal multiplies the factors by a kernel's scale
+//!   whatever the pipeline, though a state made with `supportIndirectCommandBuffers` never enables
+//!   the scale: 2 drew what factors of 2 draw, 0.5 what factors of 0.5 draw (integer partitioning
+//!   rounds it up to 1), and 0, -1 and NaN drew nothing. Metal rounds the scale to `half` first
+//!   (the M3 Max and the M4 alike): 1.0004 drew what 1 draws, 1.3 and 2.0005 what 2 draws, a scale
+//!   subnormal as a `half` what its product draws, one infinite as a `half` (70000, `+∞`) what the
+//!   maximum factor draws, and one that is 0 as a `half` (2^-30) nothing. So a scale that is not
+//!   positive, or is 0 as a `half`, runs nothing, and one that is another `half` than 1 draws on
+//!   the state's factor-scaling twin (`GraphicsState::factor_scaling`) with the encoder's scale the
 //!   command's, as the encoder's scale multiplies the factors (the binder rounds it to `half`);
 //!   the twin is made the first time a command asks for it.
-//! - **Visibility results** (EVs RFL-visprobe2-m3 and -m4). Metal counts the commands' draws in the
-//!   mode set at the call, as the encoder's draws (`Boolean` 1, `Counting` their samples, nothing
-//!   while `Disabled`). The call ends the active query in the secondary before the execution's and
+//! - **Visibility results**. Metal counts the commands' draws in the mode set at the call, as the
+//!   encoder's draws (`Boolean` 1, `Counting` their samples, nothing while `Disabled`). The call
+//!   ends the active query in the secondary before the execution's and
 //!   begins a continuation of its offset in the one after it, and lends the execution a third query
 //!   of the same offset (`visibility::Lent`), which its recording begins in its secondary before
 //!   the first command and ends after the last; the three combine as any continuations do. A
@@ -99,15 +98,14 @@
 //!   fragment without Metal's depth attachment, every command of the buffer for a range read from
 //!   one. The recording begins and ends each spare it takes as the encoder's own continuations, and
 //!   every other one empty after the last command, counting nothing.
-//! - **One start, two lengths** (EVs RFL-execprobe, -execprobe2 and -execprobe3, on an Apple M3 Max
-//!   and an Apple M4). Where an encoder executes one buffer's commands from a command it executed
-//!   them from before with another length, ranges given or read from a buffer alike, Metal's
-//!   executions do not each run their own range: one may run the other's length, and the commands
-//!   that run change from run to run of the same program. No stable answer exists, so each
-//!   execution runs its own range, as Metal documents, and the device announces it once
-//!   (`Degradation::RepeatedExecutionStart`), naming the buffer, the command and both lengths:
-//!   at the call for two ranges given, at the host step for a range read from a buffer. A
-//!   compute encoder's executions run their own ranges on Metal too.
+//! - **One start, two lengths** (on an Apple M3 Max and an Apple M4). Where an encoder executes one
+//!   buffer's commands from a command it executed them from before with another length, ranges
+//!   given or read from a buffer alike, Metal's executions do not each run their own range: one may
+//!   run the other's length, and the commands that run change from run to run of the same program.
+//!   No stable answer exists, so each execution runs its own range, as Metal documents, and the
+//!   device announces it once (`Degradation::RepeatedExecutionStart`), naming the buffer, the
+//!   command and both lengths: at the call for two ranges given, at the host step for a range read
+//!   from a buffer. A compute encoder's executions run their own ranges on Metal too.
 //! - **Tile threadgroup memory** (`render/tile_memory.rs`). A command whose fragment function reads
 //!   its threadgroup arguments reaches the pass's buffer of every tile's memory, with the arguments
 //!   the encoder set at the call, as the encoder's draws do; the pass's buffer moves into the
@@ -119,18 +117,17 @@
 //!   call) is given the passes of such runs as it ends (`RunPasses`), and the encoder's draws that
 //!   reach the memory after the call record into a new instance. A memoryless attachment keeps its
 //!   texels across the runs (below).
-//! - **A command's barrier** (EV RFC-probe3-m4, an M4). Plain Metal orders a command whose barrier
-//!   is set after the draws before it, their writes visible to it, where its validation stops
-//!   `setBarrier` on a buffer without mesh draws. Such a command's draw records into the
-//!   execution's next run, as one ordered after a draw that reached the tile memory does, where the
-//!   CPU set a barrier of the buffer before the encoder ended (the instance then has its
-//!   `RunPasses`); a barrier set later refuses the commit `NotImplemented(IndirectRenderCommands)`.
-//!   The barrier does not order the earlier draws' fragments before the command's vertex, object
-//!   and mesh functions (EVs IRX-fgeo-m3 and -m4, the M3 Max and an M4): those read the buffers of
-//!   their tables from before the pass where a fragment stage of it wrote them, from a copy the
-//!   recording takes before the pass (`render/pass_start_reads.rs`), starting from what the
-//!   encoder's draws before the call noted.
-//! - **An emulated mesh command after a draw it depends on** (EV IRX-mfrag-m4, an M4). On a device
+//! - **A command's barrier** (an M4). Plain Metal orders a command whose barrier is set after the
+//!   draws before it, their writes visible to it, where its validation stops `setBarrier` on a
+//!   buffer without mesh draws. Such a command's draw records into the execution's next run, as one
+//!   ordered after a draw that reached the tile memory does, where the CPU set a barrier of the
+//!   buffer before the encoder ended (the instance then has its `RunPasses`); a barrier set later
+//!   refuses the commit `NotImplemented(IndirectRenderCommands)`. The barrier does not order the
+//!   earlier draws' fragments before the command's vertex, object and mesh functions (the M3 Max
+//!   and an M4): those read the buffers of their tables from before the pass where a fragment stage
+//!   of it wrote them, from a copy the recording takes before the pass
+//!   (`render/pass_start_reads.rs`), starting from what the encoder's draws before the call noted.
+//! - **An emulated mesh command after a draw it depends on** (an M4). On a device
 //!   that emulates mesh draws (`render/mesh.rs`), a command's object and mesh functions run as
 //!   compute dispatches, recorded before the pass, as Metal runs them before the fragments of every
 //!   earlier draw of the pass: they read none of those fragments' writes, behind the command's
@@ -142,7 +139,7 @@
 //!   other stages touched without the command's barrier (unordered on Metal, or ordered by a
 //!   barrier of the encoder the execution does not see) or beside reading an earlier fragment's
 //!   write.
-//! - **A command of another instance's shape** (EVs RFL-inst-m3 and -m4: Metal draws a command that
+//! - **A command of another instance's shape** (Metal draws a command that
 //!   fetches its color attachment, writes the stencil in the shader, reaches a fragment imageblock,
 //!   or is amplified, as the encoder's own draw of it). The execution's instance is one of no
 //!   fetched attachments, shader-side stencil or views. A command whose draw leaves attachments it
@@ -165,7 +162,7 @@
 //!   several taking a framebuffer of it. Where the pass reads such an attachment past its instances
 //!   (its sample planes, a color resolve drawn after the pass, a depth/stencil resolve), the commit
 //!   is refused `NotImplemented(IndirectRenderCommands)`.
-//! - **A fetched attachment's stand-in or sample planes** (EVs RFL-inst-m3 and -m4). A run whose
+//! - **A fetched attachment's stand-in or sample planes**. A run whose
 //!   draws read and write attachments in the pixel interlock elsewhere than the pass's instances
 //!   render them has its steps around it (`RunSteps`), as the encoder's instances of such draws do
 //!   (`render/pass_steps.rs`): the copies from the image the instances render such an attachment
@@ -177,7 +174,7 @@
 //!   between barriers, so the run reads what the draws before it rendered and the draws after it
 //!   read what it wrote. The scratch and planes a command's draw made are held until the command
 //!   buffer completes and announced as the encoder's (`fetch-through-scratch`, `sample-planes`).
-//! - **A fetched attachment's stand-in through input attachments** (EVs RFL-inst-m3 and -m4 for
+//! - **A fetched attachment's stand-in through input attachments** (for
 //!   Metal's answer). Where the device reads fetched attachments as input attachments (lavapipe), a
 //!   command whose draw reads one whose image takes no input attachment usage (a caller's image,
 //!   `texture/wrapped.rs`) makes a stand-in that has it, as the encoder's draw does, which makes
@@ -185,27 +182,25 @@
 //!   framebuffer holds the stand-in in place of the image the pass's instances render
 //!   (`Run::framed`), copied from that image before the run and back after it between barriers
 //!   (`RunSteps`), as around a run of the pixel interlock's scratch.
-//! - **Metal's hidden depth and stencil** (EVs IRX-hidden6-m4, an M4, and IRX-hidden7-m3, an M3
-//!   Max, commands alone). In a pass without a depth or a stencil attachment, a command's draw
-//!   tests and writes the hidden depth and stencil Metal gives such a pass under the encoder's
-//!   state at the call, as the encoder's own draw then would: shared with the encoder's draws
-//!   before and after it, each command's write seen by the next. Plain Metal draws every order so,
-//!   and its validation stops the encoder's draws among them, not the commands. Where the state at
-//!   the call needs them, the call gives the pass them, so the execution's instance holds them;
-//!   where the pass can take none (an attachment of the other aspect, no color attachment, a rate
-//!   map), a command's draw that needs them is refused `NotImplemented(HiddenDepthStencil)`, as the
-//!   encoder's would be.
-//! - **A shader-side stencil** (EVs RFL-inst-m3 and -m4: Metal draws a command that writes
-//!   `[[stencil]]` as the encoder's own draw). On a device without `VK_EXT_shader_stencil_export`
-//!   such a draw tests and writes a shadow of the stencil in the shader (`shadow_stencil.rs`), in
-//!   an instance of its own. Such a command records into the execution's next run, as one of
-//!   another shape does, and the next of the instance's kind begins another; the pass copies the
-//!   stencil into the shadow before the run and back after it, as around an encoder's instance of
-//!   such draws. The shadow is the encoder's, or one a command's draw made, whose copies' uses the
-//!   pass then gains, held until the command buffer completes and announced
-//!   (`shader-side-stencil`). Such a run is never its instance's first or last: the execution's
-//!   first run and what follows it in the instance bound it.
-//! - **A fragment imageblock** (EVs RFL-inst-m3 and -m4: Metal draws a command that reaches it as
+//! - **Metal's hidden depth and stencil** (an M4, and an M3 Max, commands alone). In a pass without
+//!   a depth or a stencil attachment, a command's draw tests and writes the hidden depth and
+//!   stencil Metal gives such a pass under the encoder's state at the call, as the encoder's own
+//!   draw then would: shared with the encoder's draws before and after it, each command's write
+//!   seen by the next. Plain Metal draws every order so, and its validation stops the encoder's
+//!   draws among them, not the commands. Where the state at the call needs them, the call gives the
+//!   pass them, so the execution's instance holds them; where the pass can take none (an attachment
+//!   of the other aspect, no color attachment, a rate map), a command's draw that needs them is
+//!   refused `NotImplemented(HiddenDepthStencil)`, as the encoder's would be.
+//! - **A shader-side stencil** (Metal draws a command that writes `[[stencil]]` as the encoder's
+//!   own draw). On a device without `VK_EXT_shader_stencil_export` such a draw tests and writes a
+//!   shadow of the stencil in the shader (`shadow_stencil.rs`), in an instance of its own. Such a
+//!   command records into the execution's next run, as one of another shape does, and the next of
+//!   the instance's kind begins another; the pass copies the stencil into the shadow before the run
+//!   and back after it, as around an encoder's instance of such draws. The shadow is the encoder's,
+//!   or one a command's draw made, whose copies' uses the pass then gains, held until the command
+//!   buffer completes and announced (`shader-side-stencil`). Such a run is never its instance's
+//!   first or last: the execution's first run and what follows it in the instance bound it.
+//! - **A fragment imageblock** (Metal draws a command that reaches it as
 //!   the encoder's own draw). A command whose fragment function reaches the fragment imageblock
 //!   draws in the run it falls in, over the pass's storage (`fragment_imageblock.rs`): the
 //!   encoder's, or one an earlier command's draw made, which the pass clears before its first
@@ -229,9 +224,9 @@
 //!   which the encoder's `draw_patches` refuses (Metal's GPU-written command reads past it:
 //!   unmeasured), runs nothing (`RECORD`). An index buffer, a patch index buffer and a
 //!   control-point index buffer at an offset that is not a multiple of its index size (4 for patch
-//!   indices) are read from the offset rounded down to one, as Metal reads them (probe
-//!   `RT7-icb-probe7-m4`). A range read from a buffer whose location lies past the size, or that
-//!   passes `2^32 - 1`, runs nothing (`RANGE`): Metal's GPU faults the command buffer.
+//!   indices) are read from the offset rounded down to one, as Metal reads them. A range read from
+//!   a buffer whose location lies past the size, or that passes `2^32 - 1`, runs nothing (`RANGE`):
+//!   Metal's GPU faults the command buffer.
 //! - **What is refused.** At the call (`Invalid`): a buffer of another device, a range past the
 //!   size, an inherited pipeline state that is unset or made without
 //!   `supportIndirectCommandBuffers` (Metal's validation stops each), and a range read from a
@@ -340,19 +335,16 @@ impl RenderCommandEncoder {
     ///
     /// Refused, changing nothing (`Invalid`): a buffer of another device, a range that ends past
     /// its size (`IndirectCommandBufferProblem::Range`), and, for a range that is not empty, an
-    /// inherited pipeline state that is unset (`NoPipelineState`), at which Metal's process ends
-    /// (EV IRX-xfault2-m4 `fixed_one_nopipeline`). For a range that is not empty, an inherited
-    /// state made without `supportIndirectCommandBuffers` faults Metal's GPU at the encoder (EVs
-    /// CFR-probe1-m4 `fixed_one_reset_nosupport`, IRX-xfault1-m4 `fixed_one_nosupport`): the call
-    /// is taken, the encoder runs nothing, not even its load, clear or store actions, and the
-    /// command buffer completes with
-    /// [`CommandBufferError::PageFault`](crate::CommandBufferError::PageFault), the other encoders run
-    /// and every event signal fires. A buffer of no command types, or of dispatches beside draws of
-    /// primitives, runs nothing, as plain Metal's (EV RFC-probe2-m4 `t0_exec_render`,
-    /// `mixed_exec_render`); one of dispatches alone, or beside other draws (unmeasured in a pass),
-    /// is `NotImplemented(IndirectRenderCommands)`. An empty range runs nothing, whatever the
-    /// encoder's pipeline state, as plain Metal's (EV CFR-probe1-m4 `fixed_empty_nosupport`,
-    /// `fixed_empty_at_size_nosupport`, `fixed_empty_nopipeline`). What a command's draw would be
+    /// inherited pipeline state that is unset (`NoPipelineState`), at which Metal's process ends.
+    /// For a range that is not empty, an inherited state made without
+    /// `supportIndirectCommandBuffers` faults Metal's GPU at the encoder: the call is taken, the
+    /// encoder runs nothing, not even its load, clear or store actions, and the command buffer
+    /// completes with [`CommandBufferError::PageFault`](crate::CommandBufferError::PageFault), the
+    /// other encoders run and every event signal fires. A buffer of no command types, or of
+    /// dispatches beside draws of primitives, runs nothing, as plain Metal's; one of dispatches
+    /// alone, or beside other draws (unmeasured in a pass), is
+    /// `NotImplemented(IndirectRenderCommands)`. An empty range runs nothing, whatever the
+    /// encoder's pipeline state, as plain Metal's. What a command's draw would be
     /// refused refuses the commit ([`CommandBuffer::commit`]). Where a visibility result mode is
     /// set, the commands' draws count in it (the module docs).
     pub fn execute_commands_in_buffer(
@@ -401,17 +393,15 @@ impl RenderCommandEncoder {
     ///
     /// Refused, changing nothing: what
     /// [`execute_commands_in_buffer`](Self::execute_commands_in_buffer) refuses but a range (an
-    /// unset inherited state whatever the range, EV IRX-xfault2-m4 `indirect_empty_nopipeline`); a
-    /// range buffer of another device, and a range Metal's reading of is not defined (`Invalid`,
-    /// `IndirectCommandBufferProblem::RangeBuffer`): an offset that is not a multiple of 4 bytes,
-    /// at which Metal's GPU faulted, or 8 bytes that run past `range_buffer`, which Metal reads
-    /// from whatever follows it. A range a draw of the encoder
-    /// before the call may write is `NotImplemented(IndirectRenderCommands)`: Metal's execution
-    /// reads that draw's write, where the runtime's copy, made before the pass, would not; as for
-    /// the index bounds pass, an untracked buffer's writes are not seen. Under an inherited state
-    /// made without `supportIndirectCommandBuffers`, whatever the range, `{0, 0}` included, the
-    /// encoder faults as `execute_commands_in_buffer`'s does (EVs CFR-probe1-m4,
-    /// IRX-xfault1-m4 `indirect_empty_nosupport`, `indirect_one_nosupport`).
+    /// unset inherited state whatever the range); a range buffer of another device, and a range
+    /// Metal's reading of is not defined (`Invalid`, `IndirectCommandBufferProblem::RangeBuffer`):
+    /// an offset that is not a multiple of 4 bytes, at which Metal's GPU faulted, or 8 bytes that
+    /// run past `range_buffer`, which Metal reads from whatever follows it. A range a draw of the
+    /// encoder before the call may write is `NotImplemented(IndirectRenderCommands)`: Metal's
+    /// execution reads that draw's write, where the runtime's copy, made before the pass, would
+    /// not; as for the index bounds pass, an untracked buffer's writes are not seen. Under an
+    /// inherited state made without `supportIndirectCommandBuffers`, whatever the range, `{0, 0}`
+    /// included, the encoder faults as `execute_commands_in_buffer`'s does.
     pub fn execute_commands_in_buffer_indirect(
         &mut self,
         icb: &IndirectCommandBuffer,
@@ -453,9 +443,9 @@ impl RenderCommandEncoder {
     /// The pipeline state an execution of `icb` here runs with (`Inherited`). Where the
     /// encoder's, which `icb` inherits, was made without `supportIndirectCommandBuffers`,
     /// Metal's GPU faults the encoder, which runs nothing, and the command buffer completes with
-    /// `CommandBufferError::PageFault` (EVs CFR-probe1-m4, IRX-xfault1-m4): the encoder is
-    /// marked so (`EncoderCore::fault`). Refused (`Invalid`) for `call`: an inherited state that
-    /// is unset (`NoPipelineState`), at which Metal's process ends (EV IRX-xfault2-m4).
+    /// `CommandBufferError::PageFault`: the encoder is marked so (`EncoderCore::fault`). Refused
+    /// (`Invalid`) for `call`: an inherited state that is unset (`NoPipelineState`), at which
+    /// Metal's process ends.
     fn inherited_pipeline(
         &mut self,
         call: &'static str,
@@ -541,7 +531,7 @@ impl RenderCommandEncoder {
         let queries = self.visibility.lend(&device, spares)?;
         // The commands' draws test and write Metal's hidden depth and stencil under the state at
         // the call, as the encoder's own draw now would, shared with the encoder's draws before
-        // and after them (EV IRX-hidden6-m4): where the state needs them, the call gives the pass
+        // and after them: where the state needs them, the call gives the pass
         // them, so the execution's instance holds them. Where the pass can take none, the call
         // gives none, and a command's draw that needs them is refused as before
         // (`hidden_depth_stencil`); an execution of no such draw runs.
@@ -1399,10 +1389,9 @@ impl Asked {
     }
 }
 
-/// What a patch command's factor scale does (probe `RT7-icb-probe8-m4`, an M4: Metal multiplies
-/// the factors by a kernel's scale whatever the pipeline, which `supportIndirectCommandBuffers`
-/// keeps from enabling the scale itself; EVs ICBV-scale-m3 and -m4, the M3 Max and the M4 alike:
-/// it rounds the scale to `half` first).
+/// What a patch command's factor scale does (an M4: Metal multiplies the factors by a kernel's
+/// scale whatever the pipeline, which `supportIndirectCommandBuffers` keeps from enabling the scale
+/// itself; the M3 Max and the M4 alike: it rounds the scale to `half` first).
 #[derive(Debug, PartialEq)]
 enum Scale {
     /// 1 as a `half`: the factors as they stand (1.0001 and 1.0004 drew what 1 draws).
@@ -1434,7 +1423,7 @@ fn patch_scale(bits: u32) -> Scale {
 impl Draw<u64> {
     /// The draw, each address resolved against `residency`'s resources: an index buffer's and a
     /// patch index buffer's offset rounded down to a multiple of the index size or of 4, as Metal
-    /// reads a command's indices where its validation stops the call (probe `RT7-icb-probe7-m4`),
+    /// reads a command's indices where its validation stops the call,
     /// and a factor buffer's at any byte, whose factors the binder reads from the offset rounded
     /// down to a multiple of 2 and each instance's at the stride rounded down to a multiple of 4,
     /// as plain Metal reads them; a patch draw's control-point indices as its pipeline's index size
@@ -1467,9 +1456,8 @@ impl Draw<u64> {
                     (_, None) => Ok(PointIndices::Own),
                     (PointIndices::Own | PointIndices::Zero, Some(_)) => Ok(PointIndices::Zero),
                     // Metal reads the indices from the offset rounded down to a multiple of
-                    // the index size (EVs ICBV-ipatch-m3, -m4, ICBV-ipatch2-m3 and -m4: 32-bit
-                    // indices at offsets 1, 2, 3, 6 and 7, 16-bit at 1, 3 and 5; its validation
-                    // does not stop the offset).
+                    // the index size (32-bit indices at offsets 1, 2, 3, 6 and 7, 16-bit at 1, 3
+                    // and 5; its validation does not stop the offset).
                     (PointIndices::Buffer(address), Some(size)) => {
                         rounded(address, size).map(PointIndices::Buffer)
                     }
@@ -1914,7 +1902,7 @@ impl RenderExecution {
                     scale: _,
                 } => {
                     // Metal draws a command's patches with its pipeline's control points, whatever
-                    // the record holds (measured, probe `RT7-icb-probe7-m4`).
+                    // the record holds (measured).
                     draw.control_points = control_points.unwrap_or(draw.control_points);
                     let (buffer, offset) = factors.buffer;
                     encoder.factors.buffer = Some(FactorBuffer {
@@ -2156,8 +2144,7 @@ impl RenderExecution {
             // The commands' draws hold no shadow: the execution ended the pass's.
             extended: super::ExtendedShadows::none(),
             pass_start: snapshot.pass_start.notes(),
-            // An execution's draws restart at the all-ones index whatever the encoder's call
-            // (EV RFX-probe5-m4's `icb_*`).
+            // An execution's draws restart at the all-ones index whatever the encoder's call.
             restart: None,
             live: Arc::default(),
             log: None,
@@ -2939,9 +2926,9 @@ impl DeferredPass {
 mod tests {
     use super::{patch_scale, Scale};
 
-    /// What each scale does, as Metal rounds it to `half` (EVs ICBV-scale-m3 and -m4): 1 nothing
-    /// to the factors, another positive `half` multiplies them, and what is not positive or is 0
-    /// as a `half` culls (probe `RT7-icb-probe8-m4`'s 0, -1 and NaN among them).
+    /// What each scale does, as Metal rounds it to `half`: 1 nothing to the factors, another
+    /// positive `half` multiplies them, and what is not positive or is 0 as a `half` culls (the
+    /// probe's 0, -1 and NaN among them).
     #[test]
     fn patch_scales_are_classified_as_metal_measured_them() {
         let cases = [

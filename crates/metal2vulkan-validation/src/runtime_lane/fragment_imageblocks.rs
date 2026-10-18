@@ -15,7 +15,7 @@
 //!   dispatch's scratch.
 //! - Commands of an indirect command buffer reach the same storage as the encoder's draws, in their
 //!   order, where the encoder made it and where only a command did: Metal draws such a command as
-//!   the encoder's own draw of it (EVs RFL-inst-m3 and -m4).
+//!   the encoder's own draw of it.
 //! - A pipeline of more imageblock bytes per sample than the pass gives is refused as it is set,
 //!   as Metal's validation refuses it; a draw of another master's alignment after the pass's
 //!   first, and a draw beside a tile dispatch whose tile function's explicit imageblock is of
@@ -346,7 +346,7 @@ enum Step<'a> {
 
 /// Commands of an indirect command buffer whose fragment functions reach the fragment imageblock
 /// read and write the pass's storage as the encoder's own draws of their pipelines do, Metal's
-/// answer (EVs RFL-inst-m3 and -m4: an imageblock initialized by the encoder's draw, accumulated
+/// answer (an imageblock initialized by the encoder's draw, accumulated
 /// by a command and resolved by the encoder's draw, as the encoder's three draws give). Each pass
 /// is `a_pass_keeps_its_imageblock_across_draws_and_a_split`'s without the tile dispatch,
 /// `imageblock_clear_odd`, `imageblock_accumulate` twice and `imageblock_resolve`, some of them

@@ -1,9 +1,8 @@
 //! Metal's sRGB tables of Apple's extended-range `_sRGB` formats: the decode step of each offset
 //! from the zero code and the first encode index of each, read from an Apple M3 Max and an Apple M4
-//! (EVs TXN-xrprobe-m3 and -m4, byte-identical). The shader's `lower::arith::extended_range`
-//! declares them once per module; the runtime's clear values read them through
-//! `ExtendedRange::clear_texel`, beside the thresholds of Metal's straight clear route's own
-//! encode.
+//! (byte-identical). The shader's `lower::arith::extended_range` declares them once per module; the
+//! runtime's clear values read them through `ExtendedRange::clear_texel`, beside the thresholds of
+//! Metal's straight clear route's own encode.
 
 /// The decode step of every offset `n = |c - 384|` of an `_sRGB` color channel: Metal reads
 /// the value `s / 8192` for `s = SRGB_DECODE_STEPS[n]`, signed as `c - 384` (every code read).
@@ -98,7 +97,7 @@ pub(crate) const SRGB_ENCODE_FIRST: [u16; 640] = [
 /// The thresholds of the sRGB encode Metal's straight clear route applies to a non-negative
 /// color channel of an extended-range `_sRGB` format (`ClearRoute::Straight`): entry `n - 1` is
 /// the bits of the least non-negative `float` whose clear stores the offset `n` or more from
-/// code 384, for `n` from 1 to 639 (EV XSH-clr4-m4, an Apple M4 under macOS 27.0.1, and the
+/// code 384, for `n` from 1 to 639 (an Apple M4 under macOS 27.0.1, and the
 /// consumer's M3 Max under 26.7 alike, by bisection over the `float`'s bits, `BGR10_XR_sRGB` and
 /// `BGRA10_XR_sRGB` alike, each threshold and the `float` below it checked). Within a code step of the sRGB curve's thresholds, but not
 /// those: `0.025448689342018` stores offset 88, where the curve's `88.5011` code steps round up.
@@ -746,7 +745,7 @@ pub(crate) const STRAIGHT_SRGB_FIRST: [u32; 639] = [
 
 /// [`STRAIGHT_SRGB_FIRST`]'s thresholds of a negative color channel: entry `n - 1` is the bits
 /// of the least magnitude of a negative `float` whose clear stores the offset `-n` or less, for
-/// `n` from 1 to 384 (EV XSH-clr5-m4, as [`STRAIGHT_SRGB_FIRST`]'s). Each is the positive one but
+/// `n` from 1 to 384 (as [`STRAIGHT_SRGB_FIRST`]'s). Each is the positive one but
 /// 12 of the curve's linear part (`n` at most 20), which lie from 15 to 257 `float` steps
 /// above it.
 pub(crate) const STRAIGHT_SRGB_FIRST_NEGATIVE: [u32; 384] = [

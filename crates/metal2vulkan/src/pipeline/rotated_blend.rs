@@ -3,7 +3,7 @@
 //! An `ARGB8Unorm` attachment's image is `R8G8B8A8_UNORM`, holding Metal's alpha, red, green and
 //! blue in its red, green, blue and alpha (`metal::format::to_rotated_image`). Metal blends the
 //! format as `RGBA8Unorm`, channel by channel: its alpha by the alpha operation and factors, which
-//! read Metal's alphas, and its red, green and blue by the color ones (EV GSM2-a8r-m4: eleven blend
+//! read Metal's alphas, and its red, green and blue by the color ones (eleven blend
 //! states, every texel the `RGBA8Unorm` one's rotated). Vulkan's color operation and factors govern
 //! the image's red, green and blue (Metal's alpha, red and green), its alpha ones the image's alpha
 //! (Metal's blue), and a Vulkan factor that reads an alpha reads the image's (Metal's blue). So
@@ -33,16 +33,15 @@
 //! alpha arithmetic, and the rotation moves Metal's blue into the image's alpha and Metal's alpha
 //! into its red: under `SourceAlpha` over `OneMinusSourceAlpha` Metal's color is `fma(d, 1 - a, s *
 //! a)`, where the image's alpha blends a factor and one minus it as `fma(f, s - d, d)`, which
-//! rounds one code apart near half-code ties (EVs GSM2-f84b-m4, GSM2-f84d-m4 and -m3). A swept 440
-//! blend states held 1 to 1,767 differing texels of 65,536 in 40 of them (EV GSM2-f84e-m4). The
-//! blend states [`MEASURED`] lists store Metal's bytes rotated in the forms this module gives them,
-//! on the M4 and the M3 Max at 65,536 tie-heavy texels and on every lane device at the
-//! rotated-targets lane's; under `SourceAlpha` over `OneMinusSourceAlpha` with the add operation,
-//! where the device's blend is Apple's (`VkProperty::MetalColorWrites`), the image's alpha takes
-//! one over one minus the second output's alpha and the function writes Metal's blue premultiplied
-//! by Metal's alpha (`RotatedBlendForm::Premultiplied`), which the blend then computes as Metal's
-//! own `fma(d, 1 - a, s * a)`. Every other blend state is the search's, announced
-//! (`RotatedBlendForm::Unmeasured`, `PrecisionNote::RotatedBlendRounding`).
+//! rounds one code apart near half-code ties. A swept 440 blend states held 1 to 1,767 differing
+//! texels of 65,536 in 40 of them. The blend states [`MEASURED`] lists store Metal's bytes rotated
+//! in the forms this module gives them, on the M4 and the M3 Max at 65,536 tie-heavy texels and on
+//! every lane device at the rotated-targets lane's; under `SourceAlpha` over `OneMinusSourceAlpha`
+//! with the add operation, where the device's blend is Apple's (`VkProperty::MetalColorWrites`),
+//! the image's alpha takes one over one minus the second output's alpha and the function writes
+//! Metal's blue premultiplied by Metal's alpha (`RotatedBlendForm::Premultiplied`), which the blend
+//! then computes as Metal's own `fma(d, 1 - a, s * a)`. Every other blend state is the search's,
+//! announced (`RotatedBlendForm::Unmeasured`, `PrecisionNote::RotatedBlendRounding`).
 
 use crate::device::requirements::{VkFeature, VkProperty};
 use crate::device::DeviceProfile;
@@ -116,7 +115,7 @@ const MEASURED: [Measured; 11] = {
             O::Add,
         ),
         // Straight alpha: the image's red, green and blue by the second output's alpha (Metal's
-        // source alpha), its alpha (Metal's blue) premultiplied (EV GSM2-f84c-m4).
+        // source alpha), its alpha (Metal's blue) premultiplied.
         Measured {
             metal: (
                 [

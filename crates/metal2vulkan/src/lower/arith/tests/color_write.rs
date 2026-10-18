@@ -345,7 +345,7 @@ fn run_rules_in(what: &str, rules: [Option<ChannelWrite>; 4], values: &[f32], cl
 /// nearest stores the code, whatever it does at ties, and so does Metal; and the linear value of
 /// every sRGB byte is that byte's in Metal's encode.
 /// A render state's half-float channel under `textureWriteRoundingMode` 2 rounds to nearest even
-/// (`color_writes::HALF_NEAREST`): the consumer's spot values on an M3 Max and EV TXN2-twr-m4's
+/// (`color_writes::HALF_NEAREST`): the consumer's spot values on an M3 Max and our probe's
 /// on an M4 (1 + 3 * 2^-12 to `0x3C01`, the tie 1 + 3 * 2^-11 to `0x3C02`, 65519 to `0x7BFF`, from
 /// 65520 infinity), and on the interpreter every 7th half and the ties beside it, the unsigned
 /// 11- and 10-bit grids under the same rule, and the specials: each lane of an output beside
@@ -498,7 +498,7 @@ fn narrow_channels_round_to_metals_codes() {
 }
 
 /// The packed 16-bit formats' channels (`ChannelWrite::HalfUnorm`) round the value to a half
-/// first, then as unorm channels: EV TXN2-pk16b-m3's spot values on an M3 Max (`0x3C842FFF`, a
+/// first, then as unorm channels: our probe's spot values on an M3 Max (`0x3C842FFF`, a
 /// half below 1/62, to 5-bit code 0; `0x3D463000` to 2; `0x3EFFFFFF`, whose half is 0.5, to 16
 /// of 31 and 32 of 63; 0.5 to 1-bit code 0; `0x3D089000` to 4-bit code 0; `0x3C021000` to 6-bit
 /// code 0), then on the interpreter the values beside every code and tie of 1, 4, 5 and 6 bits,

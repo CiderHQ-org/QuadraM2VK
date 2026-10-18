@@ -3,7 +3,7 @@
 //! a read gives back, and the notices either announces.
 //!
 //! What plain Metal does (the M3 Max under macOS 26.7, measured by the consumer, and the M4 under
-//! macOS 27.0.1, EV SID-nan1-m4): a `half` texel written to a 16-bit float channel stores the
+//! macOS 27.0.1): a `half` texel written to a 16-bit float channel stores the
 //! half's own bits, a signalling NaN's and a negative NaN's included.
 //!
 //! The kernels are this lane's own AIR, the consumer's
@@ -25,7 +25,7 @@
 //! write-combined, which a device without unified memory places in device-local memory.
 //!
 //! `RGBX16Float` (the consumer's M3 run at ee1727a55: 13 texels' NaNs `0x7e00`, announced) stores
-//! the written green's half in its fourth channel, Metal's X field (EV FPV-pf1-m4), and reads
+//! the written green's half in its fourth channel, Metal's X field, and reads
 //! alpha 1.
 
 use super::degrade_notices::{counts, on_device_with};

@@ -3,14 +3,14 @@
 //! `dispatchThreadsWithIndirectBuffer:indirectBufferOffset:`, the compute encoder's SPI that
 //! Metal 4's encoder makes public.
 //!
-//! - **What Metal takes and runs**, measured by probes RT11-metal-probe-17b and -18 on an M3 Max
+//! - **What Metal takes and runs**, measured by our probes on an M3 Max
 //!   (macOS 26.7) and an M4 (macOS 27.0.1), identically. API validation stops an argument offset
 //!   that is not a multiple of 4 ("indirectBufferOffset(2) must be a multiple of 4 bytes"), and
 //!   arguments that run past the buffer ("(indirectBufferOffset +
 //!   sizeof(MTLDispatchThreadsIndirectArguments))(72) must be <= \[indirectBuffer length\](64)").
-//!   Plain Metal reads the arguments at the offset rounded down to a multiple of 4 (EV
-//!   SWP-misuse5-m4), and so does the runtime; arguments past the buffer from there are refused as
-//!   the dispatch is encoded ([`arguments_offset`]). The dispatch reads its arguments as it runs,
+//!   Plain Metal reads the arguments at the offset rounded down to a multiple of 4, and so does the
+//!   runtime; arguments past the buffer from there are refused as the dispatch is encoded
+//!   ([`arguments_offset`]). The dispatch reads its arguments as it runs,
 //!   after what the encoder's earlier commands wrote. A grid of `threadsPerGrid` runs its edge
 //!   threadgroups at the remainder's size, as `dispatchThreads:` does. A zero axis of the grid or
 //!   of the group counts runs nothing, and so does a threadgroup with a zero axis or more threads

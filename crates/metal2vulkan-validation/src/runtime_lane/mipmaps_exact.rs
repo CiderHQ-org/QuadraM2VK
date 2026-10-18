@@ -817,7 +817,7 @@ fn mipmaps_at_macos_27_0_1_are_the_m3_max_s_filter() {
 
 /// Plain Metal's integer mipmap of a level from the level above (`above`, of `above_extent`),
 /// `texel` bytes a texel: texel `i` is the above's texel `floor((2i + 1) W / 2w)` on each axis,
-/// `W` and `w` the two levels' sizes on it (EV SPCrp-probe3-m4, an M4 under macOS 27.0.1).
+/// `W` and `w` the two levels' sizes on it (an M4 under macOS 27.0.1).
 fn picked(above: &[u8], above_extent: [usize; 3], extent: [usize; 3], texel: usize) -> Vec<u8> {
     let [aw, ah, ad] = above_extent;
     let [w, h, d] = extent;
@@ -836,7 +836,7 @@ fn picked(above: &[u8], above_extent: [usize; 3], extent: [usize; 3], texel: usi
 
 /// `generate_mipmaps` of the integer formats, which Metal's API validation stops, on the device
 /// the cfg selects under the validation layer: plain Metal's texel picks exactly, never refused
-/// and never announced. EV SPCrp-probe3-m4's `R8Uint` textures, each texel the low byte of its
+/// and never announced. Our probe's `R8Uint` textures, each texel the low byte of its
 /// index, give its levels; 2D textures one texel high or wide, a 2D array of odd height, a cube,
 /// 3D textures and a view of a 2D array's later levels and middle slices, of 1 to 16 bytes a
 /// texel, give the rule applied to the level above as the device read it back.

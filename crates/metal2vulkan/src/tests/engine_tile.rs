@@ -283,7 +283,7 @@ fn every_tile_stages_its_pixels() {
 
 /// [`every_tile_stages_its_pixels`] under `threadgroupSizeMatchesTileSize`: the 8x8 threads
 /// still stage every cell of their 16x16 tile, and the builtins answer the tile as the
-/// threadgroup, as plain Metal answers them (EV TTG-tat5, an M3 Max and an M4): threads per
+/// threadgroup, as plain Metal answers them (an M3 Max and an M4): threads per
 /// threadgroup 16x16, the position in the grid `threadgroup · 16 + position`, and the threads per
 /// grid the 3x2 tiles times the tile, 48x32.
 #[test]
@@ -530,8 +530,7 @@ fn a_float_attachment_is_bound_through_its_bits() {
             Err(e) => panic!("{stem}: {e}"),
         };
         // The aliased layout's size, a tile state's sample length whatever the formats pack to
-        // (18 here), as Metal answers for this struct and these formats (probe
-        // RT11-metal-probe-11).
+        // (18 here), as Metal answers for this struct and these formats.
         assert!(
             pipe.dependencies
                 .iter()
@@ -1073,7 +1072,7 @@ fn a_tile_pipeline_binds_its_attachments() {
                 .any(|x| matches!(x.fact, RuntimeFact::AliasedImageblock { .. })),
             "{stem}"
         );
-        // Metal's 1024 (TTG-probe1-m4), the 32x32 threadgroup the binder runs, where the
+        // Metal's 1024, the 32x32 threadgroup the binder runs, where the
         // device's limits take it.
         let max = pipe.metal_info.max_total_threads_per_threadgroup;
         assert!(max <= 1024, "{stem}: {max}");
@@ -1087,7 +1086,7 @@ fn a_tile_pipeline_binds_its_attachments() {
         );
         // The descriptor's limit lowers it, never raises it, and is part of the key; Metal's 0 is
         // no limit. A limit answers the most threads of a threadgroup of even sides within it, as
-        // Metal's does (TTG-probe2 on an M3 Max and an M4: 1000 answers 960, 255 252, 3 none).
+        // Metal's does (on an M3 Max and an M4: 1000 answers 960, 255 252, 3 none).
         for (limit, metal) in [
             (Some(64), 64),
             (Some(1024), 1024),
@@ -1272,7 +1271,7 @@ fn the_authored_tile_fixtures_compile() {
 }
 
 /// Metal's tile-dispatch layout of a `w x h` threadgroup (measured on Apple silicon by
-/// `k10ts_tile_order`'s cases for squares to 16; EV TTG-probe1-m4 on an M4 for every shape below):
+/// `k10ts_tile_order`'s cases for squares to 16; on an M4 for every shape below):
 /// the position of `thread_index_in_threadgroup` `index` (the threadgroup's 2x2 quads in rows of `w
 /// / 2`, each quad's threads in rows), and the simdgroup and lane of the thread at a position. The
 /// threadgroup is columns `min(w, 16)` wide, each holding its share of the simdgroups in order, and
@@ -1392,7 +1391,7 @@ fn every_tile_thread_takes_its_measured_place() {
 
 /// Under `threadgroupSizeMatchesTileSize` a tile function's `thread_index_in_threadgroup` is
 /// `simdgroup · 32 + lane`, not the quad order across the whole width, while each thread keeps
-/// its measured place, lane and simdgroup (EV TTG-tat5, an M3 Max and an M4): the record at
+/// its measured place, lane and simdgroup (an M3 Max and an M4): the record at
 /// each index holds the thread whose simdgroup and lane give it, for threadgroups 16 and 32
 /// wide, where the two orders differ, and 8x8 in a 16x16 tile, where they agree.
 #[test]

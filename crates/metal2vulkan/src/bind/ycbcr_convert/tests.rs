@@ -423,7 +423,7 @@ fn surface_of(
 }
 
 /// Metal's `read()` of a 40 x 24 `YCBCR8_420_2P` texture over a CoreVideo `420v` surface with no
-/// YCbCr matrix, its planes filled from our probes' generator at seed 5 (EV XRR2-ycc2-m4, an
+/// YCbCr matrix, its planes filled from our probes' generator at seed 5 (an
 /// Apple M4 under macOS 27.0.1): the FNV-1a digest of each texel's red, green and blue `v` as
 /// little-endian 16-bit words, and the first texels.
 const METAL_READ_DIGEST: u32 = 0x26e2_da15;
@@ -470,11 +470,10 @@ struct MetalRead {
     first: [[u16; 3]; 4],
 }
 
-/// Forty of the probes' reads (EVs TXN2-ycr1-m4, TXN2-ycv1-m4, the BT.2020 ones TXN2-ycr3-m4,
-/// `RGB8_420_2P`'s XRR2-ycr540-m4, the 4:2:2 and 4:4:4 ones TXN2-ycq1-m4, their code twins'
-/// XRR2-ycr541-m4, and the packed ones TXN2-ycp1-m4, each an Apple M4 under macOS 27.0.1). A
-/// 4:2:0 format over a 4:2:2 or 4:4:4 surface reads its chroma plane as a 4:2:0 one at its rows,
-/// and a 4:2:2 one over a 4:4:4 surface its pairs at their places in the rows.
+/// Forty of the probes' reads (the BT.2020 ones, `RGB8_420_2P`'s, the 4:2:2 and 4:4:4 ones, their
+/// code twins' and the packed ones, each an Apple M4 under macOS 27.0.1). A 4:2:0 format over a
+/// 4:2:2 or 4:4:4 surface reads its chroma plane as a 4:2:0 one at its rows, and a 4:2:2 one over a
+/// 4:4:4 surface its pairs at their places in the rows.
 const METAL_PROBE_READS: [MetalRead; 40] = [
     // `YCBCR10_420_2P_PACKED` over `p420`, BT.709, odd sizes.
     MetalRead {
@@ -1081,7 +1080,7 @@ fn the_kernel_reads_the_probes_surfaces_as_metal_does() {
     }
 }
 
-/// Metal's measured texels of single codes (EV XRR2-ycc1-m4's model, which every 8-bit luma and
+/// Metal's measured texels of single codes (the probe's model, which every 8-bit luma and
 /// chroma code was compared against): black of zero chroma reads green, a video-range one more
 /// than a full-range one.
 #[test]
@@ -1255,8 +1254,8 @@ fn the_srgb_knots_are_the_curves() {
         assert_eq!(srgb_step(16 * j as u32), k, "the line meets knot {j}");
     }
     // Knots 0 and 1 are 0 and 1: step 8 lies halfway, at 0 (even); knots 1 and 2 are 1 and 2:
-    // step 24 lies halfway, at 2 (even). Measured (EV TXN2-ycr1-m4): 8 reads 0, 24 reads 2; and
-    // every step from 0 to 8192 reads the line's (EV TXN2-ycv1-m4's 512 x 512 surfaces).
+    // step 24 lies halfway, at 2 (even). Measured: 8 reads 0, 24 reads 2; and every step from 0 to
+    // 8192 reads the line's (the probe's 512 x 512 surfaces).
     assert_eq!(SRGB_KNOTS[..3], [0, 1, 2]);
     assert_eq!(srgb_step(8), 0);
     assert_eq!(srgb_step(24), 2);

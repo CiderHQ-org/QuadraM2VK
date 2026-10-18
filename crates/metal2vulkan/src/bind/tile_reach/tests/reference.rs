@@ -18,8 +18,7 @@ pub(super) const SUBPIXEL: i64 = 256;
 /// product the kernel's integer tests form fits an `i64`.
 pub(super) const COORDINATE_LIMIT: i64 = 1 << 29;
 
-/// The largest point size Metal draws, in pixels: a larger size draws as this one (EVs
-/// RRS3-reach11, -reach12 and RCH-reach13).
+/// The largest point size Metal draws, in pixels: a larger size draws as this one.
 pub(super) const POINT_SIZE_LIMIT: f32 = 511.0;
 
 /// Which faces a draw culls.
@@ -86,7 +85,7 @@ impl Raster {
     }
 
     /// The sample positions of a pixel in 1/256 units: Metal's defaults, Vulkan's standard ones
-    /// (EV RRS3-reach5: a triangle holding each one alone reaches, at 2 and at 4 samples).
+    /// (a triangle holding each one alone reaches, at 2 and at 4 samples).
     fn sample_offsets(&self) -> &'static [[i64; 2]] {
         match self.samples {
             2 => &[[192, 192], [64, 64]],
@@ -481,7 +480,7 @@ fn line(raster: &Raster, ends: [[f32; 4]; 2], flags: &mut Flags, tiles: &mut BTr
 /// along y, and its extent from there. It starts half its size back, the start rounded half up
 /// (the left and top edges reach from more than half a unit past a tile's edge), and spans its
 /// size rounded to the nearest 1/16 of a pixel, a half up (the right and bottom edges follow from
-/// the left and top ones): EVs RCH-reach13 and -reach14.
+/// the left and top ones).
 pub(super) fn point_extent(size: f32) -> (i64, i64) {
     // Exact in f64: an f32 size below 512 times 256.
     let units = f64::from(size) * SUBPIXEL as f64;

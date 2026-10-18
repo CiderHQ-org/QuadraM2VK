@@ -972,8 +972,8 @@ fn random_texels_of_every_format_resolve_as_metal() {
     }
 }
 
-/// Metal's resolves of 2-sample `RGBA16Float` channels measured on an M3 Max under macOS 26.7 (EV
-/// `RES-hr1-m3`, our own probe `resrule.swift`): two samples' bits and the resolved bits, six of
+/// Metal's resolves of 2-sample `RGBA16Float` channels measured on an M3 Max under macOS 26.7 (our
+/// own probe `resrule.swift`): two samples' bits and the resolved bits, six of
 /// each of the probe's categories, and ties of both signs.
 const MEASURED_HALF_PAIRS: [[u32; 3]; 64] = [
     [0xa307, 0x88b6, 0x9f1a],

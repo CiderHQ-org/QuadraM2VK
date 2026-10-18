@@ -13,6 +13,7 @@
 //!   for its command buffer's submission handlers, which the thread that took its last batch for
 //!   its queue runs.) A release the scheduler's thread hands off (`Device::let_go_elsewhere`) runs
 //!   in a context of its own, behind no queue's handlers.
+//! - **Metal's order** (measured on an M4, macOS 27.0.1): while one of a
 //!   queue's handlers blocks, the queue's later transitions wait, even of a command buffer whose
 //!   work already ran; another queue's transitions and handlers go on, on another thread. Metal
 //!   ran 256 queues' handlers blocked at once, on 256 threads, and reached no limit.

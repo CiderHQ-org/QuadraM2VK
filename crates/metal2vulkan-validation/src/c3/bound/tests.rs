@@ -606,8 +606,8 @@ fn a_denormal_the_device_keeps_stays_open() {
             && !notes.contains(&PrecisionNote::DeviceArithmetic),
         "{notes:?}"
     );
-    // A word whose Metal answer to `fast::sinpi(tiny)` is +0 (the operand read as zero, EV
-    // MBB-pi1-m3) and whose device keeps the subnormal: pi * 2^-149 rounds to 3 * 2^-149. Both
+    // A word whose Metal answer to `fast::sinpi(tiny)` is +0 (the operand read as zero) and whose
+    // device keeps the subnormal: pi * 2^-149 rounds to 3 * 2^-149. Both
     // are within Table 8.2's absolute 2^-13.
     let sinpi =
         |recorded: &[PrecisionNote]| verdict_of("sinpi(a)", Math::Fast, &[tiny], (0, 3), recorded);

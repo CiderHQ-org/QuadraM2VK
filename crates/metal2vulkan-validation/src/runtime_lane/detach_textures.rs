@@ -1,5 +1,5 @@
 //! Textures over detached bytes (`detach_backing`), on the device the cfg selects, under the
-//! validation layer. What Metal answers, as an M4 under macOS 27.0.1 measured it (EV TXN3-dtp-m4):
+//! validation layer. What Metal answers, as an M4 under macOS 27.0.1 measured it:
 //! a texture over a no-copy buffer's bytes, or in a no-copy heap, stays while they are detached and
 //! is made over them meanwhile; its size queries answer its descriptor; a kernel that reaches it
 //! through an argument buffer without naming it, where no command buffer made its pages resident,

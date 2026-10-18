@@ -10,7 +10,7 @@
 //!   rasterizer's shape; the tile functions `clear` (each bitset word to 0) and `resolve` (each
 //!   word ORed into `out[tile * 8 + word]`) run between the draws.
 //!
-//! As Metal does on an M4 (EV `CFIT-m4-probe4c`):
+//! As Metal does on an M4:
 //!
 //! - Every fragment of a tile shares its memory, which starts at zero: a draw over the pass counts
 //!   each tile's covered pixels, and at 2 and 4 samples (each the device takes) each covered

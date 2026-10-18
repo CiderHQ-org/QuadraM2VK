@@ -649,7 +649,7 @@ fn a_replacing_blend_and_a_write_that_stores_nothing_take_the_storage_form() {
 /// channels. A factor of the second source is
 /// refused by name. A read-only attachment, a replacing blend under fast math and a write that
 /// stores nothing take the form without one; a replacing blend without fast math keeps the
-/// destination's product by zero (EV FBL-zf1-m3), so the shader computes it.
+/// destination's product by zero, so the shader computes it.
 #[test]
 fn a_sixteen_bit_float_blend_is_computed_in_the_storage_form() {
     use crate::metal::{BlendFactor as F, BlendOperation as O};

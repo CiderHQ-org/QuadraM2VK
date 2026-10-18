@@ -5,7 +5,7 @@
 //! one `R32G32_UINT` image (`metal::format::ExtendedRange::Planes`): each texel's color word
 //! (plane 0), then its alpha byte in the second word. Metal's blits between a buffer and such a
 //! texture move plane 0 alone, 4 bytes a texel at the buffer's rows, and leave the alpha plane as
-//! it is (EVs XRR-tx1-m4 and -m3). A consumer copies a band of the region's rows out of the image
+//! it is. A consumer copies a band of the region's rows out of the image
 //! into a scratch buffer, tight (8 bytes a texel), and one dispatch of [`plane_words_module`]
 //! moves each texel's first word into the buffer's bytes or out of them; a copy into the texture
 //! then copies the band back, its second words as they were.

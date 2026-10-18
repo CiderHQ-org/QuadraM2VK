@@ -18,7 +18,7 @@
 //! drivers' exit handlers, which other processes' GPU work slows (NVIDIA's `vkDestroyDevice` took
 //! 54 ms alone and up to 2 s beside other lanes on an RTX 3090).
 //!
-//! Metal's answers (EV `RT4-metal-teardown`, an M4 with macOS 27.0.1, each case without and with
+//! Metal's answers (an M4 with macOS 27.0.1, each case without and with
 //! `MTL_DEBUG_LAYER=1`): every such exit was clean, in 15 to 45 ms, but one: a dropped command
 //! buffer waiting for a plain `MTLEvent` held the exit back 5.03 s, which the runtime does not
 //! copy. A dropped command buffer that waits for a shared event stays pending, and completes,
@@ -101,7 +101,7 @@ const FILLED: u8 = 0x5a;
 /// on a CPU device only. Registered before the device, the handler runs after the driver's own
 /// exit-time destructors as well as the device's hook, and a GPU driver's may unmap what it mapped:
 /// on the RTX 3090 (NVIDIA 615.71.09) the read of a marker it had mapped ended the process with
-/// `SIGSEGV` in every exit (EV `SWP-exit3090-m2`, 3 of 3, the fault at the mapping's first byte in
+/// `SIGSEGV` in every exit (3 of 3, the fault at the mapping's first byte in
 /// the handler). A CPU device's memory is the process's own, which no destructor unmaps, and only
 /// a CPU device's exit waits for the work the marker follows (macOS; on Linux it ends at once, and
 /// the handler does not run).

@@ -533,8 +533,7 @@ pub(super) fn plan_texture_images(
 /// is given (`metal::format::padded_only_over_memory`: `R10Unorm_X6`, `RG10Unorm_X12` and their
 /// `_sRGB` twins) is
 /// refused `NotImplemented(Format)` naming it, since Metal's texture of a descriptor alone
-/// stores nothing (EVs XRR2-x6a and -x6b). A texture over an IOSurface's plane or a caller's
-/// buffer does not ask it.
+/// stores nothing. A texture over an IOSurface's plane or a caller's buffer does not ask it.
 pub(super) fn check_own_memory(pf: PixelFormat) -> Result<(), Unsupported> {
     match metal2vulkan::metal::format::padded_only_over_memory(pf) {
         true => Err(Unsupported::not_implemented(Feature::Format).naming_format(pf)),
@@ -711,9 +710,10 @@ fn plan_held(
         });
     // Apple's private `BlockWritesOnly` (0x10000) is a usage Metal writes through as through
     // `ShaderWrite`: its validation takes every write form into a texture of it, and plain Metal
-    // stores them (EV XRR2-usw1; CoreAnimation's blur textures are `ShaderRead | RenderTarget |
-    // BlockWritesOnly`). Its image takes the storage usage where the device stores the format;
-    // elsewhere a binding takes the usage shadow (`texture/usage_shadow.rs`).
+    // stores them (CoreAnimation's blur textures are
+    // `ShaderRead | RenderTarget | BlockWritesOnly`). Its image takes the storage usage where the
+    // device stores the format; elsewhere a binding takes the usage shadow
+    // (`texture/usage_shadow.rs`).
     let stored = (wants(TextureUsage::SHADER_WRITE)
         || wants(TextureUsage::SHADER_ATOMIC)
         || wants(TextureUsage::BLOCK_WRITES_ONLY))
@@ -867,7 +867,7 @@ fn plan_held(
     // samples: MoltenVK gives a mutable image's Metal texture `PixelFormatView` usage only where
     // the image has a view usage (sampled, storage, input or color attachment; MoltenVK 1.4.1's
     // `MVKPixelFormats::getMTLTextureUsage`); without one it made a compressed texture, larger
-    // than Metal's (a `PixelFormatView` texture alone, the consumer's M3 Max; EV API-hsm1-mvk4).
+    // than Metal's (a `PixelFormatView` texture alone, the consumer's M3 Max).
     let any_format = usage.contains(TextureUsage::PIXEL_FORMAT_VIEW)
         || (metal_keeps_uncompressed(!depth_stencil, usage)
             && !usage_flags.contains(ImageUsageFlags::STORAGE));

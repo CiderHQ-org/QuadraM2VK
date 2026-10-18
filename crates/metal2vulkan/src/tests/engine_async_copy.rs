@@ -7,7 +7,7 @@
 //! copy's event and of the null event out. Each kernel is compiled for a profile of each simdgroup
 //! tier, passes L3, and runs on the interpreter in both scheduling orders, in threadgroups of 64
 //! threads and of 40 (a second simdgroup of 8 lanes); every word must be the reference's
-//! ([`reference`], the reading the Metal probes RFS-acp2-m4 and -m3 matched). `llvm-as` assembles
+//! ([`reference`], the reading the Metal probes matched). `llvm-as` assembles
 //! the fixture; without it the tests skip visibly.
 
 use std::collections::BTreeMap;

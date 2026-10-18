@@ -1043,14 +1043,14 @@ fn uniform_blend(
 /// format has, none where it keeps none of them. A mask of some of its channels is
 /// `NotImplemented(Format)`: Metal keeps a masked channel's code but rewrites the texel's other
 /// bits (`BGRA10_XR`'s alpha clamped even where masked, its low bits and `BGR10_XR`'s top bits
-/// made canonical; EV XRR-rtp1-m4), which a mask of the raw components cannot express.
-/// A padded form's channels are its raw words, one each, and the mask is theirs: a loading pass
-/// that draws keeps a masked channel's code and zeroes its word's low six bits, every word of each
-/// tile it stores alike (EVs XRR2-x6g to -x6k, an Apple M3 Max and an M4, byte-identical), which a
-/// consumer's load pass does before the pass (the runtime's `render/unused_bits_load.rs`,
-/// `bind::unused_bits_module`), so a channel the mask leaves out keeps the word Metal's pass
-/// leaves. A bfloat form's channels are its own (red; red and green; all four), each a raw
-/// component; a mask of some of them is unmeasured and refused as above.
+/// made canonical), which a mask of the raw components cannot express. A padded form's channels are
+/// its raw words, one each, and the mask is theirs: a loading pass that draws keeps a masked
+/// channel's code and zeroes its word's low six bits, every word of each tile it stores alike (an
+/// Apple M3 Max and an M4, byte-identical), which a consumer's load pass does before the pass (the
+/// runtime's `render/unused_bits_load.rs`, `bind::unused_bits_module`), so a channel the mask
+/// leaves out keeps the word Metal's pass leaves. A bfloat form's channels are its own (red; red
+/// and green; all four), each a raw component; a mask of some of them is unmeasured and refused as
+/// above.
 fn extended_write_mask(
     form: ExtendedRange,
     mask: vk::ColorComponentFlags,

@@ -1,7 +1,7 @@
 //! MoltenVK's command-buffer failures, relayed to the command buffer that failed.
 //!
-//! **Metal.** A GPU fault fails the command buffer it struck, and the queue runs on: EV
-//! RFX-probe1-m4 (an M4 with macOS 27.0.1, plain Metal) measured a blit into a buffer over
+//! **Metal.** A GPU fault fails the command buffer it struck, and the queue runs on: our probe (an
+//! M4 with macOS 27.0.1, plain Metal) measured a blit into a buffer over
 //! read-only pages failing with `MTLCommandBufferErrorInternal` (1, "Discarded (victim of GPU
 //! error/recovery)"), as did the command buffer committed after it while it ran, the later ones
 //! completing; an execution range past its buffer failing with `PageFault` (3), the next command
@@ -25,7 +25,7 @@
 //! (`command_buffer/submit.rs`), and, after any other use of the queue (the program's through
 //! `CommandQueue::with_vk_queue`, or the runtime's own outside a batch), a submission of no work
 //! with one, which ends where that use's submissions end. Metal runs one queue's completed
-//! handlers in order, on one thread (EV RFX-probe1-m4's `handlers` and `handlers_fault`: 600
+//! handlers in order, on one thread (the probe's `handlers` and `handlers_fault`: 600
 //! handlers, failures among them, none out of order), so when MoltenVK reports a failure every
 //! submission before the failed one has its fence signaled, and the failed one does not: the
 //! relay gives the first submission whose fence is unsignaled the failure's code, with Metal's
@@ -41,7 +41,7 @@
 //! **The loader word.** MoltenVK writes `ICD_LOADER_MAGIC` over the first word of an object it
 //! names in a message (`loader_word.rs`), the queue's here, where a layer between the loader and
 //! the driver reads the queue's dispatch table (the validation layer then ends the process at
-//! the next submission: EV RFX-explore1-mvk4). The queue's word is put back before each use of
+//! the next submission). The queue's word is put back before each use of
 //! the queue (`QueueSlot::with`) and as the relay hears a message naming it; a submission on
 //! another thread in between still reads the magic.
 //!
@@ -543,7 +543,7 @@ mod tests {
     use super::failure;
 
     /// MoltenVK 1.4.1's message of a failed Metal command buffer gives its code and Metal's
-    /// description, the device kept or lost; other messages none (the forms EV RFX-explore1-mvk4
+    /// description, the device kept or lost; other messages none (the forms our probe
     /// heard).
     #[test]
     fn a_failure_s_code_and_description_are_read_from_its_message() {

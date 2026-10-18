@@ -7,7 +7,7 @@
 //! (factors `One` and `SourceAlpha`), which does not commute, so the 4² `RGBA16Float` target,
 //! cleared to (0.5, 0.25, 0.125, 1), holds the answer of the triangles' order alone, every step
 //! exact in `half`: the eight in one draw, in eight draws, and in two of four. Metal's answer, as
-//! an M4 draws it (EV REF-rog-fixture), is that order's in each.
+//! an M4 draws it, is that order's in each.
 //!
 //! The compile layer gives such a group no interlock: Vulkan blends a sample's fragments in
 //! rasterization order, the draws' order and within a draw its primitives'. So every device gives

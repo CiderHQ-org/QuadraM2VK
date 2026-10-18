@@ -84,20 +84,20 @@ use std::time::{Duration, Instant};
 /// - **On Apple's platforms, four** ([`APPLE_TURNS`]): MoltenVK's compiles go to Metal's compiler
 ///   service, which every device of the process shares and which schedules its own work. On the
 ///   M3 Max, eight distinct compiles of a large fragment at once all finished in 1.5 times one's
-///   time (EV RRS2-conc3-m3); on the consumer's Mac under a guest's cold boot (E26, C15, C14 at
+///   time; on the consumer's Mac under a guest's cold boot (E26, C15, C14 at
 ///   7486754bb) a large fragment's compiles beside their siblings took 28-31 s each where one took
 ///   5-8 s.
 /// - **Elsewhere, twelve from sixteen threads up ([`WIDE_HOST`]), else half the host's threads,
 ///   never fewer than four**: the driver compiles each pipeline on the thread that asks. On the RTX 3090's 16-thread host, nine makings of the
 ///   consumer's Xgc fragment inside one creation took 157 s one at a time, 98 s two, 63 s four
-///   and 44.5 s eight at a time (each making 17, 20, 22.5 and 26 s; EV PRDP-cw1-nv3090), for 45%
-///   more CPU time in all and about 0.4 GB of the driver's memory per compile in flight. On the RTX
-///   5080 laptop's 24 threads, ten such makings took 41 s eight at a time and 27-28 s twelve,
-///   sixteen or twenty-four at a time (all ten at once), for 13% more CPU time and about 0.5 GB per
-///   compile in flight (EV PRDP-bu2-5080). On the RTX 3090's 16 threads, the same ten took 56-59 s
-///   eight at a time and 37-40 s twelve, sixteen or twenty-four at a time, for 17% more CPU time
-///   (EV PRDP-bu1-nv3090). Hosts below sixteen threads are not measured above half their threads,
-///   and keep it. Never fewer than the four every host had before.
+///   and 44.5 s eight at a time (each making 17, 20, 22.5 and 26 s), for 45% more CPU time in all
+///   and about 0.4 GB of the driver's memory per compile in flight. On the RTX 5080 laptop's 24
+///   threads, ten such makings took 41 s eight at a time and 27-28 s twelve, sixteen or twenty-four
+///   at a time (all ten at once), for 13% more CPU time and about 0.5 GB per compile in flight. On
+///   the RTX 3090's 16 threads, the same ten took 56-59 s eight at a time and 37-40 s twelve,
+///   sixteen or twenty-four at a time, for 17% more CPU time. Hosts below sixteen threads are not
+///   measured above half their threads, and keep it. Never fewer than the four every host had
+///   before.
 pub(crate) fn turns_for(threads: usize) -> usize {
     if cfg!(target_vendor = "apple") {
         APPLE_TURNS

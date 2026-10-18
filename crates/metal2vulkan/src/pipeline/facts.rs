@@ -339,14 +339,13 @@ pub enum RuntimeFact {
     /// The function writes texture slot `slot` (a `write` or an imageblock slice's copy), or,
     /// with `atomic`, updates it by a texture atomic. Metal drops every write a function makes to
     /// a sparse texture, its mapped tiles' included: the texture keeps its contents for the
-    /// writing thread, the threadgroup's other threads, later work, and blits (SPR-probe4-m4,
-    /// SPR-probe8-m4 and SPR-probe8-m3: Apple M4 on macOS 27.0.1 and M3 Max on macOS 26.7; Metal's
-    /// API validation stops the texture's `ShaderWrite` usage instead). Under the slot's
-    /// `SpecKey::SparseTexture` specialization, 1 where the bound texture is sparse, the module
-    /// drops the slot's writes. A texture atomic on a sparse texture has no deterministic answer
-    /// on Metal (the value it returns changes between processes, and it zeroes texels it does not
-    /// address), so with `atomic` the binder refuses a sparse texture at the slot
-    /// (`Unsupported { feature: SparseTexture { slot }, needs: NotRepresentable }`).
+    /// writing thread, the threadgroup's other threads, later work, and blits (Apple M4 on macOS
+    /// 27.0.1 and M3 Max on macOS 26.7; Metal's API validation stops the texture's `ShaderWrite`
+    /// usage instead). Under the slot's `SpecKey::SparseTexture` specialization, 1 where the bound
+    /// texture is sparse, the module drops the slot's writes. A texture atomic on a sparse texture
+    /// has no deterministic answer on Metal (the value it returns changes between processes, and it
+    /// zeroes texels it does not address), so with `atomic` the binder refuses a sparse texture at
+    /// the slot (`Unsupported { feature: SparseTexture { slot }, needs: NotRepresentable }`).
     SparseTextureWrites { slot: SlotRef, atomic: bool },
     /// The tile function reads its threadgroup argument `index` (`[[threadgroup(index)]]`):
     /// memory of its tile that the render pass keeps across its tile dispatches, at the offset
@@ -362,15 +361,14 @@ pub enum RuntimeFact {
     /// The function reads texture buffer slot `slot` (not as `ulong` texels), and applies the
     /// bound texture buffer's swizzle to each read under the slot's `SpecKey::TextureSwizzle`
     /// specialization: Metal returns each channel from the source the swizzle names, a missing
-    /// channel and an out-of-bounds texel included (UNV-metal-probe-3 and -3b, Apple M4 and M3
-    /// Max). The binder specializes it, and refuses a swizzled texture buffer at a slot whose
-    /// stage reads texels without this fact, as `ulong` ones (`Unsupported { feature:
-    /// TextureSwizzle }`); a slot only queried or written binds one. Under
-    /// `LoweringInputs::swizzled_storage` the function states it too for a storage slot it reads or
-    /// writes texels of: it applies the bound texture's swizzle to each read and undoes it on each
-    /// write; and for an extended-range sampled slot of it, whose decoded texels its reads, samples
-    /// and gathers swizzle, and a packed normalized sampled slot of it, whose converted texels they
-    /// swizzle.
+    /// channel and an out-of-bounds texel included (Apple M4 and M3 Max). The binder specializes
+    /// it, and refuses a swizzled texture buffer at a slot whose stage reads texels without this
+    /// fact, as `ulong` ones (`Unsupported { feature: TextureSwizzle }`); a slot only queried or
+    /// written binds one. Under `LoweringInputs::swizzled_storage` the function states it too for a
+    /// storage slot it reads or writes texels of: it applies the bound texture's swizzle to each
+    /// read and undoes it on each write; and for an extended-range sampled slot of it, whose
+    /// decoded texels its reads, samples and gathers swizzle, and a packed normalized sampled slot
+    /// of it, whose converted texels they swizzle.
     TextureSwizzle { slot: SlotRef },
     /// The tile function declares an explicit imageblock that stands alone (no implicit one
     /// beside it, and not aliased onto one), of `data_size` bytes (`air.imageblock_data_size`)
@@ -548,7 +546,7 @@ pub enum RuntimeFact {
     /// The function samples, gathers, or queries a level of a texture through the runtime sampler
     /// bound to the slot, whose min or mag filter may be Metal's `Cubic` (raw value 2): Metal then
     /// samples through the sampler as through a constexpr bicubic sampler of the same state,
-    /// whatever the level (EV GSM2-bcs2-m4). Bound to such a sampler, the slot joins the plan's
+    /// whatever the level. Bound to such a sampler, the slot joins the plan's
     /// variant (`VariantKey::cubic_samplers`, `LoweringInputs::cubic_samplers`) with the bound
     /// word's `SamplerWord::CUBIC_STATE` bits, under which the function emulates the bicubic
     /// filter of that state (`lower::sampler::bicubic`) or refuses what it does not measure. Bound

@@ -24,8 +24,8 @@
 //!
 //! The executed pass draws the same at 1 and 4 samples over a `Stencil8` target, its first and
 //! third draws as commands of an indirect command buffer executed between the encoder's draws, each
-//! under the encoder's state at the call, which Metal draws as the encoder's own (EVs RFL-inst-m3
-//! and -m4): Metal's stencil. Through the shadow each such command draws in a run of its own, the
+//! under the encoder's state at the call, which Metal draws as the encoder's own: Metal's stencil.
+//! Through the shadow each such command draws in a run of its own, the
 //! shadow filled before it and copied back after it. It then draws one execution of an output
 //! command, a plain command and an output command under the first draw's state, whose stencil is
 //! the first draw's outputs.

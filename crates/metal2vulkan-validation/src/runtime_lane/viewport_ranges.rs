@@ -1501,9 +1501,9 @@ fn written_depths_store_metals_bits() {
 
 /// Each depth probe 3 wrote, written in a pass of 4 samples, stores Metal's bits in every sample
 /// through each of its viewports, or nothing where Metal's depth test failed: Metal's answers at
-/// 4 samples are its answers at 1 (EVs ZIN-zd1-m4 and ZIN-zd2-m4, an M4 under macOS 27.0.1:
-/// every sample of a 4x `Depth32Float` target alike). The color target is resolved and compared
-/// as [`written_depths_store_metals_bits`] compares it; its rules hold sample by sample.
+/// 4 samples are its answers at 1 (an M4 under macOS 27.0.1: every sample of a 4x `Depth32Float`
+/// target alike). The color target is resolved and compared as [`written_depths_store_metals_bits`]
+/// compares it; its rules hold sample by sample.
 #[test]
 fn written_depths_store_metals_bits_in_every_sample() {
     let messages = Messages::default();
@@ -2455,12 +2455,12 @@ fn offsets_through_clamped_vertices_store_metals_depths() {
 /// A depth a bias takes past `[0, 1]` in clip mode stores Metal's clamp. The fullscreen triangle
 /// at depth `z + 0.05 x` (0.025 per pixel) through a viewport of `[0, 1]`, under a slope-scaled
 /// bias of 4 (0.1 at that slope), reads `z + 0.1` and more along its columns: from 0.9 its
-/// columns 2 and 3 read 1.0125 and 1.0375, which Metal stores as 1 (EVs DSX-ds3-m4 and
-/// XRR2-dz1b-m4: in clip mode a depth is clamped to `[0, 1]`); under a bias of -4 from 0.1 its
-/// columns 0 and 1 read -0.0375 and -0.0125, stored as +0. Each other column stores the depth its
-/// fragment read. A device that enabled `VK_EXT_depth_range_unrestricted`, and so stores such a
-/// depth unclamped, without the native range (`native_depth_range`) announces
-/// `biased-depth-past-unit-range` once instead, and its clamped columns print.
+/// columns 2 and 3 read 1.0125 and 1.0375, which Metal stores as 1 (in clip mode a depth is clamped
+/// to `[0, 1]`); under a bias of -4 from 0.1 its columns 0 and 1 read -0.0375 and -0.0125, stored
+/// as +0. Each other column stores the depth its fragment read. A device that enabled
+/// `VK_EXT_depth_range_unrestricted`, and so stores such a depth unclamped, without the native
+/// range (`native_depth_range`) announces `biased-depth-past-unit-range` once instead, and its
+/// clamped columns print.
 #[test]
 fn biased_depths_past_unit_range_store_metals_clamp() {
     let messages = Messages::default();

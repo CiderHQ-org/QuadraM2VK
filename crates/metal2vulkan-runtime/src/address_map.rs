@@ -15,8 +15,8 @@
 //! - **Constexpr samplers**: a constexpr sampler's state is the pipeline's (its immutable sampler,
 //!   and the modes its emulations read), so a slot a constexpr sampler samples takes a texture's
 //!   map through the pipeline variant of the slot (`VariantKey::address_maps`), whose compile maps
-//!   the sampler's modes; Metal samples a constexpr sampler as a runtime one of its modes (EV
-//!   TXN2-ycx1-m4). A texture of the identity map keeps every key.
+//!   the sampler's modes; Metal samples a constexpr sampler as a runtime one of its modes. A
+//!   texture of the identity map keeps every key.
 //! - **Refused, typed** (`RuntimeGap::MappedTextureSampling`, naming the map): what cannot follow
 //!   the map ([`MappedSampling`]): a constexpr sampler whose modes the map sends where a
 //!   constexpr sampler cannot address, or whose modes are not stated; one sampler slot sampling
@@ -170,7 +170,7 @@ pub(super) fn resolve(
             Pair::Constexpr { texture, modes } => {
                 // A constexpr sampler samples a mapped texture through the pipeline variant of
                 // its slot (`VariantKey::address_maps`), whose state holds its modes mapped, as
-                // Metal samples it (EV TXN2-ycx1-m4: a constexpr sampler samples as a runtime one
+                // Metal samples it (a constexpr sampler samples as a runtime one
                 // of its modes): refused only where the map sends a mode where a constexpr
                 // sampler cannot address, or its modes are not stated.
                 let map = map_of(texture);

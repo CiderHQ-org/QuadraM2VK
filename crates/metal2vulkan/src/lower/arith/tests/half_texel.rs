@@ -370,9 +370,9 @@ fn an_unmeasured_format_takes_the_exact_rounding() {
 /// A two-plane YCbCr format's one texel and a 2D gather's lanes: its step of `1/8192` (or of
 /// `1/2048`, a `half` already) rounds to `half` with ties away from zero, as Metal's read and
 /// nearest sample of `YCBCR8_420_2P_sRGB`, `YCBCR10_420_2P_sRGB` and three 12-bit and
-/// extended-range formats did (EV TXN2-ycr1-m4, every channel), and its gathers (EV TXN2-ycg1-m4),
-/// and every step of each grid: the extended-range steps signed within `[-2, 2]`. A value that may
-/// be filtered keeps nearest even (a filtered value is the device's).
+/// extended-range formats did (every channel), and its gathers, and every step of each grid: the
+/// extended-range steps signed within `[-2, 2]`. A value that may be filtered keeps nearest even (a
+/// filtered value is the device's).
 #[test]
 fn a_ycbcr_texel_rounds_its_step_with_ties_away() {
     for (pf, d, lo, hi) in [
@@ -736,7 +736,7 @@ fn steps_rounding_twice(d: u32) -> Vec<u32> {
 /// code scale and filter grid, the sRGB table's `1/4095`, and the YCbCr grids `1/2048` and `1/8192`
 /// (whose ties the routine still breaks away from zero on `8192`). The 16-bit grids are not: `65455
 /// / 65535`, `65519 / 65535` and `32759 / 32767` round twice, so the routine keeps their exact
-/// `half` (EVs GSM2-hrp-m4 and GSM2-hrp-m3 differ at exactly those steps). A signed step's value is
+/// `half` (our probes differ at exactly those steps). A signed step's value is
 /// the negation of its magnitude's, so the magnitudes cover both signs. Exact: integer arithmetic
 /// on the step and on the `f32` value.
 #[test]

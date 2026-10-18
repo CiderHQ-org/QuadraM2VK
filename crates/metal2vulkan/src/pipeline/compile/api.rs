@@ -1427,7 +1427,7 @@ fn check_tile_formats(a: &FunctionArtifact, d: &TileRenderPipelineDescriptor) ->
 }
 
 /// A tile pipeline's `maxTotalThreadsPerThreadgroup` bound: Metal's answer for every tile function
-/// measured (EV TTG-probe1-m4, an M4: plain, simdgroup shuffles and reductions, threadgroup memory,
+/// measured (an M4: plain, simdgroup shuffles and reductions, threadgroup memory,
 /// an explicit imageblock, many live values), the largest tile threadgroup the binder runs (32x32,
 /// `bind::dispatch::TILE_THREADGROUP_SIDE`), which `metal_info` lowers to the device's limits and
 /// the descriptor's.
@@ -1439,8 +1439,8 @@ const METAL_MAX_THREADS: u32 = 1024;
 const TILE_MAX_SIDE: u32 = crate::bind::dispatch::TILE_THREADGROUP_SIDE;
 
 /// The most threads of a tile threadgroup within `limit`, as Metal answers a tile pipeline's
-/// `maxTotalThreadsPerThreadgroup` (EV TTG-probe2, an M3 Max and an M4): the largest `w · h <=
-/// limit` of even `w` and `h` from 2 to 32 (Metal's validation counts each side rounded up to
+/// `maxTotalThreadsPerThreadgroup` (an M3 Max and an M4): the largest `w · h <= limit` of even `w`
+/// and `h` from 2 to 32 (Metal's validation counts each side rounded up to
 /// even), 0 below 4. A descriptor's 1000 answers 960 (32x30), 959 answers 900 (30x30) and 255
 /// answers 252 (18x14); 1024 answers itself.
 fn tile_threads_within(limit: u32) -> u32 {

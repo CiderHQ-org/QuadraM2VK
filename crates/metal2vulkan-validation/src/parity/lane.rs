@@ -93,7 +93,7 @@ mod metal_recording {
     /// or stale into its committed records file, as that environment's line. A current line is
     /// kept, and its scenario does not run: only what changed runs on the Mac.
     #[test]
-    #[ignore = "writes the committed parity records; the recording EV runs it on a Mac"]
+    #[ignore = "writes the committed parity records; a recording run on a Mac takes it"]
     fn record_metal() {
         let environment = crate::metal::identity().unwrap().environment_id();
         for scenario in &SCENARIOS {

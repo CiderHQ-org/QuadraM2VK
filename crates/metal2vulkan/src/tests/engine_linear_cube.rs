@@ -1,7 +1,7 @@
 //! Metal's linear filter of a cube texture, emulated by fetches on a device that does not sample
 //! through Metal's own sampler, on the CPU interpreter:
 //!
-//! - Metal's own answers: seven lanes per format family of a probe WRG-cubelin2-probe (its `cl` run
+//! - Metal's own answers: seven lanes per format family of a probe (its `cl` run
 //!   on 1x1 cubes, `lanes-cube-1.bin`; Apple M4 on macOS 27.0.1 and Apple M3 Max on macOS 26.7,
 //!   byte-identical), bit for bit, with `float` and `half` results: 8-bit unorm and snorm,
 //!   `R8Unorm`, 8-bit sRGB (through the raw view), 16-bit unorm and snorm, half-float, and 32-bit
@@ -937,7 +937,7 @@ fn compared(
 
 /// A depth cube's linear comparison compares each tap, the corner's by the format's rule
 /// (`Depth32Float`'s `x` face's texel, `Depth16Unorm`'s made-up code), and sums the passes as
-/// `r8Unorm` codes 0 and 255 (RT13-px5-probe-m4: 3,072 directions of two cubes and a cube array,
+/// `r8Unorm` codes 0 and 255 (3,072 directions of two cubes and a cube array,
 /// every lane): every lane of random depth cubes (faces of 1 and 3 texels; a cube array's second
 /// cube) under `less`, `greater_equal` and `not_equal`, references equal to a texel's depth and NaN
 /// included, and some lanes reading a corner tap.
@@ -1007,11 +1007,11 @@ fn linear_cube_comparisons_sum_their_passes() {
     }
 }
 
-/// RT13-px5-probe-m4's 5x5 pattern cube (faces in order, rows of five): each texel's depth 0 or
+/// Our probe's 5x5 pattern cube (faces in order, rows of five): each texel's depth 0 or
 /// 1 (`Depth32Float`), or code 0 or 65535 (`Depth16Unorm`).
 const PX5_PATTERN: &str = "000010111100010001001100011010010101001011001011101000010000001011111111001000101000000010000111100101100000111111001101111011101011001101101110111001";
 
-/// Lanes of RT13-px5-probe-m4's `cc` run (Apple M4, macOS 27.0.1): the lane, its direction's
+/// Lanes of our probe's `cc` run (Apple M4, macOS 27.0.1): the lane, its direction's
 /// bits, and Metal's `less` comparison against 0.5 of [`PX5_PATTERN`] as `Depth32Float` and as
 /// `Depth16Unorm`. The first ten differ between the formats (284 of 3,072 lanes do, all at the
 /// corner tap); the rest read the same value from both.
@@ -1140,7 +1140,7 @@ fn a_cube_comparison_answers_metals_px5_lanes() {
 
 // ---- Metal's own lanes --------------------------------------------------------------------------
 
-/// The directions (bits) of seven lanes of WRG-cubelin2-probe's `cl` run on 1x1 cubes, by their
+/// The directions (bits) of seven lanes of our probe's `cl` run on 1x1 cubes, by their
 /// index in `lanes-cube-1.bin`: six with a major of `±1`, one on each face, and one scaled.
 const PROBE_LANES: [(u32, [u32; 3]); 7] = [
     (0, [0xbf16_af84, 0xbf7e_fffe, 0x3f80_0000]),

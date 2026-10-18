@@ -980,9 +980,9 @@ fn compressed_extension_formats_follow_exposure() {
     }
 }
 
-/// ASTC's 4x2 and 8x4 formats take the raw values and names Metal gave them in our census (EV
-/// GSM2-fmt0-m4), so a consumer holds each, and every usage of each is refused
-/// `NotImplemented(Format)` on every committed device: no Vulkan block has their footprints.
+/// ASTC's 4x2 and 8x4 formats take the raw values and names Metal gave them in our census, so a
+/// consumer holds each, and every usage of each is refused `NotImplemented(Format)` on every
+/// committed device: no Vulkan block has their footprints.
 #[test]
 fn astc_4x2_and_8x4_are_named_and_refused_typed() {
     use FormatUsage as U;
@@ -1016,9 +1016,9 @@ fn astc_4x2_and_8x4_are_named_and_refused_typed() {
 }
 
 /// Every other raw value Metal names takes Metal's name (a texture descriptor's description on an
-/// Apple M4 under macOS 27.0.1, EVs XRR2-pf576b-m4 and XRR2-pfi1-m4), so a consumer holds each,
-/// and every usage of each is refused `NotImplemented(Format)` on every committed device until
-/// its reads, writes and samples are measured.
+/// Apple M4 under macOS 27.0.1), so a consumer holds each, and every usage of each is refused
+/// `NotImplemented(Format)` on every committed device until its reads, writes and samples are
+/// measured.
 #[test]
 fn formats_metal_names_are_named_and_refused_typed() {
     use FormatUsage as U;
@@ -1147,7 +1147,7 @@ fn formats_metal_names_are_named_and_refused_typed() {
 /// storage and rendering (the shader decodes, filters and encodes them, `ExtendedRange::R10X6` and `Rg10X12`), only they
 /// are held only over memory a texture is given, and a clear stores Metal's words: the color
 /// through `float` and `half`, each to nearest even, the code of the exact product with 1023
-/// rounded to nearest in the top 10 bits (EV XRR2-x6f-m4).
+/// rounded to nearest in the top 10 bits.
 #[test]
 fn padded_formats_are_held_raw() {
     use FormatUsage as U;
@@ -1243,7 +1243,7 @@ fn padded_formats_are_held_raw() {
         r.clear_texel([2.0, 0.0, 0.0, 0.0], ClearRoute::ThroughHalf),
         [1023 << 6, 0, 0, 0]
     );
-    // The `_sRGB` twins' clear of (0.3, 0.7) is Metal's (EVs XRR2-x6fs-m4 and -m3: a clear-only
+    // The `_sRGB` twins' clear of (0.3, 0.7) is Metal's (a clear-only
     // pass over a buffer stores 38208 and [4928, 7424] in every texel), through their tables.
     let rs = ExtendedRange::R10X6Srgb;
     let rgs = ExtendedRange::Rg10X12Srgb;
@@ -1287,7 +1287,7 @@ fn swizzled_views_read_metal_s_opaque_black_border() {
             let device = crate::metal::sampler::device_opaque_black(c.format, c.components, false);
             // Metal's: alpha 1, the color's or a missing channel's, but `A8Unorm`'s, the red,
             // and `ARGB8Unorm`'s, whose border passes through its byte rotation: blue 1
-            // (measured on the M3 Max, EV TXN-xrprobe3-m3, and an M4, EV GSM2-a8r-m4).
+            // (measured on the M3 Max, and an M4).
             let metal = match pf {
                 PixelFormat::ARGB8Unorm => [false, false, true, false],
                 _ => [false, false, false, pf != PixelFormat::A8Unorm],
@@ -1596,8 +1596,7 @@ fn storage_choices_follow_d25() {
 /// ([`FormatEmulation::Bfloat`]): read as floats, sampled and stored through it, never filtered
 /// by a device nor blended; a color attachment of the raw format; a multisample texture is none
 /// (the runtime's descriptor rules). A fill's texel is each channel through `float` and `half`,
-/// each to nearest even, then the bfloat nearest that, ties to even, a NaN `0x7fc0` (EV
-/// FPV-pf1-m4).
+/// each to nearest even, then the bfloat nearest that, ties to even, a NaN `0x7fc0`.
 #[test]
 fn bfloat_formats_are_held_raw() {
     use vk::Format as F;
@@ -1705,7 +1704,7 @@ fn bfloat_formats_are_held_raw() {
     // nearest, ties to even, subnormals kept (the consumer's M3 Max: `-3e38`, `1e-40`, `70000`
     // and `1 + 2^-8 + 2^-23`, where `ThroughHalf` gives `0xff80`, 0, `0x7f80` and `0x3f80`), a
     // `half`'s value as under `ThroughHalf`, the infinity past the largest `float`, a NaN its
-    // `float`'s sign and top payload bits, quieted (EV FRT-bcs2-m4).
+    // `float`'s sign and top payload bits, quieted.
     let nearest = |form: ExtendedRange, c: [f64; 4]| form.clear_texel(c, ClearRoute::Straight);
     let consumers = [-3e38, 1e-40, 70000.0, 1.0 + 1.0 / 256.0 + 2f64.powi(-23)];
     assert_eq!(
@@ -1921,14 +1920,14 @@ fn storage_choices_on_committed_profiles_are_declarable() {
 }
 
 /// A half-float storage texture a function writes takes the class its `float` writes need, by
-/// what the committed profile's device is measured to store (EVs `TXN2-hsw2-*`, and lavapipe's
-/// `TXN2-hsw3-lvpx86`, `TXN2-hsw4-lvparm` and `TXN2-hsw6-lvp262`): `Identity` on MoltenVK
-/// (Metal's every value and NaN), `HalfQuietNan` where the device rounds as Metal does but
-/// stores another NaN (RADV, ANV, NVIDIA's, lavapipe), `HalfTowardZero` where its rounding is not
-/// measured; a read-only use, and another float format, stay `Identity`. On a profile not measured
-/// to store a written `half`'s NaN as its bits (`DriverDeviation::MetalHalfTexelWrites`), a written
-/// use takes the unsigned integer alias (`StorageImageClass::HalfBits`) wherever the alias serves
-/// it, an image of its own format alone the measured class.
+/// what the committed profile's device is measured to store (and lavapipe's
+/// probes): `Identity` on MoltenVK (Metal's every value and NaN), `HalfQuietNan` where the device
+/// rounds as Metal does but stores another NaN (RADV, ANV, NVIDIA's, lavapipe), `HalfTowardZero`
+/// where its rounding is not measured; a read-only use, and another float format, stay `Identity`.
+/// On a profile not measured to store a written `half`'s NaN as its bits
+/// (`DriverDeviation::MetalHalfTexelWrites`), a written use takes the unsigned integer alias
+/// (`StorageImageClass::HalfBits`) wherever the alias serves it, an image of its own format alone
+/// the measured class.
 #[test]
 fn half_float_storage_writes_take_their_measured_class() {
     let mut seen = BTreeSet::new();
@@ -2266,7 +2265,7 @@ fn out_of_bounds_alpha_follows_the_measured_formats() {
         assert_eq!(out_of_bounds_alpha_one(pf), Some(one), "{pf:?}");
     }
     assert_eq!(out_of_bounds_alpha_one(P::Depth32Float), Some(true));
-    // A `YCBCR8_420_2P` texture's texels read alpha 1 (EV XRR2-ycc1-m4); outside them its 1 is
+    // A `YCBCR8_420_2P` texture's texels read alpha 1; outside them its 1 is
     // the alpha it has none of.
     assert_eq!(out_of_bounds_alpha_one(P::YCBCR84202P), Some(true));
     // Every format answers but the placeholders, which are no format, and the formats Metal
@@ -2286,8 +2285,8 @@ fn out_of_bounds_alpha_follows_the_measured_formats() {
 }
 
 /// `imageblock_sample_length` answers what Metal answered for each measured list of color
-/// formats on an M3 Max and an M4 (probes RT11-metal-probe-10 and -11): texels in index order at
-/// their component's alignment, unrounded; unset and `Invalid` formats take no room.
+/// formats on an M3 Max and an M4: texels in index order at their component's alignment, unrounded;
+/// unset and `Invalid` formats take no room.
 #[test]
 fn imageblock_sample_lengths_are_metals() {
     use PixelFormat as P;
@@ -2329,8 +2328,8 @@ fn imageblock_sample_lengths_are_metals() {
 }
 
 /// `color_record` places each color where Metal's render pipeline state writes it and its pass
-/// reads it, on an M4 (probes CFX-probe1 and -2): in index order at the component's alignment,
-/// an unset color taking no room; its end is `imageblock_sample_length`.
+/// reads it, on an M4: in index order at the component's alignment, an unset color taking no room;
+/// its end is `imageblock_sample_length`.
 #[test]
 fn color_records_are_metals() {
     use PixelFormat as P;
@@ -2376,10 +2375,9 @@ fn color_records_are_metals() {
 }
 
 /// `explicit_imageblock_sample_length` answers what Metal answered for a render pipeline whose
-/// fragment function declares an explicit imageblock, on an M3 Max and an M4 (probes
-/// RT11-metal-probe-13 to -15): the data size, then the color attachments' bytes rounded up to 8
-/// and then to the layout's alignment. Each row is a layout (its data size and alignment) and color
-/// formats.
+/// fragment function declares an explicit imageblock, on an M3 Max and an M4: the data size, then
+/// the color attachments' bytes rounded up to 8 and then to the layout's alignment. Each row is a
+/// layout (its data size and alignment) and color formats.
 #[test]
 fn explicit_imageblock_sample_lengths_are_metals() {
     use PixelFormat as P;
@@ -2526,7 +2524,7 @@ fn ycbcr_formats_are_the_two_plane_family_as_named() {
 }
 
 /// Metal drops a function's writes to a 4:2:0 or 4:2:2 two-plane YCbCr format and stores a
-/// 4:4:4 one's into both planes (EV XRR2-ycw1-m4): only the subsampled formats' writes are
+/// 4:4:4 one's into both planes: only the subsampled formats' writes are
 /// dropped, and a storage slot of a 4:4:4 format is refused, typed, as a read one is.
 #[test]
 fn only_subsampled_ycbcr_formats_drop_writes() {
@@ -2682,7 +2680,7 @@ fn a_clears_tile_holds_its_colors_halves() {
     assert_eq!(ExtendedRange::Rgba16Bfloat.clear_tile_value([0.0; 4]), None);
 }
 
-/// The probe's clear colors (EV XSH-clr3-m4): each 10-bit code's value and each tie between two
+/// The probe's clear colors: each 10-bit code's value and each tie between two
 /// codes, 512 values of its generator, and the specials; color `i` is values `i` to `i + 3`.
 fn straight_clear_colors() -> Vec<[f64; 4]> {
     let mut values = Vec::new();
@@ -2720,7 +2718,7 @@ fn straight_clear_colors() -> Vec<[f64; 4]> {
         .collect()
 }
 
-/// Metal's two clear routes store the texels the model gives (EV XSH-clr3-m4, an Apple M4 under
+/// Metal's two clear routes store the texels the model gives (an Apple M4 under
 /// macOS 27.0.1, plain and under Metal's validation layer alike: 2,574 colors into a 16 x 16
 /// private target of plain usage in a pass with no draw call, `ClearRoute::Straight`, and into a
 /// 4 x 4 one, `ClearRoute::ThroughHalf`), as an FNV-1a digest of each format's texels as Metal

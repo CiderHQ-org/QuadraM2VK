@@ -529,11 +529,10 @@ fn sorted(mut tiles: Vec<[u64; 2]>) -> Vec<[u64; 2]> {
 
 /// An indirect update maps or unmaps the regions its buffer holds when it runs, a `Shared` one
 /// or a `Private` one a blit wrote just before in the same command buffer: a count, then that
-/// many regions, as an M4 reads them (SPR-probe1-m4); a count of 0 maps nothing; a single tile maps
-/// on every device that makes the texture. Arguments Metal's validation stops fail the command
-/// buffer typed; a count past the buffer is refused where encoded; an offset off 4 reads at the
-/// multiple of 4 below it, as plain Metal reads it (EV SPCrp-probe2-m4 `sp_ind_off*`). The device
-/// announces the host's reads once.
+/// many regions, as an M4 reads them; a count of 0 maps nothing; a single tile maps on every device
+/// that makes the texture. Arguments Metal's validation stops fail the command buffer typed; a
+/// count past the buffer is refused where encoded; an offset off 4 reads at the multiple of 4 below
+/// it, as plain Metal reads it. The device announces the host's reads once.
 #[test]
 fn indirect_updates_map_what_the_buffer_holds_when_they_run() {
     on_device(|device, messages| {
@@ -668,7 +667,7 @@ fn indirect_updates_map_what_the_buffer_holds_when_they_run() {
 
 /// Assert that level 0 `after` holds, in the 2x2 tiles from `to`, what level 0 `before` held in the
 /// 2x2 tiles from `from`: a move's texels go with it, as Metal's do for a texture without
-/// GPU-optimized contents (EVs RRX-sparse2-m4 and -m3).
+/// GPU-optimized contents.
 fn assert_moved(after: &[f32], to: [u64; 2], before: &[f32], from: [u64; 2], what: &str) {
     for y in 0..128u64 {
         for x in 0..128u64 {
@@ -683,14 +682,13 @@ fn assert_moved(after: &[f32], to: [u64; 2], before: &[f32], from: [u64; 2], wha
 }
 
 /// A move takes each mapped source tile to its destination tile where that one is unmapped, as an
-/// M4's does (SPR-probe1-m4, SPR-probe2-m4): onto mapped tiles nothing moves; between textures of
-/// one heap or of two, whose counts do not change. What a Metal sparse probe measured on an M3 Max
-/// and an M4 moves too: within one texture over overlapping regions, one tile at a time in Metal's
-/// order (only the tiles that land on unmapped ones), between formats of different tiles tile for
-/// tile, and a slice's tail at `firstMipmapInTail`, onto another's tail or onto a tile and back.
-/// Each moved tile's texels go with it, on every device that makes the textures, whatever its
-/// blocks, as Metal's do for a texture without GPU-optimized contents. Fences order the encoder
-/// like any other.
+/// M4's does: onto mapped tiles nothing moves; between textures of one heap or of two, whose counts
+/// do not change. What a Metal sparse probe measured on an M3 Max and an M4 moves too: within one
+/// texture over overlapping regions, one tile at a time in Metal's order (only the tiles that land
+/// on unmapped ones), between formats of different tiles tile for tile, and a slice's tail at
+/// `firstMipmapInTail`, onto another's tail or onto a tile and back. Each moved tile's texels go
+/// with it, on every device that makes the textures, whatever its blocks, as Metal's do for a
+/// texture without GPU-optimized contents. Fences order the encoder like any other.
 #[test]
 fn moves_take_mappings_to_unmapped_tiles() {
     on_device(|device, messages| {
@@ -834,9 +832,8 @@ fn moves_take_mappings_to_unmapped_tiles() {
         assert_eq!(heap.used_size(), 17 * PAGE, "{name}");
 
         // A tail onto a tiled level's tile and back, as Metal's validation takes them and Metal
-        // moves them (EVs RRX-sparse1-m4, RRX-sparse2-m4 and -m3): the mappings move and the heap's
-        // count stays; the destination reads zero, the runtime's near-equivalent of Metal's moved
-        // bytes in the other layout.
+        // moves them: the mappings move and the heap's count stays; the destination reads zero, the
+        // runtime's near-equivalent of Metal's moved bytes in the other layout.
         let moved_level = |from: &Texture, from_level: u64, to: &Texture, to_level: u64| {
             let command_buffer = queue.command_buffer().unwrap();
             let mut encoder = command_buffer.resource_state_command_encoder().unwrap();
@@ -882,8 +879,7 @@ fn moves_take_mappings_to_unmapped_tiles() {
 
         // Fences: an update after the bind, which a blit of another command buffer waits for;
         // a wait after the encoder's own update waits for the update before the encoder (none
-        // here), and the bind runs, as plain Metal's does (EV SPCrp-probe2-m4
-        // `sp_fence_update_then_wait`).
+        // here), and the bind runs, as plain Metal's does.
         let fence = device.new_fence();
         let command_buffer = queue.command_buffer().unwrap();
         let mut encoder = command_buffer.resource_state_command_encoder().unwrap();
@@ -911,7 +907,7 @@ fn moves_take_mappings_to_unmapped_tiles() {
 
 /// A blit into a block of the device's that holds one mapped tile writes that tile alone: the
 /// block's unmapped tiles read zero after it on every device, as Metal drops a blit's writes to
-/// unmapped tiles (SPR-probe1-m4); a copy from another texture is dropped there too.
+/// unmapped tiles; a copy from another texture is dropped there too.
 #[test]
 fn a_blit_into_a_partly_mapped_block_leaves_its_unmapped_tiles_zero() {
     on_device(|device, messages| {
@@ -966,9 +962,9 @@ fn a_blit_into_a_partly_mapped_block_leaves_its_unmapped_tiles_zero() {
 }
 
 /// A mapping update of a texture that is not sparse, and a move between two such, record
-/// nothing and leave the texels as they were, as plain Metal does (an M4 under macOS 27.0.1, EV
-/// RRP-probe1-m4 `sp_notsparse_*`: map, unmap, indirect unmap, move; its validation stops them);
-/// a move between a sparse texture and one that is not stays refused (not measured).
+/// nothing and leave the texels as they were, as plain Metal does (an M4 under macOS 27.0.1: map,
+/// unmap, indirect unmap, move; its validation stops them); a move between a sparse texture and one
+/// that is not stays refused (not measured).
 #[test]
 fn updates_of_a_texture_that_is_not_sparse_record_nothing() {
     on_device(|device, _| {
@@ -1107,9 +1103,9 @@ fn a_render_pass_drops_its_stores_into_unmapped_tiles() {
 }
 
 /// An update or a move through a view of a sparse texture names the texture's own tiles, as a Metal
-/// sparse probe measured on an M3 Max and an M4 and EVs RRX-sparse1-m4, RRX-sparse2-m4 and -m3
-/// measured further: the level names the texture's level whatever the view's levels, past them too;
-/// the slice is the view's, its texture's past the view's first slice, past the view's slices too,
+/// sparse probe measured on an M3 Max and an M4 and our probes measured further: the level names
+/// the texture's level whatever the view's levels, past them too; the slice is the view's, its
+/// texture's past the view's first slice, past the view's slices too,
 /// and one past the texture's is refused as on the texture; a view of another pixel format of the
 /// same tile names the same tiles; an indirect update's regions and a move's sides read so too.
 #[test]
@@ -1265,14 +1261,14 @@ fn face_texels(face: u64) -> Vec<f32> {
         .collect()
 }
 
-/// A sparse cube texture's faces map their own tiles (EVs RRX-cube1-m3, an M3 Max, and
-/// RRX-cube1-m4, an M4, alike): a 256x256 `R32Float` cube of one level from a 1-MiB heap of 16-KiB
-/// pages, its tile 64x64; face 1's tile (0, 0) and face 4's tiles (1, 1) and (2, 1) mapped take
-/// three pages, and a blit of every face after them lands in those tiles alone, every other tile
-/// reading zero where residency is strict; an unmap of face 4's tile (1, 1) gives its page back and
-/// it reads zero, its neighbour keeping its texels. On a device whose functions read residency from
-/// tile maps (MoltenVK) the cube is an ordinary image with no tile map, which a slot reading
-/// residency from a map refuses as it is bound; it was refused as it was made before.
+/// A sparse cube texture's faces map their own tiles (an M3 Max, and an M4, alike): a 256x256
+/// `R32Float` cube of one level from a 1-MiB heap of 16-KiB pages, its tile 64x64; face 1's tile
+/// (0, 0) and face 4's tiles (1, 1) and (2, 1) mapped take three pages, and a blit of every face
+/// after them lands in those tiles alone, every other tile reading zero where residency is strict;
+/// an unmap of face 4's tile (1, 1) gives its page back and it reads zero, its neighbour keeping
+/// its texels. On a device whose functions read residency from tile maps (MoltenVK) the cube is an
+/// ordinary image with no tile map, which a slot reading residency from a map refuses as it is
+/// bound; it was refused as it was made before.
 #[test]
 fn a_sparse_cube_maps_each_face_s_own_tiles() {
     on_device(|device, messages| {

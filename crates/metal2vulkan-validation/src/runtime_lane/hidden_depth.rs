@@ -30,9 +30,9 @@
 //! way round, stay refused `NotImplemented(HiddenDepthStencil)` (not built, unmeasured).
 //!
 //! An indirect command buffer's commands executed in such a pass draw as the encoder's own draws at
-//! the call do (EV IRX-hidden6-m4, an M4 with macOS 27.0.1, plain and validated; EV IRX-hidden7-m3,
-//! an M3 Max, the commands alone): against the hidden depth and stencil under the encoder's state
-//! at the call, shared with the encoder's draws before and after them, each command's write seen by
+//! the call do (an M4 with macOS 27.0.1, plain and validated; an M3 Max, the commands alone):
+//! against the hidden depth and stencil under the encoder's state at the call, shared with the
+//! encoder's draws before and after them, each command's write seen by
 //! the next. Metal's validation stops the encoder's draws among these, not the commands.
 //!
 //! The pipeline's depth and stencil formats decide nothing (a Metal probe, an M4 with macOS 27.0.1,
@@ -520,7 +520,7 @@ fn executed(probe: &Probe, case: &str, steps: &[Step]) -> Vec<u8> {
 }
 
 /// Executed commands in a pass without a depth or stencil attachment test and write Metal's
-/// hidden depth and stencil as the encoder's own draws at the call do (EV IRX-hidden6-m4, an M4
+/// hidden depth and stencil as the encoder's own draws at the call do (an M4
 /// with macOS 27.0.1, plain and validated alike, every order of the earlier probes): against 1.0
 /// and 0 at the pass's start, under the encoder's state at each call, their writes seen by the
 /// commands and the encoder's draws after them, the encoder's by the commands. Metal's validation

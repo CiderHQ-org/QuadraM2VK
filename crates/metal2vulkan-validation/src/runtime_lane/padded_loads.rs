@@ -2,22 +2,21 @@
 //! twins, over a buffer and draw on the device the cfg selects, under the validation layer, against
 //! Metal's bytes.
 //!
-//! Each case replays one of Metal probes `x6i`, `x6j` and `x6k` (EVs XRR2-x6i, -x6j and -x6k: an
-//! Apple M4 under macOS 27.0.1 and an Apple M3 Max under macOS 26.7, byte-identical): a 200 x 100
-//! texture over a buffer holding the probe's words (texel `i`'s red word `(i * 2654435761) >> 7`
-//! and green word `i * 40503`, each to 16 bits), loaded and stored, and the owned fixture
-//! `rt6_samples`'s full-screen triangle filling `float4` values `((37 i) mod 1024 / 1023, (101 i)
-//! mod 1024 / 1023, 0.5, 1)` at texel `i` (`rt6_fill_rgba32float`), under a write mask: drawn
-//! whole, under a scissor rectangle (37, 13, 54, 57), in a pass of a smaller render target size, as
-//! a draw of no vertices, as an indirect command buffer's execution of the draw, or not drawn. And
-//! the probe `x6l` (EVs XRR2-x6l-m4 and -m3, byte-identical): the triangle drawn into a view of the
-//! texture as a 2D array of its one slice (in a pass of a render target array length of 0 and of
-//! 1), and into a texture buffer of one row over the buffer's first, whose pass rewrites that row
-//! alone. And the probe `x6is` (EVs XRR2-x6is-m4 and -m3, byte-identical): the same words and draw
-//! over `R10Unorm_X6_sRGB` and `RG10Unorm_X12_sRGB`, drawn whole, as a draw that rasterizes nothing
-//! (which the lane draws as one of no vertices: any draw rewrites alike), or not drawn. Metal's
-//! answer: the SHA-256 of the texture's words after the pass, row after row ([`METAL`]); the bytes
-//! between the rows stay as they were.
+//! Each case replays one of Metal probes `x6i`, `x6j` and `x6k` (an Apple M4 under macOS 27.0.1 and
+//! an Apple M3 Max under macOS 26.7, byte-identical): a 200 x 100 texture over a buffer holding the
+//! probe's words (texel `i`'s red word `(i * 2654435761) >> 7` and green word `i * 40503`, each to
+//! 16 bits), loaded and stored, and the owned fixture `rt6_samples`'s full-screen triangle filling
+//! `float4` values `((37 i) mod 1024 / 1023, (101 i) mod 1024 / 1023, 0.5, 1)` at texel `i`
+//! (`rt6_fill_rgba32float`), under a write mask: drawn whole, under a scissor rectangle (37, 13,
+//! 54, 57), in a pass of a smaller render target size, as a draw of no vertices, as an indirect
+//! command buffer's execution of the draw, or not drawn. And the probe `x6l` (byte-identical): the
+//! triangle drawn into a view of the texture as a 2D array of its one slice (in a pass of a render
+//! target array length of 0 and of 1), and into a texture buffer of one row over the buffer's
+//! first, whose pass rewrites that row alone. And the probe `x6is` (byte-identical): the same words
+//! and draw over `R10Unorm_X6_sRGB` and `RG10Unorm_X12_sRGB`, drawn whole, as a draw that
+//! rasterizes nothing (which the lane draws as one of no vertices: any draw rewrites alike), or not
+//! drawn. Metal's answer: the SHA-256 of the texture's words after the pass, row after row
+//! ([`METAL`]); the bytes between the rows stay as they were.
 //!
 //! Metal's pass that loads such a texture and draws writes every word of its render area rounded
 //! up to 32 texels back, the words no fragment writes and the channels the mask leaves out as
@@ -69,7 +68,7 @@ enum Pass {
     Executed,
     /// No draw.
     Undrawn,
-    // The triangle into another attachment over the same bytes (EV XRR2-x6l-m4):
+    // The triangle into another attachment over the same bytes:
     /// a view of the texture as a 2D array of its one slice;
     ArrayView,
     /// that view, in a pass of a render target array length of 1;

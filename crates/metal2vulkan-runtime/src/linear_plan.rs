@@ -29,12 +29,11 @@
 //!   buffer's `bytesPerRow` is any length that covers the row. A texture buffer's offset is any:
 //!   Metal's validation alone stops one off 16, and a plain run makes the texture, its functions
 //!   reading and writing from the offset rounded down to 16 and its blits and the CPU at the
-//!   offset (an M4, macOS 27.0.1, EVs SPCrp-probe1-m4 `lin_tb_off*`, SPCrp-probe6-m4 `tbo_*`;
-//!   `buffer_texture.rs`), so the runtime does too. The SPI's texture buffer, unmeasured there,
-//!   keeps the validated rule. An array's `bytesPerImage` is ignored: each slice starts
-//!   `bytesPerRow` × `height`, rounded up to 128, after the one before. Metal's validation alone
-//!   asserts that it is a multiple of 128; a plain run makes the array at any (16, 32, 64, 80 and
-//!   192 measured, probe 9b), so the runtime does too.
+//!   offset (an M4, macOS 27.0.1; `buffer_texture.rs`), so the runtime does too. The SPI's texture
+//!   buffer, unmeasured there, keeps the validated rule. An array's `bytesPerImage` is ignored:
+//!   each slice starts `bytesPerRow` × `height`, rounded up to 128, after the one before. Metal's
+//!   validation alone asserts that it is a multiple of 128; a plain run makes the array at any (16,
+//!   32, 64, 80 and 192 measured, probe 9b), so the runtime does too.
 //! - **Length.** Validation counts `offset + bytesPerRow × (height × slices − 1) + the packed row`
 //!   against the buffer's length: for an array, as if its slices were not rounded. Where an
 //!   array's last slice still runs past the length, Metal answers nil when the buffer is at least
@@ -46,8 +45,7 @@
 //! **IOSurface planes** (`Buffer::new_texture_with_iosurface_plane`, the stand-in for
 //! `newTextureWithDescriptor:iosurface:plane:` over the caller's memory). Measured on the M3 Max
 //! (macOS 26.7) and an M4 (macOS 27.0.1), which agree on every byte but the memory-dependent reads
-//! and the overlapping writes below (EVs `SPH-iosurf1-m4`, `SPH-iosurf2-m4`, `SPH-iosurf3-m3`,
-//! `SPH-iosurf3-m4`, `IOS-iosurf4-m4` and `IOS-iosurf4-m3`; one process a case, plain twice and
+//! and the overlapping writes below (one process a case, plain twice and
 //! under API validation, which flags none of them):
 //!
 //! - **Made.** A surface without planes takes a `bytesPerRow` that is a multiple of 16 only: Metal
@@ -56,7 +54,7 @@
 //!   its '420v' backing, base and offset alike) takes any offset and any `bytesPerRow` that covers
 //!   its row, a multiple of the texel's size or not. IOSurface makes no plane whose pitch is below
 //!   its row.
-//! - **Options** (EV `IOS-modes2-m4`, an M4, macOS 27.0.1, flat and planar surfaces). The texture
+//! - **Options** (an M4, macOS 27.0.1, flat and planar surfaces). The texture
 //!   takes and reports its descriptor's storage, CPU cache and hazard tracking modes (its default
 //!   hazard tracking mode resolved to tracked), whatever the surface's memory or the buffer
 //!   standing for it: `Shared` and `Managed`, each CPU cache mode and each hazard tracking mode are
@@ -78,7 +76,7 @@
 //!   process, and after a write other bytes, neither the surface's nor the written ones (not the
 //!   same on the M3 Max and the M4). The runtime's GPU reads those rows where its writes put them,
 //!   a recorded near-equivalent (`Degradation::NarrowSurfaceRows`, [`Placed::narrow`]).
-//! - **4:2:2 planes** (an M4 under macOS 27.0.1, EV `APX2-xv1-m4`, plain twice and validated
+//! - **4:2:2 planes** (an M4 under macOS 27.0.1, plain twice and validated
 //!   alike): a texture of either 4:2:2 format over a CoreVideo `2vuy` or `yuvs` surface (no planes,
 //!   `bytesPerRow` 64 for 16 x 4) is made, in either format over either surface; `getBytes` reads
 //!   the surface's rows, `replaceRegion` writes them leaving the bytes between untouched, and a
@@ -99,12 +97,12 @@
 //!   plane the texture keeps one aspect's unit a texel (`copy_plan::surface_depth_unit`: its depth,
 //!   else its stencil; the stencil of `Depth32Float_Stencil8` is not in the plane), laid out by the
 //!   rules above as a colour texel's: its reads, samples and CPU access take the plane's bytes
-//!   there (EVs SID-pdl1-m4 to SID-pdl6-m4). The texture is a shadow of those bytes (`shadow.rs`),
-//!   whose copies move that aspect alone. A render pass stores it otherwise, in Metal's tiled
-//!   layout (`texture/heap_tiled.rs`) from the plane's offset rounded down to 128: it renders
-//!   through a tiled twin (`texture/surface_depth.rs`, which lists what stays the runtime's gap,
+//!   there. The texture is a shadow of those bytes (`shadow.rs`), whose copies move that aspect
+//!   alone. A render pass stores it otherwise, in Metal's tiled layout (`texture/heap_tiled.rs`)
+//!   from the plane's offset rounded down to 128: it renders through a tiled twin
+//!   (`texture/surface_depth.rs`, which lists what stays the runtime's gap,
 //!   `NotImplemented(RuntimeGap::SurfaceDepthStencil)`, with a blit of the stencil of
-//!   `Depth32Float_Stencil8`; EVs SID-pdl1-m4 to SID-pdl7-m4).
+//!   `Depth32Float_Stencil8`).
 //!
 //! The runtime holds both layouts: the GPU's ([`Placed::gpu`]) is the texture's texels for every
 //! command, the copies of its shadow, an aliasing image and their hazards; the CPU's
@@ -235,10 +233,9 @@ fn backed(pf: PixelFormat) -> Result<(), BufferTextureProblem> {
 
 /// `pf`'s alignment in a buffer ([`LINEAR_ALIGNMENT`]) on a device answering at `level`, or why
 /// no buffer can back it: also a format the level describes none of
-/// ([`MetalLevel::describes`]), whose alignment queries Metal asserts on (EVs XRR2-pla1-m4 and
-/// XRR2-pla1-m3), and one it describes as a depth or a stencil format, `AnyDepth` and
-/// `AnyStencil` among them, which Vulkan has no format for ("Linear textures do not support
-/// depth/stencil pixel formats", EV M27-lin1-m3).
+/// ([`MetalLevel::describes`]), whose alignment queries Metal asserts on, and one it describes as a
+/// depth or a stencil format, `AnyDepth` and `AnyStencil` among them, which Vulkan has no format
+/// for ("Linear textures do not support depth/stencil pixel formats").
 pub(super) fn linear_alignment(
     pf: PixelFormat,
     level: MetalLevel,

@@ -9,7 +9,7 @@
 //!
 //! Premultiplied source-over (one over one minus the source alpha, added, for color and alpha):
 //! fast math `h(fma(d, h(1 - a), s))`, without `h(s + h(d · h(1 - a)))`, in `float` likewise.
-//! EV FB8-sw1-m3 (plain Metal on the M3 Max under macOS 27.0.1, our own MSL of the guest's shape,
+//! Our probe (plain Metal on the M3 Max under macOS 27.0.1, our own MSL of the guest's shape,
 //! a 4096 x 961 target): every `half` alpha in `[0, 1]` against every destination code of each
 //! channel, four source draws per pair (half aimed within four units in the last place of a
 //! code's midpoint, 2% out of range, infinite or NaN), each of `half4` and `float4`, fast and safe:
@@ -21,8 +21,7 @@
 //! Other factors, operations, write masks and the blend color: a state of each rule
 //! `Blend::unorm8` names (the color's contracted pair and alpha's lerp of source alpha over, the
 //! blend color's lerps, a lone color channel's lerp, and alpha alone beside the color channels'
-//! destination factor), against the arithmetic the probes measured (EVs FB8-sw2-m3, FB8-bc1-m3,
-//! FB8-sc1-m3 and FB8-ao1-m3).
+//! destination factor), against the arithmetic the probes measured.
 
 use super::*;
 use crate::lower::arith::extended_range::blend::{
@@ -477,8 +476,8 @@ fn the_factor_set_masks_and_blend_color_store_metals_code() {
         alpha_operation: oa,
     };
     type Form = fn(BlendArith, BlendMath, Lane) -> f64;
-    // Each state, its format and mask, and the color and alpha lanes' Metal arithmetic (EVs
-    // FB8-sw2-m3, FB8-bc1-m3, FB8-sc1-m3 and FB8-ao1-m3); `None` where the lane keeps its texel.
+    // Each state, its format and mask, and the color and alpha lanes' Metal arithmetic; `None`
+    // where the lane keeps its texel.
     let states: [(
         BlendEquation,
         PixelFormat,
@@ -646,9 +645,8 @@ fn the_factor_set_masks_and_blend_color_store_metals_code() {
 }
 
 /// A format without alpha (`R8Unorm`, `RG8Unorm`) sums its products under fast math in forms of
-/// its own (EV FB8-r8-m3): a lerp, common factor or contracted pair is refused
-/// `NotImplemented(FramebufferFetch)` there, a fused or single product built, and without fast
-/// math every blend is built.
+/// its own: a lerp, common factor or contracted pair is refused `NotImplemented(FramebufferFetch)`
+/// there, a fused or single product built, and without fast math every blend is built.
 #[test]
 fn a_format_without_alpha_builds_only_its_measured_fast_forms() {
     let eq = |fs, fd| BlendEquation {

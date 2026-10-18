@@ -1393,7 +1393,7 @@ impl FeatureRow {
             // at run time among functions' addresses, not a table's entry alone, is a word, and a
             // call through it a switch over the functions it can hold: selected, merged, carried
             // around a loop, kept in thread or threadgroup memory, compared and converted to an
-            // integer and back, as Metal runs them (FPC-probe2).
+            // integer and back, as Metal runs them.
             F::FunctionPointersCompute => first([function_tables(f)]),
             // Function pointers in render stages: the render encoder's tables
             // (`set_vertex_visible_function_table`, `set_fragment_visible_function_table`,

@@ -6,14 +6,13 @@
 //! value clamped to its range (a NaN 0) times its maximum code `m = 2^b - 1` (`2^(b-1) - 1`
 //! signed) exactly, rounded to nearest with a tie away from zero; a packed 16-bit format's channel
 //! takes the same exact product, not the `half` a color attachment rounds through first, and its
-//! 1-bit channel stores 1 only above one half (EV FRT3-nsw1-m4, an Apple M4 under macOS 27.0.1:
-//! every code's value and every tie between codes with two `f32` steps either side, per channel),
-//! and a `half` write as its value's (EV FRT3-nsw4-m4: every one of the 65,536 halves, every
-//! format, both accesses), which the routine takes widened.
-//! A Vulkan driver converts the `f32` it is handed by its own rounding: ANV and lavapipe round the
-//! `f32` product with ties to even, NVIDIA's 615.71.09 stores the code below about 40% of the values
-//! just past a tie (and RGB10A2's 2-bit alpha takes the top bits of an 8-bit code), so near each
-//! tie they store another code (EVs FRT3-nsw2-anv, -lvpx86, -nv3090).
+//! 1-bit channel stores 1 only above one half (an Apple M4 under macOS 27.0.1: every code's value
+//! and every tie between codes with two `f32` steps either side, per channel), and a `half` write
+//! as its value's (every one of the 65,536 halves, every format, both accesses), which the routine
+//! takes widened. A Vulkan driver converts the `f32` it is handed by its own rounding: ANV and
+//! lavapipe round the `f32` product with ties to even, NVIDIA's 615.71.09 stores the code below
+//! about 40% of the values just past a tie (and RGB10A2's 2-bit alpha takes the top bits of an
+//! 8-bit code), so near each tie they store another code.
 //!
 //! The slot's `SpecKey::TexelFormat` specialization (a heap texture's: the class its handle
 //! carries) names the bound format's class (`metal::texel_format`), and one module routine,

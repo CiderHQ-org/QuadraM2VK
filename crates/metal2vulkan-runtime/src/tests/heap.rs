@@ -304,7 +304,7 @@ fn the_heap_descriptor_defaults_to_metal_s() {
 /// A heap lies in memory its textures' optimal images take where its storage class has such a
 /// type, else in memory linear images take, and a texture is an optimal image where that image
 /// takes every type of the class the heap may lie in, else a linear one where that takes them. On
-/// the RTX 3090 (NVIDIA 615.71.09, SPR-linprobe1-3090), whose optimal images take memory types 0
+/// the RTX 3090 (NVIDIA 615.71.09), whose optimal images take memory types 0
 /// and 1 (neither host-visible) and linear color images types 0, 1, 3, 4 and 5, a `Shared` heap's
 /// textures are linear and a `Private` heap's optimal; on a device whose depth images take no
 /// host-visible memory but its color images do (MoltenVK), a `Shared` heap's color textures are
@@ -465,8 +465,8 @@ fn a_depth_twin_lies_past_its_image_inside_the_heap_texture_s_bytes() {
     let lone = requirements(16512, 128);
     let (got, offset) = heap_extent(&lone, None, pages(1024));
     assert_eq!((got, offset), (answer(17408, 1024), None));
-    // ANV's compressed 4x4 `RGBA8Unorm` image on an Xe-LP GPU (EV SPH-ccsrepro-ms01): 4112
-    // bytes at 64 KiB, in whole chunks there, and with a twin past it.
+    // ANV's compressed 4x4 `RGBA8Unorm` image on an Xe-LP GPU: 4112 bytes at 64 KiB, in whole
+    // chunks there, and with a twin past it.
     let compressed = requirements(4112, 65536);
     let (got, offset) = heap_extent(&compressed, None, chunks(1));
     assert_eq!((got, offset), (answer(4352, 65536), None));
@@ -661,9 +661,9 @@ fn a_heap_shadow_lays_colour_compressed_and_3d_levels_out_tightly() {
     assert_eq!(length, 26);
 }
 
-/// A heap's one-level 2D two-plane texture lays its planes out as an Apple M4 does (EV
-/// XRR2-xrh1-m4): plane 0's rows at a multiple of 16 bytes, plane 1 from a multiple of 16 KiB in
-/// rows at a multiple of 16, spanning the size Metal's heap query answers for each size measured
+/// A heap's one-level 2D two-plane texture lays its planes out as an Apple M4 does: plane 0's rows
+/// at a multiple of 16 bytes, plane 1 from a multiple of 16 KiB in rows at a multiple of 16,
+/// spanning the size Metal's heap query answers for each size measured
 /// (16576 for 16 x 12, 16613 for 37 x 5, 20480 for 64 x 64, 16385 for 1 x 1, 119580 for
 /// 300 x 70, 118797 for 333 x 61); its CPU copies move plane 0's words at those rows.
 #[test]
@@ -747,7 +747,7 @@ fn a_heap_numbers_its_textures_and_finds_those_made_after_a_mark() {
 /// granularity; on a device whose driver answers a compressed image's size short of its
 /// compression data (ANV on Xe-LP GPUs), also whole 256-byte chunks, so no other resource lies in
 /// the chunk the image's compression data ends in: ANV's compressed 4x4 `RGBA8Unorm` image (4112
-/// bytes at 64 KiB, EV SPH-ccsrepro-ms01) takes 4352 bytes there and keeps its size elsewhere.
+/// bytes at 64 KiB) takes 4352 bytes there and keeps its size elsewhere.
 #[test]
 fn an_image_takes_whole_chunks_of_compression_data_where_the_driver_needs_them() {
     use crate::texture::ImagePlacement;

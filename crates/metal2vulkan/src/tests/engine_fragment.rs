@@ -1241,7 +1241,7 @@ fn the_storage_form_declares_early_tests_only_where_they_keep_metals_writes() {
 /// A fetching function that writes other memory (`dvp_rog_coherence`'s `fetch_coherent`), beside a
 /// depth or stencil attachment, compiles in the storage form without early tests, its stores before
 /// the tests, and states `TestedStorageWrites` without the early-tests variant: Metal runs its
-/// memory writes for the fragments its tests drop (EV XRR2-fx1-m4). Without such an attachment it
+/// memory writes for the fragments its tests drop. Without such an attachment it
 /// states nothing. The whole pipeline on `moltenvk-m3` (a `BGRA8Unorm_sRGB` color,
 /// `Depth32Float_Stencil8`) plans a draw whose tests drop no fragment, and refuses one that does
 /// not state its tests, or whose tests a visibility result counts, at the depth attachment. (A draw
@@ -1925,7 +1925,7 @@ fn a_fetched_bgra_attachment_is_viewed_in_its_rgba_twin_where_no_declaration_rea
 /// every committed profile that orders fetch through the interlock (a write of mask none stores
 /// nothing), passes L3, and the first makes its whole pipeline on `moltenvk-m3`; under a blend that
 /// adds the destination too, the function computing Metal's blend of its `half2` output (one and
-/// one, added: Metal's `h(s + d)`, measured bit-exact by the narrow sweeps, EV FBL-nw1-m3), its
+/// one, added: Metal's `h(s + d)`, measured bit-exact by the narrow sweeps), its
 /// fact naming the blend, and passes L3. A stored channel without early tests compiles, stating
 /// `TestedStorageWrites`, whose draws' plans check their tests; the write of mask none states
 /// nothing of them.
@@ -4050,7 +4050,7 @@ fn a_demoting_site_exits_a_quad_of_helpers_before_a_later_simdgroup_operation() 
 }
 
 /// Where Metal places the sum ahead of each discard of the owned fixture `fragment_discard_hoist`,
-/// as Apple M4 and M3 Max draw it (EVs REF-hfix, REF-hfix-m3), and what canonicalization makes of
+/// as Apple M4 and M3 Max draw it, and what canonicalization makes of
 /// it: `Moved` where Metal counts only the lanes that survive the discard, `Counted` where it
 /// counts the dropped quads too for a measured reason, `Unknown` where no rule covers the shape (a
 /// use between, a nested discard, which Metal was measured placing both ways), which alone records

@@ -2,7 +2,7 @@
 //! device the cfg selects, under the validation layer, against Metal's codes: the consumer's
 //! passes clear such attachments.
 //!
-//! Metal's answers: EV FRT-bfp1-m4, an Apple M4 under macOS 27.0.1, our own probe `bfp.m` (no
+//! Metal's answers: an Apple M4 under macOS 27.0.1, our own probe `bfp.m` (no
 //! guest data):
 //!
 //! - **Clears.** 2,048 clear colors (the probe's generator, rebuilt here; the colors' digest is
@@ -11,12 +11,12 @@
 //!   digest, checked here too: a 1 x 1 target's clear goes through `half`
 //!   (`ClearRoute::ThroughHalf`). The device answers at the M4's release
 //!   (`MetalLevel::MacOS27_0_1`), as do the loads and draws below.
-//! - **Clear routes** (EVs FRT-bcs1-m4 and FRT-bcs2-m4, the consumer's M3 Max under macOS 26.7
-//!   alike). Metal clears straight to bfloat (`ClearRoute::Straight`) where it keeps the level
-//!   compressed and the pass has no draw call, else through `half`: targets of each route clear
-//!   their route's codes for colors whose routes differ (the consumer's, `-3e38`, `1e-40`, `70000`
-//!   and a `half` tie that is no bfloat tie), the extremes, subnormals and NaNs; the consumer's
-//!   codes from its M3 Max are checked against the model too.
+//! - **Clear routes** (the consumer's M3 Max under macOS 26.7 alike). Metal clears straight to
+//!   bfloat (`ClearRoute::Straight`) where it keeps the level compressed and the pass has no draw
+//!   call, else through `half`: targets of each route clear their route's codes for colors whose
+//!   routes differ (the consumer's, `-3e38`, `1e-40`, `70000` and a `half` tie that is no bfloat
+//!   tie), the extremes, subnormals and NaNs; the consumer's codes from its M3 Max are checked
+//!   against the model too.
 //! - **Loads.** A 256-texel-wide target holding every bfloat code once (each channel of each
 //!   texel the next code), through one pass that stores it: loaded with no draw, which keeps
 //!   every code; loaded under a full-screen draw that writes another attachment alone, which
@@ -28,7 +28,7 @@
 //!   `rt6_samples`'s fill writes color 0 (Metal's pass rewrites each loaded attachment of every
 //!   tile a draw reaches, whichever it writes).
 //!
-//! - **Draws** (EV FPV-pf5-m4, an Apple M4 under macOS 27.0.1, a probe `fpv5.swift`, our own): a
+//! - **Draws** (an Apple M4 under macOS 27.0.1, a probe `fpv5.swift`, our own): a
 //!   full-screen draw of the owned fixture's fill into a new target of each format, at the default
 //!   `textureWriteRoundingMode` and at `NearestEven`, of every code's `float`, of every `half`
 //!   code, and of the `float`s around each code's tie: Metal's answer is the SHA-256 of the
@@ -355,11 +355,11 @@ const M3_CODES: [[u16; 4]; 2] = [
 ];
 
 /// A `Clear` of a bfloat attachment stores the codes of Metal's route for its texture and pass
-/// (EVs FRT-bcs1-m4 and FRT-bcs2-m4, an M4 under macOS 27.0.1; the consumer's M3 Max under 26.7
-/// alike): straight to bfloat (`ClearRoute::Straight`) for a 16 x 16 private target of plain
-/// usage in a pass with no draw call, and through `half` (`ClearRoute::ThroughHalf`) for an
-/// 8 x 8 one, one of `ShaderWrite` or `PixelFormatView` usage, and one whose pass draws into
-/// another attachment. Every texel of the target is checked.
+/// (an M4 under macOS 27.0.1; the consumer's M3 Max under 26.7 alike): straight to bfloat
+/// (`ClearRoute::Straight`) for a 16 x 16 private target of plain usage in a pass with no draw
+/// call, and through `half` (`ClearRoute::ThroughHalf`) for an 8 x 8 one, one of `ShaderWrite` or
+/// `PixelFormatView` usage, and one whose pass draws into another attachment. Every texel of the
+/// target is checked.
 #[test]
 fn bfloat_clears_take_metal_s_route() {
     let (messages, _cache, lane) = lane_with(|_| {});
@@ -680,7 +680,7 @@ fn bfloat_load_passes_leave_metal_s_codes() {
     quiet(lane, &messages);
 }
 
-/// A draw's sweep (the probe `fpv5.swift`'s; EV FPV-pf5-m4): a fragment function's output per
+/// A draw's sweep (the probe `fpv5.swift`'s): a fragment function's output per
 /// texel of a full-screen draw.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Sweep {
@@ -696,7 +696,7 @@ enum Sweep {
 }
 
 /// Metal's digests (SHA-256 of the target's bytes) of each sweep's draw into each bfloat format,
-/// at the default `textureWriteRoundingMode` and at `NearestEven` (EV FPV-pf5-m4, an Apple M4
+/// at the default `textureWriteRoundingMode` and at `NearestEven` (an Apple M4
 /// under macOS 27.0.1).
 const DRAWN: [(PixelFormat, Sweep, &str, &str); 9] = [
     (

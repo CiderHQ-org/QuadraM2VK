@@ -815,7 +815,7 @@ pub(crate) const SRGB_WRITE_WORDS: u32 =
 /// [`srgb::declare`](crate::lower::arith::srgb::declare)): a NaN 0, the value clamped to `[0, 1]`,
 /// the exact product with 4095 rounded to nearest, and the byte of the largest first index at or
 /// below it; alpha's the exact product with 255 rounded to nearest: `pack_float_to_srgb_unorm4x8`
-/// (`math::pack`), which a kernel's write takes too (EV FPV-sr1-m4). Each code `c` is written as
+/// (`math::pack`), which a kernel's write takes too. Each code `c` is written as
 /// `c` times the `f32` nearest `1 / 255`, whose product with 255 lies within `2^-7` of `c`, so
 /// every device's conversion stores `c` (as `argb_codes` writes).
 fn srgb_codes(
@@ -1426,7 +1426,7 @@ pub(crate) fn reinterpret(
             narrow::from_bits(fb, half.half(), x)
         }
         // A `short` or `ushort` result: an integer word's low 16 bits, a float texel's `half`
-        // bits (EVs XCR-p1-m3, XCR-p2-m3), held zero-extended.
+        // bits, held zero-extended.
         (TexelConv::I32, TexelConv::I16 { .. }) => {
             let mask = u32s(fb, n, 0xFFFF)?;
             fb.binary(BinOp::BitwiseAnd, x, mask)
@@ -1440,8 +1440,7 @@ pub(crate) fn reinterpret(
 
 /// Written lanes `v`, held as `c.declared` declares them, as the texel `native` of the bound
 /// texture's own class (`texture::native_write_form`), as plain Metal stores them in format
-/// `c.format` (EVs XCR-p1-m3, XCR-p2-m3 on an Apple M3 Max, 28 formats, texture and
-/// texture-buffer writes):
+/// `c.format` (on an Apple M3 Max, 28 formats, texture and texture-buffer writes):
 ///
 /// - into an integer format, the lane's word (a 32-bit lane's bits, a 16-bit lane's, a `half`'s
 ///   bits, extended by the format's signedness), which the write then saturates to each
@@ -1642,10 +1641,10 @@ fn int_lanes(fb: &mut FunctionBuilder<'_>, elem: TypeId, lanes: &[u32]) -> BResu
 }
 
 /// `x` (`f32` lanes of form `f`) rounded to nearest even onto `RG11B10Float`'s channels, as
-/// Metal's integer store rounds them (EVs XCR-p1-m3, XCR-p2-m3): red and green to six fraction
-/// bits, blue to five, unsigned (a negative value to 0), a finite value that rounds past the
-/// largest finite one held there (65024, 64512), an infinity kept and a NaN quieted, which the
-/// float class's write stores as Metal's NaN code (`StorageImageClass::SmallFloatQuietNan`).
+/// Metal's integer store rounds them: red and green to six fraction bits, blue to five, unsigned (a
+/// negative value to 0), a finite value that rounds past the largest finite one held there (65024,
+/// 64512), an infinity kept and a NaN quieted, which the float class's write stores as Metal's NaN
+/// code (`StorageImageClass::SmallFloatQuietNan`).
 fn small_floats_nearest(
     fb: &mut FunctionBuilder<'_>,
     f: crate::lower::arith::legal::Form,
@@ -1827,7 +1826,7 @@ fn ycbcr_write_texel(fb: &mut FunctionBuilder<'_>, form: TexelForm, x: SValue) -
 /// read gives, 0 or alpha 1, and Metal's out-of-bounds texel's likewise): each channel's half
 /// widened exactly (`narrow::from_bits`), Metal's `half` read of the half stored, a NaN's sign
 /// and payload kept; for a `float` result every NaN `0x7fc00000`, Metal's `float` read of a half
-/// NaN (EV LTF-hp1-m3, the M3 Max: every NaN, fast and safe math); a lane the format lacks its
+/// NaN (the M3 Max: every NaN, fast and safe math); a lane the format lacks its
 /// integer converted (0.0, alpha 1.0).
 fn half_bits_texel(
     fb: &mut FunctionBuilder<'_>,
@@ -2040,7 +2039,7 @@ fn quiet_nans(
 /// class `class`: under `HalfTowardZero` the values every device stores as Metal's `half`, each
 /// rounded toward zero to the `f32` that holds that `half` exactly, a finite value past 65504 to
 /// 65504, an infinity kept and a NaN to [`QUIET_NAN`] (the half-float rule of `color_write::round`,
-/// the fragment rule, which a kernel's write takes too: EV TXN-hkw-m4; `color_write::small_float`
+/// the fragment rule, which a kernel's write takes too, as measured; `color_write::small_float`
 /// on the whole vector), so a device that rounds a conversion to nearest stores the exact `half`;
 /// under `HalfQuietNan`, on a device that rounds as Metal does, the value as computed but a NaN as
 /// [`QUIET_NAN`]. The NaN stores as the device's encoding of [`QUIET_NAN`] (Metal's `0x7e00` where
@@ -2182,11 +2181,11 @@ fn half_nan_texel(
 }
 
 /// Held `half` texel `held` of image texel `x` (`f32` lanes: the device's value, one texel's or
-/// filtered) with Metal's NaN wherever `x` is a NaN (`texture::half_texel_nans`, EV
-/// NAN-hrn1-m3): `x` itself, the device's decode of the texel, where the access reads one texel
-/// (`one`: `None` where it always does, else a `bool`) of a texture the class says holds 16-bit
-/// float channels (`class`: a slot's `TexelFormat` class of the half-float family without a
-/// packed field, `metal::texel_format::half_channels`, or `TexelFormat::OTHER`, a format whose
+/// filtered) with Metal's NaN wherever `x` is a NaN (`texture::half_texel_nans`): `x` itself, the
+/// device's decode of the texel, where the access reads one texel (`one`: `None` where it always
+/// does, else a `bool`) of a texture the class says holds 16-bit float channels (`class`: a slot's
+/// `TexelFormat` class of the half-float family without a packed field,
+/// `metal::texel_format::half_channels`, or `TexelFormat::OTHER`, a format whose
 /// conversion is not measured, whose NaN stays the device's decode as the module notes,
 /// `DeviceNanEncoding`; a heap handle's class index, [`heap_half_format`]); [`QUIET_NAN`]
 /// elsewhere, the `half` `0x7e00` held. The NaN test reads
@@ -2430,8 +2429,8 @@ fn norm_codes(
 /// `[0, 1]`, a NaN 0, the exact product with 255 rounded to nearest) times the `f32` nearest `1 /
 /// 255`, the rule (`color_write::round`). A device's conversion to the code may take either
 /// neighbour of the product: the RTX 3090 stored the code below on 22 of the
-/// `extended_range_planes` lane's 1,024 alpha values whose product lies just above a half (EV
-/// TXN-xrl5-nvidia), where Metal and the other venues stored the nearest.
+/// `extended_range_planes` lane's 1,024 alpha values whose product lies just above a half, where
+/// Metal and the other venues stored the nearest.
 fn argb_codes(fb: &mut FunctionBuilder<'_>, form: TexelForm, x: SValue) -> BResult<SValue> {
     use crate::lower::arith::color_write;
     use crate::lower::arith::legal::{FloatFmt, Form, Held};
@@ -2509,7 +2508,7 @@ fn swizzled_texel(
 
 /// `v`, a four-lane held texel of `form` written to a storage slot of
 /// `LoweringInputs::swizzled_storage`, with the swizzle `word` undone as plain Metal undoes it
-/// (EV RRP-probe1-m4, an M4 under macOS 27.0.1): channel `c` takes the lane `i` of the first of the
+/// (an M4 under macOS 27.0.1): channel `c` takes the lane `i` of the first of the
 /// swizzle's four sources that is channel `c` (raw value `2 + c`), and its own lane `c` where no
 /// source is. A permutation's inverse, and for a swizzle with a zero, a one or a repeated source
 /// the same rule: `RRRR` stores `v` as it is, `GR01` on two channels stores `(v.y, v.x)`.

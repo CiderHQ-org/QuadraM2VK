@@ -473,7 +473,7 @@ pub(crate) fn address_map_variant(
 /// The runtime sampler slots whose function samples through them (`RuntimeFact::CubicSampler`)
 /// at which `shape` binds a sampler whose min or mag filter is `Cubic`, each with the bound word
 /// masked by `SamplerWord::CUBIC_STATE`: the plan's `VariantKey::cubic_samplers`. Metal samples
-/// through such a sampler with its bicubic filter of that state (EV GSM2-bcs2-m4). The variant's
+/// through such a sampler with its bicubic filter of that state. The variant's
 /// compile states the same facts, so its plan for the same shape states the same key. A bound
 /// word whose state the bicubic filter is not measured under, whatever the function samples
 /// (`metal::bicubic::runtime_cubic_measured`: a mip filter, anisotropy, another reduction), is

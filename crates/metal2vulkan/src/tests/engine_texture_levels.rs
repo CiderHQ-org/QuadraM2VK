@@ -1821,8 +1821,8 @@ fn a_plan_s_key_keeps_levels_only_where_the_pipeline_reads_them() {
 }
 
 /// A level slot binds a texture of any usage at its levels: plain Metal writes a texture made
-/// without `ShaderWrite` at every level, through every write form, as one made with it (EV
-/// XRR2-usw1; CoreAnimation's blur textures are `ShaderRead | RenderTarget | BlockWritesOnly`),
+/// without `ShaderWrite` at every level, through every write form, as one made with it
+/// (CoreAnimation's blur textures are `ShaderRead | RenderTarget | BlockWritesOnly`),
 /// where the binder bound the neutral there and dropped the writes. Its shape states its levels
 /// whatever the usage, and the plan's key (`BindShape::for_plan`) keeps them only where the
 /// pipeline reads them. A texture with more levels than the views hold is larger than the device's

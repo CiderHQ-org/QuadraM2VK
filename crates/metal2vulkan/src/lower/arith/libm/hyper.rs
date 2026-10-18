@@ -1,9 +1,9 @@
 //! The hyperbolic functions and their inverses: Metal's precise `sinh`, `cosh`, `tanh`, `asinh`,
 //! `acosh`, and `atanh` of a `float`, which MSL Table 8.1 bounds at 4, 4, 5, 4, 4, and 5 ulp. Each
-//! is Metal's own form, which matches Metal's measured words (EVs MATH-sweep2-m4, MBB-hyp1-m3, and
-//! MBB-hyp2-m3) and follows Apple's runtime library: polynomials near zero and in the middle
-//! ranges, then compositions of Metal's precise `exp` ([`exp::exp_base`]), `log2`
-//! ([`log::metal_log2`], with its table), and reciprocal ([`E::recip`]).
+//! is Metal's own form, which matches Metal's measured words and follows Apple's runtime library:
+//! polynomials near zero and in the middle ranges, then compositions of Metal's precise `exp`
+//! ([`exp::exp_base`]), `log2` ([`log::metal_log2`], with its table), and reciprocal
+//! ([`E::recip`]).
 //!
 //! - `sinh` and `cosh` ([`hyper`]): polynomials below 1.5, `(E ∓ 1/E) / 2` of `E = e^a` to
 //!   `12 ln 2`, and `e^a / 2` past it;
@@ -45,7 +45,7 @@ use crate::spirv::error::BResult;
 use crate::spirv::ids::Value;
 use crate::spirv::ir::{BinOp, UnOp};
 
-/// Metal's polynomials near zero (EV MATH-sweep2-m4): `1 + s q(s)` of `s = x x` by Horner's rule,
+/// Metal's polynomials near zero: `1 + s q(s)` of `s = x x` by Horner's rule,
 /// each step one fused multiply-add, `q`'s `f32` coefficients by their bits. `sinh(x) = x (1 + s
 /// q)` and `cosh(x) = 1 + s q` below 1.5 in magnitude, `tanh(x) = x (1 + s q)` below 0.35.
 pub(crate) const SINH_Q: [u32; 4] = [0x3E2A_AAA8, 0x3C08_894C, 0x394F_C8DE, 0x3642_2719];
@@ -185,7 +185,7 @@ fn below(e: &mut E<'_, '_>, ab: Value, bits: u32) -> BResult<Value> {
     e.iop(BinOp::ULessThan, ab, b)
 }
 
-/// Metal's precise `which` of `x` (EV MATH-sweep2-m4; `tanh`'s middle range):
+/// Metal's precise `which` of `x` (`tanh`'s middle range):
 /// - `sinh` and `cosh`: the operand (`sinh`) or 1 (`cosh`) to [`SINH_TINY`] / [`COSH_TINY`],
 ///   their polynomials below 1.5, `(E - 1/E) / 2` and `(E + 1/E) / 2` of `E = e^a` to `12 ln 2`,
 ///   and past it `e^a / 2` ([`exp::exp_half`], so `2 h` is [`exp::exp_base`]'s `E`);

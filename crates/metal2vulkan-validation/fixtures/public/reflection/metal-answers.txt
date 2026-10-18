@@ -14,23 +14,22 @@
 # answered the same, the function's encoder at its index failed "Buffer argument out (buffer index:
 # 2) of function reflection_argument_buffers is not an indirect argument buffer", and
 # encoder_plain_struct's `constantDataAtIndex:1` failed "index (1) is outside of the valid index
-# range [0, 0]", EVs UNI-reflfix-11 and -12), and `newArgumentEncoderWithBufferBinding:` of every
-# buffer binding of the encoders, encoder_types and encoder_arrays fixtures' kernels, the library's
-# and the pipeline's (`== enc:<fixture>:<kernel>`: each encoder's length and alignment, and
-# `constantDataAtIndex:` 0 to 7 as offsets from the argument buffer's start; under MTL_DEBUG_LAYER=1
-# each of the 182 bindings' encoders was made alone, one process each, with no validation message,
-# on both GPUs; EVs UNI-reflfix-14, -14-m3, -15 and -15-m3; the pipeline case struct_arrays ran
-# there as encoder_arrays). Identical on an M3 Max (macOS 26.7) and an M4 (macOS 27.0.1), with one
-# exception, recorded here as the M3 Max answers: a plain buffer's encoder gives an integer, `bool`
-# or atomic scalar member 8 bytes aligned to 8 on the M3 Max, and its own size aligned to 1 on the
-# M4 (encoder_plain_struct's counter 4 aligned to 1; in encoders_plain b7 to b10, b22 and b23, and
-# in encoder_types_plain_1 and _2 the Char, UChar, Short, UShort, Int, UInt, Long, ULong and Bool
-# bindings, 1, 2, 4 or 8 bytes aligned to 1 there), and where such a member is the last of a struct
-# array's element the M4 answers the indices otherwise (encoder_arrays' a5, an array of two {float,
-# int}: 16 bytes, index 0 at 8 and index 1 at 0 on the M4, against 24 bytes, 4 and 12 here). The
-# function_kinds and function_types (`metallib-only/`) fixtures' sections, the
-# stage_in_dynamic_stride case and the specialized cases were recorded on the M4 alone (EVs
-# UNI-reflfix-7 and -8), the earlier sections again there unchanged. Raw values are Metal's enums'
+# range [0, 0]"), and `newArgumentEncoderWithBufferBinding:` of every buffer binding of the
+# encoders, encoder_types and encoder_arrays fixtures' kernels, the library's and the pipeline's
+# (`== enc:<fixture>:<kernel>`: each encoder's length and alignment, and `constantDataAtIndex:` 0 to
+# 7 as offsets from the argument buffer's start; under MTL_DEBUG_LAYER=1 each of the 182 bindings'
+# encoders was made alone, one process each, with no validation message, on both GPUs; the pipeline
+# case struct_arrays ran there as encoder_arrays). Identical on an M3 Max (macOS 26.7) and an M4
+# (macOS 27.0.1), with one exception, recorded here as the M3 Max answers: a plain buffer's encoder
+# gives an integer, `bool` or atomic scalar member 8 bytes aligned to 8 on the M3 Max, and its own
+# size aligned to 1 on the M4 (encoder_plain_struct's counter 4 aligned to 1; in encoders_plain b7
+# to b10, b22 and b23, and in encoder_types_plain_1 and _2 the Char, UChar, Short, UShort, Int,
+# UInt, Long, ULong and Bool bindings, 1, 2, 4 or 8 bytes aligned to 1 there), and where such a
+# member is the last of a struct array's element the M4 answers the indices otherwise
+# (encoder_arrays' a5, an array of two {float, int}: 16 bytes, index 0 at 8 and index 1 at 0 on the
+# M4, against 24 bytes, 4 and 12 here). The function_kinds and function_types (`metallib-only/`)
+# fixtures' sections, the stage_in_dynamic_stride case and the specialized cases were recorded on
+# the M4 alone, the earlier sections again there unchanged. Raw values are Metal's enums'
 # (`MTLDataType`, `MTLBindingType`, `MTLBindingAccess`, `MTLTextureType`, `MTLFunctionType`,
 # `MTLPatchType`, ...); sizes are NSUInteger printed through Swift's Int (NSUIntegerMax is -1), and
 # patchControlPointCount is an NSInteger. src/reflection/tests.rs compares the function, library,
@@ -1753,13 +1752,12 @@ pipeline a9 encodedLength=16 alignment=8
   constants 0:0 1:4 2:8 3:0 4:0 5:0 6:0 7:0
 pipeline out encodedLength=0 alignment=1
 # The leftovers fixture: its functions' section and the pipeline cases from tile_explicit on,
-# recorded on the M3 Max (macOS 26.7, EV RTL-refl-m3c) and the M4 (macOS 27.0.1, EV RTL-refl-m4c),
-# identical, and without and with MTL_DEBUG_LAYER=1 alike. reflection_computed_indices' library
-# answer states indices no value of its constant gives (28, 4294967236 and 18 for `base`, `base + 2`
-# and `base * 2`); the crate refuses it. The three descriptors whose attribute names a buffer
-# without a layout stop Metal at an assertion (exit 134), without API validation too, whether the
-# function reads the attribute or not; each is recorded as `stopped:` and the assertion's message,
-# after these assertions:
+# recorded on the M3 Max (macOS 26.7) and the M4 (macOS 27.0.1), identical, and without and with
+# MTL_DEBUG_LAYER=1 alike. reflection_computed_indices' library answer states indices no value of
+# its constant gives (28, 4294967236 and 18 for `base`, `base + 2` and `base * 2`); the crate
+# refuses it. The three descriptors whose attribute names a buffer without a layout stop Metal at an
+# assertion (exit 134), without API validation too, whether the function reads the attribute or not;
+# each is recorded as `stopped:` and the assertion's message, after these assertions:
 #   vertex_no_layout: -[MTLVertexDescriptorInternal
 #     validateWithVertexFunction:error:renderPipelineDescriptor:]:904: failed assertion `Vertex
 #     Descriptor Validation
@@ -1900,10 +1898,10 @@ stopped: Attribute at index 2 references a buffer at index 2 that has no stride.
 stopped: Attribute at index 1 references a buffer at index 1 that has no stride.
 == stage_in_no_layout
 stopped: Attribute at index 1 references a buffer at index 2 that has no stride.
-# Visible function tables inside an argument buffer (the fixture tables_in_arguments, EVs
-# RFL-refltab-m3 and RFL-refltab3-m4, identical on the M3 Max and the M4, and under
-# MTL_DEBUG_LAYER=1): a table member is MTLDataTypeVisibleFunctionTable (115), and an array of two
-# is strided as resources, 8 in the library's answer and 0 in a pipeline's.
+# Visible function tables inside an argument buffer (the fixture tables_in_arguments, identical on
+# the M3 Max and the M4, and under MTL_DEBUG_LAYER=1): a table member is
+# MTLDataTypeVisibleFunctionTable (115), and an array of two is strided as resources, 8 in the
+# library's answer and 0 in a pipeline's.
 == functions_tables_in_arguments
 function reflection_table_step functionType=5 patchType=0 patchControlPointCount=-1
 vertexAttributes nil
@@ -1925,10 +1923,9 @@ compute count=2
 options=0 nil
 options=2 same
 options=3 same
-# A user annotation (the fixture annotations, EVs RFL-reflr2-m3 and RFL-reflr2b-m4, identical on the
-# M3 Max and the M4, and under MTL_DEBUG_LAYER=1): the library's reflection answers the string
-# `[[user_annotation(...)]]` passes as userAnnotation, nil without one; a pipeline's reflection has
-# none.
+# A user annotation (the fixture annotations, identical on the M3 Max and the M4, and under
+# MTL_DEBUG_LAYER=1): the library's reflection answers the string `[[user_annotation(...)]]` passes
+# as userAnnotation, nil without one; a pipeline's reflection has none.
 == functions_annotations
 function reflection_annotated functionType=3 patchType=0 patchControlPointCount=-1
 vertexAttributes nil
@@ -1949,11 +1946,10 @@ compute count=1
 options=0 nil
 options=2 same
 options=3 same
-# A vertex input a function constant leaves unread (the fixture specialized_reads, EVs RFL-reflr2-m3
-# and RFL-reflr2b-m4, identical on the M3 Max and the M4, and under MTL_DEBUG_LAYER=1): the library
-# function's `uv` is active (the AIR does not mark it unused), the function made with the constant
-# false answers it inactive, and a pipeline of that function answers the vertex descriptor's buffer
-# only it reads unused.
+# A vertex input a function constant leaves unread (the fixture specialized_reads, identical on the
+# M3 Max and the M4, and under MTL_DEBUG_LAYER=1): the library function's `uv` is active (the AIR
+# does not mark it unused), the function made with the constant false answers it inactive, and a
+# pipeline of that function answers the vertex descriptor's buffer only it reads unused.
 == functions_specialized_reads
 function reflection_branch_read functionType=1 patchType=0 patchControlPointCount=-1
 vertexAttributes count=2
@@ -2013,11 +2009,10 @@ options=0 nil
 options=2 same
 options=3 same
 # An object and a mesh function's payload, and a mesh render pipeline's reflection (the fixture
-# mesh_functions, EVs RFL-reflr2-m3 and RFL-reflr2b-m4, identical on the M3 Max and the M4, and
-# under MTL_DEBUG_LAYER=1): the payload is MTLBindingTypeObjectPayload (34) at index 0xFFFFFFFF,
-# read-write in the object function and read-only in the mesh function, with its type's size and
-# alignment; a mesh pipeline answers object, mesh and fragment bindings and none for the vertex and
-# tile stages.
+# mesh_functions, identical on the M3 Max and the M4, and under MTL_DEBUG_LAYER=1): the payload is
+# MTLBindingTypeObjectPayload (34) at index 0xFFFFFFFF, read-write in the object function and
+# read-only in the mesh function, with its type's size and alignment; a mesh pipeline answers
+# object, mesh and fragment bindings and none for the vertex and tile stages.
 == functions_mesh_functions
 function reflection_mesh functionType=7 patchType=0 patchControlPointCount=-1
 vertexAttributes nil
@@ -2065,15 +2060,14 @@ options=0 nil
 options=2 same
 options=3 same
 # A kernel's stage inputs, a post-tessellation function's per-patch inputs and control points, and
-# bindings of each kind that a function constant leaves unread (the fixture specialized_inputs, EVs
-# RRX-refl2-m4 and RRX-refl2-m3, identical on the M4 and the M3 Max, and under MTL_DEBUG_LAYER=1):
-# the library functions answer every one active or used (the AIR does not mark them unused); a
-# function made with the constant false answers the kernel's `b` and the per-patch `pg` inactive,
-# and a pipeline of it answers unused the stage input descriptor's buffer only `b` reads and the
-# bindings `extra`, `tex`, `tint`, `args`, `smp` and `tg`. A function's control points are one
-# argument: read at all, every field is active (`p` too, where only `cps[2].q` is read); unread,
-# every field is inactive. A post-tessellation pipeline answers its vertex descriptor's buffers
-# unused either way.
+# bindings of each kind that a function constant leaves unread (the fixture specialized_inputs,
+# identical on the M4 and the M3 Max, and under MTL_DEBUG_LAYER=1): the library functions answer
+# every one active or used (the AIR does not mark them unused); a function made with the constant
+# false answers the kernel's `b` and the per-patch `pg` inactive, and a pipeline of it answers
+# unused the stage input descriptor's buffer only `b` reads and the bindings `extra`, `tex`, `tint`,
+# `args`, `smp` and `tg`. A function's control points are one argument: read at all, every field is
+# active (`p` too, where only `cps[2].q` is read); unread, every field is inactive. A
+# post-tessellation pipeline answers its vertex descriptor's buffers unused either way.
 == functions_specialized_inputs
 function reflection_gated_control_points functionType=1 patchType=2 patchControlPointCount=4
 vertexAttributes count=3
@@ -2263,8 +2257,8 @@ options=2 same
 options=3 same
 # The function constants of functions whose module's static initializer stores a pointer a constant
 # chooses, and of kernels that call visible functions or take their addresses (the fixtures
-# constant_pointers and function_addresses, EVs RRX-ci2-m4 and RRX-ci2-m3, identical on the M4 and
-# the M3 Max, and under MTL_DEBUG_LAYER=1): a kernel that reads the stored pointer reads the
+# constant_pointers and function_addresses, identical on the M4 and the M3 Max, and under
+# MTL_DEBUG_LAYER=1): a kernel that reads the stored pointer reads the
 # constant that chose it (cp_pointer: cp_flag), and nothing for the literal table it points into; a
 # kernel reads none of the constants of a visible function it calls or whose address it takes
 # (fa_direct, fa_pointers), and those of a plain function it calls out of line (fa_plain:
@@ -2318,14 +2312,13 @@ functionConstants count=1
   functionConstant key=fa_sub_k name=fa_sub_k type=29 index=1 required=true
 library userAnnotation=nil count=0
 # The function constants of the functions of modules whose static initializer branches on a constant
-# (the fixtures constant_initializers, EVs RRX-ci2-m4 and RRX-ci2-m3, and constant_loops, EVs
-# RRX-ci3-m4 and RRX-ci3-m3, identical on the M4 and the M3 Max, and under MTL_DEBUG_LAYER=1): every
-# function lists the constants a loop runs on (its trip count, the value its body folds, and the
-# constant a loop of a literal trip count folds), a function that reads no global included (ci_none,
-# cl_none); a constant combined with a loop's result after it (cl_z), with nothing looped (cl_w), or
-# by a select (ci_b, ci_c, ci_flag) is listed only by the functions that read its global; a
-# definedness query a global stores lists its constant, optional, for the functions that read the
-# global (ci_opt). In the fixture constant_branches (EVs RRX-ci4-m4 and RRX-ci4-m3, identical, and
+# (the fixtures constant_initializers, and constant_loops, identical on the M4 and the M3 Max, and
+# under MTL_DEBUG_LAYER=1): every function lists the constants a loop runs on (its trip count, the
+# value its body folds, and the constant a loop of a literal trip count folds), a function that
+# reads no global included (ci_none, cl_none); a constant combined with a loop's result after it
+# (cl_z), with nothing looped (cl_w), or by a select (ci_b, ci_c, ci_flag) is listed only by the
+# functions that read its global; a definedness query a global stores lists its constant, optional,
+# for the functions that read the global (ci_opt). In the fixture constant_branches (identical, and
 # under MTL_DEBUG_LAYER=1), no constant spreads: an if/else whose arm divides is listed, its
 # condition with its arms' constants (cb_flag, cb_p, cb_d, cb_q), only by the function that reads
 # its global, and a loop in a function the initializer calls out of line lists its trip count and

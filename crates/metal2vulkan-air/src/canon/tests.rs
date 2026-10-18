@@ -3599,8 +3599,8 @@ fn absent_memory_ops(e: &Entry) -> Vec<AbsentAccess> {
         .collect()
 }
 
-/// Threadgroup memory a function constant removed has no contents Metal defines (measured, EV
-/// GTG-tg-metal: it varies with the validation layer). A load through it, at its own address or one
+/// Threadgroup memory a function constant removed has no contents Metal defines (measured: it
+/// varies with the validation layer). A load through it, at its own address or one
 /// derived from it in one or more steps, and an atomic on it are the absent read of their type (an
 /// atomic's stays though nothing observes it); a store into it, a plain one or an atomic one, is
 /// dropped. The argument leaves the entry point, and no address derived from it stays.

@@ -468,10 +468,9 @@ impl Drop for ListedPages {
 /// A hold on the memory a buffer's bytes lie in now, and on nothing else of the buffer
 /// (`Buffer::memory_hold`), kept and never read: an image bound to them (a texture's over the
 /// buffer, a heap's texture's) keeps it while a command buffer may still reach the image, past the
-/// buffer and texture objects. Metal frees those at their release (EVs XRB-bft1-m4,
-/// XRB-hep1-m4): the buffer's range of the address space and its range token go with the buffer,
-/// and a no-copy buffer's deallocator runs as its pages go; only the `VkBuffer` and its memory,
-/// or host pages' import, stay.
+/// buffer and texture objects. Metal frees those at their release: the buffer's range of the
+/// address space and its range token go with the buffer, and a no-copy buffer's deallocator runs as
+/// its pages go; only the `VkBuffer` and its memory, or host pages' import, stay.
 #[derive(Clone)]
 pub(super) enum MemoryHold {
     Fixed { _pages: Arc<FixedPages> },
@@ -1747,7 +1746,7 @@ impl Device {
     /// mode in device-local memory where the device maps such.
     ///
     /// Refused: a length of 0 or past the device's `max_buffer_length` (`Nil`, as plain Metal
-    /// answers nil, its validation stopping it; EV TTG-nil10-m4), `Memoryless` storage
+    /// answers nil, its validation stopping it), `Memoryless` storage
     /// (`Invalid`).
     pub fn new_buffer(&self, length: u64, options: ResourceOptions) -> Result<Buffer, Error> {
         self.keep_room();
@@ -2409,8 +2408,7 @@ impl Heap {
                 heap: self.clone(),
                 bytes: heap_bytes.clone(),
                 offset,
-                // A placement heap's buffer answers aliasable from the start, as Metal's does
-                // (EVs SPH-alias1-m3, -m4).
+                // A placement heap's buffer answers aliasable from the start, as Metal's does.
                 aliasable: AtomicBool::new(self.heap_type() == HeapType::Placement),
             }),
         }))
@@ -2534,9 +2532,9 @@ impl Buffer {
     /// buffer the rest of the host pages its range touches, as far as its `VkBuffer` holds them
     /// (all of them where the device's buffer of them fits the pages, `host_memory.rs`). Plain
     /// Metal reads the caller's bytes there, current ones, from the pointer to its pages' end
-    /// (an M4 under macOS 27.0.1, EV SPCrp-probe4-m4 `p_nocopy_*`). Past them, and past another
-    /// buffer's length, its API validation stops the copy, and plain Metal reads zeros, bytes
-    /// written past the length, or another resource's: refused (`Invalid`).
+    /// (an M4 under macOS 27.0.1). Past them, and past another buffer's length, its API validation
+    /// stops the copy, and plain Metal reads zeros, bytes written past the length, or another
+    /// resource's: refused (`Invalid`).
     pub(super) fn copy_reach(&self) -> u64 {
         match &self.0.bytes {
             Bytes::Own(own) => own.shape().reach,
@@ -3186,8 +3184,7 @@ impl Buffer {
     }
 
     /// `isAliasable`: whether `make_aliasable` was called on an automatic heap's buffer; true for
-    /// a placement heap's from the start, and false outside a heap, as Metal answers (EVs
-    /// SPH-alias1-m3, -m4).
+    /// a placement heap's from the start, and false outside a heap, as Metal answers.
     pub fn is_aliasable(&self) -> bool {
         match &self.0.bytes {
             Bytes::Heap(bytes) => bytes.aliasable.load(Ordering::Acquire),

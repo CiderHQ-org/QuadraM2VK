@@ -1,8 +1,8 @@
 //! Metal's anisotropic filter, emulated by the device's samples at explicit levels.
 //!
-//! **The rule** (an Apple M4 on macOS 27.0.1, a probe rounds ANI-p1-m4 to ANI-p7-m4, our own
+//! **The rule** (an Apple M4 on macOS 27.0.1, seven probe rounds, our own
 //! synthetic textures and gradients; the M3 Max on macOS 26.7 answered every compared footprint
-//! identically, EV ANI-p4-m3). For a sample of a 2D plane with gradients `gx`, `gy` in level-0
+//! identically). For a sample of a 2D plane with gradients `gx`, `gy` in level-0
 //! texels through a sampler of `maxAnisotropy` rounded up to a power of two, `a = 2^la`
 //! (`metal::sampler::vk_sampler`):
 //!
@@ -51,7 +51,7 @@
 //! hold it, above 0, so on a texture of one level too) is handed as `2^-12`, which keeps the
 //! device's minification filter and blends nothing a device's mip precision keeps. A nearest mip
 //! filter's level is handed whole too: the 3090's anisotropic sampler blends the next level at a
-//! fractional explicit level whatever its mipmap mode (EV ANI-l3-nv3090). Under a nearest mip
+//! fractional explicit level whatever its mipmap mode. Under a nearest mip
 //! filter or none, level 0 where Metal minifies is handed as `0.25` where the device's sampler of
 //! the binding is isotropic (`metal::sampler::device_anisotropy`), where Vulkan reads level 0 by
 //! the min filter at it on every device, and which a device that rounds `2^-12` to 0 (the 780M's
@@ -1379,7 +1379,7 @@ fn read_levels(
     let next = fb.binary(BinOp::FAdd, whole, onef)?;
     let nearest = fb.select(up, next, whole)?;
     // Whole levels only: an RTX 3090's anisotropic sampler blends the next level at an explicit
-    // fractional level whatever its mipmap mode (EV ANI-l3-nv3090). Level 0 above Metal's 0 is
+    // fractional level whatever its mipmap mode. Level 0 above Metal's 0 is
     // handed as `MINIFIED_ZERO` or `minified_nearest`, which keep the device's minification
     // filter.
     let minified = f32c(fb, MINIFIED_ZERO)?;

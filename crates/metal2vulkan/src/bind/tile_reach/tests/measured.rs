@@ -1,8 +1,8 @@
-//! Every case EVs RRS3-reach1, -reach2, -reach3 and -reach4c measured on an Apple M4 under macOS
-//! 27.0.1 (each in a process of its own; the kit `share-reach` measured the same 111 answers on
-//! an Apple M3 Max under macOS 26.7), as the probes drew it, and the tiles it reached: a
-//! `DontCare`-loaded, stored color attachment prefilled with 0x11 bytes, whose reached tiles hold
-//! zero or the draw's red and whose others keep the bytes (the module docs). Our own probes.
+//! Every case our probes measured on an Apple M4 under macOS 27.0.1 (each in a process of its own;
+//! the kit `share-reach` measured the same 111 answers on an Apple M3 Max under macOS 26.7), as the
+//! probes drew it, and the tiles it reached: a `DontCare`-loaded, stored color attachment prefilled
+//! with 0x11 bytes, whose reached tiles hold zero or the draw's red and whose others keep the bytes
+//! (the module docs). Our own probes.
 
 use super::reference::Cull;
 use super::{clip, clip_z, full, lines, points, quad, quad_z, row, tris, Draw, Other, Row};
@@ -653,7 +653,7 @@ pub(super) fn rows() -> Vec<Row> {
 }
 
 /// The triangle with a corner at `(cx + ex, cy + ey)` and legs `leg` along +x and +y (y down), as
-/// EV RRS3-reach5 drew it.
+/// our probe drew it.
 fn corner(cx: f64, cy: f64, ex: f64, ey: f64, leg: f64) -> Vec<[f32; 4]> {
     vec![
         clip(cx + ex, cy + ey),
@@ -663,7 +663,7 @@ fn corner(cx: f64, cy: f64, ex: f64, ey: f64, leg: f64) -> Vec<[f32; 4]> {
 }
 
 /// The sliver from `(x, x + 0.25)` to `(x + l, x + l + 0.25)`, its third vertex `(x, x + 0.35)`:
-/// in a band of `y - x` that holds no pixel centre (EVs RRS3-reach6b and -reach7).
+/// in a band of `y - x` that holds no pixel centre.
 fn sliver(x: f64, l: f64) -> Vec<[f32; 4]> {
     vec![
         clip(x, x + 0.25),
@@ -673,8 +673,7 @@ fn sliver(x: f64, l: f64) -> Vec<[f32; 4]> {
 }
 
 /// The sliver from `(40, y0)` along `(w, h)`, of slope `p / q`, its third vertex `0.3 / q` below
-/// its first, in a band of `y - (p / q) x` midway between the values pixel centres take (EVs
-/// RRS3-reach8 and -reach9).
+/// its first, in a band of `y - (p / q) x` midway between the values pixel centres take.
 fn band(w: f64, h: f64, p: f64, q: f64) -> Vec<[f32; 4]> {
     let m = p / q;
     let gap = 1.0 / q;
@@ -689,7 +688,7 @@ fn band(w: f64, h: f64, p: f64, q: f64) -> Vec<[f32; 4]> {
 }
 
 /// The diagonal sliver from `(40, 40 + b)` to `(40 + l, 40 + l + b)`, its third vertex 0.1 below
-/// its first (EV RRS3-reach9).
+/// its first.
 fn diag(l: f64, b: f64) -> Vec<[f32; 4]> {
     vec![
         clip(40.0, 40.0 + b),
@@ -698,11 +697,11 @@ fn diag(l: f64, b: f64) -> Vec<[f32; 4]> {
     ]
 }
 
-/// EVs RRS3-reach5, -reach6b, -reach7, -reach8 and -reach9 (an Apple M4 under macOS 27.0.1, each
-/// case in a process of its own, two rounds alike): the small-primitive cull's precision (1/256),
-/// its space (the viewport's), what makes it test a triangle's samples (a box of at most 12 pixel
-/// centres at 1 sample, 10 or 20 positions at 2 or 4) and the default sample positions. Our own
-/// probes, built in their order and given the answers of `REACH5` to `REACH9`.
+/// Our probes (an Apple M4 under macOS 27.0.1, each case in a process of its own, two rounds
+/// alike): the small-primitive cull's precision (1/256), its space (the viewport's), what makes it
+/// test a triangle's samples (a box of at most 12 pixel centres at 1 sample, 10 or 20 positions at
+/// 2 or 4) and the default sample positions. Our own probes, built in their order and given the
+/// answers of `REACH5` to `REACH9`.
 pub(super) fn later_rows() -> Vec<Row> {
     let mut drawn: Vec<(&'static str, Vec<[f32; 4]>, u32, Option<[f64; 4]>)> = Vec::new();
     let mut add = |probe: &'static str, v: Vec<[f32; 4]>, samples: u32, vp: Option<[f64; 4]>| {
@@ -864,7 +863,7 @@ pub(super) fn later_rows() -> Vec<Row> {
         .collect()
 }
 
-/// EV RRS3-reach5-m4's answers, in the probe's order.
+/// Our probe's answers, in the probe's order.
 const REACH5: &[(&str, &str)] = &[
     ("cull_xy_e1", ".... .... .... ...."),
     ("cull_xy_e2", ".... .... .... ...."),
@@ -905,7 +904,7 @@ const REACH5: &[(&str, &str)] = &[
     ("ms4_centre", ".... .... .... .... .... .... .... ...."),
     ("ms4_quarter", ".... .... .... .... .... .... .... ...."),
 ];
-/// EV RRS3-reach6b-m4's answers, in the probe's order.
+/// Our probe's answers, in the probe's order.
 const REACH6: &[(&str, &str)] = &[
     ("sliver_40_L0.5", ".... .... .... ...."),
     ("sliver_40_L1.0", ".... .... .... ...."),
@@ -941,7 +940,7 @@ const REACH6: &[(&str, &str)] = &[
     ("sliver_40_L4.0_ccw", ".... .R.. .... ...."),
     ("sliver_40_L8.0_ccw", ".... .R.. .... ...."),
 ];
-/// EV RRS3-reach7-m4's answers, in the probe's order.
+/// Our probe's answers, in the probe's order.
 const REACH7: &[(&str, &str)] = &[
     ("diag_40.6_L3.2", ".... .... .... ...."),
     ("diag_40.5_L3.0", ".... .... .... ...."),
@@ -968,7 +967,7 @@ const REACH7: &[(&str, &str)] = &[
     ("steep_L3.0", ".... .... .R.. ...."),
     ("shallow_L3.0", ".R.. .... .... ...."),
 ];
-/// EV RRS3-reach8-m4's answers, in the probe's order.
+/// Our probe's answers, in the probe's order.
 const REACH8: &[(&str, &str)] = &[
     ("band_8.0x1.0", ".... .... .... ...."),
     ("band_1.0x8.0", ".... .... .... ...."),
@@ -981,7 +980,7 @@ const REACH8: &[(&str, &str)] = &[
     ("band_3.4x3.4", ".... .... .... ...."),
     ("band_3.6x3.6", ".... .R.. .... ...."),
 ];
-/// EV RRS3-reach9-m4's answers, in the probe's order.
+/// Our probe's answers, in the probe's order.
 const REACH9: &[(&str, &str)] = &[
     ("n12_w1.3_m9_1", ".... .... .... ...."),
     ("n12_w1.8_m3_1", ".... .... .... ...."),
@@ -1019,7 +1018,7 @@ const REACH9: &[(&str, &str)] = &[
     ("ms2_diag_L4.0", ".... .R.. .... ...."),
 ];
 
-/// EV RRS3-reach10-m4's slivers, in the probe's order: at `samples` samples, the triangle
+/// Our probe's slivers, in the probe's order: at `samples` samples, the triangle
 /// `(x0, y0)`, `(x0 + w, y0 + h)`, `(x0, y0 + t)` (pixels, y down), holding no sample position,
 /// its closed box holding 11 to 14 positions at 2 samples and 21 to 24 at 4, in several slopes.
 const SLIVERS10: &[(u32, f64, f64, f64, f64, f64)] = &[
@@ -1082,7 +1081,7 @@ const SLIVERS10: &[(u32, f64, f64, f64, f64, f64)] = &[
     ),
 ];
 
-/// EV RRS3-reach10-m4's answers, in the probe's order.
+/// Our probe's answers, in the probe's order.
 const REACH10: &[(&str, &str)] = &[
     ("ms2_c11_m2_1", ".... .... .... ...."),
     ("ms2_c11_m1_2", ".... .... .... ...."),

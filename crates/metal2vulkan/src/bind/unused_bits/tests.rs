@@ -303,7 +303,7 @@ fn every_padded_word_takes_its_code_s_load_code_with_its_low_six_bits_zeroed() {
 }
 
 /// Every code of each bfloat form takes its load code (`ExtendedRange::load_code`, measured for
-/// every code: EV FRT-bfp1-m4), under a mask of every tile, across several workgroups: 56,829
+/// every code), under a mask of every tile, across several workgroups: 56,829
 /// codes move (the NaNs to `0x7fc0`, the magnitudes from 65,536 to infinity, those below
 /// `2^-14` to `half`'s step), the 8,707 others stay.
 #[test]
@@ -321,7 +321,7 @@ fn every_bfloat_code_takes_its_load_code() {
         let load = |c: u16| form.load_code(u32::from(c)).expect("a bfloat code");
         let moved = codes.iter().filter(|&&c| load(c) != u32::from(c)).count();
         assert_eq!(moved, 56_829, "{form:?}");
-        // A few of Metal's answers (EV FRT-bfp1-m4): the NaNs, an overflow, the codes `half`
+        // A few of Metal's answers: the NaNs, an overflow, the codes `half`
         // holds, and the double rounding below `2^-14`.
         for (code, metal) in [
             (0x7f81, 0x7fc0),

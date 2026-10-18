@@ -275,13 +275,12 @@ pub(crate) fn stage_direct(source: &StageSource, depth: u32, m: &mut Meter) -> R
 /// The buffers a vertex or stage input descriptor adds before a stage's own bindings, named
 /// `<prefix>.N`: one per buffer a set attribute (`(attribute index, buffer index)` in
 /// `attributes`; the caller leaves out those of format `Invalid`, whose buffers Metal's
-/// reflection does not list, EVs RFL-layoutprobe3-m3 and -m4) reads, in buffer index order, its
-/// data size its layout's stride (`strides`, by buffer index; `None` for a dynamic stride, whose
-/// data size is `u64::MAX`, Metal's `NSUIntegerMax`), used when one of its attributes is one the
-/// stage reads (`read`). The caller has checked the layouts (`check_layouts`): Metal stops at an
-/// assertion where a set attribute's buffer "has no stride", whether the stage reads the
-/// attribute or not, without API validation too (EVs RTL-refl-m3b and -m4b, RFL-layoutprobe-m3
-/// and -m4).
+/// reflection does not list) reads, in buffer index order, its data size its layout's stride
+/// (`strides`, by buffer index; `None` for a dynamic stride, whose data size is `u64::MAX`, Metal's
+/// `NSUIntegerMax`), used when one of its attributes is one the stage reads (`read`). The caller
+/// has checked the layouts (`check_layouts`): Metal stops at an assertion where a set attribute's
+/// buffer "has no stride", whether the stage reads the attribute or not, without API validation
+/// too.
 fn descriptor_buffers(
     prefix: &str,
     attributes: impl IntoIterator<Item = (u32, u32)>,

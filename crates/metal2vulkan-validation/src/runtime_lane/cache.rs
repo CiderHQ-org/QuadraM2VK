@@ -51,7 +51,7 @@ const SECOND_DIR: &str = "M2V_LANE_SHADER_CACHE_DIR";
 /// The environment variable that names the case to [`second_process`] (by default [`CASE`])
 /// and to [`a_named_case_cold_and_warm`].
 const CASE_VAR: &str = "M2V_LANE_SHADER_CACHE_CASE";
-/// The committed profile the survey translates for: the RADV device the timing EV measures on.
+/// The committed profile the survey translates for: the RADV device the timing run measures on.
 const SURVEY_PROFILE: &str = "amd-780m-radv";
 /// The line [`second_process`] reports on.
 const REPORT: &str = "SHADER-CACHE-SECOND-PROCESS";
@@ -261,12 +261,12 @@ fn a_second_process_reads_the_first_ones_translations() {
     two_processes(CASE);
 }
 
-/// [`two_processes`] on the case [`CASE_VAR`] names: the timing EV runs it in release mode on
+/// [`two_processes`] on the case [`CASE_VAR`] names: a timing run takes it in release mode on
 /// the slowest translation [`rank_public_cases_by_translation_time`] found.
 #[test]
-#[ignore = "a release-mode measurement: the timing EV names the case"]
+#[ignore = "a release-mode measurement: a timing run names the case"]
 fn a_named_case_cold_and_warm() {
-    let case = std::env::var(CASE_VAR).expect("the timing EV names the case");
+    let case = std::env::var(CASE_VAR).expect("a timing run names the case");
     two_processes(&case);
 }
 
@@ -275,7 +275,7 @@ fn a_named_case_cold_and_warm() {
 /// them for [`SURVEY_PROFILE`], slowest first: the ten slowest are printed as `RANKED` lines.
 /// CPU only: it opens no device. A case that does not compile is left out.
 #[test]
-#[ignore = "a release-mode survey: the timing EV runs it"]
+#[ignore = "a release-mode survey: a timing run takes it"]
 fn rank_public_cases_by_translation_time() {
     let device = crate::engine::load_device(SURVEY_PROFILE).unwrap();
     let inputs = VariantKey::new().lowering_inputs(Stage::Kernel);

@@ -3,7 +3,7 @@
 //! writes them there (the consumer's macOS 26.6.2 guests, whose RenderBox makes one over a `'b3a8'`
 //! surface at every boot).
 //!
-//! **Metal's answers** (EV XRR2-xrs1-m4, our own probe `xrs1`: an Apple M4 under macOS 27.0.1,
+//! **Metal's answers** (our own probe `xrs1`: an Apple M4 under macOS 27.0.1,
 //! plain; CoreVideo `'b3a8'` surfaces of 64 x 64, 37 x 5 and 33 x 17, a 16 x 8 texture over a
 //! 64 x 64 one, and `IOSurfaceCreate` two-plane surfaces with plane 0 at 256, 272 and 260 bytes a
 //! row and plane 1 at 64, 80 and 68, plane 1 right after plane 0 or 48 or 4 bytes past it; four
@@ -32,7 +32,7 @@
 //!   OSTypes and over surfaces without planes; there it reads alpha 0, and over plane 1 its rows
 //!   overlap. A blit between such a texture and another texture moves both planes' bytes at rows
 //!   of plane 0's GPU rows (the defect, at this texture's rows), and a fill writes plane 0's words
-//!   at its GPU rows (EV XRR2-xrs2-m4).
+//!   at its GPU rows.
 //!
 //! **Held** as a heap's such texture is (`heap_two_planes.rs`): one `R32G32_UINT` image (each
 //! texel's color word, then its alpha byte), a shadow of the surface's bytes (`shadow.rs`,

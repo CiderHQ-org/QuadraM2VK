@@ -432,7 +432,7 @@ fn entry_address(
 /// plus the two header words. The loads never take the null address: the null entry's reads take
 /// the directory's last entry's address, a listed table's, and their words are dropped. A branch
 /// around them did not keep a driver from reading the null address: lavapipe faulted at address 0
-/// on the null and unknown ids with the loads behind `address != 0` (EV FPC-segv2-lvpx86). The
+/// on the null and unknown ids with the loads behind `address != 0`. The
 /// binder refuses an addressed directory that lists no table (`bind::heap`), and the branch skips
 /// the loads where the last entry's address is null too. `None` only where the branch merged no
 /// value.

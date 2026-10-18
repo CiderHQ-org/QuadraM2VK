@@ -1,7 +1,7 @@
 //! Swizzled textures read and written through storage slots on the device the cfg selects, under
 //! the validation layer.
 //!
-//! What plain Metal does (EV RRP-probe1-m4, an M4 under macOS 27.0.1, plain twice alike; misuse,
+//! What plain Metal does (an M4 under macOS 27.0.1, plain twice alike; misuse,
 //! which Metal's validation stops: "writes texture whose usage (0x11) doesn't specify
 //! MTLTextureUsageShaderWrite"): a 2 x 2 texture of `ShaderRead | ShaderWrite |
 //! PixelFormatView` usage viewed with a swizzle (the view's usage then `ShaderRead |

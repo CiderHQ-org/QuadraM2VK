@@ -118,9 +118,9 @@
 //! completed. It is a `VkSubmitInfo` of its own, first in the batch's `vkQueueSubmit`, waiting for
 //! what the work waits for but a binary semaphore: MoltenVK 1.4.1 runs each `VkSubmitInfo` as a
 //! Metal command buffer of its own (`MVKQueue::submit`), and lost a copy into a new image
-//! recorded in the same one as the image's move (EVs STL-p4a-mvk4, STL-p4b-mvk4); Mesa's drivers
-//! merge it with the work, as it signals nothing (`vk_queue_submits_merge`), so it costs no
-//! kernel submission of its own. A failed `vkQueueSubmit` made none of it, or lost the device.
+//! recorded in the same one as the image's move; Mesa's drivers merge it with the work, as it
+//! signals nothing (`vk_queue_submits_merge`), so it costs no kernel submission of its own. A
+//! failed `vkQueueSubmit` made none of it, or lost the device.
 //!
 //! [`Device::new_texture_with_vk_image`]: crate::Device::new_texture_with_vk_image
 //!

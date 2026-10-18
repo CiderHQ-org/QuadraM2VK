@@ -2,8 +2,7 @@
 //! type, and `fill_buffer_pattern4`, on the device the cfg selects, under the validation layer,
 //! against Metal's bytes.
 //!
-//! Metal's answers: EVs FRT-fil1-m4 and FRT-fil3-m4, an Apple M4 under macOS 27.0.1, our own
-//! probe `fil.m` (no guest data):
+//! Metal's answers: an Apple M4 under macOS 27.0.1, our own probe `fil.m` (no guest data):
 //!
 //! - **Texels.** Into a private 128 x 64 texture of each of 70 formats, one texel a color: the
 //!   probe's first 512 sweep colors (its 68 specials in every channel, then NaNs, specials and
@@ -154,7 +153,7 @@ fn sweep_colors() -> Vec<[f64; 4]> {
     colors
 }
 
-/// The probe's NaN and edge colors (EV FRT-fil3-m4): each of 24 NaNs and 26 doubles at rounding
+/// The probe's NaN and edge colors: each of 24 NaNs and 26 doubles at rounding
 /// edges in every channel, then in each channel apart over (0.25, 0.5, 0.75, 1).
 fn edge_colors() -> Vec<[f64; 4]> {
     const NAN_BITS: [u64; 24] = [
@@ -234,7 +233,7 @@ fn fnv(bytes: impl Iterator<Item = u8>) -> u64 {
 }
 
 /// Metal's texels: each format's raw value and texel bytes, and FNV-1a of its texels of the
-/// first 512 sweep colors (EV FRT-fil1-m4) and of the 250 NaN and edge colors (EV FRT-fil3-m4).
+/// first 512 sweep colors and of the 250 NaN and edge colors.
 const METAL: [(u32, u64, u64, u64); 70] = [
     (1, 1, 0x7480cb8d2fff4810, 0x4ddf512a557ec47b),
     (10, 1, 0x9d85de351e6e548f, 0x35a785406c3be905),

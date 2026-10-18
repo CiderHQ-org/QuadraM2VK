@@ -86,7 +86,7 @@ pub enum AppleOnly {
     /// extended-range texture whose fill Metal writes where the runtime holds no bytes (one of its
     /// own memory at a width that is not a multiple of 4, where Metal's blit rows move texels
     /// between rows; a heap's texture other than a one-level 2D one) or whose bytes Metal's blits
-    /// read back no rule fits (one of its own of more than one level; EV XRR2-fill4-m4).
+    /// read back no rule fits (one of its own of more than one level).
     /// 1D, 3D, cube and array textures and regions of several depth images are measured and built.
     FillUnmeasured,
 }

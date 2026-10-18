@@ -452,7 +452,7 @@ pub fn require_seq_cst(cx: &mut SelectCx<'_>) -> Result<(), Error> {
 /// Vulkan has no sequentially consistent order (its memory model reads `SequentiallyConsistent`
 /// as `AcquireRelease`), and an acquire-release fence lets two threads that each store and then
 /// load the other's word both read the old values (store buffering), which Metal's `seq_cst`
-/// fence forbids (EV SDX-p1-m3: none in 13.1 M pairs on an M3, where a relaxed pair showed 2,684).
+/// fence forbids (none in 13.1 M pairs on an M3, where a relaxed pair showed 2,684).
 /// The increments of one word are totally ordered, and each reads the one before it, so of two
 /// such fences the later synchronizes with the earlier: what preceded the earlier fence happens
 /// before what follows the later one.

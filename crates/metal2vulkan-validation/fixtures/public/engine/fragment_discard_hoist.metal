@@ -2,8 +2,8 @@
 // Owned fixture: a simdgroup count before a discard of
 // whole quads, in the thirteen shapes measured for where Metal's compiler places it, past the
 // discard (`hoisted_*`) or ahead of it, counting the dropped quads (`counted_*`), as Apple M4 and
-// M3 Max draw them (EVs REF-hfix, REF-hfix-m3). Written for this repository; no third-party
-// source. One loop (`hoisted_loop`, bounded by a buffer value).
+// M3 Max draw them. Written for this repository; no third-party source. One loop (`hoisted_loop`,
+// bounded by a buffer value).
 #include <metal_stdlib>
 using namespace metal;
 
@@ -149,7 +149,7 @@ fragment int4 counted_call_use(BASE, device int *rw [[buffer(3)]]) {
 }
 
 // Metal moves the sum past this nested discard, but counted the dropped quads with the same
-// nesting around another inner condition (EV REF-dhoist's `m_branch`): its placement is unknown.
+// nesting around another inner condition: its placement is unknown.
 fragment int4 hoisted_nested(BASE) {
     PROLOGUE
     int sel = k;

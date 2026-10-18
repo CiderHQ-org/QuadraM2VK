@@ -299,9 +299,8 @@ const AUX_MAP_CHUNK: u64 = 256;
 /// image's start and `size / 256` bytes long (16 for a 4096-byte image), so the rounding ends the
 /// image at the end of its last chunk, and no other resource lies in a chunk the GPU writes the
 /// image's compression data through: a resource bound right after the 16 bytes lost the rest of
-/// their 64-byte line to a stale write-back (EVs SPH-ccsrepro-ms01 and SPH-ccsrepro-13900), and one
-/// bound at the next 256 bytes kept its contents (SPH-ccsrepro2). The cost there is at most 240
-/// bytes an image; other devices keep the image's own size.
+/// their 64-byte line to a stale write-back, and one bound at the next 256 bytes kept its contents.
+/// The cost there is at most 240 bytes an image; other devices keep the image's own size.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct ImagePlacement {
     /// `bufferImageGranularity`, a power of two.
@@ -1248,7 +1247,7 @@ pub(super) enum Owner {
     /// command that reaches the image, a batch that took its first move and holds only the image
     /// included. It holds the memory alone, never the buffer: the texture objects hold the buffer,
     /// as a Metal texture over a buffer retains it, and Metal frees the buffer at their release
-    /// even while a command buffer still reaches the texture through its ID (EV XRB-bft1-m4): its
+    /// even while a command buffer still reaches the texture through its ID: its
     /// range and range token go then, and a no-copy buffer's deallocator runs (the caller's hold on
     /// an IOSurface goes).
     Buffer {
@@ -1871,11 +1870,10 @@ impl Device {
     /// `twin`), with the storage usage a texture without `ShaderWrite` or `ShaderAtomic` lacks,
     /// and the sampled usage one without `ShaderRead` lacks, each where it costs the image
     /// nothing (`if_free`: the same memory size and alignment): plain Metal writes and reads such
-    /// a texture (an M4 under macOS 27.0.1, EV RRP-probe1-m4 `mu_writeto_readonly`,
-    /// `mu_readfrom_writeonly`; its validation stops them), and a valid program's texture keeps
-    /// its compression. The candidate is the image the texture with the usage would have, taken
-    /// only where it keeps the image's format and twin; elsewhere a binding that needs the usage
-    /// is the runtime's gap (`Feature::UndeclaredTextureUsage`, `binding_view`).
+    /// a texture (an M4 under macOS 27.0.1; its validation stops them), and a valid program's
+    /// texture keeps its compression. The candidate is the image the texture with the usage would
+    /// have, taken only where it keeps the image's format and twin; elsewhere a binding that needs
+    /// the usage is the runtime's gap (`Feature::UndeclaredTextureUsage`, `binding_view`).
     fn with_undeclared_usage(
         &self,
         plan: ImagePlan,
@@ -1912,7 +1910,7 @@ impl Device {
             .check(self.properties().texture_rules())
             .map_err(|refused| refused.error(call))?;
         // The device makes no framebuffer-only texture: plain Metal asserts "framebufferOnly ==
-        // NO" (EV ZCI2-rotprobe-m4's `private` and `depth`).
+        // NO".
         if descriptor.framebuffer_only {
             return Err(invalid(
                 call,
@@ -1922,8 +1920,7 @@ impl Device {
         // A memoryless texture of any type is made, as plain Metal makes and renders through one.
         let memoryless = storage == StorageMode::Memoryless;
         // But for a two-plane extended-range cube or cube array, which plain Metal makes
-        // memoryless (EVs XRR2-tcb1-m3, XRR2-tcb1-m4): the runtime's two-plane attachments are
-        // built and measured as 2D ones alone.
+        // memoryless: the runtime's two-plane attachments are built and measured as 2D ones alone.
         if memoryless && memoryless_two_plane_cube(layout.pixel_format, layout.texture_type) {
             return Err(Error::Unsupported(
                 Unsupported::not_implemented(Feature::Format).naming_format(layout.pixel_format),
@@ -2021,8 +2018,8 @@ impl Device {
         let plan = plan_image(layout, usage, false, &facts)
             .map_err(|refusal| image_error(call, refusal))?;
         // The usage the texture lacks, as for a texture of its own: plain Metal writes a texture
-        // over a buffer made without `ShaderWrite` and reads one made without `ShaderRead` (EV
-        // CFR-probe3-m4). A linear image aliasing the buffer's memory takes it where one with it
+        // over a buffer made without `ShaderWrite` and reads one made without `ShaderRead`. A
+        // linear image aliasing the buffer's memory takes it where one with it
         // still lies on Metal's layout there: a linear image is never compressed, and its memory is
         // the buffer's, so the usage costs it nothing. Else the image without it, and else the
         // shadow, with it where that costs the shadow nothing.
@@ -2575,7 +2572,7 @@ impl Device {
     /// [`new_image`](Self::new_image)'s image for a texture of its own memory the program made
     /// (`newTextureWithDescriptor:`, `newSharedTextureWithDescriptor:`): zero in every texel, as
     /// the texels of Metal's new textures read zero in every storage mode but `Memoryless`, whose
-    /// texture holds nothing (an Apple M4 under macOS 27.0.1, EV ZIN-zp1-m4: `Private` ones
+    /// texture holds nothing (an Apple M4 under macOS 27.0.1: `Private` ones
     /// Metal does not compress read zero, each time, also right after a texture of the same
     /// shape was written and released; those it compresses read a fixed pattern, which the
     /// runtime does not give yet). The runtime's own images keep [`new_image`](Self::new_image)'s
@@ -2766,7 +2763,7 @@ impl Device {
         // copies on the host and makes and places it so (`texture/host_copy.rs`), else as
         // before.
         // A PVRTC texture copies through submissions: MoltenVK's host copies of its blocks take
-        // Metal's CPU order, not Vulkan's rows (EV STL-hic1-mvk4). A `Private` texture takes no CPU
+        // Metal's CPU order, not Vulkan's rows. A `Private` texture takes no CPU
         // copy, so its image takes no host-transfer usage.
         let private = storage == StorageMode::Private;
         // A `Shared` or `Managed` texture's image the staging queue copies, where it takes no
@@ -3351,7 +3348,7 @@ impl Heap {
     /// Refused: another heap type (`Invalid`); an offset that is not a multiple of the answered
     /// alignment, bytes past the heap's end (`Nil`, as plain Metal answers nil, its validation
     /// stopping them); a two-plane extended-range cube or cube array, which Metal makes here
-    /// (`NotImplemented(Format)`, EV TTG-nil4-m4); what [`Heap::new_texture`] refuses of an
+    /// (`NotImplemented(Format)`); what [`Heap::new_texture`] refuses of an
     /// automatic heap's texture. A descriptor plain Metal answers nil for answers `Nil` before
     /// the heap's own rules (its storage mode, `framebuffer_only`, the offset), and one Metal
     /// stops `Invalid` before them.
@@ -3369,11 +3366,10 @@ impl Heap {
 /// The driver fact under which a texture of `pf` reads its texels as Metal's, where `pf` is a
 /// BC format, whose decode Vulkan leaves to the implementation: BC1 to BC3 (the sRGB forms too)
 /// `ColorBlockDecodeIsMetals`, BC4 and BC5 `ChannelBlockDecodeIsMetals`. NVIDIA's decodes both
-/// otherwise (EVs SID2-bcd2-nv3090 and SID2-bcd3-nv5080), RADV's the second (EV SID2-cdc2-radv).
-/// BC6H `Bc6hBlockDecodeIsMetals` and BC7 (its sRGB form through its unorm view and Metal's table,
-/// `metal::texel_format::srgb_raw`) `Bc7BlockDecodeIsMetals`, measured as the others, where every
-/// driver was taken to decode them as Metal does (lavapipe's BC7 lies a `float` ulp off). Every
-/// other format is `None`.
+/// otherwise, RADV's the second. BC6H `Bc6hBlockDecodeIsMetals` and BC7 (its sRGB form through its
+/// unorm view and Metal's table, `metal::texel_format::srgb_raw`) `Bc7BlockDecodeIsMetals`,
+/// measured as the others, where every driver was taken to decode them as Metal does (lavapipe's
+/// BC7 lies a `float` ulp off). Every other format is `None`.
 pub(super) fn block_decode_fact(pf: PixelFormat) -> Option<DriverFact> {
     use PixelFormat as P;
     match pf {
@@ -4545,7 +4541,7 @@ impl Texture {
     }
 
     /// `heapOffset`: where the texture lies in a placement heap; 0 for a texture of an automatic or
-    /// sparse heap, as Metal answers (SPR-heaptex1, and a Metal heap probe on the M3 Max and an M4
+    /// sparse heap, as Metal answers (and a Metal heap probe on the M3 Max and an M4
     /// for texture buffers), and for one outside a heap.
     pub fn heap_offset(&self) -> u64 {
         if let Some(buffer) = self.heap_texels() {
@@ -4564,9 +4560,8 @@ impl Texture {
     /// error, as in Metal.
     ///
     /// A texture outside a heap stays as it is, its texels kept and not aliasable, as plain Metal
-    /// leaves a `Shared` and a `Private` one where its validation stops the call (EV
-    /// `SPH-heapmis1-m4`). Refused for a sparse heap's texture (`NotImplemented(SparseHeaps)`, not
-    /// measured).
+    /// leaves a `Shared` and a `Private` one where its validation stops the call. Refused for a
+    /// sparse heap's texture (`NotImplemented(SparseHeaps)`, not measured).
     pub fn make_aliasable(&self) -> Result<(), Error> {
         if let (Some(place), Some(heap)) = (self.heap_place(), &self.0.heap) {
             heap.make_aliasable(place.offset, place.size, &place.aliasable);
@@ -4583,7 +4578,7 @@ impl Texture {
 
     /// `isAliasable`: whether `make_aliasable` was called on an automatic heap's texture (or a
     /// texture it views); true for a placement heap's texture and its views from the start, and
-    /// false otherwise, as Metal answers (EVs SPH-alias1-m3, -m4).
+    /// false otherwise, as Metal answers.
     pub fn is_aliasable(&self) -> bool {
         if let Some(buffer) = self.heap_texels() {
             return buffer.is_aliasable();
@@ -4843,8 +4838,8 @@ impl Texture {
         }
         // A texture made in `X32_Stencil8` holds a stencil texture's bytes: plain Metal views it
         // as `Depth32Float_Stencil8` over them in its GPU's own layout, no defined answer (an M4
-        // under macOS 27.0.1, EV SPCrp-probe5-m4 `v_x32_as_d32s8`), and stops every other
-        // format ("not castable", SPCrp-probe4-m4 `x_view_*`). Only its own format views it.
+        // under macOS 27.0.1), and stops every other format ("not castable"). Only its own format
+        // views it.
         let own_x32 = matches!(&self.0.storage,
             Storage::Image(image) if image.plan().pixel_format == PixelFormat::X32Stencil8);
         if own_x32 && record.pixel_format != PixelFormat::X32Stencil8 {
@@ -4949,7 +4944,7 @@ impl Texture {
     /// the y bit lowest, with a `bytes_per_row` of 0 or of the level's row of blocks
     /// (`pvrtc::cpu_order_position`). Refused `NotImplemented(PvrtcBlockOrder)`: a region other
     /// than a whole level, which Metal's validation stops and whose blocks plain Metal places by no
-    /// rule the runtime has found (EV CFR-probe7-m4), and another `bytes_per_row`, unmeasured.
+    /// rule the runtime has found, and another `bytes_per_row`, unmeasured.
     ///
     /// 32-bit float depth is copied as Metal holds it, any `float`, on every device: without
     /// `VK_EXT_depth_range_unrestricted` Vulkan leaves a copied value outside `[0, 1]` undefined
@@ -5324,7 +5319,7 @@ impl Texture {
         self.check_bytes_reached(call)?;
         // A texture over a buffer the CPU reaches has its bytes there whatever its storage mode:
         // a `Private` IOSurface plane's `getBytes` and `replaceRegion` read and write the
-        // surface's bytes on plain Metal (IOS-modes2-m4). A texture over a `Private` buffer takes
+        // surface's bytes on plain Metal. A texture over a `Private` buffer takes
         // its storage mode, and is refused as a private texture is.
         let reached = match &self.0.storage {
             Storage::Image(_) => false,
@@ -5370,8 +5365,7 @@ impl Texture {
             return Ok(None);
         }
         // A packed two-plane YCbCr texture's CPU calls move nothing: Metal's `getBytes` leaves
-        // the bytes and its `replaceRegion` the planes as they were, at any bytes per row (EV
-        // TXN2-ycp1-m4).
+        // the bytes and its `replaceRegion` the planes as they were, at any bytes per row.
         if ycbcr_format(record.pixel_format).is_some_and(|f| f.packed) {
             check_region(record, &region, &unit)
                 .map_err(|problem| invalid(call, Problem::Copy(problem)))?;
@@ -5418,7 +5412,7 @@ impl Texture {
         };
         if cpu_order.is_some() {
             // Metal's order of a region other than a whole level, which its validation stops,
-            // follows no rule the runtime has found (EV CFR-probe7-m4), and another pitch than 0
+            // follows no rule the runtime has found, and another pitch than 0
             // and the level's row is not measured. A whole block of a level smaller than one is
             // the whole level (plain Metal's bytes on an Apple M3 Max under macOS 26.7, a probe;
             // its validation stops it).

@@ -481,13 +481,12 @@ struct Case<'a> {
 
 /// Every setter writes its word at the arguments' offset 0 for an index no argument has, whatever
 /// argument lies there, a range's words in turn (the last stands), and no other byte changes, as
-/// plain Metal writes them (an M4, EVs SWP-misuse3-m4 and RFL-argmisuse1-m4, whose descriptors
-/// these are: two pointers, a texture then a pointer, and one sampler, the arguments at offsets 0
-/// and 32 of a buffer of 0xaa bytes; Metal's debug layer asserts). A buffer set as `None` writes 0
-/// whatever the offset, and a sampler state made without argument-buffer support writes its own
-/// ID, as plain Metal writes both (RFL-argmisuse1-m4). In a layout of 4 bytes the word passes
-/// the encoded length, as Metal's did (RFL-argmisuse2-m4), and is refused where it would pass
-/// the argument buffer's end.
+/// plain Metal writes them (an M4, whose descriptors these are: two pointers, a texture then a
+/// pointer, and one sampler, the arguments at offsets 0 and 32 of a buffer of 0xaa bytes; Metal's
+/// debug layer asserts). A buffer set as `None` writes 0 whatever the offset, and a sampler state
+/// made without argument-buffer support writes its own ID, as plain Metal writes both. In a layout
+/// of 4 bytes the word passes the encoded length, as Metal's did, and is refused where it would
+/// pass the argument buffer's end.
 #[test]
 fn a_setter_at_an_index_no_argument_has_writes_at_offset_0() {
     on_device(|device| {
@@ -633,7 +632,7 @@ fn a_setter_at_an_index_no_argument_has_writes_at_offset_0() {
                 set: &|e| e.set_sampler_state(Some(&without), 0).unwrap(),
                 written: &[(0, without.gpu_resource_id().0)],
             },
-            // A layout of 4 bytes: the 8 bytes pass its encoded length (RFL-argmisuse2-m4).
+            // A layout of 4 bytes: the 8 bytes pass its encoded length.
             Case {
                 label: "small4_buffer_5",
                 descriptors: &one_uint,
@@ -694,13 +693,12 @@ fn a_setter_at_an_index_no_argument_has_writes_at_offset_0() {
 }
 
 /// An encoder made from a reflected buffer binding (`newArgumentEncoderWithBufferBinding:`)
-/// writes where Metal's does (EVs UNI-reflfix-9 and -10): one from a library's binding as the
-/// function's own encoder, in 224 bytes; one from a pipeline's binding, whose arrays reflect
-/// stride 0, in 208 bytes with both elements of `ptrs` at element 0's place (the last written
-/// kept). Both answer the same constant offsets and the 8-byte encoder of the nested argument
-/// buffer `sub`. A plain buffer's binding makes Metal's encoder of no bytes, alignment 1, which
-/// API validation lets through; the function's encoder at that buffer's index is refused, as
-/// validation stops it (EV UNI-reflfix-11).
+/// writes where Metal's does: one from a library's binding as the function's own encoder, in 224
+/// bytes; one from a pipeline's binding, whose arrays reflect stride 0, in 208 bytes with both
+/// elements of `ptrs` at element 0's place (the last written kept). Both answer the same constant
+/// offsets and the 8-byte encoder of the nested argument buffer `sub`. A plain buffer's binding
+/// makes Metal's encoder of no bytes, alignment 1, which API validation lets through; the
+/// function's encoder at that buffer's index is refused, as validation stops it.
 #[test]
 fn a_binding_makes_its_argument_encoder() {
     const FUNCTION: &str = "reflection_argument_buffers";

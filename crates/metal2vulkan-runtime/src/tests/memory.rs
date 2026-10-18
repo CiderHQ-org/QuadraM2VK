@@ -170,8 +170,8 @@ fn no_class_takes_amd_device_coherent_memory() {
 /// host-cached `Shared` memory where the device has it among them, else the class's memory as any
 /// image does (a copy through a submission could queue behind the program's work), never a type
 /// the host maps without coherence (ANV's cached type on Arrow Lake-S). On the memory types and
-/// host-transfer image memory type bits measured (EVs XSH-hrp2-3090, XSH-hrp4-radv), the RTX 3090
-/// has none, so its images take resizable BAR, and the Radeon 780M (unified) takes its host-cached
+/// host-transfer image memory type bits measured, the RTX 3090 has none, so its images take
+/// resizable BAR, and the Radeon 780M (unified) takes its host-cached
 /// system memory, type 5, where it took RADV's uncached device-local type before. MoltenVK's shared
 /// type on Apple GPUs (`MVK_VK_MEMORY_TYPE_METAL_SHARED` with `DEVICE_LOCAL`, MoltenVK 1.4.1) and
 /// lavapipe's one type are host-cached and device-local; a device with both kinds of device-local

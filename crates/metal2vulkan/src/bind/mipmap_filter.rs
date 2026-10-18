@@ -3,7 +3,7 @@
 //! `generateMipmapsForTexture:` makes each level from the one above it. On an Apple M4 every
 //! level, and on an Apple M3 Max every level of a 3D texture and the first level of each of its
 //! passes over a 2D chain (below), is the GPU's bilinear (trilinear in 3D) filter of the level
-//! above at each texel's centre. EVs CPM-probe2 to -6 measured it on every mipmappable colour
+//! above at each texel's centre. Our probes measured it on every mipmappable colour
 //! format: 115,086 values of random, extreme and impulse chains of 2D textures, arrays, cubes and
 //! 3D textures, halving and not, and 173,505 taps of level widths, heights and depths up to 16383.
 //! The M3 Max computes a 2D chain's other levels by its own shader arithmetic (its "tail"). This
@@ -14,13 +14,13 @@
 //! **By release** ([`MipmapRule`]). The passes, the tail and the half below are macOS 26.7's
 //! ([`MipmapRule::AppleM3MaxPasses`]). Under macOS 27.0.1 the M3 Max makes every level of every
 //! chain by its filter of the level above, carrying no field through a half
-//! ([`MipmapRule::Filter`]; EVs M27-mips1-m3 to M27-mips4-m3, our own probes: the 679 chains of
-//! the 26.7 tables rerun and 182 3D chains of 14 formats at 13 extents, `measured_m3_27.txt`, and
-//! 556 chains of random bytes, 2D textures to 16384x64 and 4096x4096, arrays, cubes and 3D textures
-//! of 32 formats). Every level of every chain matched, `A1BGR5Unorm`'s and `ABGR4Unorm`'s, the 3D
-//! chains of odd widths and heights and the half-float ones among them, but at two 8-bit sRGB near
-//! ties (below). Its reciprocal is not separated from an Apple M4's by those chains (levels 41 and
-//! 61 texels wide among them); the chain takes the M3 Max's.
+//! ([`MipmapRule::Filter`]; our own probes: the 679 chains of the 26.7 tables rerun and 182 3D
+//! chains of 14 formats at 13 extents, `measured_m3_27.txt`, and 556 chains of random bytes, 2D
+//! textures to 16384x64 and 4096x4096, arrays, cubes and 3D textures of 32 formats). Every level of
+//! every chain matched, `A1BGR5Unorm`'s and `ABGR4Unorm`'s, the 3D chains of odd widths and heights
+//! and the half-float ones among them, but at two 8-bit sRGB near ties (below). Its reciprocal is
+//! not separated from an Apple M4's by those chains (levels 41 and 61 texels wide among them); the
+//! chain takes the M3 Max's.
 //!
 //! **The taps.** Along each axis, destination texel `i` of `w` from `W` reads source texels
 //! `x0` and `min(x0 + 1, W - 1)` with weights `256 - q` and `q`: the centre's coordinate is
@@ -31,8 +31,8 @@
 //! that stays one has one tap. A texel's eight taps weigh `ax ay az` (of `2^24`; a 2D level's
 //! depth taps weigh 256 and 0) split along y last: the second row's part of `ax az` (of `2^16`)
 //! is `ax az qy` rounded half down to `2^-16`, the first row's the rest of `ax az`. Only a 3D level
-//! of a width, height or depth that does not halve has a split that is not exact (EV M27-imp1-m3,
-//! an Apple M3 Max under macOS 27.0.1: every weight of a 41x61x5 `RGBA32Float` chain's first
+//! of a width, height or depth that does not halve has a split that is not exact (an Apple M3 Max
+//! under macOS 27.0.1: every weight of a 41x61x5 `RGBA32Float` chain's first
 //! computed level, one tap a channel, read back exactly). Each layer of an array or cube is filtered
 //! alone.
 //!
@@ -108,28 +108,28 @@
 //! grid), stored as `v 510 + 384` rounded to nearest even; an extended-range sRGB sum's magnitude
 //! in steps of `2^-13` is rounded half away from zero to 11 significant bits before its search.
 //!
-//! **The M3 Max's tail** (EVs CPM-probe2-m3 and -probe6-m3: 115,743 values of squares to 64x64,
-//! arrays and cubes, and 2D chains to 61x37, none missed but 4 of `A1BGR5Unorm` and
-//! `ABGR4Unorm`). Each axis of destination texel `i` of `w` from `W`: the centre `x = (i + 0.5)
-//! W / w` rounded to a half float (nearest even), to an `f32` from a level of 4096 texels or more
-//! along the axis (`tail::HALF_CENTRE`), `c = x - 0.5`, `x0 = floor(c)` and `t = c - x0` (a
-//! multiple of `2^-11`); source texels `x0` and `min(x0 + 1, W - 1)`. Each field mixes its four
-//! values along x and then y, `mix(a, b, t) = a (1 - t) + b t` with `b t` rounded and then the sum
-//! (one fused multiply-add), each to a half float for `RGBA16Float`'s family, the formats carried
-//! through a half, and to `f32` for the rest (subnormals kept; IEEE's infinities and NaNs, a NaN or
-//! an infinity times a weight of 0 a NaN). An axis of one texel reads it alone, with no mix along
-//! it: an infinity there stays one (a one-texel tall level of `RG11B10Float`'s 4096x4 strip). The
-//! values it reads are the level above's codes as it reads them (`code / den` rounded to the
-//! field's precision, an sRGB byte's linear step over 4095, an extended-range code's `(code - 384)
-//! / 510` or its signed linear step over 8192, a float's value), or, where its passes say so
-//! (above), the level above's unrounded values (the first level's `Q / (den 2^k)` rounded to `f32`,
-//! the sRGB step sum over 4095, the 16-bit code's value, the half answers of the formats summed as
-//! halves, a float's value). It stores `v den` rounded to nearest even for a normalized or
-//! 16-bit code, `v 4095` rounded and searched for an sRGB byte, `v 510 + 384` (alpha's `v`
-//! clamped to `[0, 1]`) or `|v| 8192` searched for an extended-range code, an `f32`'s value with
-//! those below `2^-126` flushed to their signed zero, a half's value, an unsigned float's value
-//! toward zero (the largest finite above it), and `RGB9E5Float`'s shared exponent of the largest
-//! channel with each mantissa floored. Every zero is +0.
+//! **The M3 Max's tail** (115,743 values of squares to 64x64, arrays and cubes, and 2D chains to
+//! 61x37, none missed but 4 of `A1BGR5Unorm` and `ABGR4Unorm`). Each axis of destination texel `i`
+//! of `w` from `W`: the centre `x = (i + 0.5) W / w` rounded to a half float (nearest even), to an
+//! `f32` from a level of 4096 texels or more along the axis (`tail::HALF_CENTRE`), `c = x - 0.5`,
+//! `x0 = floor(c)` and `t = c - x0` (a multiple of `2^-11`); source texels `x0` and `min(x0 + 1,
+//! W - 1)`. Each field mixes its four values along x and then y, `mix(a, b, t) = a (1 - t) + b
+//! t` with `b t` rounded and then the sum (one fused multiply-add), each to a half float for
+//! `RGBA16Float`'s family, the formats carried through a half, and to `f32` for the rest
+//! (subnormals kept; IEEE's infinities and NaNs, a NaN or an infinity times a weight of 0 a NaN).
+//! An axis of one texel reads it alone, with no mix along it: an infinity there stays one (a
+//! one-texel tall level of `RG11B10Float`'s 4096x4 strip). The values it reads are the level
+//! above's codes as it reads them (`code / den` rounded to the field's precision, an sRGB byte's
+//! linear step over 4095, an extended-range code's `(code - 384) / 510` or its signed linear step
+//! over 8192, a float's value), or, where its passes say so (above), the level above's unrounded
+//! values (the first level's `Q / (den 2^k)` rounded to `f32`, the sRGB step sum over 4095, the
+//! 16-bit code's value, the half answers of the formats summed as halves, a float's value). It
+//! stores `v den` rounded to nearest even for a normalized or 16-bit code, `v 4095` rounded and
+//! searched for an sRGB byte, `v 510 + 384` (alpha's `v` clamped to `[0, 1]`) or `|v| 8192`
+//! searched for an extended-range code, an `f32`'s value with those below `2^-126` flushed to their
+//! signed zero, a half's value, an unsigned float's value toward zero (the largest finite above
+//! it), and `RGB9E5Float`'s shared exponent of the largest channel with each mantissa floored.
+//! Every zero is +0.
 //!
 //! **The sum.** Each field of the texel sums its taps' decoded values times `n`, by its format's
 //! rule (`S` exact unless stated, in units of `2^-24`):
@@ -157,8 +157,8 @@
 //!   away from zero to 24 bits, `+0` where it lies below `2^-126` before rounding. A NaN tap
 //!   of nonzero weight, or both infinities, gives `0x7fc00000`; one infinity gives itself. A 3D
 //!   level sums each depth slice's four terms so, at the slice's own `e`, then truncates each
-//!   slice's sum toward zero to `2^(e - 38)` of the larger `e` and adds them (EV M27-mips4-m3:
-//!   every value of the 3D `RGBA32Float` and `R16Float` chains, halving and not, on an Apple M3
+//!   slice's sum toward zero to `2^(e - 38)` of the larger `e` and adds them (every value of the 3D
+//!   `RGBA32Float` and `R16Float` chains, halving and not, on an Apple M3
 //!   Max under macOS 27.0.1).
 //! - **16-bit float**: the same accumulator at `2^(e - 17)`, rounded half away from zero to a
 //!   half, subnormals kept; a NaN gives `0x7e00`.

@@ -2,26 +2,25 @@
 //! itself takes: a cube's comparison gather (`cube::gather`) and a linear comparison
 //! (`linear::sum`).
 //!
-//! **What Metal compares** (Apple M4, macOS 27.0.1; the RT13-cg3-probe-m4 and RT13-cg4-probe-m4 for
-//! cube gathers, RT13-px3-probe-m4 and RT13-px4-probe-m4 for 2D linear and nearest comparisons and
-//! comparison gathers, each run with and without Metal's validation layer; the Apple M3 Max, macOS
-//! 26.7, answers every lane of the four alike). Each tap is compared on its own, the reference `r`
-//! against the tap's depth `x` as `r OP x` in `f32`, `1` where it passes and `0` elsewhere; a NaN
-//! fails every ordered comparison and passes `not_equal`. A float format's reference and texel are
-//! compared as given (NaN, denormals and values outside `[0, 1]` included); a `Depth16Unorm`
-//! texture's as codes, the texel's its code and the reference's the code of its exact product with
-//! 65535 ([`reference`]). The shader compares the values' integer keys ([`key`]), not the floats: a
-//! device's float comparison may flush a denormal to zero, as x86 lavapipe's does
-//! (`runtime_lane::depth_compares` with float comparisons: 82 of 3,392 `Depth32Float` comparisons
-//! differed from Metal's, such as the least denormal reference passing `less_equal` against a zero
-//! texel; with the keys, none), and Metal's does not. A tap outside a border axis compares the
-//! border's depth as it would a texel's (RT13-px4-probe-m4: zero, opaque black and opaque white
-//! borders under `less` and `greater`, every lane of 2,048).
+//! **What Metal compares** (Apple M4, macOS 27.0.1; the probes for cube gathers, for 2D linear and
+//! nearest comparisons and comparison gathers, each run with and without Metal's validation layer;
+//! the Apple M3 Max, macOS 26.7, answers every lane of the four alike). Each tap is compared on its
+//! own, the reference `r` against the tap's depth `x` as `r OP x` in `f32`, `1` where it passes and
+//! `0` elsewhere; a NaN fails every ordered comparison and passes `not_equal`. A float format's
+//! reference and texel are compared as given (NaN, denormals and values outside `[0, 1]` included);
+//! a `Depth16Unorm` texture's as codes, the texel's its code and the reference's the code of its
+//! exact product with 65535 ([`reference`]). The shader compares the values' integer keys
+//! ([`key`]), not the floats: a device's float comparison may flush a denormal to zero, as x86
+//! lavapipe's does (`runtime_lane::depth_compares` with float comparisons: 82 of 3,392
+//! `Depth32Float` comparisons differed from Metal's, such as the least denormal reference passing
+//! `less_equal` against a zero texel; with the keys, none), and Metal's does not. A tap outside a
+//! border axis compares the border's depth as it would a texel's (zero, opaque black and opaque
+//! white borders under `less` and `greater`, every lane of 2,048).
 //!
-//! **A linear comparison** (RT13-px2-probe-m4 and RT13-px3-probe-m4: 2,560 lanes clamping to the
-//! edge, 2,048 to zero, and 2,032 through a runtime pixel sampler; `Depth16Unorm` alike) is an
-//! `r8Unorm` texture's linear sample of the passes as codes 0 and 255 (`linear::sum` with
-//! [`PASS_FORMAT`]): the exact weighted sum of the passes rounded once onto `1/4080`, ties up.
+//! **A linear comparison** (2,560 lanes clamping to the edge, 2,048 to zero, and 2,032 through a
+//! runtime pixel sampler; `Depth16Unorm` alike) is an `r8Unorm` texture's linear sample of the
+//! passes as codes 0 and 255 (`linear::sum` with [`PASS_FORMAT`]): the exact weighted sum of the
+//! passes rounded once onto `1/4080`, ties up.
 //!
 //! `TapCompare::new` takes the sampler's compare function; a constexpr sampler's is known when
 //! the function compiles. A runtime sampler's is its word's `COMPARE` field, the raw
@@ -279,14 +278,14 @@ fn float(fb: &mut FunctionBuilder<'_>, v: f32) -> BResult<SValue> {
     value(fb, c)
 }
 
-/// The value a comparison compares reference `r` as (the RT13-cg3-probe-m4 and RT13-cg4-probe-m4,
-/// Apple M4 on macOS 27.0.1): a float format's as given, NaN and values outside `[0, 1]` included;
-/// where `normalized` (`Depth16Unorm`), its code: `r` clamped into `[0, 1]` (`m`) and the exact
-/// product `m · 65535` rounded to the nearest integer (at the one half-way reference, 0.5, up to
-/// 32768), a NaN kept. The product is rounded once in `f32` to `k` and corrected: with `h = m ·
-/// 65536` (exact), the exact product lies above `k + 1/2` exactly where `h - (k + 1/2) > m`, and
-/// below `k - 1/2` where `h - (k - 1/2) < m`, each difference exact where it decides (its operands
-/// within a factor of two). Metal rounds the exact product: RT13-cg4-probe-m4's 96 references whose
+/// The value a comparison compares reference `r` as (the probes, Apple M4 on macOS 27.0.1): a float
+/// format's as given, NaN and values outside `[0, 1]` included; where `normalized`
+/// (`Depth16Unorm`), its code: `r` clamped into `[0, 1]` (`m`) and the exact product `m · 65535`
+/// rounded to the nearest integer (at the one half-way reference, 0.5, up to 32768), a NaN kept.
+/// The product is rounded once in `f32` to `k` and corrected: with `h = m · 65536` (exact), the
+/// exact product lies above `k + 1/2` exactly where `h - (k + 1/2) > m`, and below `k -
+/// 1/2` where `h - (k - 1/2) < m`, each difference exact where it decides (its operands within a
+/// factor of two). Metal rounds the exact product: our probe's 96 references whose
 /// `f32` product rounds to a half-way point between the other code and the exact product's code
 /// each read the exact product's.
 fn reference(fb: &mut FunctionBuilder<'_>, r: SValue, normalized: SValue) -> BResult<SValue> {

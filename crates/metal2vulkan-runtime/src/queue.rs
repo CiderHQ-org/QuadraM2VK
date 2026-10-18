@@ -7,7 +7,7 @@
 //!
 //! A queue holds at most its `maxCommandBufferCount` uncompleted command buffers, as Metal's does
 //! (measured on an M3 Max with macOS 26.7 and an M4 with macOS 27.0.1, with and without API
-//! validation: EVs `RT10-qlprobe`, `-qlprobe2`, `-qlprobe3`):
+//! validation):
 //! - `newCommandQueue` holds 64; `newCommandQueueWithMaxCommandBufferCount:` holds the count
 //!   given (every count from 1 to `NSIntegerMax` is taken). A count of 0 fails Metal's command
 //!   queue creation validation, which ends the process with or without API validation; the
@@ -40,7 +40,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::Instant;
 
 /// The uncompleted command buffers a queue holds when made with `new_command_queue`: Metal's
-/// default `maxCommandBufferCount`, measured (`RT10-qlprobe`).
+/// default `maxCommandBufferCount`, measured.
 const DEFAULT_MAX_COMMAND_BUFFER_COUNT: usize = 64;
 
 /// A Metal command queue (`MTLCommandQueue`). Cheap to clone (a retain); `Send + Sync`.

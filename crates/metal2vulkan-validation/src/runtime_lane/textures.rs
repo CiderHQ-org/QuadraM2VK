@@ -41,8 +41,8 @@ pub(super) fn texel_bytes(pf: PixelFormat) -> Option<usize> {
 
 /// Whether Metal makes no texture of `pf` from a descriptor alone, answering nil to the device's
 /// and a heap's calls (`TextureProblem::NoTextureOfFormat`), where measured on an Apple M4 under
-/// macOS 27.0.1: the two-plane YCbCr formats (EV XRR2-ycf3p1b-m4, each of the 69), made only over
-/// an IOSurface's planes, and `RGBA16Float_XR`, `AnyDepth` and `AnyStencil` (EV XRR2-ycc1-m4).
+/// macOS 27.0.1: the two-plane YCbCr formats (each of the 69), made only over an IOSurface's
+/// planes, and `RGBA16Float_XR`, `AnyDepth` and `AnyStencil`.
 pub(super) fn no_texture_alone(pf: PixelFormat) -> bool {
     metal2vulkan::metal::format::ycbcr_format(pf).is_some()
         || matches!(
@@ -52,8 +52,8 @@ pub(super) fn no_texture_alone(pf: PixelFormat) -> bool {
 }
 
 /// `R10Unorm_X6` and `RG10Unorm_X12`, and their `_sRGB` twins, are made only over memory a texture
-/// is given, as Metal's textures of them store nothing in memory of their own (EVs XRR2-x6a and
-/// -x6b): every creator of a texture in memory of its own refuses them `NotImplemented(Format)`
+/// is given, as Metal's textures of them store nothing in memory of their own: every creator of a
+/// texture in memory of its own refuses them `NotImplemented(Format)`
 /// naming the format (the device's `new_texture`, an automatic heap's `new_texture`,
 /// `new_shared_texture`, each for a 2D texture and a texture buffer, and the heap size query), and
 /// a caller's buffer's `new_texture` makes them.
@@ -342,7 +342,7 @@ fn textures_copy_levels_slices_and_views() {
             let image = (z * bpi) as usize..(z * bpi + 64) as usize;
             assert_eq!(back[image.clone()], src[image], "image {z}");
         }
-        // A `bytesPerImage` off Metal's rules, as plain Metal takes it (EV SPH-bpi1-m4):
+        // A `bytesPerImage` off Metal's rules, as plain Metal takes it:
         // `get_bytes` writes images exactly that far apart, in turn, a later image's bytes over an
         // earlier one's; a blit reads and writes each row at its offset rounded down to 4 bytes,
         // out of the texture in turn too.
@@ -432,8 +432,7 @@ fn textures_copy_levels_slices_and_views() {
             assert_eq!(back, bytes, "{pf:?}");
         }
         // A combined depth/stencil format copies its depth, 4 bytes a texel, at any pitch, the
-        // stencil left as it is, as plain Metal does (EV SPH-cpu1-m4 `ds.rp.bpr10`,
-        // `ds.gb.bpr10`).
+        // stencil left as it is, as plain Metal does.
         if let Ok(combined) = texture_2d(&device, PixelFormat::Depth32FloatStencil8, 2, 1) {
             let queue = device.new_command_queue().unwrap();
             let blit = |buffer: &Buffer, into: bool, option: BlitOption, bpr: u64| {
@@ -501,8 +500,8 @@ fn textures_copy_levels_slices_and_views() {
                 Problem::Copy(CopyProblem::Region)
             ))
         );
-        // A pitch between 0 and a row copies nothing, as plain Metal copies nothing (EV
-        // SPCrp-probe1-m4 `bpr_rr_*`): the new texture still reads zero.
+        // A pitch between 0 and a row copies nothing, as plain Metal copies nothing: the new
+        // texture still reads zero.
         assert_eq!(
             small.replace_region(Region::new_2d(0, 0, 4, 2), 0, 0, &[0xab; 32], 8, 0),
             Ok(())

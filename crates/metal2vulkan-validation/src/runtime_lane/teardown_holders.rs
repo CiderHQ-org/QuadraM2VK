@@ -287,8 +287,8 @@ fn states_sharing_an_immutable_sampler_set_outlive_the_device_in_every_order() {
 /// A host step's draw of a sampled state made after its command buffer's commit, as Metal
 /// allows one: the owned fixture `examples/icb_argument_sampling.ll`, whose fragment function
 /// samples the texture its argument buffer holds through a constexpr sampler. Metal refuses a state
-/// that supports indirect command buffers whose functions use a direct texture or sampler argument
-/// (EV RRS3-icbtex3-m4), and the runtime refuses a mapped texture a function sampling handles can
+/// that supports indirect command buffers whose functions use a direct texture or sampler argument,
+/// and the runtime refuses a mapped texture a function sampling handles can
 /// reach (`MappedSampling::Handles`), so no address-mode map reaches the step's variant: its
 /// immutable sampler is the state's, and the step shares the set the state's creation made on the
 /// program's thread, making none of its own (`WorkCounts::host_step_sampler_sets_made` stays). The

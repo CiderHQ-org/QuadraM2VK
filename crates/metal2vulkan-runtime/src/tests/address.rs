@@ -1,5 +1,5 @@
 //! The Metal address space (`address.rs`): ranges the runtime picks, and pinned ones as Metal
-//! honours them (probes `RT7-place-probe1` to `4` on an M3 Max and an M4).
+//! honours them (on an M3 Max and an M4).
 
 use crate::address::{
     AddressPlacement, AddressRange, AddressSpace, GpuAddress, Place, PlacementConflict, RecordsId,
@@ -117,7 +117,7 @@ fn a_pin_holds_its_pages_and_guard_pages_after_them() {
 }
 
 /// A pin of `n` pages holds them and one guard page, rounded up to 32 KiB, as an Apple M4 holds
-/// a pinned buffer's and heap's (EV TXN3-span1-m4: a 1-page pin is made at the first page after
+/// a pinned buffer's and heap's (a 1-page pin is made at the first page after
 /// that span and at none before it, for 1 to 8, 15 to 17, 64 and 65 pages, and for each and a
 /// byte); the page after an odd count's guard page is free, where the runtime once held two guard
 /// pages after a range of more than one page.
@@ -558,8 +558,8 @@ fn records_take_the_lowest_free_id_and_leave_the_spaces_alone() {
 }
 
 /// Indirect command buffers' records IDs after a reservation are the ones Metal hands out, from a
-/// pool of 32 (measured on an M4: EV MESH-rid3-m4 `i_17_20` and `i_1_40`, and MESH-rid4-m4 `b5_a`,
-/// predicted before it was measured), and only the first reservation with an ID counts.
+/// pool of 32 (measured on an M4: predicted before it was measured), and only the first reservation
+/// with an ID counts.
 #[test]
 fn records_ids_after_a_reservation_are_metal_s() {
     let cases: [(&[u64], &[(u64, u64)]); 3] = [
@@ -587,7 +587,7 @@ fn records_ids_after_a_reservation_are_metal_s() {
     }
 }
 
-/// A placed indirect command buffer's ID is not the pool's (EV MESH-icb1-m4 on an M4, plain and
+/// A placed indirect command buffer's ID is not the pool's (on an M4, plain and
 /// under API validation): plain allocation neither skips it (1, 2, then 3 placed, then 3 and 4
 /// plain) nor gets it back once the placed buffer is gone (1 to 4 plain, 2 placed and gone: 5, 6
 /// and 7, then 2 once the plain 2 is gone), and a placement counts as an allocation for a later
@@ -635,7 +635,7 @@ fn a_placed_records_id_is_not_the_pool_s() {
 
 /// Each records ID has one slot, the buffer made last with it, placed or plain, which a kernel
 /// encoding through the ID reaches; once it is gone the ID reaches none, even while an earlier
-/// buffer with it lives, and an earlier one's going changes nothing (EV MESH-icb1-m4 on an M4,
+/// buffer with it lives, and an earlier one's going changes nothing (on an M4,
 /// the `r_` cases: a kernel's encode through the ID, each buffer executed alone afterwards).
 #[test]
 fn the_buffer_made_last_with_a_records_id_holds_its_slot() {

@@ -1,6 +1,6 @@
 //! Metal's precise `sin` and `cos` of a `float`: Metal's own form, `t S(t)` of the folded
 //! quarter-turn value `t` and its hardware's `sinc`, which follows Apple's runtime library; the
-//! `sinc` through a model of the hardware's, read off directly (EV MBB-sinc1-m3).
+//! `sinc` through a model of the hardware's, read off directly.
 //!
 //! **Reduction** to quarter turns, `x 2/π = k + r`, by Metal's own reduction ([`quarter::turns`],
 //! without the error term of its large operands). The quarter turns fold `r` into `t` in `[-1, 1]`
@@ -16,7 +16,7 @@
 //! model ([`SINC`]) is a cubic per segment by Horner's rule in integers, 12 bits below `S`'s ulp,
 //! fitted to the hardware's words at every `m`: Metal's word at 8,377,984 of the 8,388,608 `m`
 //! below 1 (99.873 %), and through it Metal's precise `sin` and `cos` at 99.86 % to 99.91 % of
-//! the measured operands (EV MBB-trig1-m3), where the correctly rounded value is at 45 % to 58 %.
+//! the measured operands, where the correctly rounded value is at 45 % to 58 %.
 //! `S(0)` is `RN(π/2)` and `S(1)` is 1, as the hardware answers.
 //!
 //! **Special operands**: below `2^-12` in magnitude or at it (a zero and a denormal included),
@@ -24,8 +24,8 @@
 //!
 //! **Metal's `half` `sin` and `cos`** ([`half_sin_cos`]) are its own form, which follows Apple's
 //! runtime library: a shorter reduction (`2/π`'s first two parts, no table) with the same fold and
-//! `sinc`, and `sin(x) = x` below `1/64`. Rounded to `half`, Metal's word at every `half` (EVs
-//! MB2-half1-m3 and -m4), the 6 (`sin`) and 2 (`cos`) where that is not the correctly rounded value
+//! `sinc`, and `sin(x) = x` below `1/64`. Rounded to `half`, Metal's word at every `half`, the 6
+//! (`sin`) and 2 (`cos`) where that is not the correctly rounded value
 //! among them.
 
 use crate::lower::arith::libm::atan::read;

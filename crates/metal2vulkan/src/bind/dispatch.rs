@@ -417,7 +417,7 @@ pub(crate) const TILE_THREADGROUP_SIDE: u32 = 32;
 
 /// Whether Metal's tile-dispatch layout of a `width x height x 1` threadgroup is the one the
 /// lowering reproduces (`lower::dispatch`'s `tile_pos` and `tile_index`), as measured on Apple
-/// silicon (EV TTG-probe1-m4): both sides powers of two from 2 to 32, or the single thread, where
+/// silicon: both sides powers of two from 2 to 32, or the single thread, where
 /// each simdgroup is a whole block of its column (`b x 32 / b` positions, `b` the column's width up
 /// to 8, the column the threadgroup's width up to 16) or the threadgroup is one simdgroup at most 8
 /// wide. Metal lays out the others another way (a 16x2 threadgroup's one simdgroup, a 1xN

@@ -98,8 +98,8 @@ pub struct PipelineOptions {
     /// ends Metal's process (measured on an M4).
     pub placement: IdPlacement,
     /// `label`: the descriptor's label, which the state answers as its `label` (`None` is nil,
-    /// `Some("")` an empty one, as Metal keeps them). The state keeps the label it was made with
-    /// (EV CFR-probe5-m4). It is not part of what the state compiles.
+    /// `Some("")` an empty one, as Metal keeps them). The state keeps the label it was made with.
+    /// It is not part of what the state compiles.
     pub label: Option<String>,
 }
 

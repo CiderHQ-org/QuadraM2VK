@@ -49,7 +49,7 @@ incremental = true
 
 # Dev and test builds keep line tables (file and line in backtraces) and no other debug info, and
 # dependencies none. Full debug info made each link of a binary holding the translator, the runtime
-# and validation take 35-47 s; on an i9-13900 (EV BLD-base1) the clean workspace build's links
+# and validation take 35-47 s; on an i9-13900 the clean workspace build's links
 # summed to 726 s against 94 s with this, and its target to half the size. A debugger session that
 # needs variables builds with CARGO_PROFILE_DEV_DEBUG=full. Like the release profile above, this
 # changes only how the repo builds itself.

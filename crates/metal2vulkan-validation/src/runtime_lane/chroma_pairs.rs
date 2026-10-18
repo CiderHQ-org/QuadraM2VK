@@ -1,6 +1,6 @@
 //! 4:2:2 textures (`GBGR422`, `BGRG422`; the runtime's `chroma_pairs.rs`) on the device the cfg
-//! selects, under the validation layer, against what EVs CFR-probe8-m4 and RRP-probe11-m4
-//! measured on an M4 under macOS 27.0.1 (each case plain twice and under Metal's API validation):
+//! selects, under the validation layer, against what our probes measured on an M4 under macOS
+//! 27.0.1 (each case plain twice and under Metal's API validation):
 //!
 //! - Either format makes a 16 x 16 2D texture, `Private` and `Shared`, of `ShaderRead`,
 //!   `ShaderWrite` or `RenderTarget` usage. A mipmapped one, and a view of one in any other
@@ -130,7 +130,7 @@ fn bytes_of(device: &Device, t: &Texture) -> Vec<u8> {
 
 /// `whole` with the bytes of `texels` texels from x `x` on rows `0..rows` replaced by `put`'s
 /// consecutive rows of `pitch` bytes from `offset`: the bytes plain Metal's copy of a region
-/// leaves (RRP-probe11-m4).
+/// leaves.
 fn placed(
     whole: &[u8],
     put: &[u8],

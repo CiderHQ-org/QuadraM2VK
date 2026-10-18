@@ -1,7 +1,7 @@
 //! Metal's stop of a render pipeline state whose attachment is in a pixel format the device's
 //! Metal describes none of.
 //!
-//! - **What Metal stops** (EV XRR2-ol4-m4, an Apple M4 under macOS 27.0.1, plain).
+//! - **What Metal stops** (an Apple M4 under macOS 27.0.1, plain).
 //!   `newRenderPipelineStateWithDescriptor:`'s descriptor validation asserts where a color
 //!   attachment's pixel format is one the release describes none of (the three-channel formats
 //!   and 646 to 650: "pixelFormat, for color render target(0), is not a valid MTLPixelFormat"),

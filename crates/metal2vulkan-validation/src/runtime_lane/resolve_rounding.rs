@@ -47,7 +47,7 @@
 //! compared with the same rules and printed as unmeasured, never as Metal's. A device without
 //! `imageViewFormatReinterpretation` (MoltenVK) views no texel as an unsigned format of other
 //! components, so the formats only such a view reads back are printed as unread there. The runs
-//! before the runtime resolved so (EVs `RPL-avg2-*` at 2b41d71d) measured each driver's own
+//! before the runtime resolved so (at 2b41d71d) measured each driver's own
 //! average, which `DriverFact::ColorResolveAverageIsMetals` records.
 
 use super::presenting::{image_info, made_image, shared_among};

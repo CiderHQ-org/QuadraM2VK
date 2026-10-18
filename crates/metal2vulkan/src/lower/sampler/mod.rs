@@ -138,9 +138,9 @@
 //! through a runtime or argument buffer's sampler snaps behind the sampler's word
 //! (`position::SnapKind::WordGather`): onto Metal's block at Metal's position by each axis's mode
 //! the word states (a `MirrorClampToEdge` axis's a clamping axis's position, whose taps the device
-//! mirrors once and clamps as Metal does, TXN-gprobe and RRP-probe5-m4). Every other gather, and
-//! such a runtime gather, records `PrecisionNote::DeviceGatherFootprint`. Such a nearest sample of
-//! a cube hands the device a direction onto the centre of the texel Metal's position names with
+//! mirrors once and clamps as Metal does). Every other gather, and such a runtime gather, records
+//! `PrecisionNote::DeviceGatherFootprint`. Such a nearest sample of a cube hands the device a
+//! direction onto the centre of the texel Metal's position names with
 //! Metal's reciprocal, whose model misses Apple's texture unit's on a few majors
 //! (`face::snapped`, `PrecisionNote::CubeFaceReciprocal`). On a device with the property, a module
 //! with any of them requires it.

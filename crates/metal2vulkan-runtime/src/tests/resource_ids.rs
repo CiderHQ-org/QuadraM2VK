@@ -198,9 +198,9 @@ fn internal_resources_take_no_id() {
     drop(internal);
 }
 
-/// A pipeline state's placement keeps its index's low 32 bits, as Metal did on an M4 (EVs
-/// `CFIT-m4-probe6` to `6d`): `2^32 + 5` is 5, `2^32` plain allocation, as 0 and `Any` are; and
-/// is refused at 16384 or more after the cut, which ended Metal's process.
+/// A pipeline state's placement keeps its index's low 32 bits, as Metal did on an M4: `2^32 + 5` is
+/// 5, `2^32` plain allocation, as 0 and `Any` are; and is refused at 16384 or more after the cut,
+/// which ended Metal's process.
 #[test]
 fn a_pipeline_placement_keeps_its_low_32_bits_below_the_pipeline_limit() {
     use crate::error::{Error, Invalid, Problem};
@@ -238,8 +238,8 @@ fn a_pipeline_placement_keeps_its_low_32_bits_below_the_pipeline_limit() {
 }
 
 /// One reservation call's IDs and the plain IDs Metal handed out after it, in runs (first,
-/// last), each measured on an M4 (EVs MESH-rid1-m4 to MESH-rid4-m4): textures and sampler states
-/// start with a pool of 16, pipeline states of 32. `b*` were predicted before they were measured.
+/// last), each measured on an M4: textures and sampler states start with a pool of 16, pipeline
+/// states of 32. `b*` were predicted before they were measured.
 const MEASURED: &[(&str, IdSpace, &[u64], &[(u64, u64)])] = &[
     (
         "o1_0_10",
@@ -356,10 +356,9 @@ fn plain_ids_after_a_reservation_are_metal_s() {
     }
 }
 
-/// An ID given back joins its free neighbours, so a run of them beats a lone one (EV
-/// MESH-rid4-m4 `c_plain_235`: 2, 3 and 5 of 1 to 8 given back are taken as 5, 2, 3, then 9;
-/// `c_res10_3_12`: after a reservation of 10 and IDs 11 to 15 and 1 to 3, 3 and 12 given back
-/// are taken as 12, then 3 to 9, then 16).
+/// An ID given back joins its free neighbours, so a run of them beats a lone one (2, 3 and 5 of 1
+/// to 8 given back are taken as 5, 2, 3, then 9; `c_res10_3_12`: after a reservation of 10 and IDs
+/// 11 to 15 and 1 to 3, 3 and 12 given back are taken as 12, then 3 to 9, then 16).
 #[test]
 fn an_id_given_back_joins_its_free_neighbours() {
     let ids = ids();
@@ -387,9 +386,9 @@ fn an_id_given_back_joins_its_free_neighbours() {
 }
 
 /// Only a space's first reservation with an ID counts, whether or not the space handed one out
-/// since; a call of no ID, or of 0 alone, changes nothing (EV MESH-rid2-m4 `w_16_5`: 16, then 5,
-/// keeps 16 alone; `empty_first`; MESH-rid9-m4 `y_zero_then_10`, whose later IDs the runtime
-/// hands out once, where Metal's pool handed out 1 to 4 again).
+/// since; a call of no ID, or of 0 alone, changes nothing (16, then 5, keeps 16 alone;
+/// `empty_first`; whose later IDs the runtime hands out once, where Metal's pool handed out 1 to 4
+/// again).
 #[test]
 fn only_the_first_reservation_with_an_id_counts() {
     let ids = ids();
@@ -404,7 +403,7 @@ fn only_the_first_reservation_with_an_id_counts() {
     assert_eq!(got, expand(&[(1, 15), (17, 18)]));
 }
 
-/// Visible-function tables' first pool is 32, as Metal's (EV MESH-rid6-m4: 2 to 4 of 1 to 5
+/// Visible-function tables' first pool is 32, as Metal's (2 to 4 of 1 to 5
 /// given back come back before 6, 2 to 6 of 1 to 13 before 14, and 2 to 10 of 1 to 29 after 30
 /// and 31).
 #[test]
@@ -431,7 +430,7 @@ fn function_tables_start_with_a_pool_of_32() {
 }
 
 /// Orders Metal's texture pool hands out after the device's first command queue or indirect
-/// command buffer and then a reservation, measured on an M4 (EV APX2-rid1-m4, plain and validated
+/// command buffer and then a reservation, measured on an M4 (plain and validated
 /// alike, a queue or a buffer first alike): the reservation's ranges beside the pool's first
 /// range, `[1, 16)`, from which Metal hands out IDs a live texture holds a second time. Each case
 /// is the reservation and Metal's whole measured order, as runs of IDs.
@@ -500,7 +499,7 @@ fn a_texture_pool_made_before_its_reservation_hands_out_metal_s_ids() {
 }
 
 /// IDs given back in a made pool join their neighbours as before, and plain allocation hands out
-/// the IDs live textures hold where Metal does (EV APX2-rid1-m4, an M4: after a queue, a
+/// the IDs live textures hold where Metal does (an M4: after a queue, a
 /// reservation of 64 to 66 and textures 1 to 3, 2 given back is taken as 2, 4, 5; after a
 /// reservation of 40 and textures 1 to 15 and 41 to 45, 3 as 3, 46 to 63, then 1, which a texture
 /// holds; after a reservation of 20 and textures 21 to 31 and 1 to 15, 5 as 5, then 1 to 7, which
@@ -538,7 +537,7 @@ fn ids_given_back_in_a_made_pool_follow_metal_s_order() {
 }
 
 /// Orders Metal's texture pool hands out once IDs it handed out twice are given back, measured on
-/// an M4 (EV TTG-rid1-m4, plain, each case twice alike; the model was fitted to these). Each case:
+/// an M4 (plain, each case twice alike; the model was fitted to these). Each case:
 /// whether a command queue comes first, the reservation, the plain textures made, the positions
 /// (in the order made) of those then released, in order, as runs, and Metal's next IDs, as runs.
 /// After a queue and 20 reserved, positions 11 to 25 hold 1 to 15 and 26 to 40 hold them again.

@@ -360,7 +360,7 @@ fn sample_counts_are_the_flags_bits() {
 /// An amplification count is supported from 1 to the maximum.
 #[test]
 fn amplification_counts_run_from_one_to_the_maximum() {
-    // Metal answers yes for 0 (EVs API-props1-m3 and API-props1-m4).
+    // Metal answers yes for 0.
     assert!(amplification_count_supported(6, 0));
     assert!(amplification_count_supported(6, 1));
     assert!(amplification_count_supported(6, 6));
@@ -413,7 +413,7 @@ fn every_query_answers_the_device() {
         }
         Query::VertexAmplificationCount => {
             assert_eq!(p.supports_vertex_amplification_count(2), Ok(true));
-            // Metal answers yes for 0 (EVs API-props1-m3 and API-props1-m4).
+            // Metal answers yes for 0.
             assert_eq!(p.supports_vertex_amplification_count(0), Ok(true));
             assert_eq!(p.supports_vertex_amplification_count(9), Ok(false));
         }

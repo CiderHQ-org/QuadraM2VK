@@ -1,7 +1,7 @@
 //! Device tests of attachments larger than their pass's render area (the runtime's
 //! `clear_reach.rs`) on the device the cfg selects, under the validation layer.
 //!
-//! Each pass is one EVs RRS-probe-2 and RRS-probe-5 measured (the M3 Max with macOS 26.7 and an
+//! Each pass is one that our probes measured (the M3 Max with macOS 26.7 and an
 //! M4 with 27.0.1, the same answers, each case with and without Metal's API validation): a
 //! 128x128 attachment whose texels the test sets first (a color's bytes 0x11, a depth 0.75, a
 //! stencil 0x22), a render area of 40x40 (the descriptor's target size, or a smaller attachment),
@@ -396,6 +396,9 @@ fn inline_passes(lane: &Lane) -> u64 {
     lane.device.work_counts().inline_passes
 }
 
+/// A color attachment's `Clear` load reaches past the render area as Metal's (the probe's
+/// `c_rgba8_draw`, `c_rgba8_nodraw`, `c_rgba8_a40x24_draw`, `c_rgba8_nothing`,
+/// `c_rgba8_a100x100_draw`, `c_rgba8_small_depth_draw`, `c_rgba8_load_draw`; our probe's
 /// `c_rgba8_level1_draw`, `c_rgba8_layered_nodraw`, `c_rgba8_emptydraw`): to whole 32x32 tiles
 /// in a pass with a draw call (one wholly outside the target, or of no vertex, included), the
 /// whole attachment in one without, the smaller attachment's extent setting the render area
@@ -710,8 +713,8 @@ fn a_nan_clear_reaches_as_metal_s() {
     quiet(lane, &messages);
 }
 
-/// Depth and stencil attachments' `Clear` loads reach past the render area as a color's (EV
-/// RRS-probe-2's `d_d32_draw`, `d_d32_nodraw`, `d_d16_draw`, `s_s8_draw`, `ds_d32s8_draw`, and a
+/// Depth and stencil attachments' `Clear` loads reach past the render area as a color's (the
+/// probe's `d_d32_draw`, `d_d32_nodraw`, `d_d16_draw`, `s_s8_draw`, `ds_d32s8_draw`, and a
 /// 4-sample color's `c_rgba8_ms4_draw`, read through a second pass that loads and resolves it
 /// whole): 0.25 drawn and 0.5 cleared past the render area to the tiles, 0.75 past them; the
 /// stencil 0x41 and 0x40, 0x22 past them.
@@ -964,6 +967,7 @@ fn a_pass_that_changes_no_texel_records_nothing() {
     quiet(lane, &messages);
 }
 
+/// A `DontCare` load of an attachment the pass stores: kept in a pass
 /// that does not draw (a draw call of no vertex, or through a pipeline that rasterizes nothing,
 /// included), as Metal keeps it, with no notice; cleared to zero over every tile, Metal's answer
 /// with no notice, where such a pass clears and stores its depth (the clear rule); in one that
@@ -989,9 +993,8 @@ fn a_dont_care_load_is_metal_s_in_the_tiles_draws_touch() {
         OLD.repeat((SIDE * SIDE) as usize),
         "dl_rgba8_emptydraw"
     );
-    // A draw call of no vertex in a pass that clears and stores its depth reaches every tile (EV
-    // RRS3-reach3's `clear_depth_store_instances0`): zero over the render area rounded up to
-    // whole tiles, as the depth's clear reaches.
+    // A draw call of no vertex in a pass that clears and stores its depth reaches every tile: zero
+    // over the render area rounded up to whole tiles, as the depth's clear reaches.
     let texture = lane.old_color(rgba8, PLAIN, target);
     let depth = PixelFormat::Depth32Float;
     let cleared = lane.old_depth_stencil(depth, PLAIN, (true, false));
@@ -1013,10 +1016,9 @@ fn a_dont_care_load_is_metal_s_in_the_tiles_draws_touch() {
         expected(SIDE, area, [64, 64], (None, &word(0.5), &word(0.75))),
         "dl_rgba8_emptydraw_depth_cleared, depth"
     );
-    // A draw through a pipeline that rasterizes nothing reaches no tile (EV RRS3-reach4c's
-    // `no_raster_t11`): the owned fixture `rvc_draw_bases`'s vertex function, which returns
-    // nothing, as Metal requires there, and writes 16 bytes at element `(iid * 8 & 24) | (vid &
-    // 7)` of buffer 0.
+    // A draw through a pipeline that rasterizes nothing reaches no tile: the owned fixture
+    // `rvc_draw_bases`'s vertex function, which returns nothing, as Metal requires there, and
+    // writes 16 bytes at element `(iid * 8 & 24) | (vid & 7)` of buffer 0.
     let bitcode = llvm_assemble(&engine_dir().join("rvc_draw_bases.ll")).unwrap();
     let library = lane.device.new_library_with_air(&bitcode).unwrap();
     let vertex = library
@@ -1129,7 +1131,7 @@ fn a_dont_care_load_is_metal_s_in_the_tiles_draws_touch() {
 
 /// A `DontCare` load of a 128x128 attachment the pass stores, over the whole of it, in a pass
 /// whose triangle over the whole target draws through a 40x40 viewport at (48, 48), or under a
-/// 40x40 scissor rectangle there (EV XRB-pdc2's shapes on an Apple M4: the viewport and the
+/// 40x40 scissor rectangle there (the probe's shapes on an Apple M4: the viewport and the
 /// scissor each bound the tiles a draw zeroes exactly): the rectangle holds the draw's color, the
 /// rest of its four 32x32 tiles, from (32, 32) to (96, 96), zero, and every other tile keeps its
 /// texels, Metal's answer. A pass of a 16x16 tile (`tileWidth`, `tileHeight`; XRB's probes

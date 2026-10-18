@@ -3,7 +3,7 @@
 //! default one (native device sampling and maths, what a consumer runs) and under the default one
 //! with the NaN switch on (`NanMinMaxPolicy::Exact`).
 //!
-//! What plain Metal answers (our own probe, EV NAN-hrn1-m3: an Apple M3 Max under macOS 26.7,
+//! What plain Metal answers (our own probe: an Apple M3 Max under macOS 26.7,
 //! safe and fast math alike, every NaN lane of the eight formats below): a lane is a NaN where a
 //! tap of nonzero weight is one (a linear sample at a texel's centre reads that texel alone), or
 //! where the taps of nonzero weight hold both infinities. Its bits:
@@ -57,7 +57,7 @@ use metal2vulkan_runtime::{
 };
 
 /// The halves of the 16-bit float formats: quiet and signalling NaNs of both signs and payload
-/// edges, then infinities, denormals, zeros and normals (EV NAN-hrn1-m3's).
+/// edges, then infinities, denormals, zeros and normals (our probe's).
 const V: [u16; 24] = [
     0x7e00, 0x7c01, 0x7dff, 0x7fff, 0x7e01, 0x7d55, 0xfe00, 0xfc01, 0xfdff, 0xffff, 0xfe01, 0x7f00,
     0x7c00, 0xfc00, 0x0001, 0x8001, 0x03ff, 0x3c00, 0x0000, 0x8000, 0x7bff, 0xfbff, 0x3555, 0xff00,

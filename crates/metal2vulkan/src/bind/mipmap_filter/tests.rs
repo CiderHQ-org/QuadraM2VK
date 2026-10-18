@@ -1003,7 +1003,7 @@ fn the_kernel_is_the_chain_on_the_cpu() {
     assert_eq!(formats, 35, "the formats the filter computes");
 }
 
-/// Taps the M4 measured (EV CPM-probe3-m4, R32Float ramps) where the exact centre's weight,
+/// Taps the M4 measured (R32Float ramps) where the exact centre's weight,
 /// rounded, is one step from Metal's: `(above, level, texel, x0, q)`.
 #[test]
 fn the_taps_are_the_m4_s_f32_coordinates() {
@@ -1050,7 +1050,7 @@ fn the_taps_are_the_m4_s_f32_coordinates() {
     assert_eq!(axis_tap(0, 3, 1, m4), (1, 0));
 }
 
-/// Taps the M3 Max measured (EV CPM-probe4-m3, R32Float ramps: 173,505 taps of widths, heights
+/// Taps the M3 Max measured (R32Float ramps: 173,505 taps of widths, heights
 /// and depths from 257 to 16383, every one its coordinates from its own reciprocal) where its
 /// reciprocal moves the weight one step above the M4's: `(above, level, texel, x0, q)`.
 #[test]
@@ -1079,7 +1079,7 @@ fn the_m3_s_taps_start_from_its_own_reciprocal() {
         let m4 = axis_tap(i, big, small, Reciprocal::AppleM4);
         assert_eq!(m4, (x0, q - 1), "the M4's: {big} -> {small} texel {i}");
     }
-    // The M3 Max's reciprocal (EV CPM-probe6-m3 `rcp`): one unit above the rounded quotient at
+    // The M3 Max's reciprocal: one unit above the rounded quotient at
     // 41 and 61, below at 33 and its doubles, the rounded quotient at 3 and at 16384.
     let units = |n: u32| {
         let m3 = Reciprocal::AppleM3Max.of(n).to_bits();

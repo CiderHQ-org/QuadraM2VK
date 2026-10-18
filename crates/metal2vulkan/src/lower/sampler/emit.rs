@@ -229,8 +229,8 @@ const METAL_BIAS_REACH: f32 = 64.0;
 
 /// Metal's reading `B` of fragment bias `b`, on the CPU: `b` rounded to the nearest `half` (ties to
 /// even), floored to a multiple of `1/64`, and clamped into `[-32, 31.984375]`; a NaN stays a NaN
-/// (the device's reading, unmeasured). [`metal_bias`] emits the same steps. Measured on an Apple M4
-/// (EV SPN-p1-m4): every quad of five samplers' 32,768 samples biased from -40 to 40 at levels from
+/// (the device's reading, unmeasured). [`metal_bias`] emits the same steps. Measured on an Apple
+/// M4: every quad of five samplers' 32,768 samples biased from -40 to 40 at levels from
 /// -1.5 to 11.5 reads level `lod + B`.
 pub(super) fn metal_bias_of(b: f32) -> f32 {
     if b.is_nan() {
@@ -331,20 +331,19 @@ pub(super) fn metal_bias(fb: &mut FunctionBuilder<'_>, b: SValue) -> BResult<SVa
 /// length where that passes it.
 ///
 /// Metal's level of such a sample is `max(log2 minor + B, log2 major - log2 maxAnisotropy)`, the
-/// bias shifting the footprint's minor axis alone (an Apple M4, EV SPN-p1-m4: every one of
-/// 32,768 quads of a 16x anisotropic trilinear sampler within 0.06 of a level, biases from -40 to
-/// 40, footprints to 32 to 1; scaling both axes by `2^B` misses 15,791). A device's anisotropic
-/// level of the pair is `max(log2 shorter, log2 longer - log2 maxAnisotropy)` with its own
-/// anisotropy, so the pair gives Metal's level where `minor + B` stays below the major axis, and
-/// the isotropic `minor + B` past it, as Metal's rule does. The floor at a sixteenth of the
-/// longer, Metal's greatest `maxAnisotropy`, moves no level a device clamping the pair's ratio
-/// at its anisotropy (at most 16) reads, and keeps the ratio within 16 for a device that
-/// mishandles a greater one: x86-64 lavapipe read levels up to 10 below Metal's on 1,343 of
-/// 32,768 quads, every one of a ratio past 4,564, where its explicit-gradient samples of ratios
-/// up to 32 are within 0.08 of Metal's (EV SPN2-rtb1-lvpx86). A shorter that vanishes there (at
-/// most `2^-100` of the floor) is replaced by the longer's perpendicular in texels at the floor's
-/// length. `Exp2`'s precision and the device's level arithmetic are the device's
-/// (`PrecisionNote::GradFromBias`).
+/// bias shifting the footprint's minor axis alone (an Apple M4: every one of 32,768 quads of a 16x
+/// anisotropic trilinear sampler within 0.06 of a level, biases from -40 to 40, footprints to 32 to
+/// 1; scaling both axes by `2^B` misses 15,791). A device's anisotropic level of the pair is
+/// `max(log2 shorter, log2 longer - log2 maxAnisotropy)` with its own anisotropy, so the pair gives
+/// Metal's level where `minor + B` stays below the major axis, and the isotropic `minor + B` past
+/// it, as Metal's rule does. The floor at a sixteenth of the longer, Metal's greatest
+/// `maxAnisotropy`, moves no level a device clamping the pair's ratio at its anisotropy (at
+/// most 16) reads, and keeps the ratio within 16 for a device that mishandles a greater one: x86-64
+/// lavapipe read levels up to 10 below Metal's on 1,343 of 32,768 quads, every one of a ratio past
+/// 4,564, where its explicit-gradient samples of ratios up to 32 are within 0.08 of Metal's. A
+/// shorter that vanishes there (at most `2^-100` of the floor) is replaced by the longer's
+/// perpendicular in texels at the floor's length. `Exp2`'s precision and the device's level
+/// arithmetic are the device's (`PrecisionNote::GradFromBias`).
 pub(super) fn axis_gradients(
     fb: &mut FunctionBuilder<'_>,
     (dx, dy): (SValue, SValue),
@@ -489,7 +488,7 @@ fn scaled_axis_gradients(
 ///   (`CubeGradientRoute::AppleSwizzled`, measured on that identity alone): the isotropic
 ///   `‖(g_a, g_b)‖ e_b`, `b = (a + 2) mod 3`, and the anisotropic `(0, g_x, g_z)`, `(g_x, 0, g_y)`
 ///   and `(g_z, g_y, 0)` on an `x`, `y` and `z` face, which the fixup's swizzle hands that GPU's
-///   transposed anisotropic reading as Metal's face gradients there (EV RT13-ag3-probe-m3).
+///   transposed anisotropic reading as Metal's face gradients there.
 ///
 /// The major axis is `z` over `y` over `x` at equal magnitudes, which on a direction whose ties are
 /// broken as Metal breaks them (`face::metal_ties`) is Metal's, there being none left. A footprint
@@ -1625,7 +1624,7 @@ fn word_states(fb: &mut FunctionBuilder<'_>, word: SValue, mask: u32) -> BResult
 /// [`Sampling::centre_word`] is [`SamplerWord::PIXEL_COORDINATES`]), and
 /// the normalized centre of the texel Metal reads at pixel coordinate `coord` (`s.lanes` floats) on
 /// a texture of level-0 size `size` (`size_lanes` components), `(floor(coord) + 1/2) / size` per
-/// plane axis. Metal floors a nearest pixel sampler's coordinate (WRG-pixel-probe: Apple M4, 1,378
+/// plane axis. Metal floors a nearest pixel sampler's coordinate (Apple M4, 1,378
 /// lanes a fraction of a texel either side of every integer, constexpr and runtime samplers,
 /// clamped to the edge and to zero); a device's nearest filter takes `floor(u size)`, whose product
 /// `u size` of the scaled coordinate can round onto the next integer, so the texel's centre, half a

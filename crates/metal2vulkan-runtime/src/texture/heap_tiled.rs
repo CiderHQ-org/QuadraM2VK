@@ -2,11 +2,11 @@
 //! them out: tiled (the consumer's report: a texture placed in a heap over a guest's pages is not
 //! linear on Metal).
 //!
-//! **Metal's layout** (an Apple M4 under macOS 27.0.1, EVs TXN3-htl1..5, TXN3-htlb2,
-//! TXN3-htlc1..3 and the M3 probe's L rows, TXN3-m3p3 and TXN3-m3p4: a `Shared` placement heap
-//! over host pages, `setAddressRanges:`; each element of each slice, level and depth slice
-//! written by `replaceRegion` with values that name it, the span read through the pages; an M3
-//! Max under macOS 26.7 alike on every row of plain formats, the consumer's run of the probe):
+//! **Metal's layout** (an Apple M4 under macOS 27.0.1, our probes and the M3 probe's L rows: a
+//! `Shared` placement heap over host pages, `setAddressRanges:`; each element of each slice, level
+//! and depth slice written by `replaceRegion` with values that name it, the span read through the
+//! pages; an M3 Max under macOS 26.7 alike on every row of plain formats, the consumer's run of the
+//! probe):
 //!
 //! - **Tiles.** Elements of `B` bytes lie in tiles of at most 16 KiB: 128 x 128 elements of 1
 //!   byte, 128 x 64 of 2, 64 x 64 of 4, 64 x 32 of 8, 32 x 32 of 16 (`largest_tile`). A level
@@ -27,85 +27,83 @@
 //!   lie at multiples of 16 KiB from a chain of 16 KiB on, the texture then aligned to 16 KiB;
 //!   any other texture is aligned to 128. `heapTextureSizeAndAlignWithDescriptor:` answers the
 //!   chains' bytes and that alignment: every uncompressed answer measured (4126 of every plain
-//!   format, sRGB, packed, extended-range, depth and stencil formats among them, every type,
-//!   EV TXN3-htlm1-m4; the bases of 476 more, TXN3-htlc3-m4).
-//! - **Block-compressed formats** (an Apple M4 under macOS 27.0.1, EVs TXN3-htl5-m4 and
-//!   TXN3-bcsw1-m4 to TXN3-bcsw4-m4: every BC, ETC2, EAC and ASTC format, 815 textures, every
-//!   element of every slice, level and depth slice; `tests/heap_tiled_blocks.rs`) lay out a block
-//!   as an element. Each level's allocation counts level 0's blocks halved per level, rounding up
-//!   (`⌈b0 / 2^l⌉`: its full levels' tiles, its first narrow level's sides). Its tiles count its
-//!   blocks by a placement of the format's family (`BlockPlacement`), `⌈e / tw⌉` tiles a row:
-//!   `Halved` counts them so too (ASTC on the M4); `Narrow` counts them so while the level before
-//!   is a tile or more on that side, then halves the first narrower level's texels (its blocks'
-//!   whole texels), rounding down (BC, ETC2 and EAC on the M4: level 3 of a 100 x 36 `BC1_RGBA`
-//!   chain, 3 x 1 blocks of its own and 4 x 2 halved, lies in tiles of 4 x 1, where `Halved` would
-//!   take 4 x 2). An Apple M3 Max under macOS 26.7 (the same 815 textures, packages `bc-m3pkg` and
-//!   `bc-m3pkg2` rerun there) answers every texture alike and places every family as `Halved` where
-//!   its CPU copies (`replaceRegion`, `getBytes`) reach the bytes; where its GPU does (a blit from
-//!   or into a buffer), it counts a level's tiles a row by the level's own blocks instead, `⌈b /
-//!   tw⌉` (`GpuRows::Own`), so on 7 of the 815 (levels whose own and halved blocks fill a different
-//!   number of tiles a row: level 1 of a 513 x 300 `BC1_RGBA` chain, 64 blocks of its own and 65
-//!   halved in tiles 64 wide) its GPU and its CPU copies meet the level's blocks at other bytes,
-//!   and a CPU copy reads back other blocks than a blit wrote; the M4's GPU counts them as its CPU
-//!   copies do (`GpuRows::AsCpu`). The release makes the difference: the M3 Max under 27.0.1
-//!   answers every texture of `tests/heap_tiled_blocks.rs` as the M4 does, its CPU's spans and its
-//!   GPU's (EV M27-hblk1-m3). The device's Metal level names each family's placement and its
-//!   GPU's count (`MetalLevel::heap_blocks`, `MetalLevel::heap_block_gpu_rows`): the CPU copies
-//!   place blocks by `TiledLevel::across`, the kernel's moves by `TiledLevel::gpu_across`, as
-//!   Metal's own two paths do. A PVRTC texture stays untiled
-//!   (`heap-texture-block-compressed-layout`), its answer its device's.
-//! - **Lossless compression** (EV TXN3-htlm1-m4, 14174 answers of every plain format, type,
-//!   shape, usage and storage mode). Metal keeps a texture losslessly compressed where
-//!   `allowGPUOptimizedContents` holds and the shorter side of its level 0 is 16 texels or more
-//!   (16 x 16 compressed; 16 x 8, 6 x 43 and 2048 x 5 not), a colour texture of none of
-//!   `ShaderWrite`, `PixelFormatView` and `ShaderAtomic` usage and a depth or stencil texture of
-//!   any (`metal_compresses`, `metal_keeps_uncompressed`; EV API-hsa1-m4). Its bytes are no layout
-//!   of its texels. It answers its chains uncompressed, then each chain's metadata
-//!   (`lossless_answer`, `chain_metadata`): for each of its levels, 8 bytes for each 16 x 16 tile
-//!   of the level, its tiles on each side padded to a power of two, rounded up to 128. A one-level
-//!   texture's metadata is its level's (8538 answers, every one). A mipmapped one's covers the full
-//!   chain's levels, whatever levels the texture has, while level 0's sides, each padded to a
-//!   multiple of 16 and halved per level, have a longer side of 16 or more, each level's tiles
-//!   counted over those halved sides (EVs FPV-hsz1-m4, an Apple M4 under macOS 27.0.1, and
-//!   FPV-hsz1-m3, an M3 Max under 26.7, alike on every one of their 410356 answers: 2D textures of
-//!   12 colour formats and `Depth16Unorm`, `Depth32Float` and `Stencil8` at every pair of 30 sides
-//!   from 1 to 1440, two-slice 2D arrays and cubes of 5 colour formats at 7 sizes, 1 to 10 levels,
-//!   usages 0x1, 0x5, 0x7 and 0x10005, both storage modes; a 224 x 928 chain's metadata covers its
-//!   first 6 levels). Every chain takes it alike: a 3D texture's, one a depth slice of level 0, and
-//!   a cube array's (EV FPV-hsz2-m4, 114921 answers on the M4: 3D textures of 3 colour formats at
-//!   12 x 12 sides and 6 depths, 2D arrays of 1, 3 and 6 slices, cubes and cube arrays of 1 and
-//!   2 of 7 colour and 4 depth and stencil formats, every level count, `allowGPUOptimizedContents`
-//!   off, on and unset for the depth and stencil ones, which compress at no usage with it off).
+//!   format, sRGB, packed, extended-range, depth and stencil formats among them, every type; the
+//!   bases of 476 more).
+//! - **Block-compressed formats** (an Apple M4 under macOS 27.0.1: every BC, ETC2, EAC and ASTC
+//!   format, 815 textures, every element of every slice, level and depth slice;
+//!   `tests/heap_tiled_blocks.rs`) lay out a block as an element. Each level's allocation counts
+//!   level 0's blocks halved per level, rounding up (`⌈b0 / 2^l⌉`: its full levels' tiles, its
+//!   first narrow level's sides). Its tiles count its blocks by a placement of the format's family
+//!   (`BlockPlacement`), `⌈e / tw⌉` tiles a row: `Halved` counts them so too (ASTC on the M4);
+//!   `Narrow` counts them so while the level before is a tile or more on that side, then halves the
+//!   first narrower level's texels (its blocks' whole texels), rounding down (BC, ETC2 and EAC on
+//!   the M4: level 3 of a 100 x 36 `BC1_RGBA` chain, 3 x 1 blocks of its own and 4 x 2 halved, lies
+//!   in tiles of 4 x 1, where `Halved` would take 4 x 2). An Apple M3 Max under macOS 26.7 (the
+//!   same 815 textures, packages `bc-m3pkg` and `bc-m3pkg2` rerun there) answers every texture
+//!   alike and places every family as `Halved` where its CPU copies (`replaceRegion`, `getBytes`)
+//!   reach the bytes; where its GPU does (a blit from or into a buffer), it counts a level's tiles
+//!   a row by the level's own blocks instead, `⌈b / tw⌉` (`GpuRows::Own`), so on 7 of the 815
+//!   (levels whose own and halved blocks fill a different number of tiles a row: level 1 of a 513 x
+//!   300 `BC1_RGBA` chain, 64 blocks of its own and 65 halved in tiles 64 wide) its GPU and its CPU
+//!   copies meet the level's blocks at other bytes, and a CPU copy reads back other blocks than a
+//!   blit wrote; the M4's GPU counts them as its CPU copies do (`GpuRows::AsCpu`). The release
+//!   makes the difference: the M3 Max under 27.0.1 answers every texture of
+//!   `tests/heap_tiled_blocks.rs` as the M4 does, its CPU's spans and its GPU's. The device's Metal
+//!   level names each family's placement and its GPU's count (`MetalLevel::heap_blocks`,
+//!   `MetalLevel::heap_block_gpu_rows`): the CPU copies place blocks by `TiledLevel::across`, the
+//!   kernel's moves by `TiledLevel::gpu_across`, as Metal's own two paths do. A PVRTC texture stays
+//!   untiled (`heap-texture-block-compressed-layout`), its answer its device's.
+//! - **Lossless compression** (14174 answers of every plain format, type, shape, usage and storage
+//!   mode). Metal keeps a texture losslessly compressed where `allowGPUOptimizedContents` holds and
+//!   the shorter side of its level 0 is 16 texels or more (16 x 16 compressed; 16 x 8, 6 x 43 and
+//!   2048 x 5 not), a colour texture of none of `ShaderWrite`, `PixelFormatView` and `ShaderAtomic`
+//!   usage and a depth or stencil texture of any (`metal_compresses`, `metal_keeps_uncompressed`).
+//!   Its bytes are no layout of its texels. It answers its chains uncompressed, then each chain's
+//!   metadata (`lossless_answer`, `chain_metadata`): for each of its levels, 8 bytes for each 16 x
+//!   16 tile of the level, its tiles on each side padded to a power of two, rounded up to 128. A
+//!   one-level texture's metadata is its level's (8538 answers, every one). A mipmapped one's
+//!   covers the full chain's levels, whatever levels the texture has, while level 0's sides, each
+//!   padded to a multiple of 16 and halved per level, have a longer side of 16 or more, each
+//!   level's tiles counted over those halved sides (an Apple M4 under macOS 27.0.1, and an M3 Max
+//!   under 26.7, alike on every one of their 410356 answers: 2D textures of 12 colour formats and
+//!   `Depth16Unorm`, `Depth32Float` and `Stencil8` at every pair of 30 sides from 1 to 1440,
+//!   two-slice 2D arrays and cubes of 5 colour formats at 7 sizes, 1 to 10 levels, usages 0x1, 0x5,
+//!   0x7 and 0x10005, both storage modes; a 224 x 928 chain's metadata covers its first 6 levels).
+//!   Every chain takes it alike: a 3D texture's, one a depth slice of level 0, and a cube array's
+//!   (114921 answers on the M4: 3D textures of 3 colour formats at 12 x 12 sides and 6 depths, 2D
+//!   arrays of 1, 3 and 6 slices, cubes and cube arrays of 1 and 2 of 7 colour and 4 depth and
+//!   stencil formats, every level count, `allowGPUOptimizedContents` off, on and unset for the
+//!   depth and stencil ones, which compress at no usage with it off).
 //!   It stays untiled (`heap-texture-lossless-layout`).
-//! - **Multisample textures** (the consumer's ask; EVs FPV-hm1-m4, FPV-hm2-m4 and FPV-hm3-m4 on an
-//!   Apple M4 under macOS 27.0.1, and the same package as FPV-hm3-m4 run on an M3 Max under 26.7
-//!   (the coordinator's run, FPV-hm3-m3), which answered every one of its 27648 descriptors and
-//!   laid out every byte of its 9 textures as the M4; 18 formats, 2 and 4 samples (both answer no
-//!   to 8), 1 to 3 slices, six usages, `Shared` and `Private`). Metal keeps a multisample texture
-//!   losslessly compressed by the rule above over its **sample grid** (`sample_grid`: `w x 2h` at 2
-//!   samples, `2w x 2h` at 4): with `allowGPUOptimizedContents`, the grid's shorter side 16 or
-//!   more, and a colour texture of neither `ShaderWrite` nor `PixelFormatView` usage or a depth or
-//!   stencil texture of any; the storage mode decides nothing (every one of 10152 descriptors
-//!   around the threshold, on both machines). Uncompressed, a pixel's samples lie side by side as
-//!   one element of `S·B` bytes (sample `s` at `s·B`), laid out as a one-level texture's elements
-//!   above (tiles of 32 x 16 elements of 32 bytes and 16 x 16 of 64), a multisample array's slices
-//!   as an array's: every sample of 21 textures drawn at the bytes the rule names (14 on the M4,
-//!   nothing past their answers written; 7 on both machines). Compressed, its bytes are no layout
-//!   of its samples, and its answer is that one's plus, for each slice, its sample grid's metadata
-//!   as a one-level texture's above (`multisample_heap_layout`; every answer of every format but
-//!   `Depth32Float_Stencil8` measured, 93422 on the M4 and 24576 on the M3 Max, compressed and not,
-//!   at 128 bytes or, an array's chain of 16 KiB or more, 16 KiB, a one-slice array's too: EV
-//!   FPV-hm4-m4). A `Depth32Float_Stencil8` texture answers two planes: its depth plane
-//!   (`Depth32Float`'s answer, compressed or not) rounded up to 16 KiB, then its stencil plane
-//!   (`Stencil8`'s), at the depth plane's alignment (every one of its 4800 answers on the M4 and
-//!   3072 on the M3 Max, 1 to 3 slices; before, its device's answer, whose alignment on MoltenVK
-//!   was 128 where Metal's is 16 KiB for an array of a 16-KiB depth chain, the consumer's report),
-//!   and so does a one-sample one, of every type and level count, compressed or not (every one of
-//!   14552 answers each of EVs FPV-hsz1-m4 and FPV-hsz1-m3, 2D, and 12330 of FPV-hsz2-m4, 2D
-//!   arrays, cubes and cube arrays). Over host pages a compressed one lies in memory of its own and
-//!   is announced `heap-texture-lossless-layout`; an uncompressed one is refused
-//!   (`RuntimeGap::HostHeapUncompressedMultisample`, `heap.rs`). In any heap one whose image the
-//!   heap's memory or Metal's answer cannot hold lies in memory of its own too.
+//! - **Multisample textures** (the consumer's ask; on an Apple M4 under macOS 27.0.1, and the same
+//!   package run on an M3 Max under 26.7 (the coordinator's run), which answered every one of its
+//!   27648 descriptors and laid out every byte of its 9 textures as the M4; 18 formats, 2 and 4
+//!   samples (both answer no to 8), 1 to 3 slices, six usages, `Shared` and `Private`). Metal keeps
+//!   a multisample texture losslessly compressed by the rule above over its **sample grid**
+//!   (`sample_grid`: `w x 2h` at 2 samples, `2w x 2h` at 4): with `allowGPUOptimizedContents`, the
+//!   grid's shorter side 16 or more, and a colour texture of neither `ShaderWrite` nor
+//!   `PixelFormatView` usage or a depth or stencil texture of any; the storage mode decides nothing
+//!   (every one of 10152 descriptors around the threshold, on both machines). Uncompressed, a
+//!   pixel's samples lie side by side as one element of `S·B` bytes (sample `s` at `s·B`), laid out
+//!   as a one-level texture's elements above (tiles of 32 x 16 elements of 32 bytes and 16 x 16 of
+//!   64), a multisample array's slices as an array's: every sample of 21 textures drawn at the
+//!   bytes the rule names (14 on the M4, nothing past their answers written; 7 on both machines).
+//!   Compressed, its bytes are no layout of its samples, and its answer is that one's plus, for
+//!   each slice, its sample grid's metadata as a one-level texture's above
+//!   (`multisample_heap_layout`; every answer of every format but `Depth32Float_Stencil8` measured,
+//!   93422 on the M4 and 24576 on the M3 Max, compressed and not, at 128 bytes or, an array's chain
+//!   of 16 KiB or more, 16 KiB, a one-slice array's too). A `Depth32Float_Stencil8` texture answers
+//!   two planes: its depth plane (`Depth32Float`'s answer, compressed or not) rounded up to 16 KiB,
+//!   then its stencil plane (`Stencil8`'s), at the depth plane's alignment (every one of its 4800
+//!   answers on the M4 and 3072 on the M3 Max, 1 to 3 slices; before, its device's answer, whose
+//!   alignment on MoltenVK was 128 where Metal's is 16 KiB for an array of a 16-KiB depth chain,
+//!   the consumer's report), and so does a one-sample one, of every type and level count,
+//!   compressed or not (every one of 14552 answers each on the M4 and the M3 Max, 2D, and 12330 on
+//!   the M4, 2D arrays, cubes and cube arrays). Over host pages a compressed one lies in memory of
+//!   its own and is announced `heap-texture-lossless-layout`; an uncompressed one is refused
+//!   (`RuntimeGap::HostHeapUncompressedMultisample`, `heap.rs`). In any
+//!   heap one whose image the heap's memory or Metal's answer cannot hold lies in memory of its own
+//!   too.
 //! - **Not measured**: a two-aspect depth and stencil format's layout (`Depth32Float_Stencil8`'s
 //!   answer is, above) and a PVRTC format's; the runtime holds them untiled
 //!   (`heap-texture-untiled-layout`), a PVRTC texture at its device's answer.
@@ -577,7 +575,7 @@ pub(crate) fn metal_compresses_layout(
 /// Whether Metal keeps a texture of `usage` (the effective usage: `Unknown` is every usage)
 /// uncompressed whatever its size and `allowGPUOptimizedContents`: a colour texture (`colour`)
 /// of `ShaderWrite`, `PixelFormatView` or `ShaderAtomic` usage; never a depth or stencil texture,
-/// which Metal compresses at every usage (EV API-hsa1-m4, an Apple M4 under macOS 27.0.1: every
+/// which Metal compresses at every usage (an Apple M4 under macOS 27.0.1: every
 /// one of the 256 sets of `ShaderRead`, `ShaderWrite`, `RenderTarget`, 0x8, `PixelFormatView`,
 /// `NoConcurrentAccess`, `Video` and `BlockWritesOnly` and 9 sets with `ShaderAtomic`, at 13
 /// formats, 15 shapes, both storage modes and the property off, on and unset, each answer the
@@ -593,12 +591,12 @@ pub(crate) fn metal_keeps_uncompressed(colour: bool, usage: TextureUsage) -> boo
 
 /// What a new `Private` texture Metal keeps losslessly compressed ([`metal_compresses`]) reads
 /// before anything writes it, by pixel format: not zero, but one fixed texel in every texel of each
-/// level whose shorter side is 16 texels or more ([`pattern_levels`]), and every sample (EVs
-/// ZIN-zp1-m4, ZIN-zf1-m4 and ZIN-zf2-m4, an Apple M4 under macOS 27.0.1: every format listed, read
-/// by blits, kernels and loads, alike in every read after a written texture or buffer was released;
-/// the consumer's M3 Max alike for `RGBA8Unorm`). Each storage field of the texel is all ones but
-/// the second from its lowest bit, which is zero (`RGBA8Unorm` reads opaque magenta, `A1BGR5Unorm`
-/// opaque yellow), but for `RG11B10Float`'s canonical NaNs and the extended-range formats' own
+/// level whose shorter side is 16 texels or more ([`pattern_levels`]), and every sample (an Apple
+/// M4 under macOS 27.0.1: every format listed, read by blits, kernels and loads, alike in every
+/// read after a written texture or buffer was released; the consumer's M3 Max alike for
+/// `RGBA8Unorm`). Each storage field of the texel is all ones but the second from its lowest bit,
+/// which is zero (`RGBA8Unorm` reads opaque magenta, `A1BGR5Unorm` opaque yellow), but for
+/// `RG11B10Float`'s canonical NaNs and the extended-range formats' own
 /// codes; a NaN in a float or depth field. `None` for a format whose new texture reads zero however
 /// it is made (block-compressed, 4:2:2 and two-plane formats) or that the probes did not make.
 pub(crate) fn fresh_pattern(pf: PixelFormat) -> Option<FreshPattern> {
@@ -717,7 +715,7 @@ pub(crate) enum FreshDepth {
 /// The levels of a new `Private` texture whose texels read [`fresh_pattern`]: `0..n`, each level
 /// whose shorter side (of `[width, height]` at level 0, a 1D texture's height 1; a multisample
 /// texture's sample grid, [`sample_grid`]) is 16 texels or more, of a texture Metal compresses
-/// ([`metal_compresses`]; EV ZIN-zf1-m4: a 64 x 64 chain's levels 64, 32 and 16, and none of
+/// ([`metal_compresses`]: a 64 x 64 chain's levels 64, 32 and 16, and none of
 /// its levels under 16). 0 where Metal keeps it uncompressed: it reads zero throughout.
 pub(crate) fn pattern_levels(
     colour: bool,
@@ -976,10 +974,9 @@ pub(crate) fn metal_heap_layout(
         answer,
         layout: HeapLayout::Untiled(why),
     };
-    // Block-compressed formats: Metal's allocations are its blocks' (EVs TXN3-htlc3-m4,
-    // TXN3-htl5-m4, TXN3-bcsw1-m4 to TXN3-bcsw4-m4: every BC, ETC2, EAC and ASTC format), alike
-    // under both placements, so a placement the level does not measure answers `Halved`'s;
-    // PVRTC's are not measured.
+    // Block-compressed formats: Metal's allocations are its blocks' (every BC, ETC2, EAC and ASTC
+    // format), alike under both placements, so a placement the level does not measure answers
+    // `Halved`'s; PVRTC's are not measured.
     if let Some([bw, bh]) = block_extent(pf) {
         let block = [u64::from(bw), u64::from(bh)];
         let family = BlockFamily::of(pf);

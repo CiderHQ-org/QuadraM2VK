@@ -131,7 +131,7 @@ pub(crate) fn read(e: &mut E<'_, '_>, fun: Fun, x: Value) -> BResult<Value> {
 }
 
 /// `Q(s)` of Metal's fast `atan(t) = t Q(t^2)` on `[0, 1]`, its `f32` coefficients by their bits,
-/// read off Metal's words (EV MBB-atan1-m3; clean-room fit): Horner's rule in `s = t t` (rounded),
+/// read off Metal's words (clean-room fit): Horner's rule in `s = t t` (rounded),
 /// each step one fused multiply-add, then `t Q` rounded.
 pub(crate) const FAST_ATAN_Q: [u32; 8] = [
     0x3F7F_FFFF,
@@ -151,8 +151,8 @@ const HALF_PI_BITS: u32 = 0x3FC9_0FDB;
 /// Q(t^2)` of Metal's reciprocal `t = rcp(|x|)` above (`E::recip`; an infinity and a magnitude past
 /// `2^126`, whose reciprocal Metal flushes, give `RN(π/2)`), with `x`'s sign. A magnitude at or
 /// below `2^-126` gives a zero: Metal flushes the product `t Q`, which is below `2^-126` there
-/// before rounding. Metal's word on every `float` of `[2^-12, 1]` and every 256th of the others (EV
-/// MBB-atan1-m3), and above 1 wherever the reciprocal is Metal's.
+/// before rounding. Metal's word on every `float` of `[2^-12, 1]` and every 256th of the others,
+/// and above 1 wherever the reciprocal is Metal's.
 fn fast_atan(e: &mut E<'_, '_>, x: Value) -> BResult<Value> {
     let x = read(e, Fun::Atan(Mode::Fast), x)?;
     let a = e.abs(x)?;
@@ -182,7 +182,7 @@ fn fast_atan(e: &mut E<'_, '_>, x: Value) -> BResult<Value> {
 
 /// `P(s)` of Metal's precise `atan(t) = t + t s P(s)`, `s = t t` (rounded), for `|t|` up to
 /// `tan(π/8)`, its `f32` coefficients by their bits: the coefficients of the public Cephes `atanf`
-/// (Moshier), which a clean-room fit of Metal's words (EV MBB-atan1-m3) converged on, rounded to
+/// (Moshier), which a clean-room fit of Metal's words converged on, rounded to
 /// `float`. Horner's rule with one fused multiply-add per step.
 pub(crate) const PRECISE_ATAN_P: [u32; 4] = [0xBEAA_AA2A, 0x3E4C_925F, 0xBE0E_1B85, 0x3DA4_F0D1];
 
@@ -200,7 +200,7 @@ const QUARTER_PI_BITS: u32 = 0x3F49_0FDB;
 /// `K + fma(t, RN(RN(t t) P(t t)), t)` of [`PRECISE_ATAN_P`] with `K` zero, `RN(π/4)` and `RN(π/2)`
 /// there, and `x`'s sign. Below `2^-12` it is `x` (selected, so the emulated fused steps never take
 /// products that small), and a zero gives `+0`, a flushed denormal too. Metal's word on every
-/// `float` of `[0.25, 4)` and every 256th positive one elsewhere (EV MBB-atan1-m3, the M3) wherever
+/// `float` of `[0.25, 4)` and every 256th positive one elsewhere (the M3) wherever
 /// the reciprocal is Metal's, which it is at all but 0.08% of them.
 fn precise_atan(e: &mut E<'_, '_>, x: Value) -> BResult<Value> {
     let x = read(e, Fun::Atan(Mode::Precise), x)?;
@@ -258,7 +258,7 @@ pub(crate) fn atan(e: &mut E<'_, '_>, m: Mode, x: Value) -> BResult<Value> {
 }
 
 /// `P(s)` of Metal's fast `asin(x) = x P(x^2)` below 0.7, its `f32` coefficients by their bits,
-/// read off Metal's words (EV MBB-atan2-m4; clean-room fit): Horner's rule in `s = x x` (rounded),
+/// read off Metal's words (clean-room fit): Horner's rule in `s = x x` (rounded),
 /// each step one fused multiply-add. Its fast `acos` takes the same `P`, and both take it at `z =
 /// (1 - |x|) / 2` from 0.7 on.
 pub(crate) const FAST_ASIN_P: [u32; 7] = [
@@ -322,9 +322,9 @@ fn fast_arcs(e: &mut E<'_, '_>, a: Value) -> BResult<FastArcs> {
 /// P(z)` in one fused multiply-add, `z = (1 - |x|) / 2` and `w = z rsqrt(z)` (Metal's fast square
 /// root), with `x`'s sign; `+0` at a zero (`fast::asin(-0)` is `+0`, a flushed denormal too) and
 /// Metal's NaN, with `x`'s sign, past 1 in magnitude. Metal's `rsqrt` is the hardware's, which is
-/// correctly rounded on 95.6% of significands (EV MBB-prim1-m3); the routine takes its model
-/// ([`E::fast_rsqrt`]), and so is Metal's word on every lane below 0.7 that its polynomial is and
-/// on 99.88 % of `[0.7, 1)` (EV MBB-atan2-m4; 97.39 % with the correctly rounded root).
+/// correctly rounded on 95.6% of significands; the routine takes its model ([`E::fast_rsqrt`]), and
+/// so is Metal's word on every lane below 0.7 that its polynomial is and on 99.88 % of `[0.7, 1)`
+/// (97.39 % with the correctly rounded root).
 fn fast_asin(e: &mut E<'_, '_>, x: Value) -> BResult<Value> {
     let x = read(e, Fun::Asin(Mode::Fast), x)?;
     let a = e.abs(x)?;
@@ -500,7 +500,7 @@ pub(crate) fn acos(e: &mut E<'_, '_>, m: Mode, x: Value) -> BResult<Value> {
 /// other lane's answer is `math::atan2_special`'s, a zero or denormal answer included): Metal's
 /// precise `atan` ([`metal_atan`]) of the correctly rounded quotient `q = y / x` ([`E::div`]), and
 /// `RN(atan(q) + RN(π))` toward a negative `x`, `RN(atan(q) - RN(π))` where `y` is negative too.
-/// Metal's word on every finite normal pair of EV MBB-atan2-m4 (16.7 million, the M4) whose answer
+/// Metal's word on every finite normal pair of our probe (16.7 million, the M4) whose answer
 /// is normal, wherever the reciprocal in its `atan` is Metal's, which it is at all but 0.012% of
 /// them.
 pub(crate) fn atan2(e: &mut E<'_, '_>, y: Value, x: Value) -> BResult<Value> {
@@ -524,17 +524,17 @@ fn turned(e: &mut E<'_, '_>, t: Value, y: Value, x: Value) -> BResult<Value> {
 }
 
 /// `P(s)` of Metal's `half` `atan(a) = a P(a a)` to 1 and `RN(π/2) - t P(t t)` of `t = 1 / a`
-/// above, its `f32` coefficients by their bits: read off Metal's words at every `half` (EV
-/// MBB-half1-m3, the M3; the M4's, EV MBB-half1-m4, are the same) by a clean-room fit. Horner's
-/// rule in `s` (rounded), each step a product and a sum, both rounded.
+/// above, its `f32` coefficients by their bits: read off Metal's words at every `half` (the M3; the
+/// M4's, are the same) by a clean-room fit. Horner's rule in `s` (rounded), each step a product and
+/// a sum, both rounded.
 pub(crate) const HALF_ATAN_P: [u32; 4] = [0x3F7F_F382, 0xBEA7_01E6, 0x3E20_517B, 0xBD38_2B03];
 
 /// Metal's `half` `atan(x)` before its rounding to `half`, of a `half` `x` held as `float`: with
 /// `a = |x|`, `a P(a a)` of [`HALF_ATAN_P`] to 1, and above it `RN(π/2) - t P(t t)` of the
 /// correctly rounded `t = 1 / a` ([`E::div`]; `0` for an infinite `a`), with `x`'s sign, so a zero
-/// gives itself. Rounded to `half`, Metal's word at every `half` (EV MBB-half1-m3 and -m4),
-/// whatever the steps' fusion and whether `t` is the quotient or Metal's reciprocal: the form
-/// is no closer to any word's rounding edge than that.
+/// gives itself. Rounded to `half`, Metal's word at every `half`, whatever the steps' fusion and
+/// whether `t` is the quotient or Metal's reciprocal: the form is no closer to any word's rounding
+/// edge than that.
 pub(crate) fn half_atan(e: &mut E<'_, '_>, x: Value) -> BResult<Value> {
     let a = e.abs(x)?;
     let one = e.c(1.0)?;
@@ -567,7 +567,7 @@ fn half_atan_p(e: &mut E<'_, '_>, s: Value) -> BResult<Value> {
 /// held as `float` (any other lane's answer is `math::atan2_special`'s): [`half_atan`] of the
 /// correctly rounded quotient `q = y / x` ([`E::div`], normal for every such pair), turned to the
 /// quadrant as the precise `atan2` is (`RN(π)` added toward a negative `x`, subtracted where `y` is
-/// negative too). Rounded to `half`, Metal's word at every such pair of EV MBB-half1-m3 (65,536
+/// negative too). Rounded to `half`, Metal's word at every such pair of our probe (65,536
 /// pairs; the M4's words are the same).
 pub(crate) fn half_atan2(e: &mut E<'_, '_>, y: Value, x: Value) -> BResult<Value> {
     let q = e.div(y, x)?;

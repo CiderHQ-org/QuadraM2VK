@@ -118,7 +118,7 @@ fn the_execution_record_names_each_dispatchs_compiled_pipeline() {
 /// Each committed public render case the runtime draws records one execution: the compiled
 /// render pipeline its draw ran, and the one `VkPipeline` it records, created within the ceiling.
 /// In `EXECUTION_SHARDS` tests (`in_shard`): as one, it passed the Mac lane's 60 s a test on the
-/// M4 and took 52 s on the 780M (EVs CPF2-lane3-mvk4, CPF2-lane3-radv).
+/// M4 and took 52 s on the 780M.
 fn the_execution_record_names_each_draws_compiled_pipeline(shard: usize) {
     let cases = render_cases_where(in_shard(is_public_render, shard, EXECUTION_SHARDS));
     let mut drawn = 0usize;

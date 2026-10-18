@@ -3,7 +3,7 @@
 //! selects, under the validation layer.
 //!
 //! Metal rounds each channel toward zero, stores a finite value past 65504 as 65504, keeps an
-//! infinity, and stores every NaN as `0x7e00` (EV TXN-hkw-m4, an M4 under macOS 27.0.1: 380,972
+//! infinity, and stores every NaN as `0x7e00` (an M4 under macOS 27.0.1: 380,972
 //! of 380,972 non-NaN channels per format, every NaN of 16 payloads and both signs; Shared and
 //! Private, plain and under the debug layer, alike): [`half_toward_zero`], the fragment write's
 //! rule.
@@ -360,7 +360,7 @@ fn small_nan(code: u32, mantissa: u32) -> bool {
 
 /// A kernel's `float` write to an `RG11B10Float` storage texture through every form, against
 /// Metal's conversion: every field rounded toward zero, a negative value 0, a finite value past
-/// the largest the largest, an infinity kept, a NaN `0x7e0` or `0x3f0` (EV FRT-twr1-m4 and the
+/// the largest the largest, an infinity kept, a NaN `0x7e0` or `0x3f0` (our probe and the
 /// M3 Max's m3pkg-twr, alike: the kernel's, a fragment function's and a color attachment's
 /// writes at the default rounding mode, byte for byte). The values are every finite code's and
 /// every tie between neighbouring codes, with one `f32` step either side, of both field widths,

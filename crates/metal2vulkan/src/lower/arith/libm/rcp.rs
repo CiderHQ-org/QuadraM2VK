@@ -3,7 +3,7 @@
 //! face coordinate. [`metal_rcp`] is [`super::Fun::Recip`]'s routine, which the other routines call
 //! ([`E::recip`]) and any lowering may per lane.
 //!
-//! Read off every `float` of the M4 (EV MATH-sweep3-m4, a library compiled at run time with
+//! Read off every `float` of the M4 (a library compiled at run time with
 //! `mathMode` fast): Metal's reciprocal of a normal `y` whose reciprocal is normal is the
 //! reciprocal `r(m)` of its significand `m` in `[1, 2)` with the exponent negated and the sign
 //! kept, and `r(m)` is `1 / m` plus a smooth error per 64th of `m` (up to about a fifth of a
@@ -107,7 +107,7 @@ pub(crate) fn declare(mb: &mut ModuleBuilder) -> BResult<GlobalId> {
 /// division) and its exact residual `1 - m r0` as `r0 + ((1 - m r0) r0 + eps)`, each step's
 /// rounding far below the unit `r` rounds to; then `r`'s exponent field moved by `y`'s, and `y`'s
 /// sign (Metal's reciprocal of `-y` is the negation of its reciprocal of `y`). Metal's flushes,
-/// as measured (EV MATH-sweep3-m4): a zero or denormal `y` gives the infinity of its sign, and a
+/// as measured: a zero or denormal `y` gives the infinity of its sign, and a
 /// `y` past `2^126` (an infinity included), whose reciprocal would be denormal, the zero of its
 /// sign. A NaN gives a NaN (`y`; Metal's NaN bits are its callers').
 pub(crate) fn metal_rcp(e: &mut E<'_, '_>, y: Value) -> BResult<Value> {

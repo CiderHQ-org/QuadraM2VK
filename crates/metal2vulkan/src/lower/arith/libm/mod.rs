@@ -4,13 +4,13 @@
 //! Vulkan's precision table bounds `Atan`, `Asin`, and `Acos` at 4096 ulp and `Sin` and `Cos` at
 //! `2^-11` absolute, about what Metal's fast-math table allows, while Metal's precise functions
 //! are bounded at 4 to 6 ulp (MSL Table 8.1) and Mesa's devices answer `atan` 3,528 ulp off
-//! (EV TRN-probe on lavapipe, RADV, and ANV). Where the device is Metal's own
-//! (`FloatFunctions::Metal`: MoltenVK on an Apple GPU), its instruction is Metal's function in the
-//! math mode Metal compiles the module with ([`module_mode`]), so a call in that mode is left to
-//! it, and a call in the other mode (a `precise::` call in a fast-math module, or a `fast::` one in
-//! a module that keeps NaNs) takes the routine. Elsewhere every such call takes the routine.
-//! Metal's `sinpi`, `cospi`, and `tanpi` are no device's instruction, so every precise call of them
-//! takes their routines, and every fast one but where the device's functions are Metal's.
+//! (on lavapipe, RADV, and ANV). Where the device is Metal's own (`FloatFunctions::Metal`: MoltenVK
+//! on an Apple GPU), its instruction is Metal's function in the math mode Metal compiles the module
+//! with ([`module_mode`]), so a call in that mode is left to it, and a call in the other mode (a
+//! `precise::` call in a fast-math module, or a `fast::` one in a module that keeps NaNs) takes the
+//! routine. Elsewhere every such call takes the routine. Metal's `sinpi`, `cospi`, and `tanpi` are
+//! no device's instruction, so every precise call of them takes their routines, and every fast one
+//! but where the device's functions are Metal's.
 //!
 //! A routine is one module-scope function of one `float` per [`Fun`] (as the wide divisions and
 //! fused multiply-adds are), which a call of any lane count calls once per lane: GPU code runs a
@@ -21,8 +21,8 @@
 //! Metal's precise division (`divide.rs`) and Metal's inverse root ([`Fun::FastRsqrt`], from the
 //! correctly rounded one). So its answer does not depend on the device. Before, a routine took the
 //! device's `OpFDiv` and `Sqrt` (Vulkan allows 2.5 ulp and 3 ulp) and corrected their error where
-//! it was found to reach the result; `tan`'s answers still differed among RADV, lavapipe and NVIDIA
-//! (EV PERF-sweep1). No intermediate is an `f32` denormal where the result depends on it, so a
+//! it was found to reach the result; `tan`'s answers still differed among RADV, lavapipe and
+//! NVIDIA. No intermediate is an `f32` denormal where the result depends on it, so a
 //! device that flushes them answers the same. A routine reads a denormal operand as Metal does
 //! ([`denormal`]), and answers Metal's values at its special operands where they are measured,
 //! Metal's NaN at a domain error among them (`E::metal_nan`); a NaN operand's result is the
@@ -469,7 +469,7 @@ impl Fun {
     /// are the fast ones below the flush point. Metal's `sinpi`, `cospi`, and `tanpi` are none of
     /// the instructions SPIRV-Cross emits (it emits no `sinpi`), so no device answers a precise
     /// call: the device's `Sin` and `Cos` of `float(π) r` matched Metal on 849, 922 and 637 of case
-    /// 087758cb's 1,024 lanes (EV TRN-s1-mac), where Metal's own forms through the `sinc`'s model
+    /// 087758cb's 1,024 lanes, where Metal's own forms through the `sinc`'s model
     /// are its word at 99.5 % to 99.99 % of every measured range. A fast call is that composition,
     /// in either mode: within Apple's fast bound (MSL Table 8.2), the near-equivalent the user's
     /// fast-math sign-off accepts, at a third to a sixth of the routine's instructions per call
@@ -482,8 +482,8 @@ impl Fun {
     /// of its `exp2` and `log2` do, in either mode (`math::metal_exp`, `math::metal_log`): its
     /// precise `exp10` is `fma(E, d ln 2, E)` of `E = exp2(RN(x c))` and the product's error `d`,
     /// `c = log2(10)` (every lane of case 7b283404 on the M3 and the M4), and its `log10` is
-    /// `log2(x) RN(log10(2))` with its own polynomial next to 1 (every `float` of EV
-    /// MATH-sweep2-m4's binades). Its precise `exp` and `log` are the device's own in a
+    /// `log2(x) RN(log10(2))` with its own polynomial next to 1 (every `float` of our probe's
+    /// binades). Its precise `exp` and `log` are the device's own in a
     /// precise module and the same compositions, with `log2(e)` and `RN(ln 2)` and `log`'s
     /// polynomial, in a fast-math one. Its reciprocal is the device's `1 / y` in a fast-math
     /// module, where Metal compiles the division with its fast reciprocal, and not in a precise
@@ -744,8 +744,8 @@ impl Fun {
 /// The routines a call of float function `op` on form `f` may call: its own and those of the
 /// functions it composes. `float` lanes take routines, and so do `half` lanes, which are held
 /// as `float` and computed by a `float` function before their rounding: Metal's `half` functions
-/// are the same in both math modes (the half probe, cases dc0fee8f and 3ef7c1c5; every `half` of EV
-/// MBB-half1-m3), so `refine_float` refines only `float` calls, and the `float` function of a
+/// are the same in both math modes (the half probe, cases dc0fee8f and 3ef7c1c5; every `half` of
+/// our probe), so `refine_float` refines only `float` calls, and the `float` function of a
 /// `half` one is `math::metal_half`'s, whose `tanh` calls Metal's `exp2` and reciprocal
 /// (`math::half_tanh`); its `atan`, `atan2`, `tan`, `sin`, `cos`, and `asinh` are Metal's own
 /// `half` forms ([`Fun::HalfAtan`], [`Fun::HalfAtan2`], [`Fun::HalfTan`]; [`Fun::HalfSin`],

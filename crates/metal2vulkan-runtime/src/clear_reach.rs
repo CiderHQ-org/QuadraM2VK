@@ -2,10 +2,8 @@
 //! render area, and what a `DontCare` load leaves.
 //!
 //! **Metal**, measured on the M3 Max (macOS 26.7) and an M4 (macOS 27.0.1), every answer the
-//! same on both, each case with and without API validation, which takes every one (EVs
-//! RRS-probe-2-m3 and RRS-probe-2-m4, 44 cases; RRS-probe-5-m3, RRS-probe-5-m4 and
-//! RRS-probe-5b-m4). A pass
-//! renders over its render area, from the origin (the smallest attachment's extent, or the
+//! same on both, each case with and without API validation, which takes every one (44 cases). A
+//! pass renders over its render area, from the origin (the smallest attachment's extent, or the
 //! descriptor's target size), but its attachments' stores reach past it:
 //!
 //! - **A `Clear` load** of an attachment the pass stores clears it from the origin over the render
@@ -45,7 +43,7 @@
 //!   pass, and loads: every other tile keeps its texels, Metal's answer (a draw writes no pixel
 //!   outside them), and a pass whose draws reach no pixel loads, as one whose draws draw nothing.
 //! - A `DontCare`-loaded memoryless color attachment clears to zero in a pass whose draws reach a
-//!   tile: Metal's answer in every tile a fragment reads it (an Apple M4, EV ZIN-zp1-m4), and it is
+//!   tile: Metal's answer in every tile a fragment reads it (an Apple M4), and it is
 //!   never stored, so the answer is exact.
 //! - A pass without a draw call whose attachments all load with `Load` or `DontCare` and store
 //!   with `Store` or `DontCare`, resolving nothing, and that sets no depth/stencil state with depth
@@ -58,6 +56,10 @@
 //!   is a load operation's clear: on a device that renders through Metal (MoltenVK) that clears
 //!   a pass without a draw over the whole attachment, as Metal does, so the reach pass's would,
 //!   and the pass's own would in a pass whose draw calls draw nothing (lane `clear_reach` on
+//!   MoltenVK). A stand-in's copy back to its texture covers the reach (`attachment_stand_in.rs`).
+//!   So is a cleared attachment the pass's first instance leaves out where no whole-subresource
+//!   clear may stand for its load operation (`render.rs`'s `cleared_ahead`), over the render area
+//!   where it stores nothing.
 //! - A pass whose first instance records inline clears none before it: that instance, begun at a
 //!   draw that records (of a vertex and an instance at least), renders over the reach its colors
 //!   share, and its load operations' clear reaches it (`render/inline_first.rs`). Unmeasured on
@@ -80,8 +82,8 @@ use std::collections::BTreeSet;
 
 /// The side, in pixels, of the tiles a `Clear` load's clear reaches past the render area in, on
 /// both axes: Metal's on the M3 Max and an M4, the same at every format, sample count and tile
-/// size measured (the module docs; EVs RRS-probe-2-m3 and RRS-probe-2-m4). The one place the
-/// runtime states it: every device clears as Metal's do.
+/// size measured (the module docs). The one place the runtime states it: every device clears as
+/// Metal's do.
 pub(super) const TILE: u32 = 32;
 
 /// The extent from the origin that a `Clear` load of an attachment of `extent` clears in a pass
@@ -122,15 +124,13 @@ pub(super) fn stores(store: StoreAction) -> bool {
 pub(super) enum PassReach {
     /// No tile: the pass has no draw call, or its draw calls draw nothing (of no vertex or no
     /// instance, or through a pipeline that rasterizes nothing) and no attachment is cleared
-    /// and stored (EVs RRS3-reach1, -reach2 and -reach4c: `nodraw`, `instances0_t11`,
-    /// `no_raster_t11`, `clear_c1_store_nodraw`).
+    /// and stored (`nodraw`, `instances0_t11`, `no_raster_t11`, `clear_c1_store_nodraw`).
     Nothing,
     /// Every tile, within the render area rounded up to whole tiles: a pass of one layer with a
-    /// draw call (one that draws nothing too) and an attachment loaded `Clear` and stored (EV
-    /// RRS3-reach3: a color, depth and stencil attachment, `clear_c1_store_instances0` and
-    /// `clear_depth_store_instances0` of no instance). A `Clear` load with another store, a
-    /// separate depth or stencil texture's, and a pass of more layers are unmeasured: none of
-    /// them decides it.
+    /// draw call (one that draws nothing too) and an attachment loaded `Clear` and stored (a color,
+    /// depth and stencil attachment, `clear_c1_store_instances0` and `clear_depth_store_instances0`
+    /// of no instance). A `Clear` load with another store, a separate depth or stencil texture's,
+    /// and a pass of more layers are unmeasured: none of them decides it.
     Every,
     /// The tiles the draws' primitives reach, which the host does not know: each use of it
     /// takes every tile and announces it (until the reach is captured).
@@ -210,7 +210,7 @@ pub(super) fn dont_care_loads(layout: &mut PassLayout, reach: PassReach) -> Dont
             continue;
         };
         // A memoryless color reads zero in every tile a draw touches, the only tiles where a
-        // fragment reads it (an Apple M4, EV ZIN-zp1-m4: a framebuffer fetch of one read 0 in
+        // fragment reads it (an Apple M4: a framebuffer fetch of one read 0 in
         // 52 runs of 52, also after a pass that cleared other bytes into the tiles), and it is
         // never stored: a clear to zero is Metal's answer exactly, in a pass that draws.
         if color.load == LoadAction::DontCare && color.memoryless {
@@ -291,7 +291,7 @@ const ROW_WORDS: usize = 8;
 /// The pixels a pass's draws may write, as far as the host bounds them: each draw that draws
 /// writes only inside its viewports' pixels within their scissor rectangles
 /// (`EncoderState::vk_scissors`), so a tile none of those reaches is one Metal's draws do not,
-/// and keeps its texels (EV XRB-pdc2 on an Apple M4 under macOS 27.0.1: a sub-rectangle of the
+/// and keeps its texels (on an Apple M4 under macOS 27.0.1: a sub-rectangle of the
 /// viewport or of the scissor zeroes exactly the `DontCare`-loaded tiles it overlaps, and every
 /// other tile keeps its texels). The whole render area where a draw's pixels are not bounded so:
 /// an execution of render commands, a tile dispatch, a pass through a rasterization-rate map, or

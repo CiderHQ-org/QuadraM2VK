@@ -174,9 +174,9 @@ pub(super) struct ShadowCopies {
     /// The texture's hazard tracking, its truth's.
     pub(super) tracked: bool,
     /// Whether what a command writes through the shadow never reaches the truth: a rotated
-    /// texture's image its functions read and write, whose writes Metal drops (EV
-    /// ZCI2-rotprobe5-m4). Such a shadow is never copied back, and a command writing through it
-    /// leaves it to copy in again at its next use.
+    /// texture's image its functions read and write, whose writes Metal drops. Such a shadow is
+    /// never copied back, and a command writing through it leaves it to copy in again at its next
+    /// use.
     pub(super) drops_writes: bool,
     /// What holds the truth, as the CPU may write it.
     pub(super) backing: Backing,

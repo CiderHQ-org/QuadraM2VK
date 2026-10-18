@@ -1,10 +1,9 @@
 //! `texture/heap_tiled`'s block-compressed layouts against an Apple M4 under macOS 27.0.1 (an Apple
-//! M3 Max under 27.0.1 alike, EV M27-hblk1-m3: every row's answer, its CPU's span and its GPU's)
-//! and an Apple M3 Max under macOS 26.7, our own probes (EVs TXN3-htl5-m4 and TXN3-bcsw1-m4 to
-//! TXN3-bcsw4-m4, rerun on the M3 Max: each texture in a `Shared` placement heap over host pages,
-//! every block of every slice, level and depth slice written by `replaceRegion` with values that
-//! name it, the span read through the pages, then written again by a blit): each row's answered
-//! size and alignment, and its span's hash, as its level (`MetalLevel::MacOS27_0_1`,
+//! M3 Max under 27.0.1 alike: every row's answer, its CPU's span and its GPU's) and an Apple M3 Max
+//! under macOS 26.7, our own probes (rerun on the M3 Max: each texture in a `Shared` placement heap
+//! over host pages, every block of every slice, level and depth slice written by `replaceRegion`
+//! with values that name it, the span read through the pages, then written again by a blit): each
+//! row's answered size and alignment, and its span's hash, as its level (`MetalLevel::MacOS27_0_1`,
 //! `MetalLevel::MacOS26_7`) places its family's blocks where its CPU copies reach them and where
 //! its GPU does.
 
@@ -28,12 +27,12 @@ struct Row {
     span: u64,
 }
 
-/// The M4's rows (and the M3 Max's under 27.0.1, EV M27-hblk1-m3, every field alike), as the
+/// The M4's rows (and the M3 Max's under 27.0.1, every field alike), as the
 /// probes state them, one a line: the format and type as Metal names them
 /// (less `MTLPixelFormat` and `MTLTextureType`), width, height, depth, levels, array length,
 /// size, alignment and the span's hash; `#` a heading.
 const M4_ROWS: &str = "
-# EV TXN3-htl5-m4: 128 rows
+# The plain layouts: 128 rows
 BC1_RGBA 2D 100 36 1 7 1 5888 128 685803a2eee99313
 BC1_RGBA 2D 100 33 1 7 1 5888 128 4558c9fea80831cb
 BC1_RGBA 2D 36 100 1 7 1 5888 128 e8c0f7c64b57b2f3
@@ -162,7 +161,7 @@ ASTC_12x12_LDR 2D 20 20 1 5 1 640 128 68432baf806592c5
 ASTC_12x12_LDR 2D 13 7 1 4 1 512 128 f2b2e05f5dbc67b1
 BC1_RGBA 2DArray 100 33 1 7 2 11776 128 aa3224a2ec187d09
 ASTC_4x4_LDR 2DArray 100 33 1 7 2 22528 128 dfd4396183f3fd2a
-# EV TXN3-bcsw2-m4: 109 rows
+# The second sweep: 109 rows
 BC1_RGBA_sRGB 2D 100 33 1 7 1 5888 128 4558c9fea80831cb
 BC1_RGBA_sRGB 2D 67 300 1 9 1 44160 128 c670a09509ba2c26
 BC1_RGBA_sRGB 2D 260 70 1 9 1 44160 128 270cb2dec345a766
@@ -272,7 +271,7 @@ ETC2_RGB8 2D 67 300 1 4 1 44160 128 13420e277984e621
 BC3_RGBA 2D 129 300 1 5 1 142336 128 c2231c5faf5bbc8c
 ASTC_4x4_LDR 2D 100 33 1 2 1 11264 128 f4c901f10de281bd
 BC1_RGBA 2DArray 100 33 1 3 2 11776 128 da10f1080b16d435
-# EV TXN3-bcsw3-m4: 9 rows
+# The third sweep: 9 rows
 BC1_RGBA 2D 513 300 1 10 1 251648 128 22ea3ab679043212
 BC1_RGBA 2D 1025 300 1 11 1 404608 128 7d2637959c7ebd76
 BC3_RGBA 2D 257 140 1 9 1 142336 128 2e5537e29bf92130
@@ -282,7 +281,7 @@ EAC_RG11Unorm 2D 257 140 1 9 1 142336 128 2e5537e29bf92130
 ASTC_4x4_LDR 2D 257 140 1 9 1 142336 128 2e5537e29bf92130
 ASTC_8x8_LDR 2D 513 300 1 10 1 142464 128 21b9c43b92972b74
 BC1_RGBA 2DArray 513 300 1 10 2 524288 16384 1f01b7bf38774a8b
-# EV TXN3-bcsw4-m4: 94 rows
+# The fourth sweep: 94 rows
 ASTC_6x5_LDR 2D 100 33 1 7 1 5888 128 afec42c22597a36f
 ASTC_6x5_LDR 2D 67 300 1 9 1 22400 128 066280d7f6db5718
 ASTC_6x5_LDR 2D 260 70 1 9 1 22400 128 97e3d4ccd7e26496
@@ -377,7 +376,7 @@ ASTC_4x4_LDR 2D 257 300 1 9 1 251520 128 72d9c6368399c396
 ASTC_8x8_LDR 2D 513 600 1 10 1 251648 128 76d0828cf1e7a6f6
 ASTC_12x12_LDR 2D 780 900 1 10 1 251648 128 47e8ec1970b1f487
 EAC_RG11Unorm 2D 257 300 1 9 1 251520 128 1ae815cc24a0a396
-# EV TXN3-bcsw1-m4: 471 rows
+# The first sweep: 471 rows
 BC1_RGBA 2D 4 300 1 9 1 2560 128 ba5196c2a04f7a2d
 BC1_RGBA 2D 5 300 1 9 1 3584 128 02bec2920aedaa9a
 BC1_RGBA 2D 6 300 1 9 1 3584 128 02bec2920aedaa9a
@@ -856,7 +855,7 @@ BC3_RGBA 2D 160 300 1 9 1 142336 128 d9131f602ed48e7b
 /// `M4_ROWS` states them: each answer is the M4's, each span its CPU's writes'
 /// (`replaceRegion`).
 const M3_ROWS: &str = "
-# EV TXN3-htl5-m4 rerun on the M3 Max (package bc-m3pkg): 128 rows
+# The plain layouts rerun on the M3 Max: 128 rows
 BC1_RGBA 2D 100 36 1 7 1 5888 128 efbdfde95d2e1553
 BC1_RGBA 2D 100 33 1 7 1 5888 128 35839f04fcebe60b
 BC1_RGBA 2D 36 100 1 7 1 5888 128 d2c8176d1ef9bb93
@@ -985,7 +984,7 @@ ASTC_12x12_LDR 2D 20 20 1 5 1 640 128 68432baf806592c5
 ASTC_12x12_LDR 2D 13 7 1 4 1 512 128 f2b2e05f5dbc67b1
 BC1_RGBA 2DArray 100 33 1 7 2 11776 128 a00318c3f9ee7009
 ASTC_4x4_LDR 2DArray 100 33 1 7 2 22528 128 dfd4396183f3fd2a
-# EVs TXN3-bcsw1-m4 to TXN3-bcsw4-m4 rerun on the M3 Max (package bc-m3pkg2): 683 rows
+# The four sweeps rerun on the M3 Max: 683 rows
 BC1_RGBA 2D 4 300 1 9 1 2560 128 ba5196c2a04f7a2d
 BC1_RGBA 2D 5 300 1 9 1 3584 128 02bec2920aedaa9a
 BC1_RGBA 2D 6 300 1 9 1 3584 128 02bec2920aedaa9a
@@ -1676,7 +1675,7 @@ EAC_RG11Unorm 2D 257 300 1 9 1 251520 128 72d9c6368399c396
 /// row of `M3_ROWS` the blit's span is its CPU's, and at every row of `M4_ROWS` the M4's blit's
 /// span is its CPU's.
 const M3_GPU_ROWS: &str = "
-# the GPU blit of package bc-m3pkg2: 7 rows
+# the GPU blit on the M3 Max: 7 rows
 BC1_RGBA 2D 513 300 1 10 1 251648 128 8a8f3ecd2a8d3212
 BC1_RGBA 2D 1025 300 1 11 1 404608 128 c5ead9608c8c7376
 ETC2_RGB8 2D 513 300 1 10 1 251648 128 8a8f3ecd2a8d3212

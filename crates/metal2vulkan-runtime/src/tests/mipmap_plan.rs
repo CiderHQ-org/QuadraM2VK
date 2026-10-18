@@ -67,8 +67,7 @@ fn metals_rules_stop_compressed_and_unfilterable_formats() {
     use PixelFormat as P;
     let invalid = |p| Err(MipmapRefusal::Invalid(p));
     // One level of any format, and a depth or stencil texture of any levels, are left as they
-    // are, as plain Metal leaves them (EV SPCrp-probe1-m4 `mip_single_*`, `mip_d16_3`,
-    // `mip_d32_3`, `mip_s8_3`, `mip_d32s8_3`).
+    // are, as plain Metal leaves them.
     for pf in [P::RGBA8Unorm, P::RGBA8Uint, P::BC1RGBA, P::Depth32Float] {
         let one = TextureDescriptor {
             pixel_format: pf,
@@ -404,7 +403,7 @@ fn record_of(desc: &TextureDescriptor) -> ViewRecord {
 /// A probe's texture: its type, format and extent, and its levels below the first.
 type ProbeCase = (TextureType, PixelFormat, [u32; 3], &'static [&'static [u8]]);
 
-/// EV SPCrp-probe3-m4's integer mipmaps (an M4, macOS 27.0.1, twice each): each texel holds the
+/// Our probe's integer mipmaps (an M4, macOS 27.0.1, twice each): each texel holds the
 /// low byte of its index in the level, and the levels below hold these.
 #[test]
 fn integer_mipmaps_pick_the_texels_plain_metal_picks() {

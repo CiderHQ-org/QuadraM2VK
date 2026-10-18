@@ -4,7 +4,7 @@
 //!
 //! - Creation: Metal refuses a pipeline whose `maxCallStackDepth` `k` times its linked frames
 //!   passes 261728 bytes. The largest `k` it accepts is measured on an M4 under macOS 27.0.1
-//!   (FPC-fx3-m4, plain and under API validation alike); the lowering refuses past `261728 / L`
+//!   (plain and under API validation alike); the lowering refuses past `261728 / L`
 //!   with its own linked frames `L` (frames packed as item 29 says). For eight of the fourteen
 //!   kernels the bounds are Metal's. For the others Metal's backend keeps less than AIR says lives
 //!   across the call (one-dimensional arrays of up to 32 words, and a pair's big frame when the
@@ -47,7 +47,7 @@ const T: &[&str] = &["fr_ta", "fr_tb"];
 const U: &[&str] = &["fr_ua", "fr_ub"];
 
 /// Each kernel of the fixture, the functions its pipeline links, the largest `maxCallStackDepth`
-/// the lowering compiles it at, and the largest Metal accepts (FPC-fx3-m4): `261728 / L`, `L`
+/// the lowering compiles it at, and the largest Metal accepts: `261728 / L`, `L`
 /// the linked frames in bytes.
 ///
 /// - Equal: 8 values live across the call (48 bytes), 32 (144), arrays `[4][4]` (80), `[8][8]`
@@ -218,7 +218,7 @@ fn call(f: Fr, n: u32, frames: u32) -> u32 {
 }
 
 /// A kernel's call in one mode: the kernel, the functions its pipeline links, the mode, the
-/// function it calls, Metal's deepest correct depth at `k` (FPC-fx3-m4, at `k` 1, 2, 3, 4, 8 and
+/// function it calls, Metal's deepest correct depth at `k` (at `k` 1, 2, 3, 4, 8 and
 /// 16), and the linked frames `L` and smallest member frame `s` of the lowering's stack (a lone
 /// function's ratio is 1).
 type Reach = (

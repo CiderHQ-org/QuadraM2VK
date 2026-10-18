@@ -1,18 +1,18 @@
 //! A blit into a heap's two-plane extended-range texture whose planes lie in the heap's bytes
 //! (`AliasRoute::Planes`), as Metal's blit writes them there.
 //!
-//! **Metal's answer** (EVs XRR2-tph1-m4 and XRR2-tph2-m4, an Apple M4 under macOS 27.0.1, and
-//! XRR2-tph1-m3 and XRR2-tph2-m3, an Apple M3 Max under macOS 26.7; our own probe: every byte of a
-//! placement heap, `Shared` and `Private`, filled with random bytes and read through a buffer over
-//! the whole heap before and after one blit between two of its textures; 550 and 551, widths on
-//! 16, on 4 and off 4, whole levels, regions and single rows; each blit three times on the same
-//! bytes and the list twice, every byte alike, and alike on both chips): the copy writes the heap's
-//! bytes at Metal's blit rows (`bind::plane_bytes_copy_module`'s model), the alpha bytes past the
-//! alpha plane among them, over whatever else the heap holds there; it reads the source's bytes
-//! the same way, as they were before the copy where its writes reach them. A copy whose alpha
-//! bytes pass the heap's end raised no error; the bytes past it are not the heap's.
+//! **Metal's answer** (an Apple M4 under macOS 27.0.1, and an Apple M3 Max under macOS 26.7; our
+//! own probe: every byte of a placement heap, `Shared` and `Private`, filled with random bytes and
+//! read through a buffer over the whole heap before and after one blit between two of its textures;
+//! 550 and 551, widths on 16, on 4 and off 4, whole levels, regions and single rows; each blit
+//! three times on the same bytes and the list twice, every byte alike, and alike on both chips):
+//! the copy writes the heap's bytes at Metal's blit rows (`bind::plane_bytes_copy_module`'s model),
+//! the alpha bytes past the alpha plane among them, over whatever else the heap holds there; it
+//! reads the source's bytes the same way, as they were before the copy where its writes reach them.
+//! A copy whose alpha bytes pass the heap's end raised no error; the bytes past it are not the
+//! heap's.
 //!
-//! **Over a surface's planes** (EV XRR2-xrs2-m4, our own probe `xrs2`: an Apple M4 under macOS
+//! **Over a surface's planes** (our own probe `xrs2`: an Apple M4 under macOS
 //! 27.0.1, a copy between such a texture over a surface and a texture of its own, each way, and
 //! into a second surface's, each twice over the same bytes, on 7 surfaces and the consumer's 384 x
 //! 256 `'b3a8'` one, `Shared` and `Managed`): Metal's blit addresses both of such a texture's

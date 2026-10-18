@@ -861,11 +861,10 @@ fn channels(pf: PixelFormat, texel: &[u8]) -> Vec<(u32, u32, u32)> {
 /// one where it keeps it ([`NAN_CLEARS`]).
 type NanClear = (PixelFormat, [f64; 4], &'static [u8], &'static [u8]);
 
-/// Metal's NaN clears by format and clear color (EVs ZIN-zms2-m4, ZIN-zms3-m4, ZIN-zms4-m4,
-/// ZIN-zms5-m4 and ZIN-zms6-m4, an M4 under macOS 27.0.1; a Metal probe; the consumer's M3 Max
-/// alike at 4x4): the texel a level stores in its texels or every sample where Metal drops a `half`
-/// NaN's sign and payload (an uncompressed texture, or a level under 16 texels a side), then where
-/// it keeps them.
+/// Metal's NaN clears by format and clear color (an M4 under macOS 27.0.1; a Metal probe; the
+/// consumer's M3 Max alike at 4x4): the texel a level stores in its texels or every sample where
+/// Metal drops a `half` NaN's sign and payload (an uncompressed texture, or a level under 16 texels
+/// a side), then where it keeps them.
 const NAN_CLEARS: &[NanClear] = &[
     (
         PixelFormat::RGBA16Float,
@@ -976,21 +975,19 @@ fn nans_resolved(pf: PixelFormat, texel: &[u8]) -> Vec<u8> {
 /// in a pass without a draw call and in one whose draw (`rt6_restart`, `clear_reach::Lane`)
 /// lies wholly off the target, stores Metal's texel ([`NAN_CLEARS`]): the one with a `half`
 /// NaN's sign where Metal keeps it, at a plain level of 16 or more in a pass without a draw
-/// call, and without it elsewhere (EVs ZIN-zms4-m4, ZIN-zms6-m4 and ZIN-zms8-m4). A 1x
-/// attachment is read whole by a blit. Each sample of a 4x one is read through an unsigned view
-/// of its texel size where its format has one (`RGBA16Float`, `R16Float` and `R32Float`,
-/// `runtime_samples::encode`): its own with `PixelFormatView` usage, else a same-format copy's
-/// with it (Metal's and the devices' copies keep every sample's bits, but for a device whose
-/// multisampled copies convert float NaNs, `MultisampledCopiesConvertFloatNans`, on which a
-/// copy's samples are left unread). Every 4x one is resolved into a new plain 1x texture read by
-/// a blit. In a pass without a draw call Metal's resolve
-/// keeps the texel where it keeps the sign and stores zero in each small-float NaN channel and
-/// `0x7fc00000` in each 32-bit float one elsewhere, which the runtime writes on every device
-/// (an `R32Float` clear is Metal's conversion of the double at every level, EV ZIN-zms5-m4). In a
-/// pass with a draw Metal's resolve averages the samples, each NaN zero: a device's resolve whose
-/// NaN channels differ only so is its resolve rule, printed (`device-rounded-resolve`), not this
-/// clear's. A `BGR10_XR` NaN clear is printed beside them, or the device's refusal of the format.
-/// Each prints `MSAA-NAN-CLEAR`.
+/// call, and without it elsewhere. A 1x attachment is read whole by a blit. Each sample of a 4x one
+/// is read through an unsigned view of its texel size where its format has one (`RGBA16Float`,
+/// `R16Float` and `R32Float`, `runtime_samples::encode`): its own with `PixelFormatView` usage,
+/// else a same-format copy's with it (Metal's and the devices' copies keep every sample's bits, but
+/// for a device whose multisampled copies convert float NaNs, `MultisampledCopiesConvertFloatNans`,
+/// on which a copy's samples are left unread). Every 4x one is resolved into a new plain 1x texture
+/// read by a blit. In a pass without a draw call Metal's resolve keeps the texel where it keeps the
+/// sign and stores zero in each small-float NaN channel and `0x7fc00000` in each 32-bit float one
+/// elsewhere, which the runtime writes on every device (an `R32Float` clear is Metal's conversion
+/// of the double at every level). In a pass with a draw Metal's resolve averages the samples, each
+/// NaN zero: a device's resolve whose NaN channels differ only so is its resolve rule, printed
+/// (`device-rounded-resolve`), not this clear's. A `BGR10_XR` NaN clear is printed beside them, or
+/// the device's refusal of the format. Each prints `MSAA-NAN-CLEAR`.
 #[test]
 fn multisampled_nan_clears_store_metal_s_texel() {
     let (messages, cache, lane) = super::clear_reach::lane();
@@ -1675,8 +1672,7 @@ fn passes_and_draws_are_refused_as_metal_refuses_them() {
         draw(&mut encoder, 1),
         Err(invalid("draw_primitives", Problem::NoPipelineState))
     );
-    // An empty draw without a pipeline state stops plain Metal too (EV RFX-probe2-m4
-    // `empty_no_pipeline`, `empty_instances_no_pipeline`): refused alike.
+    // An empty draw without a pipeline state stops plain Metal too: refused alike.
     assert_eq!(
         draw(&mut encoder, 0),
         Err(invalid("draw_primitives", Problem::NoPipelineState))
@@ -1688,8 +1684,8 @@ fn passes_and_draws_are_refused_as_metal_refuses_them() {
     assert_eq!(draw(&mut encoder, 0), Ok(()));
     // An empty draw is checked only as plain Metal checks one: past a pipeline state of its
     // kind, it draws nothing whatever the rest of the encoder's state, here an amplification
-    // count above the pipeline's maximum of 1, which refuses a draw that draws (EV
-    // RFX-probe2-m4 `empty_amplification_over`; its validation stops both).
+    // count above the pipeline's maximum of 1, which refuses a draw that draws (its validation
+    // stops both).
     encoder.set_vertex_amplification_count(2, None).unwrap();
     assert_eq!(draw(&mut encoder, 0), Ok(()));
     assert_eq!(
@@ -1799,7 +1795,7 @@ fn passes_and_draws_are_refused_as_metal_refuses_them() {
     assert_eq!(encoder.end_encoding(), Ok(()));
     run(&command_buffer);
     // So does a depth or stencil store action still Unknown without a resolve texture: plain
-    // Metal left the texels under a clear, as its `DontCare` (EV RFX-probe3-m4; Metal's
+    // Metal left the texels under a clear, as its `DontCare` (Metal's
     // validation stops it).
     for (format, depth, stencil) in [
         (PixelFormat::Depth32Float, true, false),

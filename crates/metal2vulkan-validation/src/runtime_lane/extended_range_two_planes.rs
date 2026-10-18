@@ -23,10 +23,9 @@
 //!   write.
 //!
 //! Metal's answer: the SHA-256 of each output, the same on an Apple M3 Max (macOS 26.7) and an
-//! Apple M4 (macOS 27.0.1), plain and under Metal's validation layer alike: the textures' from
-//! EVs TXN-xr5probe-m3 and -m4, the plane views' from EVs TXN-xr6probe-m3 and -m4. The EVs keep
-//! the bytes. A differing output is printed whole, on one `XR-TWO-PLANES-DIFFERS`
-//! line.
+//! Apple M4 (macOS 27.0.1), plain and under Metal's validation layer alike: the textures' and the
+//! plane views' from our probes, which keep the bytes. A differing output is
+//! printed whole, on one `XR-TWO-PLANES-DIFFERS` line.
 
 use super::degrade_notices::{counts, on_device};
 use super::{buffer_with, read_buffer};
@@ -738,7 +737,7 @@ const PLANES_AT: u64 = 48;
 const PLANES_EXTENT: [u64; 2] = [37, 5];
 
 /// Where a heap's one-level 2D two-plane texture of `[w, h]` texels keeps its planes, from its
-/// first byte, as an Apple M4 lays them (EV XRR2-xrh1-m4, `Shared` and `Private` alike): plane
+/// first byte, as an Apple M4 lays them (`Shared` and `Private` alike): plane
 /// 0's rows `align(4 w, 16)` bytes apart, and plane 1 from `align(h · align(4 w, 16), 16384)`,
 /// its rows `align(w, 16)` apart.
 fn heap_planes([w, h]: [u64; 2]) -> (u64, u64, u64) {
@@ -777,7 +776,7 @@ pub(super) fn get(device: &Device, queue: &CommandQueue, buffer: &Buffer, length
 }
 
 /// A one-level 2D texture of each two-plane format in a placement heap of each storage mode keeps
-/// its texels in the heap's bytes where Metal does (EV XRR2-xrh1-m4), as a buffer over the same
+/// its texels in the heap's bytes where Metal does, as a buffer over the same
 /// bytes sees them while the texture lives: a kernel's writes land on its two planes' rows, each
 /// color word with bits 30 and 31 clear, and on no other byte; bytes written into the planes
 /// reach the texture's reads; and its CPU copies move plane 0's words there. A texture of the
@@ -920,7 +919,7 @@ type SurfaceShape = ([u64; 2], [u64; 2], [u64; 2], u64);
 /// `bytesPerRow`, plane 1's, and the surface's bytes. The consumer's `'b3a8'` surface of 384 x
 /// 256 (plane 0 at 1536 bytes a row, plane 1 right after it at 512), and one Metal was measured
 /// over at rows off 16 bytes (37 x 5 at 260 and 68 bytes a row, plane 1 4 bytes past plane 0;
-/// its GPU reads them at 0 by 256 and 1296 by 64, EV XRR2-xrs1-m4).
+/// its GPU reads them at 0 by 256 and 1296 by 64).
 const SURFACES: [SurfaceShape; 2] = [
     ([384, 256], [0, 1536], [393_216, 512], 524_288),
     ([37, 5], [0, 260], [1304, 68], 1644),
@@ -1067,17 +1066,16 @@ fn clear(queue: &CommandQueue, texture: &Texture, color: ClearColor) {
 }
 
 /// A texture of each two-plane format over plane 0 of a two-plane surface, of `Shared` and
-/// `Managed` storage, keeps its texels in the surface's two planes where Metal does (EV
-/// XRR2-xrs1-m4): a kernel's writes and a clear land on plane 0's and plane 1's GPU rows (their
-/// offsets and rows rounded down to 16 bytes) and on no other byte, each color word with bits 30
-/// and 31 clear; bytes written into the planes reach the texture's reads; its CPU copies move
-/// plane 0's words at the plane's own offset and rows, and its blits with a buffer at the GPU's,
-/// plane 1 untouched. A texture of the device's own, written alike, holds the same color words
-/// and alpha bytes. A fill writes plane 0's words at the GPU's rows, and a copy out of the
-/// surface into a texture of the device's memory, into the surface from one, and into another
-/// surface's planes moves both planes' bytes at Metal's blit rows (plane 0's GPU rows for a
-/// surface's, `⌊4 w / 16⌋ · 16` for the device's), past the planes too but not past the surface
-/// (EV XRR2-xrs2-m4).
+/// `Managed` storage, keeps its texels in the surface's two planes where Metal does: a kernel's
+/// writes and a clear land on plane 0's and plane 1's GPU rows (their offsets and rows rounded down
+/// to 16 bytes) and on no other byte, each color word with bits 30 and 31 clear; bytes written into
+/// the planes reach the texture's reads; its CPU copies move plane 0's words at the plane's own
+/// offset and rows, and its blits with a buffer at the GPU's, plane 1 untouched. A texture of the
+/// device's own, written alike, holds the same color words and alpha bytes. A fill writes plane 0's
+/// words at the GPU's rows, and a copy out of the surface into a texture of the device's memory,
+/// into the surface from one, and into another surface's planes moves both planes' bytes at Metal's
+/// blit rows (plane 0's GPU rows for a surface's, `⌊4 w / 16⌋ · 16` for the device's), past the
+/// planes too but not past the surface.
 #[test]
 fn two_plane_surface_textures_keep_their_texels_in_the_surface_s_planes() {
     on_device(|device, messages| {
@@ -1403,9 +1401,9 @@ fn plane_views_over_a_buffer_read_and_write_as_metal_does() {
     });
 }
 
-/// Each two-plane format makes what Metal makes and refuses what Metal stops (EV
-/// TXN-xr5probe-m4, one case per process): a 2D texture of each storage mode and usage, of 1 x 1
-/// and 63 x 5, mipmapped, a 2D array, 1D, 3D and `new_shared_texture`'s are made; a cube (Metal's
+/// Each two-plane format makes what Metal makes and refuses what Metal stops (one case per
+/// process): a 2D texture of each storage mode and usage, of 1 x 1 and 63 x 5, mipmapped, a 2D
+/// array, 1D, 3D and `new_shared_texture`'s are made; a cube (Metal's
 /// nil, `Error::Nil`) and a multisample texture (Metal asserts, `Error::Invalid`) are refused
 /// `TypeForFormat`, and `ShaderAtomic` usage (Metal asserts) `UsageForFormat`.
 #[test]
@@ -1491,8 +1489,7 @@ fn two_plane_textures_are_made_as_metal_makes_them() {
                 TextureProblem::UsageForFormat,
             );
             // A cube array of more than 341 cubes is stopped before the nil, and a memoryless
-            // cube or cube array, which Metal makes, is refused not implemented (EVs
-            // XRR2-tcb1-m3, XRR2-tcb1-m4).
+            // cube or cube array, which Metal makes, is refused not implemented.
             let mut cubes = of(TextureType::CubeArray, [16, 16, 1], rw);
             cubes.array_length = 342;
             refused(&cubes, TextureProblem::ArrayLength);

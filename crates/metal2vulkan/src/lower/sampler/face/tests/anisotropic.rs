@@ -11,9 +11,9 @@
 //!   one tangent; and Metal's own reading must take an `x` or `z` face's gradients from what
 //!   MoltenVK's swizzle (SPIRV-Cross's `spvGradientCube`) makes of the `Projected` form, and a `y`
 //!   face's Metal length.
-//! - Metal under macOS 26.7 on the M3 Max (the RT13-ag2-probe and RT13-ag3-probe-m3) read
-//!   `σ (g[(s + 1) mod 3], g[(t + 1) mod 3])`, `σ` the sign of `s_c`: its own reading must take it
-//!   from what the swizzle makes of the `AnisotropicSwizzled` form.
+//! - Metal under macOS 26.7 on the M3 Max (the probes) read `σ (g[(s + 1) mod 3], g[(t + 1) mod
+//!   3])`, `σ` the sign of `s_c`: its own reading must take it from what the swizzle makes of the
+//!   `AnisotropicSwizzled` form.
 //!
 //! Through a runtime sampler `emit::word_footprint` hands one of those forms or the isotropic one
 //! by the sampler's word (`emit::by_anisotropy`).
@@ -51,7 +51,7 @@ fn face_of(d: [f32; 3]) -> (usize, (usize, f32), (usize, f32)) {
 }
 
 /// The face gradients the Apple M3 Max read under macOS 26.7 from gradient `g` through an
-/// anisotropic sampler on the face `(s, t)` names, up to `σ` (RT13-ag2-probe).
+/// anisotropic sampler on the face `(s, t)` names, up to `σ`.
 fn m3_reading(g: [f32; 3], (s, t): (usize, usize)) -> [f32; 2] {
     [g[(s + 1) % 3], g[(t + 1) % 3]]
 }

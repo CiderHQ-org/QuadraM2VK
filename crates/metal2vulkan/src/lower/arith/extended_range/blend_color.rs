@@ -4,7 +4,7 @@
 
 /// The range Metal clamps a blend's `half` source color to before blending into an attachment
 /// of a linear form, `BGR10_XR_sRGB` or the two-plane `_sRGB` form: the linear values of codes 0
-/// and 1022, `-384 / 510` and `638 / 510`, rounded to `half`, nearest even (EV XRR-rtp1-m4: every
+/// and 1022, `-384 / 510` and `638 / 510`, rounded to `half`, nearest even (every
 /// one of the probe's 8,192 sources a NaN or beyond the range lands there, for each format):
 /// `-0.7529296875` and `1.2509765625`. A linear form's blend clamps the blend color's color
 /// channels to it too ([`constant_words`]).
@@ -12,9 +12,9 @@ pub(crate) const SOURCE_RANGE: (f32, f32) = (-1542.0 / 2048.0, 1281.0 / 1024.0);
 
 /// [`SOURCE_RANGE`] for `BGRA10_XR_sRGB`: the tile values of codes 0 and 1022
 /// (`super::tile_value`, the table's steps 384 and 638 over 8192 rounded to `half`, ties away from
-/// zero; EV XRR-rtp1-m4): `-0.52734375` and `1.6689453125`. A blend into it clamps the blend
-/// color's color channels to it too (EV XRB-xrts-m4, the lane table without fast math: every
-/// configuration reading the blend color into `BGRA10_XR_sRGB`).
+/// zero): `-0.52734375` and `1.6689453125`. A blend into it clamps the blend color's color channels
+/// to it too (the lane table without fast math: every configuration reading the blend color into
+/// `BGRA10_XR_sRGB`).
 pub(crate) const SRGB_SOURCE_RANGE: (f32, f32) = (-1080.0 / 2048.0, 1709.0 / 1024.0);
 
 /// The smallest range holding [`SOURCE_RANGE`] and [`SRGB_SOURCE_RANGE`], which the binder clamps
@@ -24,10 +24,10 @@ pub(crate) const COLOR_HULL: (f32, f32) = (SOURCE_RANGE.0, SRGB_SOURCE_RANGE.1);
 /// The least `f32` a color channel of the blend color reads, under `BlendColor` into
 /// `BGRA10_XR_sRGB`, as [`SRGB_DIRECT_TOP`] rather than its `half`: `1.6689399480819702`
 /// (`0x3FD5_9FD3`, 45 `f32` steps below [`SRGB_SOURCE_RANGE`]'s top). Below it the channel reads
-/// its `half` clamped to the range, as its one minus does at every value (EV XRB-bcs2-m4, plain
+/// its `half` clamped to the range, as its one minus does at every value (plain
 /// Metal on an Apple M4 under macOS 27.0.1: every `f32` from `1.6689000129699707` to
 /// `1.6689451932907104`, each read under `BlendColor` and under `OneMinusBlendColor` without fast
-/// math; EV XRB-bcs-m4 about both ends of the range, the top's `half`s, `2.0`, `1e30`, `65504`,
+/// math; our probe about both ends of the range, the top's `half`s, `2.0`, `1e30`, `65504`,
 /// the infinities and a NaN, which reads the low end).
 pub(crate) const SRGB_DIRECT_BOUND: f32 = f32::from_bits(0x3FD5_9FD3);
 
@@ -59,12 +59,12 @@ fn half_even(x: f64) -> f32 {
 /// channel at or past [`SRGB_DIRECT_BOUND`] holds [`PAST_DIRECT_BOUND`] instead, which every form
 /// clamps to its top but `BGRA10_XR_sRGB`'s `BlendColor` reads as [`SRGB_DIRECT_TOP`]. The second:
 /// one minus each, `h(1 - x)` of the color clamped to [`SOURCE_RANGE`] and `h(1 - h(a))` of alpha,
-/// as Metal reads `OneMinusBlendColor` and `OneMinusBlendAlpha` under fast math (EVs XRB-sw1-m4 and
-/// XRB-sw2-m4; a NaN of either sign, the infinities and values beyond `half`'s range, EV
-/// XRB-bcx-m4), which only a blend into a form of that range reads (no blend into `BGRA10_XR_sRGB`
-/// reading the blend color is built under fast math, and without it the blend rounds one minus the
-/// first row's value itself). `1 - x` is exact in `f64` but for `|x|` below `2^-29`, where its
-/// rounding stays clear of a `half` midpoint, so each lane rounds once.
+/// as Metal reads `OneMinusBlendColor` and `OneMinusBlendAlpha` under fast math (a NaN of either
+/// sign, the infinities and values beyond `half`'s range), which only a blend into a form of that
+/// range reads (no blend into `BGRA10_XR_sRGB` reading the blend color is built under fast math,
+/// and without it the blend rounds one minus the first row's value itself). `1 - x` is exact in
+/// `f64` but for `|x|` below `2^-29`, where its rounding stays clear of a `half` midpoint, so each
+/// lane rounds once.
 pub fn constant_words(c: [f32; 4]) -> [u32; 8] {
     let clamp = |x: f32, (lo, hi): (f32, f32)| match x.is_nan() {
         true => f64::from(lo),

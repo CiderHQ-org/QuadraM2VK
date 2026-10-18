@@ -15,7 +15,7 @@
 //!   both, plain and under API validation; what Metal ends the process for even without validation
 //!   is refused `Invalid` (a storage or CPU cache mode other than the heap's, a `Managed` or
 //!   `Memoryless` heap, an alignment that is not a power of two), and what plain Metal answers nil
-//!   for, its validation stopping it, `Nil` (EV TTG-nil10-m4):
+//!   for, its validation stopping it, `Nil`:
 //!   - a heap's size rounds up to 16 KiB, and a size of 0 answers nil;
 //!   - a placement heap places a buffer at an offset that is a multiple of 256 bytes, its bytes
 //!     inside the heap (ending at the heap's end is fine; another offset, or bytes past the end,
@@ -185,8 +185,7 @@ pub struct SizeAndAlign {
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HeapProblem {
-    /// A heap of size 0: plain Metal answers nil (`Nil`) for every type and storage mode
-    /// (EV TTG-nil10-m4).
+    /// A heap of size 0: plain Metal answers nil (`Nil`) for every type and storage mode.
     Size,
     /// The call places resources in heaps of the other type: `new_buffer` in an automatic heap,
     /// `new_buffer_at_offset` in a placement heap.
@@ -196,14 +195,14 @@ pub enum HeapProblem {
     },
     /// A placement offset that is not a multiple of the resource's alignment, 256 bytes for a
     /// buffer and `Device::heap_texture_size_and_align`'s for a texture: plain Metal answers nil
-    /// (`Nil`; EVs TTG-nil1-m4 and TTG-nil10-m4).
+    /// (`Nil`).
     Offset {
         /// The offset given.
         offset: u64,
     },
     /// A resource whose `length` bytes from `offset` run past its heap's end, of `heap_size`
     /// bytes: a placement heap's buffer or texture, or an automatic heap's buffer longer than
-    /// the heap. Plain Metal answers nil (`Nil`; EVs TTG-nil1-m4 and TTG-nil10-m4).
+    /// the heap. Plain Metal answers nil (`Nil`).
     PastEnd {
         /// The resource's offset in the heap (0 for an automatic heap's).
         offset: u64,
@@ -951,7 +950,7 @@ impl Heap {
     ///
     /// Refused: a length past the device's `max_buffer_length` (`Problem::BufferLength`), an
     /// offset that is not a multiple of 256 (`HeapProblem::Offset`), bytes past the heap's end
-    /// (`HeapProblem::PastEnd`), each `Nil` as plain Metal answers nil (EV TTG-nil10-m4); an
+    /// (`HeapProblem::PastEnd`), each `Nil` as plain Metal answers nil; an
     /// automatic heap, options other than the heap's (`Invalid`).
     pub fn new_buffer_at_offset(
         &self,
@@ -997,8 +996,8 @@ impl Heap {
     /// The options of a buffer or texture `call` places with `options`: the heap's, its hazard
     /// tracking mode resolved, where `options` names the heap's storage and CPU cache modes. A
     /// hazard tracking mode named other than the heap's becomes the heap's, as plain Metal makes
-    /// it where its validation stops it (measured for a buffer, and for a texture by EV
-    /// `SPH-heapmis1-m4`). Refused: another storage or CPU cache mode, which ends Metal's process.
+    /// it where its validation stops it (measured for a buffer, and for a texture by our probe).
+    /// Refused: another storage or CPU cache mode, which ends Metal's process.
     pub(super) fn placed_options(
         &self,
         call: &'static str,

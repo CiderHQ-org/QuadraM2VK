@@ -40,7 +40,7 @@
 //!   inheriting buffer's command reads the encoder's buffer set without one at stride 0, as the
 //!   encoder's own dispatch does. A command with no dispatch, no pipeline state, or a threadgroup
 //!   that is empty or holds more threads than the state's `max_total_threads_per_threadgroup` runs
-//!   nothing, as Metal's runs nothing, and its neighbours run (probe `RT7-icb-probe1`, ruling a). A
+//!   nothing, as Metal's runs nothing, and its neighbours run (ruling a). A
 //!   command whose dispatch the plan path refuses refuses the commit, with that error, or fails the
 //!   command buffer where the host step records it (`CommandBufferError::Refused`, the same error
 //!   typed in `CommandBuffer::refusal`).
@@ -57,9 +57,9 @@
 //!   buffer's commands used yet, or none) misses as a pointer loaded from memory does: its slot is
 //!   unbound, so it reads zero and drops writes, and the command buffer's execution report counts
 //!   the miss, one per slot.
-//! - **Threadgroup lengths** are kept as set (probe `RT7-icb-probe1`): one past the device's
-//!   `max_threadgroup_memory_length` runs clamped to it (ruling c); one that is not a multiple of
-//!   16 bytes runs rounded up to one, as the plan rounds every length.
+//! - **Threadgroup lengths** are kept as set: one past the device's `max_threadgroup_memory_length`
+//!   runs clamped to it (ruling c); one that is not a multiple of 16 bytes runs rounded up to one,
+//!   as the plan rounds every length.
 //! - **Order.** Between commands, the segment orders as the encoder orders its dispatches (a
 //!   serial encoder's where their uses meet; a concurrent one's not at all), and a command with
 //!   its barrier set runs after every earlier command of the segment.
@@ -98,7 +98,7 @@ pub(super) const CALL_INDIRECT: &str = "execute_commands_in_buffer_indirect";
 pub(super) const RANGE_BYTES: u64 = 8;
 
 /// Refuse the execution range at `offset` of a buffer of `length` bytes where Metal's reading of
-/// it is not defined (`execute_commands_in_buffer_indirect`; probe `RT7-icb-probe5`, where API
+/// it is not defined (`execute_commands_in_buffer_indirect`; where API
 /// validation stops neither): an offset that is not a multiple of 4 bytes, at which Metal's GPU
 /// faulted the command buffer, and a range whose 8 bytes run past the buffer, which Metal reads
 /// from whatever follows it.
@@ -158,13 +158,12 @@ impl ExecutionRange {
     }
 
     /// The commands it runs of a buffer of `size` commands: the range given, or the range the
-    /// copy holds now as Metal's execution takes it (probes `RT7-icb-probe2` and
-    /// `RT7-icb-probe5`, an M3 Max and an M4, for a compute encoder; a probe, the same chips, for a
-    /// render encoder): from `location` to `location + length`, clamped at the buffer's size, so a
-    /// location of 2 and a length of 5 in a buffer of 4 run commands 2 and 3, and a length of 0 or
-    /// a location at the size runs nothing. Where the location lies past the size, or `location +
-    /// length` passes `2^32 - 1` (Metal's GPU then faults the command buffer, or hangs), it runs
-    /// nothing and reports `ReplayFaults::RANGE`.
+    /// copy holds now as Metal's execution takes it (an M3 Max and an M4, for a compute encoder; a
+    /// probe, the same chips, for a render encoder): from `location` to `location + length`,
+    /// clamped at the buffer's size, so a location of 2 and a length of 5 in a buffer of 4 run
+    /// commands 2 and 3, and a length of 0 or a location at the size runs nothing. Where the
+    /// location lies past the size, or `location + length` passes `2^32 - 1` (Metal's GPU then
+    /// faults the command buffer, or hangs), it runs nothing and reports `ReplayFaults::RANGE`.
     pub(super) fn commands(&self, size: u64) -> Result<(Range<u32>, ReplayFaults), Error> {
         let copy = match self {
             ExecutionRange::Fixed(range) => return Ok((range.clone(), ReplayFaults::default())),

@@ -1,7 +1,7 @@
 //! The level a depth comparison through a runtime sampler reads: where the sampler's word reads one
 //! texel, the shader fetches it from the level the word reads at the sample's level or a kernel's
-//! bias (`fetched::FetchLevel::Word`), on the CPU interpreter against Metal's rule, which EV
-//! TXN-cmplvl2-m4 measured through runtime and argument buffer's samplers: the level rounded to
+//! bias (`fetched::FetchLevel::Word`), on the CPU interpreter against Metal's rule, which our probe
+//! measured through runtime and argument buffer's samplers: the level rounded to
 //! `half` (a NaN read as 0), clamped into the sampler's level clamp as `f32`s and into the
 //! texture's levels, and under a nearest mip filter `L + 1` where its fraction truncated onto
 //! sixty-fourths passes one half; level 0 without a mip filter.
@@ -235,9 +235,9 @@ fn a_runtime_comparison_reads_the_level_its_word_reads() {
     }
 }
 
-/// Metal's blend of two levels' passes `[p0, p1]` (each 0 or 1) by `1 - q` and `q` (EVs
-/// TXN-cmplvl2-m4 and TXN-cmplvl3-m4): the passes as `r8Unorm` codes 0 and 255, their sum
-/// `255 (p0 (1 - q) + p1 q)` rounded once onto sixteenths of a code, ties up, divided by 255.
+/// Metal's blend of two levels' passes `[p0, p1]` (each 0 or 1) by `1 - q` and `q`: the passes as
+/// `r8Unorm` codes 0 and 255, their sum `255 (p0 (1 - q) + p1 q)` rounded once onto sixteenths of a
+/// code, ties up, divided by 255.
 fn blend([p0, p1]: [f32; 2], q: f32) -> f32 {
     let m = (q * 64.0) as u32;
     let s = p0 as u32 * (64 - m) + p1 as u32 * m;

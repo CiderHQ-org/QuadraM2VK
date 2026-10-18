@@ -5,11 +5,10 @@
 //!
 //! Metal compares a `Depth16Unorm` texel against the reference's code: the reference clamped into
 //! [0, 1] and the exact product with 65535 rounded to the nearest code (the one half-way
-//! reference, 0.5, up), a NaN failing (RT13-cg3-probe-m4 and RT13-cg4-probe-m4 for cube and 2D
-//! gathers, MSFQ-m4-mipd16-1 for `sample_compare`, Apple M4 on macOS 27.0.1). It compares a
-//! `Depth32Float` texel and the reference as given, in `f32`: neither clamped, `-0` equal to `+0`,
-//! the infinities in order, tiny values kept, a NaN failing (MSFQ-m4-probe2). Vulkan clamps a
-//! UNORM format's `Dref` into [0, 1] and leaves the rest to the device.
+//! reference, 0.5, up), a NaN failing (for cube and 2D gathers, for `sample_compare`, Apple M4 on
+//! macOS 27.0.1). It compares a `Depth32Float` texel and the reference as given, in `f32`: neither
+//! clamped, `-0` equal to `+0`, the infinities in order, tiny values kept, a NaN failing. Vulkan
+//! clamps a UNORM format's `Dref` into [0, 1] and leaves the rest to the device.
 //!
 //! The kernels are `msf_compare_filter`'s (`validation/fixtures/public/engine`), over a 4x4
 //! texture of distinct texels in each format, through constexpr samplers that clamp to the edge:

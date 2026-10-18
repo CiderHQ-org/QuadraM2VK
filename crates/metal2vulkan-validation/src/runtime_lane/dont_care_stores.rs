@@ -3,11 +3,11 @@
 //! under the validation layer.
 //!
 //! Metal keeps such an attachment's earlier texels on Apple's GPUs unless the tiler overflows
-//! (EVs DGC-dcs1-m4 and DGC-dcs2-m4, an M4 with macOS 27.0.1), but a pass that clears it, draws
-//! nothing, and resolves it alone, which leaves the clear where Metal compresses the texture.
-//! Vulkan leaves the texels undefined. On a driver with the fact (MoltenVK 1.4.1 on the Apple M4),
-//! which hands the store to Metal unchanged, a pass recorded as one render pass instance keeps the
-//! texels and announces no `dont-care-store`; every other driver announces it once, and each of its
+//! (an M4 with macOS 27.0.1), but a pass that clears it, draws nothing, and resolves it alone,
+//! which leaves the clear where Metal compresses the texture. Vulkan leaves the texels undefined.
+//! On a driver with the fact (MoltenVK 1.4.1 on the Apple M4), which hands the store to Metal
+//! unchanged, a pass recorded as one render pass instance keeps the texels and announces no
+//! `dont-care-store`; every other driver announces it once, and each of its
 //! texels must be one of Metal's two answers, the earlier texel or the one the same pass stores
 //! with `Store` (Metal's under its tiler's overflow), as the notice's exactness (`OneOfMetals`)
 //! states; the counts are printed (`DONT-CARE-TEXELS`). Only a driver measured to keep one of the
@@ -236,14 +236,13 @@ fn announces(messages: &Messages, case: &str, announced: bool, first: &BTreeSet<
 }
 
 /// Passes recorded as one render pass instance keep their attachments' earlier texels under
-/// `DontCare` and `MultisampleResolve` on a driver that stores them as Metal's own (EVs
-/// DGC-dcs1-m4 and DGC-dcs2-m4's answers), and announce no `dont-care-store` there: a color
-/// attachment cleared and drawn, loaded and drawn, cleared and not drawn, and cleared and drawn
-/// over a render area smaller than it; a 4x `RGBA8Unorm` and a 4x `BGRA8Unorm_sRGB` attachment
-/// cleared, drawn and resolved, or stored `DontCare`; a `Depth32Float` and a
-/// `Depth32Float_Stencil8` attachment cleared and drawn; and a 4x `Depth32Float` attachment
-/// cleared, drawn and resolved. Every other driver announces it once, and prints whether it kept
-/// them. The resolve textures hold the draw everywhere.
+/// `DontCare` and `MultisampleResolve` on a driver that stores them as Metal's own (our probes'
+/// answers), and announce no `dont-care-store` there: a color attachment cleared and drawn, loaded
+/// and drawn, cleared and not drawn, and cleared and drawn over a render area smaller than it; a 4x
+/// `RGBA8Unorm` and a 4x `BGRA8Unorm_sRGB` attachment cleared, drawn and resolved, or stored
+/// `DontCare`; a `Depth32Float` and a `Depth32Float_Stencil8` attachment cleared and drawn; and a
+/// 4x `Depth32Float` attachment cleared, drawn and resolved. Every other driver announces it once,
+/// and prints whether it kept them. The resolve textures hold the draw everywhere.
 #[test]
 fn dont_care_stores_keep_the_texels_where_the_driver_stores_them_as_metal_s() {
     let (messages, _cache, lane) = lane();
@@ -550,7 +549,7 @@ fn a_hidden_depth_announces_no_dont_care_store() {
 /// A 4x attachment cleared and resolved alone (`MultisampleResolve`) into its sRGB twin, in a
 /// pass with no draw call, after a pass that cleared and stored it: Metal keeps the samples'
 /// earlier texels, the texture compressed or not, and resolves the clear in the attachment's
-/// encoding into the twin's channel order (EV ZIN2-xr1-m4, an Apple M4 under macOS 27.0.1; the
+/// encoding into the twin's channel order (an Apple M4 under macOS 27.0.1; the
 /// consumer's M3 Max alike for `BGRA8Unorm` each way). On every driver the samples resolve as
 /// the earlier ones do, the resolve texture holds the clear (opaque red), and the pass announces
 /// no `dont-care-store`. Each pair on a device of its own.

@@ -399,8 +399,8 @@ pub(crate) fn check(
 }
 
 /// Whether a fetched color attachment of `pf` is read through Metal's decode of its bytes
-/// (`LoweringInputs::srgb_fetches`): `RGBA8Unorm_sRGB` and `BGRA8Unorm_sRGB`, whose fetch EVs
-/// XRR2-srgb1-m4 and XRR2-halve2-m4 measured. The one- and two-channel sRGB formats' are not.
+/// (`LoweringInputs::srgb_fetches`): `RGBA8Unorm_sRGB` and `BGRA8Unorm_sRGB`, whose fetch our
+/// probes measured. The one- and two-channel sRGB formats' are not.
 pub fn srgb_fetched(pf: metal::PixelFormat) -> bool {
     matches!(
         pf,
@@ -1028,7 +1028,7 @@ fn attachment_write(
 /// fast math stores Metal's value (`StageIo::half_blend_colors`). Factors one and zero, added,
 /// blend too: lavapipe (Mesa 26.2.4) stores the source through the destination there, one
 /// `float` unit in the last place at the destination's magnitude off it in up to 11% of a
-/// 32-bit float attachment's channels (EV HOP-hb2-lvpx86).
+/// 32-bit float attachment's channels.
 pub(crate) fn blends_output(c: &ColorAttachmentState) -> bool {
     c.blend.is_some() && !c.write_mask.is_empty()
 }
@@ -1045,7 +1045,7 @@ pub(crate) fn stores_output(c: &ColorAttachmentState) -> bool {
 /// interface `io` by one and zero though [`replaces`] holds of it: an output of a module without
 /// fast math (`StageIo::half_blend_colors`, `StageIo::float_blend_colors`), whose blend there
 /// Metal computes keeping the destination's product by zero (a NaN of an infinite or NaN texel,
-/// `+0` of a `-0` output over a texel of `+0` or above; EV FBL-zf1-m3), which no write of the
+/// `+0` of a `-0` output over a texel of `+0` or above), which no write of the
 /// output alone stores. The pipeline blends it and announces `PrecisionNote::HalfOutputPrecision`;
 /// the storage form computes Metal's (`lower::fragment::fetch`).
 pub(crate) fn keeps_zero(

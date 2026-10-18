@@ -8,7 +8,7 @@
 //! destination color, the destination color over one minus the destination alpha and the blend
 //! color over one, each added, subtracted and subtracted in reverse.
 //!
-//! Metal's answer (EV FBL-nan1-m3: plain Metal on the M3 Max under macOS 27.0.1, our own MSL, an
+//! Metal's answer (plain Metal on the M3 Max under macOS 27.0.1, our own MSL, an
 //! `RGBA16Float` target blended by five such blends, `half4` and `float4` outputs, fast and safe
 //! math, over NaN texels `0x7c01`, `0x7d55`, `0x7e00`, `0x7e01`, `0x7fff`, `0xfc01`, `0xfd55`,
 //! `0xfe00` and `0xffff`, NaN sources of those bits, and infinities: every one of the 235,560 NaN

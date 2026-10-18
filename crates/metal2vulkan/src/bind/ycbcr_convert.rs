@@ -1,12 +1,11 @@
 //! A YCbCr texture's texels as Metal reads them, converted from its IOSurface's two planes.
 //!
-//! **Metal's answers** (EVs XRR2-ycc1-m4, XRR2-ycc2-m4, TXN2-ycr1-m4 and TXN2-ycr3-m4, an Apple
-//! M4 under macOS 27.0.1; our own probes over CoreVideo surfaces). A texture of a 4:2:0
-//! two-plane format of `w x h` texels made over an IOSurface's plane 0 reads the surface's luma
-//! plane (plane 0, a code `Y` a texel) and its chroma plane (plane 1, a Cb and then a Cr code for
-//! each 2 x 2 texels, `⌈w / 2⌉ x ⌈h / 2⌉` of them at the plane's rows, whatever the surface's
-//! own chroma layout). A code of `b` bits ([`YCbCrCodes`]) is a byte (8 bits) or the high `b`
-//! bits of a little-endian 16-bit word (10 bits), or, packed, one of three 10-bit codes of a
+//! **Metal's answers** (an Apple M4 under macOS 27.0.1; our own probes over CoreVideo surfaces). A
+//! texture of a 4:2:0 two-plane format of `w x h` texels made over an IOSurface's plane 0 reads the
+//! surface's luma plane (plane 0, a code `Y` a texel) and its chroma plane (plane 1, a Cb and then
+//! a Cr code for each 2 x 2 texels, `⌈w / 2⌉ x ⌈h / 2⌉` of them at the plane's rows, whatever the
+//! surface's own chroma layout). A code of `b` bits ([`YCbCrCodes`]) is a byte (8 bits) or the high
+//! `b` bits of a little-endian 16-bit word (10 bits), or, packed, one of three 10-bit codes of a
 //! little-endian 32-bit word (below). Texel `(x, y)` reads, for `YCBCR8_420_2P`
 //! over `420v` and `420f` surfaces (every 8-bit code compared), and for `YCBCR10_420_2P` and
 //! `RGB10_420_2P` over `x420`, `xf20`, `x422`, `xf22`, `x444` and `xf44` surfaces (random
@@ -17,7 +16,7 @@
 //!   farther 1 (`9 / 3 / 3 / 1`): column `⌊x / 2⌋` and the one after it for an odd `x`, the one
 //!   before it for an even `x`, each clamped to the plane, and rows the same way. Each sum `S`
 //!   rounds to a code of `b` bits, `C = (S + 8) >> 4`.
-//! - **4:2:2 and 4:4:4 chroma** ([`YCbCrCodes::subsampling`]; EV TXN2-ycq1-m4): a 4:2:2 format's
+//! - **4:2:2 and 4:4:4 chroma** ([`YCbCrCodes::subsampling`]): a 4:2:2 format's
 //!   chroma plane holds a pair for each 2 x 1 texels, `⌈w / 2⌉ x h` of them, a 4:4:4 one's a pair
 //!   for each texel, `w x h`. Along an axis the plane does not halve, texel `(x, y)` reads the pair
 //!   at its own column (or row) alone, weighted 4: a 4:2:2 texel the nearer of its row's two pairs
@@ -25,21 +24,19 @@
 //!   for `YCBCR8_422_2P`, `YCBCR8_444_2P`, `YCBCR10_422_2P`, `YCBCR10_444_2P` and their `_sRGB`
 //!   twins over their own surfaces (`422v`, `422f`, `444v`, `444f`, `x422`, `xf22`, `x444`,
 //!   `xf44`), every texel of random planes under no matrix, BT.601, BT.709 and BT.2020.
-//! - **Packed codes** ([`YCbCrCodes::packed`]; EVs TXN2-ycq1-m4 and TXN2-ycp1-m4): the `_PACKED`
-//!   formats' rows hold three 10-bit codes to a little-endian 32-bit word, at its bits 0, 10 and
-//!   20, in order: luma code `x` of a row in word `⌊x / 3⌋`, the chroma plane's pair `x` as codes
-//!   `2 x` (Cb) and `2 x + 1` (Cr). Their texels read as the unpacked 10-bit formats' of the same
-//!   codes, filter, range and matrix alike. Measured for `YCBCR10_420_2P_PACKED`,
-//!   `YCBCR10_422_2P_PACKED`, `YCBCR10_444_2P_PACKED` and their `_sRGB` twins over `p420`, `pf20`,
-//!   `p422`, `pf22`, `p444` and `pf44`, every texel of random planes under no matrix, BT.601,
-//!   BT.709 and BT.2020.
+//! - **Packed codes** ([`YCbCrCodes::packed`]): the `_PACKED` formats' rows hold three 10-bit codes
+//!   to a little-endian 32-bit word, at its bits 0, 10 and 20, in order: luma code `x` of a row in
+//!   word `⌊x / 3⌋`, the chroma plane's pair `x` as codes `2 x` (Cb) and `2 x + 1` (Cr). Their
+//!   texels read as the unpacked 10-bit formats' of the same codes, filter, range and matrix alike.
+//!   Measured for `YCBCR10_420_2P_PACKED`, `YCBCR10_422_2P_PACKED`, `YCBCR10_444_2P_PACKED` and
+//!   their `_sRGB` twins over `p420`, `pf20`, `p422`, `pf22`, `p444` and `pf44`, every texel of
+//!   random planes under no matrix, BT.601, BT.709 and BT.2020.
 //! - **Codes** ([`YCbCrOutput::Codes`], `RGB10_420_2P`, `RGB8_420_2P` and their 4:2:2 and 4:4:4
 //!   formats): red `Cr`, green `Y` and blue `Cb`, each `code / (2^b - 1)`, alpha 1: an
 //!   `RGB10A2Unorm` or an `RGBA8Unorm` texel of the codes. `RGB8_420_2P` over `420v` and `420f`
-//!   reads them so (EV XRR2-ycr540-m4, and XRR2-ycf3p2-m4 under BT.709 and BT.2020 alike), and
-//!   `RGB8_422_2P`, `RGB8_444_2P`, `RGB10_422_2P` and `RGB10_444_2P` over their own surfaces, after
-//!   their chroma filter (EV XRR2-ycr541-m4, every texel of 24 surfaces; and XRR2-ycf3p2-m4 and
-//!   XRR2-ycf3p4-m4 under every matrix).
+//!   reads them so (under BT.709 and BT.2020 alike), and `RGB8_422_2P`, `RGB8_444_2P`,
+//!   `RGB10_422_2P` and `RGB10_444_2P` over their own surfaces, after their chroma filter (every
+//!   texel of 24 surfaces; and our probes under every matrix).
 //! - **Converted** ([`YCbCrOutput::Converted`]): the codes counted as 10-bit codes
 //!   (`u = 10 - b`), `Cb' = (Cb << u) - 512`, `Cr' = (Cr << u) - 512`; luma video range (`420v`,
 //!   `x4..`) `L = 9576 ((Y << u) - 64)`, full range (`420f`, `xf..`)
@@ -49,15 +46,14 @@
 //!   Every value lies on the grid of `1 / 2048`, which a half float holds exactly.
 //! - **sRGB** ([`YCbCrOutput::Srgb`], the `_sRGB` twins `YCBCR8_420_2P_sRGB` over `420v` and `420f`
 //!   and `YCBCR10_420_2P_sRGB` over `x420`, `xf20`, `x422` and `xf44`, as textures and as views of
-//!   `YCBCR8_420_2P` and `YCBCR10_420_2P`; EVs TXN2-ycr1-m4 and TXN2-ycv1-m4, every channel, and
-//!   every one of the 8193 steps below): the converted sum through the sRGB curve on the grid of `1
-//!   / 8192`. With `T = L + kb Cb' + kr Cr'` as above, the step `q = clamp((T + 512) >> 10, 0,
-//!   8192)` is decoded by the curve's knots at every 16th step, `K[j]` the step nearest `8192 ·
-//!   srgb(16 j / 8192)` (`srgb(c)` is `c / 12.92` up to `0.04045`, `((c + 0.055) / 1.055)^2.4`
-//!   above), joined by straight lines: with `i = min(q >> 4, 511)` and `f = q - 16 i`, the step
-//!   `(16 K[i] + (K[i + 1] - K[i]) f) / 16` rounded to nearest even, each channel that step `/
-//!   8192`; alpha is 1. A half float does not hold every step (above `1/4`), so the image is
-//!   `R32G32B32A32_SFLOAT`.
+//!   `YCBCR8_420_2P` and `YCBCR10_420_2P`; every channel, and every one of the 8193 steps below):
+//!   the converted sum through the sRGB curve on the grid of `1 / 8192`. With `T = L + kb Cb' + kr
+//!   Cr'` as above, the step `q = clamp((T + 512) >> 10, 0, 8192)` is decoded by the curve's knots
+//!   at every 16th step, `K[j]` the step nearest `8192 · srgb(16 j / 8192)` (`srgb(c)` is `c /
+//!   12.92` up to `0.04045`, `((c + 0.055) / 1.055)^2.4` above), joined by straight lines: with `i
+//!   = min(q >> 4, 511)` and `f = q - 16 i`, the step `(16 K[i] + (K[i + 1] - K[i]) f) / 16`
+//!   rounded to nearest even, each channel that step `/ 8192`; alpha is 1. A half float does not
+//!   hold every step (above `1/4`), so the image is `R32G32B32A32_SFLOAT`.
 //!
 //! **The module** (one per device and output). One `GLCompute` entry `main` with local size
 //! ([`YCbCrConvertModule::LOCAL_SIZE`], [`YCbCrConvertModule::LOCAL_SIZE`], 1), no push constants,

@@ -9,13 +9,13 @@
 //! `fpc_own_*` choose among the caller's own functions and link nothing.
 //!
 //! - Every kernel compiles and passes L3 on every committed profile.
-//! - On the CPU interpreter every kernel computes what Metal does (EVs FPC-fx1-m4 and
-//!   FPC-fx1-m3 ran the fixture's own AIR): the select, phi, loop, array, comparison and
-//!   threadgroup shapes; the integer round trip, whose bits are each function's word, the same in
-//!   every thread; the table shapes, an entry holding a function's handle equal to that
-//!   function's address; and the recursion to depth `2k - 1` at `maxCallStackDepth` `k`, as plain
-//!   Metal reaches (and to `2k`, whose last call answers the zero a call past the stack yields),
-//!   and zero past the stack (the recorded near-equivalent).
+//! - On the CPU interpreter every kernel computes what Metal does (our probes ran the fixture's own
+//!   AIR): the select, phi, loop, array, comparison and threadgroup shapes; the integer round trip,
+//!   whose bits are each function's word, the same in every thread; the table shapes, an entry
+//!   holding a function's handle equal to that function's address; and the recursion to depth
+//!   `2k - 1` at `maxCallStackDepth` `k`, as plain Metal reaches (and to `2k`, whose last call
+//!   answers the zero a call past the stack yields), and zero past the stack (the recorded
+//!   near-equivalent).
 //! - A visible function whose address a kernel takes and the pipeline does not link needs it
 //!   (`NeedsInput{LinkedFunction}`), as Metal refuses the pipeline ("unresolved visible function
 //!   reference"), and the recursion's stack is refused past `k` 8179, as Metal's is.
@@ -297,7 +297,7 @@ fn pointers_chosen_at_run_time_call_the_functions_they_hold() {
 /// zero-extended, the same in every thread that holds the function: with no table read in the
 /// stage, a word of the stage's own past the pipeline's handles (2 to 6), `fpc_inc`'s 7 and
 /// `fpc_dbl`'s 8 in the order the stage takes their addresses. Metal's are its pipeline's own and
-/// vary between pipelines (FPC-probe2, FPC-fx1), so only their sameness is Metal's.
+/// vary between pipelines, so only their sameness is Metal's.
 #[test]
 fn a_pointer_through_an_integer_is_its_word() {
     let Some(fx) = fixtures() else {
@@ -359,7 +359,7 @@ fn table_entries_and_addresses_call_and_compare_alike() {
 }
 
 /// Recursion through pointers each function chooses between the two reaches depth `2k - 1` at
-/// `maxCallStackDepth` `k`, as plain Metal's does (FPC-probe1b and FPC-fx1 at `k` 1, 2, 4 and
+/// `maxCallStackDepth` `k`, as plain Metal's does (at `k` 1, 2, 4 and
 /// 8): the component's two 16-byte functions hold `2k` activations, the kernel's call and
 /// `2k - 1` recursive calls. Thread `t` runs depth `t / 2` through `fpc_rec_odd` for odd `t`; past
 /// the stack a call yields zero.
@@ -388,7 +388,7 @@ fn recursion_through_chosen_pointers_reaches_metal_s_depth() {
 }
 
 /// A visible function whose address a kernel takes and the pipeline does not link needs it, as
-/// Metal refuses the pipeline ("unresolved visible function reference: fpc_dbl", FPC-fx1).
+/// Metal refuses the pipeline ("unresolved visible function reference: fpc_dbl").
 #[test]
 fn an_unlinked_function_s_address_needs_it() {
     let Some(fx) = fixtures() else {
@@ -411,7 +411,7 @@ fn an_unlinked_function_s_address_needs_it() {
 }
 
 /// The recursion's stack is refused past `k` 8179, where Metal says "Compute pipeline exceeds
-/// available stack space" (FPC-fx1, linked in `functions` or `private_functions` alike): two
+/// available stack space" (linked in `functions` or `private_functions` alike): two
 /// 16-byte frames, 32 bytes a depth of Metal's 261728.
 #[test]
 fn the_recursion_s_stack_is_refused_where_metal_s_is() {

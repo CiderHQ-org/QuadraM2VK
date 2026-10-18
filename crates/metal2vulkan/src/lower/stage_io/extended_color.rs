@@ -7,7 +7,7 @@
 //! format's unsigned components ([`plan`], [`encode`]): Metal rounds a `float` output to `half`
 //! (to nearest, ties to even) and stores the texel a kernel's write of that value stores
 //! (`arith::extended_range::encode`), and a `half` output's texel is the kernel write's of the
-//! `half` itself (EV XRR-rtp1-m4: every texel of 8,192 random outputs to each of the six formats,
+//! `half` itself (every texel of 8,192 random outputs to each of the six formats,
 //! `float` and `half`, on an Apple M4 under macOS 27.0.1, plain and under the validation layer
 //! alike). The interface variable keeps the Metal output's type (`StageIo::outputs`), which link
 //! checks against the attachment's format as for any other color.
@@ -17,7 +17,7 @@
 //! even, a NaN `0x7fc0` ([`bfloat_output`]): a `float` output rounds to `half` toward zero, a
 //! finite value past 65504 saturating there, or to nearest even under the pipeline's
 //! `textureWriteRoundingMode` `NearestEven` (`ExtendedRangeColor::nearest_even`); a `half` output
-//! is taken as it is (EV FPV-pf5-m4, an Apple M4 under macOS 27.0.1: every code's `float` and
+//! is taken as it is (an Apple M4 under macOS 27.0.1: every code's `float` and
 //! `half` output and the `float`s at and around each code's tie, into each bfloat format, at the
 //! default mode and at `NearestEven`).
 //!
@@ -182,8 +182,8 @@ pub(crate) fn held(
     x: Value,
 ) -> BResult<Value> {
     let v = four_lanes(fb, f, x)?;
-    // A padded format's store rounds a `float` output to `half` toward zero (EV XRR2-x6d-m4:
-    // every value swept around each code's midpoint through three draw shapes, plain and
+    // A padded format's store rounds a `float` output to `half` toward zero (every value swept
+    // around each code's midpoint through three draw shapes, plain and
     // blended under one and zero), an extended-range format's to nearest even.
     let rounding = match form.padded() {
         true => HalfRounding::TowardZeroSaturating,

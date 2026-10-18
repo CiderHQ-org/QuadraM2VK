@@ -429,7 +429,7 @@ pub struct ComputePipelineMetalInfo {
     pub max_total_threads_per_threadgroup: u32,
     /// `maxTotalThreadsPerThreadgroup` on Apple's GPUs, before this device's limits: the least
     /// of 1024, the function's own maximum and the descriptor's (a compute pipeline answers a
-    /// descriptor's limit as given, EV TTG-probe2 on an M3 Max and an M4), and a tile pipeline's
+    /// descriptor's limit as given, on an M3 Max and an M4), and a tile pipeline's
     /// rounded down to the largest threadgroup of even sides within it. A dispatch whose
     /// threadgroup is past it runs nothing, as plain Metal's does; one within it but past
     /// [`max_total_threads_per_threadgroup`](Self::max_total_threads_per_threadgroup) is this
@@ -499,17 +499,16 @@ pub enum PrecisionNote {
     /// (`FloatMathsPolicy::Native`, `fast::fmod`'s fused multiply-add among them) and of the
     /// device's order (`RoundingOrderPolicy::Native`: `mix` by `FMix`, `fast::sqrt` by `Sqrt`,
     /// and `dot` of vectors of other than two to four lanes, whose chunks' products the device
-    /// sums where Metal flushes each one below `2^-126`, EV DNR-d8-m3), beside their own notes;
-    /// and, under every policy, a conversion to or from `double`, whose reading Metal's is not
-    /// measured. Every other `float` operation reads its denormals as Metal does on every device
-    /// (the device's where the profile takes the measured `DriverDeviation::MetalFloatDenormals`,
-    /// an exponent-field select elsewhere): `+ - *`, the comparisons, the divisions, `fma`, `mix`,
-    /// `dot`, `sqrt`, `rsqrt`, `floor` and `ceil`, `ldexp` (on its operand's bits), the minimum
-    /// and maximum functions (`llvm.minnum`
-    /// and `llvm.maxnum` among them, with any flags), and the functions the translation computes
-    /// itself or the device answers as Metal's own; `mix`, `atan2`, `sinpi`, `cospi`, `tanpi` and
-    /// `fast::fmod` in both modes, and two chained `fma`s, answer Metal's words on an Apple M3 Max
-    /// under macOS 27.0.1 at and around denormal operands (EVs DNR-dn2-m3 and DNR-fm1-m3),
+    /// sums where Metal flushes each one below `2^-126`), beside their own notes; and, under every
+    /// policy, a conversion to or from `double`, whose reading Metal's is not measured. Every other
+    /// `float` operation reads its denormals as Metal does on every device (the device's where the
+    /// profile takes the measured `DriverDeviation::MetalFloatDenormals`, an exponent-field select
+    /// elsewhere): `+ - *`, the comparisons, the divisions, `fma`, `mix`, `dot`, `sqrt`, `rsqrt`,
+    /// `floor` and `ceil`, `ldexp` (on its operand's bits), the minimum and maximum functions
+    /// (`llvm.minnum` and `llvm.maxnum` among them, with any flags), and the functions the
+    /// translation computes itself or the device answers as Metal's own; `mix`, `atan2`, `sinpi`,
+    /// `cospi`, `tanpi` and `fast::fmod` in both modes, and two chained `fma`s, answer Metal's
+    /// words on an Apple M3 Max under macOS 27.0.1 at and around denormal operands,
     /// but where the device's fused multiply-add under native device maths rounds a result whose
     /// exact value is below `2^-126` up to `2^-126`, which Metal flushes (docs/FAST-PATHS.md,
     /// known gaps). Validation derives no tolerance and no explanation from it: every `float`
@@ -996,8 +995,8 @@ pub enum PrecisionNote {
     /// A `float` sample or gather, a comparison's included, whose texels the device reads, on a
     /// device that does not sample through Metal's own sampler. Metal's sample and gather hand back
     /// a denormal 32-bit float texel (`R32Float`, `RG32Float`, `RGBA32Float`, `Depth32Float`) as it
-    /// is. A device's sample or gather may read it as the zero of its sign (EVs MSFZ-dnp-*,
-    /// `runtime_lane::depth_compares`):
+    /// is. A device's sample or gather may read it as the zero of its sign
+    /// (`runtime_lane::depth_compares`):
     /// - RADV (Radeon 780M): gathers and nearest samples;
     /// - NVIDIA (RTX 3090): gathers;
     /// - ANV (Iris Xe): nearest samples;
@@ -1156,7 +1155,7 @@ pub enum PrecisionNote {
     /// even, and the device's blend converts it by its own rounding (MoltenVK's toward zero), so
     /// a blended value off the half grid may store the neighbouring half; under a constant factor
     /// Metal's result is neither rule's on 2,376 of 580,508 `RGBA16Float` channels near the half
-    /// denormals (EV TXN2-twr-m4). The exact path, the blend in the function under the pixel
+    /// denormals. The exact path, the blend in the function under the pixel
     /// interlock, is not built.
     ///
     /// Validation derives no tolerance and no explanation from it: a difference stays a
@@ -1168,7 +1167,7 @@ pub enum PrecisionNote {
     /// computes a factor pair apart in its color and alpha arithmetic, and the rotation moves
     /// Metal's blue into the image's alpha and Metal's alpha into its red, so a channel may store
     /// one code apart from Metal's (up to 1,767 of 65,536 tie-heavy texels over 440 swept blend
-    /// states on an M4, EV GSM2-f84e-m4). The exact path for a blend state is its measured form
+    /// states on an M4). The exact path for a blend state is its measured form
     /// (`pipeline::rotated_blend`'s table).
     ///
     /// Validation derives no tolerance and no explanation from it: a difference stays a
@@ -1177,9 +1176,8 @@ pub enum PrecisionNote {
     /// The sampler resource IDs a pipeline state takes for the constexpr samplers of the visible
     /// functions its stage links may be other than Metal's: two or more linked functions bring
     /// constexpr samplers, which Metal numbers in an order the pipeline's inputs do not decide
-    /// (it differed between two M4s for the same program, EVs SID-sid15-m4 to SID-sid18-m4); or a
-    /// function a table can hold that linking did not import could not be planned, so its
-    /// samplers are not known; or a
+    /// (it differed between two M4s for the same program); or a function a table can hold that
+    /// linking did not import could not be planned, so its samplers are not known; or a
     /// dynamic library's symbol, a binary function or a function-pointer group's function brings
     /// them, whose numbering is not measured. The state numbers them in linking's order. Only the
     /// IDs of sampler states made while such a state lives can differ; no shader value does.
@@ -1195,7 +1193,7 @@ pub enum PrecisionNote {
     /// M4 that is the depth MoltenVK stores at every sample of flat, sloped and steep triangles
     /// at the viewport's default depth range, under a constant bias, and where the clamp decides;
     /// under perspective, a slope-scaled bias, or another depth range a sample's depth may be up
-    /// to 2 ulp from it (EV DSX-dz5-mvk4), so a depth test between surfaces that close may decide
+    /// to 2 ulp from it, so a depth test between surfaces that close may decide
     /// otherwise than Metal's. No draw's state is known when the module is made, so the function
     /// records the note wherever it computes the depth.
     ///
@@ -1207,13 +1205,12 @@ pub enum PrecisionNote {
     /// pixel coordinate scaled by the texture's size: where the sampler states pixel coordinates
     /// and a linear filter or a comparison, on a device without `VkProperty::MetalSampler` (a
     /// filtered sample of a class the emulation does not reach), or a comparison on one with it.
-    /// Measured exact (EVs SID-pix1-m4, SID-pix-mvk4, SID-pix3-lvpx86): a nearest or linear
-    /// sample of `RGBA8Unorm` and `RGBA16Float` through such a pixel sampler, clamped to the
-    /// edge, to zero, to a border or mirrored once, on MoltenVK and lavapipe, so a device with
-    /// `MetalSampler` records it only for a comparison. It is its own note, apart from
-    /// [`PrecisionNote::PixelSamplerScaling`], because only the bound states decide it: the
-    /// runtime announces it at the first draw or dispatch of a pipeline that records it while
-    /// the device lists a sampler state of pixel coordinates with a linear filter or a
+    /// Measured exact: a nearest or linear sample of `RGBA8Unorm` and `RGBA16Float` through such a
+    /// pixel sampler, clamped to the edge, to zero, to a border or mirrored once, on MoltenVK and
+    /// lavapipe, so a device with `MetalSampler` records it only for a comparison. It is its own
+    /// note, apart from [`PrecisionNote::PixelSamplerScaling`], because only the bound states
+    /// decide it: the runtime announces it at the first draw or dispatch of a pipeline that records
+    /// it while the device lists a sampler state of pixel coordinates with a linear filter or a
     /// comparison, never at the pipeline's making.
     ///
     /// Validation derives no tolerance from it: the class is unbounded.
@@ -1224,26 +1221,25 @@ pub enum PrecisionNote {
     /// included, with some channel written (`StageIo::half_blend_colors`, which the pipeline's
     /// stage reads), or its module names no math mode (under fast math the pipeline's stage records
     /// [`PrecisionNote::HalfOutputFastMathBlend`] instead). Without fast math Metal stores the
-    /// `half` the function returns (EV FLT-hb2-m3: a `half4` output and a `float4` of its `half`
-    /// store alike under every blend and format), so an unblended attachment stores Metal's value
-    /// and records nothing. For a module naming no math mode Metal may hand the output's last
-    /// operation to the attachment at `float` precision, as it does under fast math: on an Apple
-    /// M4 (macOS 27.0.1) a `half` product reaches the blend unrounded, the blend's result alone
-    /// rounded to the format (`h(s·t + d)`, where the function here rounds the output to `half`
-    /// first, `h(h(s·t) + d)`; an exact fit of every channel of a 64x48 and a 61x37 probe, EV
-    /// XRB-rpl550). And without fast math Metal blends a `half` output into a 16-bit float
-    /// attachment in `half` arithmetic: the output's `half`, each factor, each product and the sum
-    /// rounded to `half` to nearest even (every channel of 78 blended draws, 13 blends into
-    /// `R16Float`, `RG16Float` and `RGBA16Float` over two sweeps, EV FLT-hb2-m3 on an M3 Max under
-    /// macOS 26.7), and into a 32-bit float one as a multiply-add of the `half` in `float`, each
-    /// product rounded. A device whose blend is its own adds in `float` and rounds the sum once.
-    /// So a blended channel (and, naming no math mode, one whose format's conversion of the
-    /// `float` and of its `half` differ) may store a value apart from Metal's: by at most 2.5
-    /// units in the last place of a `half` at the largest operand's magnitude (the source, the
-    /// destination, or the two products' magnitudes summed; a factor's counted too, the same) on
-    /// NVIDIA, for the blend color and one minus it, and two on RADV, ANV and lavapipe, absolute,
-    /// for a 16-bit float attachment; two units in the last place of a `float` there (one on
-    /// NVIDIA) for a 32-bit float one (EVs HOP-hb1 and HOP-hb2 at 0bcc0163e5: an RTX 3090 and an
+    /// `half` the function returns (a `half4` output and a `float4` of its `half` store alike under
+    /// every blend and format), so an unblended attachment stores Metal's value and records
+    /// nothing. For a module naming no math mode Metal may hand the output's last operation to the
+    /// attachment at `float` precision, as it does under fast math: on an Apple M4 (macOS 27.0.1) a
+    /// `half` product reaches the blend unrounded, the blend's result alone rounded to the format
+    /// (`h(s·t + d)`, where the function here rounds the output to `half` first, `h(h(s·t) + d)`;
+    /// an exact fit of every channel of a 64x48 and a 61x37 probe). And without fast math Metal
+    /// blends a `half` output into a 16-bit float attachment in `half` arithmetic: the output's
+    /// `half`, each factor, each product and the sum rounded to `half` to nearest even (every
+    /// channel of 78 blended draws, 13 blends into `R16Float`, `RG16Float` and `RGBA16Float` over
+    /// two sweeps, on an M3 Max under macOS 26.7), and into a 32-bit float one as a multiply-add of
+    /// the `half` in `float`, each product rounded. A device whose blend is its own adds in `float`
+    /// and rounds the sum once. So a blended channel (and, naming no math mode, one whose format's
+    /// conversion of the `float` and of its `half` differ) may store a value apart from Metal's: by
+    /// at most 2.5 units in the last place of a `half` at the largest operand's magnitude (the
+    /// source, the destination, or the two products' magnitudes summed; a factor's counted too, the
+    /// same) on NVIDIA, for the blend color and one minus it, and two on RADV, ANV and lavapipe,
+    /// absolute, for a 16-bit float attachment; two units in the last place of a `float` there (one
+    /// on NVIDIA) for a 32-bit float one (at 0bcc0163e5: an RTX 3090 and an
     /// RTX 5080 Laptop GPU on NVIDIA's 615.71.09, a Radeon 780M on RADV, an Iris Xe of RPL-P on
     /// ANV and lavapipe, Mesa 26.2.4, the 14 blends Metal measured over the two sweeps); and 1 or 2
     /// codes of an 8-bit or extended-range format. MoltenVK on the M3 Max stores Metal's bytes in
@@ -1254,7 +1250,7 @@ pub enum PrecisionNote {
     /// color and alpha (`StageIo::float_blend_colors`). Into a 16-bit float attachment Metal's blend
     /// of a module without fast math keeps a zero factor's product, the destination's by zero
     /// there: a NaN of an infinite or NaN texel, and `+0` of a `-0` output over a texel of `+0` or
-    /// above (EV FBL-zf1-m3, plain Metal on the M3 Max under macOS 27.0.1, `half4` and `float4`
+    /// above (plain Metal on the M3 Max under macOS 27.0.1, `half4` and `float4`
     /// outputs). Where the function does not compute that blend in the storage form, the pipeline
     /// blends the output by the device's blend, whose answer for those texels is the device's own,
     /// where a `float` output would otherwise store as written.
@@ -1318,12 +1314,11 @@ pub enum PrecisionNote {
     /// blend's source otherwise than the function's computed blend, under fast math a lane of the
     /// output that is not a load, or in a module that names no math mode. A blended channel may
     /// store a value one code apart from Metal's. Measured on an Apple M4 under macOS 27.0.1
-    /// under fast math: a product of loads differs by a code under six of 21 blends (EV
-    /// XRB-pf4-fast-m4, on 35 to 432 of 4,096 texels), and of 26 computed `float4` shapes Metal's
-    /// compiler rounds a third otherwise again (EVs XRB-pf4p-fast-m4 and XRB-pf4q-fast-m4); the
-    /// consumer's measurement of computed `float4` outputs under fast math found a one-code
-    /// difference under 17 of 66 blends. Its own note, apart from the `half` output's, so a
-    /// consumer can tell the two apart.
+    /// under fast math: a product of loads differs by a code under six of 21 blends (on 35 to 432
+    /// of 4,096 texels), and of 26 computed `float4` shapes Metal's compiler rounds a third
+    /// otherwise again; the consumer's measurement of computed `float4` outputs under fast math
+    /// found a one-code difference under 17 of 66 blends. Its own note, apart from the `half`
+    /// output's, so a consumer can tell the two apart.
     ///
     /// Validation derives no tolerance and no explanation from it: a difference stays a
     /// mismatch for review, deferred in C3 until an exact path exists.
@@ -1375,13 +1370,12 @@ pub enum PrecisionNote {
     /// whose footprint, level, tap count and weights Vulkan leaves to the implementation: on
     /// `rgba8Unorm` 2D textures at `maxAnisotropy` 8 with a linear filter, ANV (Iris Xe), RADV
     /// (Radeon 780M) and an RTX 3090 miss Metal by up to 28, 60 and 62 codes (mean 6.6, 6.2 and
-    /// 12.4; EVs ANI-v1b and ANI-e1 to ANI-e5); other shapes are not measured. A sampler with a
-    /// nearest min or mag filter is handed no anisotropy off Metal's sampler, so there the device
-    /// filters isotropically, and so does every sampler on a device without `samplerAnisotropy`,
-    /// whatever its sampling (the device's own sampling recording it there too). An argument
-    /// buffer's sampler, whose anisotropy the function does not know, records `HalfSampleFilter`
-    /// or `FloatSampleFilter` alone, and is refused anisotropic without `samplerAnisotropy`.
-    /// Validation derives no tolerance from it.
+    /// 12.4); other shapes are not measured. A sampler with a nearest min or mag filter is handed
+    /// no anisotropy off Metal's sampler, so there the device filters isotropically, and so does
+    /// every sampler on a device without `samplerAnisotropy`, whatever its sampling (the device's
+    /// own sampling recording it there too). An argument buffer's sampler, whose anisotropy the
+    /// function does not know, records `HalfSampleFilter` or `FloatSampleFilter` alone, and is
+    /// refused anisotropic without `samplerAnisotropy`. Validation derives no tolerance from it.
     DeviceAnisotropicFilter,
     /// A vertex function writes `[[point_size]]`, or a mesh function `set_point_size`, on a device
     /// whose `pointSizeRange` ends below Metal's largest point, 511 pixels
@@ -1399,10 +1393,10 @@ pub enum PrecisionNote {
     /// ([`DriverWorkaround::ClippedCoverageNotMetals`](crate::device::DriverWorkaround::ClippedCoverageNotMetals)):
     /// Apple's GPU draws a triangle that extends past the viewport as pieces whose shared edges
     /// cross pixels, and such a pixel's fragments can run once per piece, each reading that
-    /// piece's coverage (EVs VSM-metal-cov1 to -cov3 on an M3 Max and an M4), where the device
-    /// hands the pixel's fragment its coverage by the whole primitive (lavapipe by its own pieces).
-    /// Where Metal splits a pixel, the function reads the whole coverage once instead of each
-    /// piece's; no Vulkan mechanism follows Apple's clipper.
+    /// piece's coverage (on an M3 Max and an M4), where the device hands the pixel's fragment its
+    /// coverage by the whole primitive (lavapipe by its own pieces). Where Metal splits a pixel,
+    /// the function reads the whole coverage once instead of each piece's; no Vulkan mechanism
+    /// follows Apple's clipper.
     ///
     /// Validation derives no tolerance and no explanation from it: C3 names it as the answer gap
     /// of a case that meets it (`ClippedPrimitiveSplit`).
@@ -1434,7 +1428,7 @@ pub enum PrecisionNote {
     /// folds the attachment's blend and conversion into the function and, under fast math, fuses
     /// and regroups them per pipeline: it reads the output's `float` or its `half`, rounds each
     /// factor and product to `half` or keeps it, and takes a lerp or a common factor, by the
-    /// attachment's channel count, the blend and the function's own arithmetic (EV FLT-hb2-m3, an
+    /// attachment's channel count, the blend and the function's own arithmetic (an
     /// M3 Max under macOS 26.7, the consumer's sweep of a `half4` computed in `float` into
     /// `R16Float`, `RG16Float` and `RGBA16Float`: one and one reads the `float` into the one- and
     /// two-channel formats and the `half` into the four-channel one; source alpha and one minus it,
@@ -1454,19 +1448,18 @@ pub enum PrecisionNote {
     /// A fragment function that fetches a blended `R16Float`, `RG16Float` or `RGBA16Float`
     /// attachment in the interlocked storage form computes the blend itself, no Vulkan blend
     /// applying to a storage write (`lower::fragment::fetch`): in the arithmetic of its `half` or
-    /// `float` output of one to four lanes, as Metal's compiler appends it (EVs FBL-sw1-m3,
-    /// FBL-sw2-m3 and FBL-nw1-m3, plain Metal on the M3 Max under macOS 27.0.1: every channel of
-    /// 677 and 1,350 blend states into each format, half and float outputs, safe and fast math).
-    /// Under fast math it records this note where the blend is not Metal's exactly: where Metal's
-    /// compiler may fold the output's own arithmetic into the blend (a lane computed by a fast-math
-    /// operation, a constant, or the fetched color; EV FBL-fold1-m3: a returned product fused into
-    /// the blend's one minus the source alpha), or the blend's fast form is a sum, a lerp, a common
-    /// factor or a product rounded beside a fused one (but a blend constant's difference), which
-    /// the sweeps fit in most states but not all. It then stores within 2 units in the last place
-    /// of a `half` of Metal's at the operands' magnitude, 16 at the stored value's under
-    /// cancellation (below one at the function's own largest term). Where every lane of the output
-    /// is opaque to the blend and its form fits every state, the blend is Metal's and the function
-    /// records nothing.
+    /// `float` output of one to four lanes, as Metal's compiler appends it (plain Metal on the M3
+    /// Max under macOS 27.0.1: every channel of 677 and 1,350 blend states into each format, half
+    /// and float outputs, safe and fast math). Under fast math it records this note where the blend
+    /// is not Metal's exactly: where Metal's compiler may fold the output's own arithmetic into the
+    /// blend (a lane computed by a fast-math operation, a constant, or the fetched color: a
+    /// returned product fused into the blend's one minus the source alpha), or the blend's fast
+    /// form is a sum, a lerp, a common factor or a product rounded beside a fused one (but a blend
+    /// constant's difference), which the sweeps fit in most states but not all. It then stores
+    /// within 2 units in the last place of a `half` of Metal's at the operands' magnitude, 16 at
+    /// the stored value's under cancellation (below one at the function's own largest term). Where
+    /// every lane of the output is opaque to the blend and its form fits every state, the blend is
+    /// Metal's and the function records nothing.
     ///
     /// Validation derives no tolerance from it; C3 takes a row it leaves unbounded as showing
     /// the fast-math regrouping cause.
@@ -1579,17 +1572,15 @@ pub enum PrecisionNote {
     /// infinity from 65520 up, `0x7E00` for a NaN):
     /// - a finite result within one unit in the last place of the `half`: NVIDIA's 615.71.09
     ///   rounds to nearest even on the RTX 5080 Laptop GPU (every `float` pattern, loaded and
-    ///   computed, EV `NAN2-hcv-nv5080`) and toward zero on the RTX 3090 (EV `NAN2-hcv-nv3090`);
-    ///   lavapipe (Mesa 26.0.8) a loaded value toward zero (EV `NAN2-hcv-lvpx86`);
+    ///   computed) and toward zero on the RTX 3090; lavapipe (Mesa 26.0.8) a loaded value toward
+    ///   zero;
     /// - or no rounding at all: NVIDIA's 615.71.09 on the RTX 3090 drops the conversion pair, with
-    ///   or without a `NoContraction` barrier (EVs `NKP-lane6-nv3090`, `NKP-lane4-nv3090`);
-    ///   lavapipe drops it in arithmetic on Mesa 26.2.4 with LLVM 23.1.1 (EV `NKP-lane10-hostlvp`)
-    ///   and for a loaded texel on Mesa 26.0.8 with LLVM 21.1.8, barrier or not (EV
-    ///   `NKP-lane4-lvpx86`), whose arithmetic measured rounded (EV `NKP-lane9-lvpx86`). The result
-    ///   is then the `float` computation itself: its differences from Metal's compound across
-    ///   operations, and a value past the `half`'s range stays finite until a `half` store
-    ///   saturates it to infinity. The RTX 5080 Laptop GPU on the same driver rounds here (EV
-    ///   `NKP-lane9-nv5080`, 8192 of 8192 sums Metal's);
+    ///   or without a `NoContraction` barrier; lavapipe drops it in arithmetic on Mesa 26.2.4 with
+    ///   LLVM 23.1.1 and for a loaded texel on Mesa 26.0.8 with LLVM 21.1.8, barrier or not, whose
+    ///   arithmetic measured rounded. The result is then the `float` computation itself: its
+    ///   differences from Metal's compound across operations, and a value past the `half`'s range
+    ///   stays finite until a `half` store saturates it to infinity. The RTX 5080 Laptop GPU on the
+    ///   same driver rounds here (8192 of 8192 sums Metal's);
     /// - on a device that rounds toward zero, a finite value from 65520 up is 65504 where
     ///   Metal's is infinity;
     /// - a result below the smallest normal `half` (`2^-14`) may be the zero of its sign on a

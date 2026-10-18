@@ -165,7 +165,7 @@ fn run_records(m: &TypedModule, records: &[u32], lanes: usize) -> Vec<[f32; 3]> 
         .collect()
 }
 
-/// The magnitudes Metal selects a face by: a subnormal one as zero (WRG-cube-edge-probe).
+/// The magnitudes Metal selects a face by: a subnormal one as zero.
 fn selecting(d: [f32; 3]) -> [f32; 3] {
     d.map(|x| {
         if x.abs() < f32::MIN_POSITIVE {
@@ -176,7 +176,7 @@ fn selecting(d: [f32; 3]) -> [f32; 3] {
     })
 }
 
-/// Metal's major axis of the magnitudes `m` (WRG-cube-tie-probe): `x` over `y` over `z` at equal
+/// Metal's major axis of the magnitudes `m`: `x` over `y` over `z` at equal
 /// magnitudes.
 fn metal_axis(m: [f32; 3]) -> usize {
     if m[0] >= m[1] && m[0] >= m[2] {
@@ -193,7 +193,7 @@ fn shrunk(x: f32) -> f32 {
     f32::from_bits(x.to_bits() - 1)
 }
 
-/// `2^-125`, below which Metal reads a face coordinate's component as zero (WRG-cube-sub-probe).
+/// `2^-125`, below which Metal reads a face coordinate's component as zero.
 const LEAST_READ: f32 = f32::from_bits(0x0100_0000);
 
 /// `2^126`, past which (as a major magnitude) Metal reads every face coordinate as zero.
@@ -262,10 +262,9 @@ fn reference(d: [f32; 3]) -> [f32; 3] {
 /// A face and its two coordinates, each minor axis's component over the major magnitude.
 type Reading = (usize, bool, [(usize, f64); 2]);
 
-/// What Apple's texture unit reads along a finite direction `d` (WRG-cube-tie-probe,
-/// WRG-cube-edge-probe, WRG-cube-sub-probe): the major axis by `x` over `y` over `z` on the
-/// magnitudes with a subnormal one read as zero, and each minor component over the major
-/// magnitude, zero where Metal reads it as zero; a direction left zero at face `+x`'s texel
+/// What Apple's texture unit reads along a finite direction `d`: the major axis by `x` over `y`
+/// over `z` on the magnitudes with a subnormal one read as zero, and each minor component over the
+/// major magnitude, zero where Metal reads it as zero; a direction left zero at face `+x`'s texel
 /// `(0, 0)`, where `y` and `z` read `+1`.
 fn metal_reading(d: [f32; 3]) -> Reading {
     let m = selecting(d);
@@ -471,7 +470,7 @@ fn flushing_reading(q: [f32; 3]) -> Reading {
 }
 
 /// The device is handed no major magnitude above `2^125` (RADV misread `2^126`, ANV and NVIDIA
-/// `2^127` and up, the WRG-1013v lanes), and a device whose reciprocal of the doubled major
+/// `2^127` and up, the probe lanes), and a device whose reciprocal of the doubled major
 /// magnitude flushes reads Metal's face, texel, and 1/256 position along it, the directions whose
 /// major magnitude is above `2^125` included.
 #[test]
@@ -500,7 +499,7 @@ fn a_huge_major_is_scaled_below_the_devices_reach() {
 
 /// A direction whose components are all zero or subnormal, in any signs, is handed as
 /// `ZERO_DIRECTION`, which reads face `+x` (one major axis) at texel `(0, 0)` on every face size up
-/// to 16,384, as Metal reads it (WRG-cube-edge-probe); and a subnormal component beside a normal
+/// to 16,384, as Metal reads it; and a subnormal component beside a normal
 /// major one is handed as `+0`.
 #[test]
 fn a_direction_left_zero_reads_metals_corner() {

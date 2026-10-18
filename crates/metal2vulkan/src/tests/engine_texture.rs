@@ -352,7 +352,7 @@ fn a_half_texel_read_records_the_device_nan_encoding() {
 /// arithmetic follows, specializes the note on one clause, a test of the class of the format
 /// bound at that slot (`SpecKey::BoundTexelFormat`) against `TexelFormat::NAN_FREE`, which no
 /// pipeline's key carries. It holds of a half-float, 32-bit float, small-float or unknown format
-/// (an Apple M4 hands back their NaNs, EV DGC-hrn1-m4), and not of a normalized or sRGB one, whose
+/// (an Apple M4 hands back their NaNs), and not of a normalized or sRGB one, whose
 /// texels decode to no NaN.
 #[test]
 fn a_half_texel_read_notes_the_device_nan_encoding_where_the_bound_format_may_hold_one() {

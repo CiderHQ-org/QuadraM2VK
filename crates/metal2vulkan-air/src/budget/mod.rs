@@ -56,14 +56,14 @@ pub const CONSTRUCT_NESTING: u64 = 256;
 pub const PRIVATE_ARENA_BYTES: u64 = u32::MAX as u64;
 /// Bytes of the call stack a thread has on Metal: a kernel's `maxCallStackDepth` times the frame
 /// it reserves may not pass it. Metal refuses a pipeline at 16359 frames of 16 bytes, 909 of 288,
-/// and 8180 of 32 ("Compute pipeline exceeds available stack space", UNI-fpprobe2, an M3 Max and an
+/// and 8180 of 32 ("Compute pipeline exceeds available stack space", an M3 Max and an
 /// M4): 261728 bytes, 256 KiB less 416, fits all three.
 pub const CALL_STACK_BYTES: u64 = 261_728;
 /// Wall-clock ceiling of one attempt (AGENTS.md).
 pub const STANDARD_DEADLINE: Duration = Duration::from_secs(20);
 /// The polls [`Meter::tick`] lets pass between two reads of the clock for its deadline, after the
 /// first poll, which reads it. Reading the clock at every poll was 15% of a render state's
-/// creation (EV SWA-cp1, an RTX 3080 host): a deadline passed is seen at most this many polls
+/// creation (an RTX 3080 host): a deadline passed is seen at most this many polls
 /// late, or [`CLOCK_UNITS`] work units, whichever comes first.
 pub(crate) const CLOCK_POLLS: u32 = 64;
 /// The work units [`Meter::tick`] counts at most between two reads of the clock (about 2 ms of

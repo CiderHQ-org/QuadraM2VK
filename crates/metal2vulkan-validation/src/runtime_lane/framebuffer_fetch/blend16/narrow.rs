@@ -9,7 +9,7 @@
 //! red (`src[i + SIDE²]` where it exceeds 2, else `src[i]`): `fbl_narrow_half2` a `half2`,
 //! `fbl_narrow_float2` a `float2`. One draw of the fullscreen triangle.
 //!
-//! Metal's answer (EV FBL-nw1-m3: plain Metal on the M3 Max under macOS 27.0.1, our own MSL, every
+//! Metal's answer (plain Metal on the M3 Max under macOS 27.0.1, our own MSL, every
 //! blend state of the 677 and 1,350 sweeps into `R16Float` and `RG16Float` through `half` and
 //! `float` outputs of one to three lanes, and the partial masks of `RG16Float`): an output of fewer
 //! than four lanes blends as four whose missing lanes are zero, so here each channel is `h(d · s)`
@@ -96,7 +96,7 @@ fn data(case: Case) -> (Vec<u16>, Vec<[f64; 2]>) {
     (texels, sources)
 }
 
-/// Metal's `blend` of `s` over the texel `d` (EV FBL-nw1-m3), as `half` bits.
+/// Metal's `blend` of `s` over the texel `d`, as `half` bits.
 fn metal(case: Case, blend: Blend, s: [f64; 2], d: [f64; 2]) -> [u16; 2] {
     let sum = blend.color.1 == BlendFactor::One;
     std::array::from_fn(|c| match (case.float, sum) {

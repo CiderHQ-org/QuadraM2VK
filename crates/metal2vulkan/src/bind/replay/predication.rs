@@ -28,11 +28,10 @@
 //!   consumer points it at one.
 //! - **Every read lands in memory the record names**, in a branch not taken and in a loop's pass
 //!   past its count too: llvmpipe (lavapipe) makes a uniform load under control flow whether or
-//!   not an invocation runs it, and a step faulted there reading address 0 (EVs
-//!   PRD-lane2-lvpx86 and PRD-lane5-lvpx86: a scalar `u32` load of address 0 in its JIT code,
-//!   `SEGV_MAPERR`). So the word is read whatever the op, and the gate loop's pass past the
-//!   table's count reads the sink, whose command the step writes, if at all, where no dispatch
-//!   reads it.
+//!   not an invocation runs it, and a step faulted there reading address 0 (a scalar `u32` load of
+//!   address 0 in its JIT code, `SEGV_MAPERR`). So the word is read whatever the op, and the gate
+//!   loop's pass past the table's count reads the sink, whose command the step writes, if at all,
+//!   where no dispatch reads it.
 //!
 //! **The record** ([`PredicationStep::record`], [`PredicationStep::RECORD_BYTES`], 16-aligned): the
 //! counter's device address, the word's, the table's, the op, the comparison and the reference, an

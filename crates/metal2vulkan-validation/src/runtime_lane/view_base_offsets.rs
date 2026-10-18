@@ -4,7 +4,7 @@
 //!
 //! Metal's rule: a constant offset on a repeating or mirrored axis is dropped where the sampled
 //! level's size lies in `[2, 7]` and the base-level size of the texture the view was made from is
-//! not a power of two (WRN-off3-probe: a view of one level reads as its parent's level). A view of
+//! not a power of two (a view of one level reads as its parent's level). A view of
 //! level 2 of an 18-texel parent is 4 texels wide, a power of two: a rule read from the view's own
 //! base would keep the offset Metal drops.
 //!

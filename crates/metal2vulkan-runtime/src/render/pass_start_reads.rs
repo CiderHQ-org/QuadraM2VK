@@ -3,14 +3,13 @@
 //! vertex, object and mesh functions before any draw's fragments.
 //!
 //! - **Metal's answer.** a probe drew, in one render pass, a draw whose fragments write a buffer,
-//!   then draws whose vertex function reads the bytes written: on an M3 Max (EV `RRS-probe-6m3`)
-//!   and an M4 (EV `RRS-probe-6`), plain and validated, 20 runs of each of 12 cases (a pixel, a
-//!   tile, a row of tiles, the whole target; one writer or four; draws between), the vertex stage
-//!   read the bytes from before the pass in every run, and a draw of a later pass read the written
-//!   bytes. A memory barrier from the fragment stage to the vertex stage is refused by Metal's
-//!   validation ("afterStages ... can not contain MTLRenderStageTile or MTLRenderStageFragment on
-//!   this device"), and plain Metal ignores it: the vertex stage reads the bytes from before the
-//!   pass there too. probes (EVs `IRX-mfrag-m4`, `IRX-fgeo-m3` and `IRX-fgeo-m4`, plain and
+//!   then draws whose vertex function reads the bytes written: on an M3 Max and an M4, plain and
+//!   validated, 20 runs of each of 12 cases (a pixel, a tile, a row of tiles, the whole target; one
+//!   writer or four; draws between), the vertex stage read the bytes from before the pass in every
+//!   run, and a draw of a later pass read the written bytes. A memory barrier from the fragment
+//!   stage to the vertex stage is refused by Metal's validation ("afterStages ... can not contain
+//!   MTLRenderStageTile or MTLRenderStageFragment on this device"), and plain Metal ignores it: the
+//!   vertex stage reads the bytes from before the pass there too. probes (plain and
 //!   validated) found the same of an object or mesh function's read, and of a command of an
 //!   indirect command buffer behind its barrier (`setBarrier`): its vertex, object and mesh
 //!   functions read the bytes from before the earlier commands' fragments, and the encoder's draws'

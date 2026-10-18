@@ -1,7 +1,7 @@
-//! The stored depth read three ways (EV DSX-dz6): whether a draw's stored depth is what its
+//! The stored depth read three ways: whether a draw's stored depth is what its
 //! device's own depth test and a copy see, where the step's compute readback of it did not land.
 //!
-//! On the M3 Max (macOS 26.7, MoltenVK 1.4.1, EV DSX-dz5-m3) three cases at one sample (`clamp`,
+//! On the M3 Max (macOS 26.7, MoltenVK 1.4.1) three cases at one sample (`clamp`,
 //! `bias_neg`, `bias_both_clamp`) read back the readback buffer's fill as the stored depth at
 //! every covered sample, where the M4 read the clamped `FragCoord.z`. Each of [`CASES`] here (those
 //! three and `flat`, which read back as the M4's) runs [`REPEATS`] times at one sample:
@@ -28,7 +28,7 @@ use ash::vk;
 use serde::Serialize;
 
 /// The cases, by the step's names: one that read back on the M3 Max as on the M4, and the three
-/// that did not (EV DSX-dz5-m3).
+/// that did not.
 const CASES: [&str; 4] = ["flat", "clamp", "bias_neg", "bias_both_clamp"];
 
 /// How many times each case runs.

@@ -19,7 +19,7 @@
 //! The two routes the translation computes itself answer as Metal's `fma` does (a probe cases
 //! e98b103f and f7850ba7, every lane): an `f32` denormal operand is read as a zero of its sign, a
 //! result whose exact value is below `2^-126` in magnitude is a zero of its sign, flushed before
-//! it is rounded (EV DNR-dn2-m3: Metal's `fma(-2^-126, 2^-126, 2^-126)` is `+0`, where the
+//! it is rounded (Metal's `fma(-2^-126, 2^-126, 2^-126)` is `+0`, where the
 //! correctly rounded sum is `2^-126`), and a NaN result is `0x7FC00000` (as Metal's functions read
 //! their operands). `OpFmaKHR` keeps the device's denormal mode and NaN encoding, as the device's
 //! other `float` arithmetic does; on MoltenVK it is Metal's own `fma`. Elsewhere it rounds before
@@ -394,11 +394,11 @@ impl Routine {
 /// routine, which it gets where the `k - 1` sequences that saves are, by their estimate, at least
 /// twice the per-lane routines together: the estimates are upper bounds, and in a module a sequence
 /// shares its constants and types, so a smaller margin grew modules (`half`'s sequence, called on
-/// two and four lanes, EV PERF-sweep2), and weighing one sequence where `k - 1` go grew those of
-/// the `double` route on two, three and four lanes (EV PERF-sweep4). A route called on one lane
-/// count keeps its one routine. A `half` sequence holds its rounding to `half`, weighed in the
-/// module's form `q`: the integer rounding (`QuantizeForm::Integer`) makes it the larger, so that
-/// its routines on two and four lanes call the one-lane routine there.
+/// two and four lanes), and weighing one sequence where `k - 1` go grew those of the `double` route
+/// on two, three and four lanes. A route called on one lane count keeps its one routine. A `half`
+/// sequence holds its rounding to `half`, weighed in the module's form `q`: the integer rounding
+/// (`QuantizeForm::Integer`) makes it the larger, so that its routines on two and four lanes call
+/// the one-lane routine there.
 pub fn complete(fmas: &mut BTreeSet<Routine>, q: QuantizeForm) {
     let add: Vec<Routine> = fmas
         .iter()

@@ -116,10 +116,9 @@ impl BicubicTexels {
     /// 894]` first, on `1/(8 · 510)`. The sums are signed and reach past `±1` (up to twice the
     /// grid); a 2D or 3D linear sum truncates a color lane's terms onto `2^-7` of its grid steps
     /// and alpha's onto `2^-4`, where a bicubic sum (the 2D exact routine's) truncates none; and a
-    /// `half` result rounds an `_sRGB` color lane's value with ties away from zero (EVs
-    /// TXN-xrprobe3 and TXN-xrprobe4, an Apple M3 Max and an Apple M4; the bicubic filter's,
-    /// `lower::sampler::extended`). [`texels`] never sets it: an extended-range slot's samples
-    /// read the format's bits as constants under its variant.
+    /// `half` result rounds an `_sRGB` color lane's value with ties away from zero (an Apple M3 Max
+    /// and an Apple M4; the bicubic filter's, `lower::sampler::extended`). [`texels`] never sets
+    /// it: an extended-range slot's samples read the format's bits as constants under its variant.
     pub const EXTENDED: u32 = 1 << 11;
     /// Bit `BORDER + 3c + b` is set when channel `c` (0 red to 3 alpha) of a tap outside the
     /// texture under a border address reads 1, not 0, for border color `b`, `MTLSamplerBorderColor`'s
@@ -240,7 +239,7 @@ pub fn texels(pf: PixelFormat) -> Option<BicubicTexels> {
         P::RG16Float => (T::HALF, RG),
         P::RG11B10Float | P::RGB9E5Float => (T::HALF, RGB),
         P::RGBA16Float => (T::HALF, RGBA),
-        // An RGBX format reads as its RGBA twin with alpha 1 (EV FPV-pf6-m4): the twin's family,
+        // An RGBX format reads as its RGBA twin with alpha 1: the twin's family,
         // red, green and blue.
         P::RGBX32Float => (T::LINEAR, RGB),
         P::RGBX8Unorm => (exact8u, RGB),
@@ -472,7 +471,7 @@ mod tests {
         }
     }
 
-    /// The border texels (EV UNV-metal-probe-1): per border color, the channels reading 1 after the
+    /// The border texels: per border color, the channels reading 1 after the
     /// format's channels and the swizzle. `R8Unorm` reads `(0, 0, 0, 1)` under transparent black
     /// and `(1, 0, 0, 1)` under white; `A8Unorm`'s alpha is the color's red, so its opaque black
     /// reads `(0, 0, 0, 0)`; a swizzle moves the channels, `ga0r` on `RGBA16Float` under opaque

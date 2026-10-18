@@ -1,12 +1,12 @@
 //! Metal's refusals of a render pipeline state for what its fragment function does once linked,
 //! with or without rasterization.
 //!
-//! - **Metal links the fragment function whether or not the pipeline rasterizes** (EVs
-//!   RRS3-icbtex11, -icbtex13 and -icbtex14 on an M4 under macOS 27.0.1): with rasterization
-//!   disabled, a state whose fragment function reads a stage input is refused where the read
-//!   reaches a color attachment 0 writes, and made without one; a constant-color fragment function
-//!   is made. The runtime takes the fragment function there too: these refusals and the indirect
-//!   command buffers' see it, and the compile drops it (nothing rasterizes).
+//! - **Metal links the fragment function whether or not the pipeline rasterizes** (on an M4 under
+//!   macOS 27.0.1): with rasterization disabled, a state whose fragment function reads a stage
+//!   input is refused where the read reaches a color attachment 0 writes, and made without one; a
+//!   constant-color fragment function is made. The runtime takes the fragment function there too:
+//!   these refusals and the indirect command buffers' see it, and the compile drops it (nothing
+//!   rasterizes).
 //! - **Depth without a depth attachment.** A fragment function with a `[[depth(...)]]` output in
 //!   a pipeline without a depth attachment is refused, with or without rasterization, a color
 //!   attachment or `supportIndirectCommandBuffers`, and before the indirect command buffers'
@@ -23,7 +23,7 @@
 //!   fragment function reading `c` and `d` into color 0: `d` alone; without color 0, made). Where
 //!   only a rule kept beyond Metal keeps such an input, the answer is [`Error::Unproven`]
 //!   ([`Problem::UnwrittenFragmentInputsUnproven`]).
-//! - **Tessellation and mesh pipelines alike** (EV RRS3-icbtex16 on an M4 under macOS 27.0.1): a
+//! - **Tessellation and mesh pipelines alike** (on an M4 under macOS 27.0.1): a
 //!   post-tessellation vertex function's unwritten input is refused with the same text; a mesh
 //!   function's with "mesh shader" in place of "vertex shader" (per-vertex and per-primitive data
 //!   both write a key). An input the linking drops is made in all three: the compile reads it as

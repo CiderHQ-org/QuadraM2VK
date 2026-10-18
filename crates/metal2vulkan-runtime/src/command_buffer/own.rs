@@ -7,8 +7,7 @@
 //! queue's order. A wait there for a transition still to come in the same queue would wait for
 //! itself.
 //!
-//! Metal's answers (measured on an M4 with macOS 27.0.1, with and without API validation, EVs
-//! `RT4-metal-selfwait`, `-selfwait2`, `-selfwait3` and `RT4-metal-order`):
+//! Metal's answers (measured on an M4 with macOS 27.0.1, with and without API validation):
 //! - a deallocator run as Metal releases a buffer returns from its wait for the completion of the
 //!   command buffer that held it; the runtime returns too;
 //! - a completed handler returns from its wait for its command buffer's scheduling; so does the
@@ -163,7 +162,7 @@ pub(crate) fn scheduled_wait(marker: Option<Marker>, target: Target, scheduled: 
 ///
 /// A committed command buffer gives its slot back only in its queue's context, after its
 /// completed handlers. In that context, then, no committed command buffer can give one back:
-/// Metal's make never returns there (RT10-qlprobe3: a completed handler's make on its own full
+/// Metal's make never returns there (a completed handler's make on its own full
 /// queue). The runtime refuses it, unless an uncommitted command buffer may still be dropped.
 pub(crate) fn slot_wait(marker: Option<Marker>, queue: Context, open: bool) -> Answer {
     let Some(marker) = marker else {

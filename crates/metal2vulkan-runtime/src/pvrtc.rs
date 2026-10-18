@@ -1,26 +1,25 @@
 //! PVRTC textures on a device without a format for them: their blocks held as raw bytes, which
 //! copies move, and their samples read a decoded twin.
 //!
-//! - **Metal's answers** (an M4 under macOS 27.0.1, EV SPCrp-probe7-m4, alike plain twice and
-//!   under API validation where it passes): every PVRTC format makes a texture, `Private` and
-//!   `Shared`, square with a power-of-two side down to 4 texels, of levels down to 1 x 1, and a
-//!   shareable one opens from its handle. Each level holds its blocks, one block a level once
-//!   the level is no larger than a block. With `MTLBlitOptionRowLinearPVRTC` and a
-//!   `bytesPerRow`, a copy between a buffer and the texture moves the blocks row by row, as
-//!   every other compressed format's (whole levels, regions of whole blocks, from any offset,
-//!   rows padded apart), and a copy between two PVRTC textures moves their blocks. Without the
-//!   option and with a nonzero `bytesPerRow`, plain Metal copies as with it (its validation stops
-//!   it: EV RRP-probe6-m4 on an M4 under macOS 27.0.1, both directions, 4- and 2-bit RGBA, 16
-//!   and 32 texels square, padded rows and a 2 x 2-block region; the reims-vgpu consumer's run on
-//!   an M3 Max under macOS 26.7, 16 x 16 4-bit RGBA at 32 bytes a row). With a `bytesPerRow` of 0,
-//!   with the option or without it, plain Metal lays the blocks out in the region's own Morton
-//!   order, the x bit lowest, a whole level's and any region's of whole blocks alike (its
-//!   validation stops both: EV RRP-probe8-m4 on an M4, the consumer's report of a whole level on an
-//!   M3 Max); `replaceRegion` and `getBytes` of a whole level take them in the Z order with the y
-//!   bit lowest, at a `bytesPerRow` of 0 (which its validation asks for, with a whole level) and of
-//!   the level's row, every level of a chain alike (EV CFR-probe7-m4). Of a region other than a
-//!   whole level, plain Metal ignores the region's origin and places the blocks by no rule the
-//!   runtime has found (CFR-probe7-m4's 21 regions).
+//! - **Metal's answers** (an M4 under macOS 27.0.1, alike plain twice and under API validation
+//!   where it passes): every PVRTC format makes a texture, `Private` and `Shared`, square with a
+//!   power-of-two side down to 4 texels, of levels down to 1 x 1, and a shareable one opens from
+//!   its handle. Each level holds its blocks, one block a level once the level is no larger than a
+//!   block. With `MTLBlitOptionRowLinearPVRTC` and a `bytesPerRow`, a copy between a buffer and the
+//!   texture moves the blocks row by row, as every other compressed format's (whole levels, regions
+//!   of whole blocks, from any offset, rows padded apart), and a copy between two PVRTC textures
+//!   moves their blocks. Without the option and with a nonzero `bytesPerRow`, plain Metal copies as
+//!   with it (its validation stops it: our probe on an M4 under macOS 27.0.1, both directions, 4-
+//!   and 2-bit RGBA, 16 and 32 texels square, padded rows and a 2 x 2-block region; the reims-vgpu
+//!   consumer's run on an M3 Max under macOS 26.7, 16 x 16 4-bit RGBA at 32 bytes a row). With a
+//!   `bytesPerRow` of 0, with the option or without it, plain Metal lays the blocks out in the
+//!   region's own Morton order, the x bit lowest, a whole level's and any region's of whole blocks
+//!   alike (its validation stops both: our probe on an M4, the consumer's
+//!   report of a whole level on an M3 Max); `replaceRegion` and `getBytes` of a whole level take
+//!   them in the Z order with the y bit lowest, at a `bytesPerRow` of 0 (which its validation asks
+//!   for, with a whole level) and of the level's row, every level of a chain alike. Of a region
+//!   other than a whole level, plain Metal ignores the region's origin and places the blocks by no
+//!   rule the runtime has found (the probe's 21 regions).
 //! - **The store.** Vulkan has no PVRTC RGB format, and its PVRTC RGBA formats need
 //!   `VK_IMG_format_pvrtc`, which only MoltenVK exposes. A PVRTC texture of a format the device
 //!   has no representation of holds its blocks in an image of a *carrier*: a compressed format
@@ -155,10 +154,9 @@ pub(super) fn image_buffer_region(
 
 /// The position of block `(x, y)` of a PVRTC level `blocks` across and down in the order plain
 /// Metal's CPU copies (`replaceRegion`, `getBytes`) take a whole level's blocks: Z order with the
-/// y bit lowest, the larger axis's extra bits on top (PowerVR's own order; EVs SPCrp-probe7-m4
-/// and CFR-probe7-m4), the blit's block order ([`block_order_position`]) with the axes swapped. A
-/// level's blocks across and down are powers of two, so its blocks take every position below their
-/// count.
+/// y bit lowest, the larger axis's extra bits on top (PowerVR's own order), the blit's block order
+/// ([`block_order_position`]) with the axes swapped. A level's blocks across and down are powers of
+/// two, so its blocks take every position below their count.
 pub(super) fn cpu_order_position(x: u64, y: u64, [across, down]: [u64; 2]) -> u64 {
     block_order_position(y, x, [down, across])
 }

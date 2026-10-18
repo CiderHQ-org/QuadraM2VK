@@ -420,7 +420,7 @@ fn equivalent_queue_families_are_all_taken_in_turn() {
         queue_plan(&[family(all, 2), transfer]),
         staged(0, &[(0, 0), (0, 1)], &[], Some((1, 0)))
     );
-    // NVIDIA's shape (an RTX 3090 with 615.71.09, EV XSH-sqp1-3090): a graphics family of 16, a
+    // NVIDIA's shape (an RTX 3090 with 615.71.09): a graphics family of 16, a
     // copy engine of 2, a compute family of 8, then video and optical flow families that also
     // transfer.
     let compute = family(all & !vk::QueueFlags::GRAPHICS, 8);
@@ -441,11 +441,10 @@ fn equivalent_queue_families_are_all_taken_in_turn() {
         plan(0, &[(0, 0), (0, 1), (0, 2), (0, 3)], &[(0, 4), (0, 5)]),
         "no family of transfers alone: no staging queue"
     );
-    // RADV's shape (a Radeon 780M with Mesa 26.2.4, EV XSH-spq2-radv): a graphics family of
-    // one, a compute family of four, video decode and encode families, and a family of sparse
-    // binding alone. Its compute queues stall behind a kernel on every compute unit (a readback
-    // there took up to 1054 ms, EV XSH-spq5-radv), so none stages: its textures copy on the host
-    // from its host-cached memory.
+    // RADV's shape (a Radeon 780M with Mesa 26.2.4): a graphics family of one, a compute family of
+    // four, video decode and encode families, and a family of sparse binding alone. Its compute
+    // queues stall behind a kernel on every compute unit (a readback there took up to 1054 ms), so
+    // none stages: its textures copy on the host from its host-cached memory.
     let video = |flags| family(flags, 1);
     assert_eq!(
         queue_plan(&[
@@ -508,7 +507,7 @@ fn host_image_copy_is_enabled_wherever_the_device_has_it() {
 
 /// The runtime enables `VK_NV_linear_color_attachment` exactly where the device lists it with
 /// what it requires, Vulkan 1.3 (where `VK_KHR_format_feature_flags2` is core) or that extension
-/// (the runtime's default Vulkan 1.2 instance, the consumer's ZIN2-mc1), and has
+/// (the runtime's default Vulkan 1.2 instance, the consumer's probe), and has
 /// `linearColorAttachment`, asked only then.
 #[test]
 fn linear_color_attachment_is_enabled_where_the_device_has_it_at_vulkan_1_3() {

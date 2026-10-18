@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use super::*;
 
 /// Metal's raw `textureWriteRoundingMode` values: 0 and 1 round toward zero, 2 to nearest even,
-/// and 3 and above are refused as Metal's descriptor validation stops them (EV TXN2-twr-m4).
+/// and 3 and above are refused as Metal's descriptor validation stops them.
 #[test]
 fn texture_write_rounding_modes_take_metals_raw_values() {
     use crate::error::{DescriptorError, Error};
@@ -183,7 +183,7 @@ fn metal_ordinals_match_the_api() {
     assert_eq!(CompareFunction::Always.as_raw(), 7);
     assert_eq!(BlendFactor::OneMinusSource1Alpha.as_raw(), 18);
     assert_eq!(SamplerAddressMode::ClampToBorderColor.as_raw(), 5);
-    // Metal's own cubic filter (EV GSM2-bcs2-m4): 2 is a filter, and 3 stops Metal.
+    // Metal's own cubic filter: 2 is a filter, and 3 stops Metal.
     assert_eq!(
         SamplerMinMagFilter::try_from(2).ok(),
         Some(SamplerMinMagFilter::Cubic)
@@ -197,7 +197,7 @@ fn metal_ordinals_match_the_api() {
     assert_eq!(ColorWriteMask::RED.as_raw(), 0x8);
     assert_eq!(ColorWriteMask::ALL.as_raw(), 0xf);
     assert_eq!(TextureUsage::SHADER_WRITE.as_raw(), 0x2);
-    // Apple's private bits (EV APX2-spi1-m4): kept, and 0x8 dropped.
+    // Apple's private bits: kept, and 0x8 dropped.
     assert_eq!(TextureUsage::NO_CONCURRENT_ACCESS.as_raw(), 0x4000);
     assert_eq!(TextureUsage::VIDEO.as_raw(), 0x8000);
     assert_eq!(TextureUsage::BLOCK_WRITES_ONLY.as_raw(), 0x10000);

@@ -2642,7 +2642,7 @@ fn llvm_math(op: &LlvmIntrinsic) -> Result<Fun, Error> {
 /// `fast_atan2`'s quotient beyond a divisor of `2^126`, which a call without every flag takes
 /// from a flushed reciprocal (probe cases 6802ab13 and c11eb8cb), and `fast_fract` and `fast_asinh`
 /// at infinities, which only a call with every flag answers as a NaN (A1 case aed3faaa without
-/// flags, EV HRD-nan-fn-metal with them), and `half` `fract`'s NaN and infinities. The other flag
+/// flags, our probe with them), and `half` `fract`'s NaN and infinities. The other flag
 /// combinations are not measured; they take the answer of a call without flags.
 fn refine_float(
     op: FloatFn,
@@ -2659,10 +2659,9 @@ fn refine_float(
     }
     // `a < b ? a : b` and `a > b ? a : b` under fast math are `llvm.minnum` and `llvm.maxnum`
     // with every flag, which Metal answers as `fmin` and `fmax` (`nan_minmax_fast`, every lane);
-    // without a flag Metal answers them the same, word for word (EV DNR-mm1-m3: those two calls
-    // of `nan_minmax_fast` with their flags removed, every pair of 20 patterns, NaNs and
-    // denormals among them), and so with some flags (EV DNR-mm2-m3: `nnan` on `llvm.minnum`,
-    // `nsz arcp` on `llvm.maxnum`).
+    // without a flag Metal answers them the same, word for word (those two calls of
+    // `nan_minmax_fast` with their flags removed, every pair of 20 patterns, NaNs and denormals
+    // among them), and so with some flags (`nnan` on `llvm.minnum`, `nsz arcp` on `llvm.maxnum`).
     match op {
         FloatFn::MinNum => return FloatFn::Min,
         FloatFn::MaxNum => return FloatFn::Max,
@@ -3269,9 +3268,9 @@ fn float_call_of(
     // Metal's `mix(x, y, t)` on `float` and `half` is `fma(t, y, fma(-t, x, x))`, with and without
     // fast-math flags, so both fused multiply-adds take the profile's route. The routines answer
     // Metal's `float` NaN; `OpFmaKHR` answers the device's, which is selected, and a `half`
-    // result's as the `half` `fma`'s. Each reads an `f32` denormal as Metal's `fma` does (EV
-    // DNR-dn2-m3): the routines themselves, `OpFmaKHR` on the deviation or flushed
-    // ([`ArithStrategy::Mix`]'s `flush`, [`with_denormals`]).
+    // result's as the `half` `fma`'s. Each reads an `f32` denormal as Metal's `fma` does: the
+    // routines themselves, `OpFmaKHR` on the deviation or flushed ([`ArithStrategy::Mix`]'s
+    // `flush`, [`with_denormals`]).
     if op == FloatFn::Mix {
         if let Some(fma) = fma::Fma::by(routes, f) {
             // The device's order takes its `FMix` where Metal's fused form would be emulated:
@@ -3346,7 +3345,7 @@ fn float_call_of(
     // functions are Metal's, its `fma` is Metal's own and its quotient's reciprocal Metal's fast
     // one in a fast-math entry ([`divide::Reciprocal::Device`]), so its notes hold only outside
     // one. Metal reads a denormal operand as the zero of its sign and answers no denormal, in both
-    // modes (EV DNR-fm1-m3): the routines read them so, and the device's fused multiply-add on the
+    // modes: the routines read them so, and the device's fused multiply-add on the
     // deviation or flushed ([`with_denormals`]) where the profile asks Metal's functions; native
     // device maths leaves them to the device's (`DeviceDenormals`), unflushed.
     if fast && op == FloatFn::Fmod && f.float_fmt() == Some(FloatFmt::F32) {
@@ -3373,7 +3372,7 @@ fn float_call_of(
     let nan = answer.filter(|_| !metal_nans);
     // A function whose denormals Metal's table reads ([`denormal::coverage`]) reads them as
     // Metal does: the device's, where the profile states it does, else flushed
-    // ([`with_denormals`]). So do Metal's fast `sinpi`, `cospi` and `tanpi` (EV DNR-dn2-m3: a
+    // ([`with_denormals`]). So do Metal's fast `sinpi`, `cospi` and `tanpi` (a
     // denormal operand read as a zero, no denormal answer): the routines read the operand by
     // `denormal::operand`, and the device's form where the profile's functions are Metal's reads
     // it as `select_float_fn` says. Native device maths records the note ([`function_notes`]).

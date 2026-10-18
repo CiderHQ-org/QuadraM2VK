@@ -1,7 +1,7 @@
 //! What each texture creator answers for the descriptors whose answers differ among Metal's
 //! creators (the consumer's sweep of 14 creators x 73 formats), on the device the cfg selects,
 //! under the validation layer. Metal's answers are plain Metal's on an Apple M4 under macOS 27.0.1
-//! and an M3 Max under 26.7, alike (EVs GSM2-nil-m4, GSM2-nil-m3 and GSM2-nil2-m4):
+//! and an M3 Max under 26.7, alike:
 //!
 //! - `newSharedTextureWithDescriptor:` answers nil for storage other than `Private` before any
 //!   rule of the descriptor (a width of 0: nil in `Shared` storage, a stop in `Private`).

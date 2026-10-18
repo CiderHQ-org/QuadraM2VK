@@ -1,6 +1,6 @@
 //! Metal's sampler-descriptor rules (`sampler::taken_descriptor`), case for case as probe 7
-//! measured them on an Apple M3 Max (macOS 26.7) and an M4 (27.0.1), and as EVs SPH-samp1-m4 to
-//! SPH-samp4-m4 measured plain Metal's samples; and the bound on the device's live samplers
+//! measured them on an Apple M3 Max (macOS 26.7) and an M4 (27.0.1), and as our probes measured
+//! plain Metal's samples; and the bound on the device's live samplers
 //! (`SamplerCount`).
 
 use super::super::sampler::{
@@ -147,9 +147,8 @@ fn metal_takes_what_probe_7_saw_it_take() {
 }
 
 /// A `maxAnisotropy` outside 1 to 16, which Metal's validation stops, samples as plain Metal
-/// samples it (EVs SPH-samp2-m4 to SPH-samp5-m4, an M4 on macOS 27.0.1): the low five bits of the
-/// value taken through a 32-bit float, saturated, 0 as 1 and 17 to 31 as 32. One of 1 to 16 samples
-/// as the power of two at or above it (EV ANI-p7-m4).
+/// samples it (an M4 on macOS 27.0.1): the low five bits of the value taken through a 32-bit float,
+/// saturated, 0 as 1 and 17 to 31 as 32. One of 1 to 16 samples as the power of two at or above it.
 #[test]
 fn an_anisotropy_metal_stops_samples_as_plain_metal_samples_it() {
     for (value, sampled) in [
@@ -214,9 +213,8 @@ fn an_anisotropy_metal_stops_samples_as_plain_metal_samples_it() {
 }
 
 /// Inverted LOD clamps, a descriptor's or a bind's, read the upper clamp's level as plain
-/// Metal's do, filtering as the upper clamp alone does (EVs SPH-samp5-m4, SPH-samp7-m4,
-/// SPH-samp6-m3, SPH-samp8-m3): the clamps `[max, max]`. Ordered clamps and NaN ones are kept as
-/// they are.
+/// Metal's do, filtering as the upper clamp alone does: the clamps `[max, max]`. Ordered clamps and
+/// NaN ones are kept as they are.
 #[test]
 fn inverted_lod_clamps_read_the_upper_clamps_level() {
     for ([min, max], taken) in [
@@ -249,8 +247,7 @@ fn inverted_lod_clamps_read_the_upper_clamps_level() {
     }
 }
 
-/// Metal keeps a raw border color's low two bits and samples 3 as transparent black (EVs
-/// SPH-samp5-m4, SPH-samp7-m4, SPH-samp6-m3, SPH-samp8-m3).
+/// Metal keeps a raw border color's low two bits and samples 3 as transparent black.
 #[test]
 fn a_raw_border_color_samples_as_plain_metal_samples_it() {
     use SamplerBorderColor::{OpaqueBlack, OpaqueWhite, TransparentBlack};
@@ -278,10 +275,9 @@ fn a_raw_border_color_samples_as_plain_metal_samples_it() {
     }
 }
 
-/// A pixel-coordinate sampler Metal's validation stops samples as plain Metal samples it (EVs
-/// SPH-samp1-m4, SPH-samp2-m4): repeat and mirrored-repeat axes as `ClampToEdge`, level 0, no
-/// anisotropy; a mirror-clamp `s` or `t` axis keeps its mode, which Metal mirrors once by texel
-/// index and then clamps (EVs RRP-probe1-m4 and RRP-probe5-m4).
+/// A pixel-coordinate sampler Metal's validation stops samples as plain Metal samples it: repeat
+/// and mirrored-repeat axes as `ClampToEdge`, level 0, no anisotropy; a mirror-clamp `s` or `t`
+/// axis keeps its mode, which Metal mirrors once by texel index and then clamps.
 #[test]
 fn a_pixel_sampler_samples_as_plain_metal_samples_it() {
     let clamped = pixel(|d| {

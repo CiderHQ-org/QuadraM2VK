@@ -10,18 +10,17 @@
 //! index splits nothing.
 //!
 //! After `set_primitive_restart_enabled` (Apple's `setPrimitiveRestartEnabled:index:`), an indexed
-//! strip restarts at the call's index `k'` alone (EVs RFX-probe5-m4 and RFX-probe6-m4, an M4 with
-//! macOS 27.0.1): `k mod 2^32` for 32-bit indices, the lesser of that and `0xffff` for 16-bit ones,
-//! compared with the index before the base vertex; the all-ones index then draws as a vertex; each
-//! piece starts its winding afresh; lists and points do not restart; the call lasts until the
-//! encoder ends. Those cases draw on a 16x16 target, over scattered positions, and each must count
-//! what the same device counts for Metal's answer drawn plainly: each piece of the strip a strip of
-//! its own, of 32-bit indices that no piece restarts in (the all-ones index as vertex 65535, which
-//! the fixture's clamp makes the same place). They cover direct and indirect draws, 16- and 32-bit
-//! indices, lines and triangles, a base vertex, positions past the index buffer (index 0,
-//! restarting where `k'` is 0), indices a blit wrote earlier in the command buffer, culled
-//! windings, the call's lifetime, and a last 16-bit index alone in its word (an odd count, or an
-//! offset 2 bytes past a multiple of 4).
+//! strip restarts at the call's index `k'` alone (an M4 with macOS 27.0.1): `k mod 2^32` for 32-bit
+//! indices, the lesser of that and `0xffff` for 16-bit ones, compared with the index before the
+//! base vertex; the all-ones index then draws as a vertex; each piece starts its winding afresh;
+//! lists and points do not restart; the call lasts until the encoder ends. Those cases draw on a
+//! 16x16 target, over scattered positions, and each must count what the same device counts for
+//! Metal's answer drawn plainly: each piece of the strip a strip of its own, of 32-bit indices that
+//! no piece restarts in (the all-ones index as vertex 65535, which the fixture's clamp makes the
+//! same place). They cover direct and indirect draws, 16- and 32-bit indices, lines and triangles,
+//! a base vertex, positions past the index buffer (index 0, restarting where `k'` is 0), indices a
+//! blit wrote earlier in the command buffer, culled windings, the call's lifetime, and a last
+//! 16-bit index alone in its word (an odd count, or an offset 2 bytes past a multiple of 4).
 
 use super::{buffer_with, dynamic_input_assembly, validated_device, Messages, ScratchCache, WAIT};
 use crate::air_library::AirLibrary;
@@ -933,7 +932,7 @@ fn strips_restart_at_the_called_index_as_metal() {
 
 /// The call lasts from where it is made, before the pipeline state or after, until the encoder
 /// ends, and the last call wins; a draw before it, and the next encoder, restart at the all-ones
-/// index (EV RFX-probe5-m4).
+/// index.
 #[test]
 fn the_restart_call_lasts_until_its_encoder_ends() {
     let cache = ScratchCache::new().unwrap();

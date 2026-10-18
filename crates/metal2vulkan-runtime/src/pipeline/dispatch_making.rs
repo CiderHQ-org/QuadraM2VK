@@ -5,8 +5,7 @@
 //!   threadgroup size, and each edge region of a `dispatchThreads`, is a `VkPipeline` of its own,
 //!   which only a dispatch names. The first dispatch of each made it on the program's thread:
 //!   0.6 to 1.5 s for a bicubic kernel on NVIDIA's 615 driver, and 14 to 107 ms for a matrix
-//!   kernel at a second threadgroup size, where Metal's dispatch waits for no compile (EV
-//!   `PRDC-fd1-nv3090`).
+//!   kernel at a second threadgroup size, where Metal's dispatch waits for no compile.
 //! - **A dispatch never waits.** One whose region's `VkPipeline` its variant has not made hands
 //!   the making to the device's pool (`pool.rs`) and goes on, as a draw does
 //!   (`render/pending.rs`); a making in flight already (another dispatch's) is taken as it stands.

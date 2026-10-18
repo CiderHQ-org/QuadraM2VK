@@ -1003,7 +1003,7 @@ fn quad_params(fb: &mut FunctionBuilder<'_>, t: Tys) -> BResult<QuadParams> {
 /// every 12-bit grid: an sRGB color lane's step is truncated, and an 8-bit lane's `16 ·
 /// code` term is a multiple of 16, so its sum is the exact one, rounded half up as [`Plane::exact`]
 /// rounds it under the weights `[0, (256 - k) · 256, k · 256, 0]`. An extended-range format's `s`
-/// is 7 on a color lane and 4 on alpha (EV TXN-xrprobe4: every lane of random 2D footprints of the
+/// is 7 on a color lane and 4 on alpha (every lane of random 2D footprints of the
 /// four formats). An unsigned format's product `c · w` is below `2^32` (codes below `2^16`, weights
 /// at most `2^16`), a `u32` word shifted logically; a signed format's codes (at most `2^15 - 1` in
 /// magnitude) keep it below `2^31`, an `i32` shifted arithmetically (toward negative infinity), as
@@ -1505,7 +1505,7 @@ fn block_weights(
 /// Σ ⌊c · w / 2^s⌋` for the codes `c` on the format's grid, `s` 4 for a 12-bit grid (an 8-bit
 /// format's `16 · code` and an sRGB step) and 8 for a 16-bit format's codes, then the step `⌊(T +
 /// 2^(15 - s)) / 2^(16 - s)⌋`, clamped and divided by the grid exactly (an extended-range format's
-/// `s` is 7 on a color lane and 4 on alpha, EV TXN-xrprobe4). An unsigned format's product `c · w`
+/// `s` is 7 on a color lane and 4 on alpha). An unsigned format's product `c · w`
 /// is below `2^32` (codes below `2^16`, weights at most `2^16`), a `u32` word shifted logically; a
 /// signed format's codes (at most `2^15 - 1` in magnitude) keep it below `2^31`, an `i32` shifted
 /// arithmetically (toward negative infinity). The terms' sum is below `2^24` in magnitude (the
@@ -2519,7 +2519,7 @@ fn define_float_quad(mb: &mut ModuleBuilder, calls: Calls) -> BResult<FuncId> {
 /// accumulator ([`accumulate`]) over the eight taps under their weights ([`block_weights`]);
 /// Metal's non-finite results on the taps of nonzero product weight `wx · wy · wz`, that is on
 /// every tap but the second of an axis whose fraction is 0 (a tap whose product rounds to a zero
-/// weight is one of them: EV TXN-pknf-m3, an Apple M3 Max's 3D samples of `RG11B10Float` texels
+/// weight is one of them: an Apple M3 Max's 3D samples of `RG11B10Float` texels
 /// holding infinities, where two such taps' infinities are the result and the 37 of zero product
 /// weight are not; inferred for the other float formats, whose sums are the same accumulator's);
 /// and the `half` result's conversion.

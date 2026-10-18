@@ -1058,7 +1058,7 @@ fn enum_attribute_keywords_round_trip() {
 }
 
 /// What a `"deferred-static-alloca-size"` function and its call must keep for Metal's compiler to
-/// delete the call once the allocation it sizes is dead (TNS-pipe1: dropping them made pipeline
+/// delete the call once the allocation it sizes is dead (dropping them made pipeline
 /// creation fail for the function-constant variants that leave a tensor type unused): the
 /// function's `hidden`, `local_unnamed_addr`, `readnone`, `mustprogress nofree nosync
 /// speculatable willreturn`, and the call's `nounwind`. The committed fixture `tns_mm_int` has

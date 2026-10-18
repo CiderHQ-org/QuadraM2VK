@@ -1,13 +1,12 @@
 //! Metal's tables of the padded `_sRGB` formats, read from an Apple M4 under macOS 27.0.1 and an
-//! Apple M3 Max under macOS 26.7 (EVs XRR2-x6c, -x6fs and -x6m; the M3's and the M4's files
-//! byte-identical): `R10Unorm_X6_sRGB`'s decode step of every code and first encode index of every
-//! code, and `RG10Unorm_X12_sRGB`'s code of every linear write code. The shader's
-//! `lower::arith::extended_range` declares them once per module that reads or writes such a
-//! texture; the runtime's clear values and load pass read them through `ExtendedRange::clear_texel`
-//! and `ExtendedRange::load_code`.
+//! Apple M3 Max under macOS 26.7 (the M3's and the M4's files byte-identical): `R10Unorm_X6_sRGB`'s
+//! decode step of every code and first encode index of every code, and `RG10Unorm_X12_sRGB`'s code
+//! of every linear write code. The shader's `lower::arith::extended_range` declares them once per
+//! module that reads or writes such a texture; the runtime's clear values and load pass read them
+//! through `ExtendedRange::clear_texel` and `ExtendedRange::load_code`.
 
 /// The decode step `s` of every code `c` of `R10Unorm_X6_sRGB`: Metal reads `s / 8192` (every
-/// code read, EV XRR2-x6c).
+/// code read).
 pub(crate) const R10X6_SRGB_DECODE_STEPS: [u16; 1024] = [
     0, 0, 1, 2, 2, 3, 4, 4, 5, 6, 6, 6, 7, 8, 9, 10, 10, 10, 11, 12, 12, 13, 14, 14, 15, 16, 16,
     16, 17, 18, 19, 20, 20, 20, 21, 22, 22, 23, 24, 24, 25, 26, 26, 26, 27, 28, 29, 30, 30, 30, 31,
@@ -74,8 +73,8 @@ pub(crate) const R10X6_SRGB_DECODE_STEPS: [u16; 1024] = [
 /// value `x` as the largest code `c` with `R10X6_SRGB_ENCODE_FIRST[c] <= i`, where `i` is `x`
 /// clamped to `[0, 1]` and rounded to `2^-13` (nearest even) in steps of `2^-13`. 23 codes no
 /// index reaches take their next code's first index, so the search never answers them (every
-/// threshold between two adjacent codes found by bisection over the `f32`s, EV XRR2-x6m, and
-/// every value of a grid and every half written, EVs XRR2-x6c and -x6fs).
+/// threshold between two adjacent codes found by bisection over the `f32`s, and every value of a
+/// grid and every half written).
 pub(crate) const R10X6_SRGB_ENCODE_FIRST: [u16; 1024] = [
     0, 1, 1, 2, 2, 3, 4, 5, 5, 6, 6, 7, 7, 8, 9, 10, 10, 11, 11, 12, 12, 13, 14, 15, 15, 16, 16,
     17, 17, 18, 19, 20, 20, 21, 21, 22, 22, 23, 24, 25, 25, 26, 26, 27, 27, 28, 29, 30, 30, 31, 31,
@@ -142,8 +141,8 @@ pub(crate) const R10X6_SRGB_ENCODE_FIRST: [u16; 1024] = [
 /// channel as `RG10X12_SRGB_WRITE_CODES[m]` for `m` the code `RG10Unorm_X12` writes (the exact
 /// product of `x` clamped to `[0, 1]` with 1023, rounded to nearest even): every one of the 137
 /// thresholds between two adjacent codes, found by bisection over the `f32`s, lies on such a
-/// product's midpoint (EV XRR2-x6m), and every value of a grid and every half written agrees
-/// (EVs XRR2-x6c and -x6fs). Its reads are `RG10Unorm_X12`'s, `c / 1023`.
+/// product's midpoint, and every value of a grid and every half written agrees. Its reads are
+/// `RG10Unorm_X12`'s, `c / 1023`.
 pub(crate) const RG10X12_SRGB_WRITE_CODES: [u8; 1024] = [
     0, 1, 2, 2, 3, 4, 5, 6, 6, 7, 8, 9, 10, 10, 11, 12, 13, 13, 14, 15, 15, 16, 16, 17, 18, 18, 19,
     19, 20, 20, 21, 21, 22, 22, 23, 23, 23, 24, 24, 25, 25, 25, 26, 26, 27, 27, 27, 28, 28, 29, 29,

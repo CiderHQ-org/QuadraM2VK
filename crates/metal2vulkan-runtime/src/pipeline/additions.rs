@@ -2,8 +2,7 @@
 //! `binaryFunctions` and the binary functions added to a made state), and what the runtime checks
 //! of them.
 //!
-//! Measured on an M3 Max (macOS 26.7) and an M4 (macOS 27.0.1), which agree (EVs RTL-816-m3/-m4
-//! and RTL-816d-m3/-m4):
+//! Measured on an M3 Max (macOS 26.7) and an M4 (macOS 27.0.1), which agree:
 //! - **Required threads per threadgroup.** Creation stops, with or without API validation, a
 //!   size with an axis of 0, one of more threads than the device's limit, and one of more threads
 //!   than the descriptor's `maxTotalThreadsPerThreadgroup`; it fails (an error, not a stop) where
@@ -93,7 +92,7 @@ pub enum BinaryFunctionProblem {
     /// state is adding fragment functions but it was created with
     /// supportAddingFragmentBinaryFunctions=NO"), and plain Metal's process ends at the call for
     /// a mesh state, whether the functions are added to its fragment stage or to the vertex or
-    /// tile stage it lacks (EV RFC-probe5-m4, an M4 under macOS 27.0.1: `mesh_frag_two`,
+    /// tile stage it lacks (an M4 under macOS 27.0.1: `mesh_frag_two`,
     /// `mesh_frag_one_add_two`, `mesh_vertex_add`, `mesh_tile_add`). Plain Metal's answer is
     /// the runtime's for a compute state's kernel and a drawing or tile state's own stages made
     /// without their flags, and for a stage a drawing or tile state lacks.
@@ -299,11 +298,8 @@ fn binary_count(stage: &StageSource) -> usize {
 /// [`added`] of `stage`, whose support flag is `supported`, linking `functions` as with the flag,
 /// and how many functions it newly links without the flag: none where it is set. Plain Metal
 /// makes the state without the flag, where its API validation stops it, and its handle of such
-/// a function calls the stage's last other callable function (EVs RFC-probe2-m4 `bf_off_two`,
-/// `bf_off_empty`, RFC-probe3-m4 `bf_off_one_add_two`, RFC-probe4-m4 `vtx_off_two`,
-/// `frag_off_two`, `tile_off_two`, `vtx_off_one_add_two`, `frag_off_one_add_two`,
-/// `tile_off_one_add_two`, `vtx_off_empty`), which a table of the state takes it as
-/// (`function_table.rs`).
+/// a function calls the stage's last other callable function, which a table of the state takes it
+/// as (`function_table.rs`).
 fn added_counting(
     device: &Device,
     call: &'static str,
@@ -321,10 +317,9 @@ fn added_counting(
 }
 
 /// `functions` added in `call` to a stage a drawing or tile state lacks, which plain Metal makes
-/// the state without, giving no handle of them (EVs RFC-probe1-m4 `bf_vertex_to_tile`,
-/// `bf_fragment_to_tile`, `bf_tile_to_drawing`, `bf_fragment_to_vertex_only`), where its API
-/// validation stops them: refused (`Invalid`) only as a stage's are, for a function of another
-/// device or one not compiled to a binary.
+/// the state without, giving no handle of them, where its API validation stops them: refused
+/// (`Invalid`) only as a stage's are, for a function of another device or one not compiled to a
+/// binary.
 fn ignored(device: &Device, call: &'static str, functions: &[Function]) -> Result<(), Error> {
     for function in functions {
         if !function.device().same(device) {
@@ -395,7 +390,7 @@ impl ComputePipelineState {
 }
 
 /// The default options with `label`: a state made with additional binary functions keeps its
-/// original's label, as Metal's does (EV CFR-probe5-m4).
+/// original's label, as Metal's does.
 fn labelled(label: Option<&str>) -> PipelineOptions {
     PipelineOptions {
         label: label.map(str::to_owned),

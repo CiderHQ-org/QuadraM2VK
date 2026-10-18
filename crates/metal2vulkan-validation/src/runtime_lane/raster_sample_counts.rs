@@ -1,11 +1,10 @@
 //! Pipeline states of a `rasterSampleCount` an Apple GPU does not take, on the device the cfg
-//! selects, under the validation layer. Plain Metal on an Apple M4 under macOS 27.0.1 (EVs
-//! RCH-msaa-m4 and RCH-msaa2-m4, with and without API validation) answers nil with an `NSError` for
-//! a render or mesh state of any count but 1, 2 and 4, and for a tile state of 0: code 2,
-//! "rasterSampleCount (8) is not supported by device.". The runtime answers so on every device,
-//! before it compiles anything, whatever samples the Vulkan driver rasterizes (lavapipe, RADV, ANV
-//! and NVIDIA rasterize 8; MoltenVK does not). The functions are the public fixture
-//! `icb_direct_arguments`' plain ones.
+//! selects, under the validation layer. Plain Metal on an Apple M4 under macOS 27.0.1 (with and
+//! without API validation) answers nil with an `NSError` for a render or mesh state of any count
+//! but 1, 2 and 4, and for a tile state of 0: code 2, "rasterSampleCount (8) is not supported by
+//! device.". The runtime answers so on every device, before it compiles anything, whatever samples
+//! the Vulkan driver rasterizes (lavapipe, RADV, ANV and NVIDIA rasterize 8; MoltenVK does not).
+//! The functions are the public fixture `icb_direct_arguments`' plain ones.
 
 use super::host_memory::on_device;
 use crate::air_library::AirLibrary;

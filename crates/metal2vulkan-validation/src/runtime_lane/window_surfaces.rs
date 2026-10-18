@@ -1,7 +1,7 @@
 //! A compositor's passes over a window server's surface (the consumer's x86 macOS guests: their
 //! 1920x1080 `BGRA8Unorm` framebuffers are textures over guest buffers), on the device the cfg
 //! selects, under the validation layer. Every byte of the scene is exact on any GPU, so each
-//! stage's bytes are compared with the scene's model whole (EV ZIN2-ws1-m4: Metal's bytes on an
+//! stage's bytes are compared with the scene's model whole (Metal's bytes on an
 //! Apple M4 equal the model at every stage).
 //!
 //! The surface is a 1920x1080 `BGRA8Unorm` texture (render target and shader read usage) over a

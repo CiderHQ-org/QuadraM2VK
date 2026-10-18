@@ -1,6 +1,5 @@
 //! `rotated`: where a rotated texture's turns put each texel, against Metal's measured rule
-//! (EVs ZCI2-rotprobe-m4, ZCI2-rotprobe2-m4, ZCI2-rotprobe3-m4; the loads, EVs TTG-rot1-m4 and
-//! TTG-rot1-m3).
+//! (the loads).
 
 use super::super::rotated::{loads_apart, quarter, source_map, stored_extent, Turn};
 
@@ -80,9 +79,9 @@ fn turns_take_each_texel_from_where_metal_stores_it() {
 
 /// A pass that draws, loading a frame of rotation 4 and storing it again, leaves the plane's
 /// texel `(x, y)` holding the texel it held at `(W' - 1 - x, y)`, `W'` the plane's width: mirrored
-/// left to right, Metal's answer (EVs TTG-rot1-m4, TTG-rot1-m3; the consumer's 32x32 frame's
-/// texel (0, 0) takes (31, 0), and (20, 30) takes (11, 30)). Every other rotation's leaves each
-/// texel in place, as the keep leaves rotation 4's.
+/// left to right, Metal's answer (the consumer's 32x32 frame's texel (0, 0) takes (31, 0), and
+/// (20, 30) takes (11, 30)). Every other rotation's leaves each texel in place, as the keep leaves
+/// rotation 4's.
 #[test]
 fn a_loaded_and_stored_frame_lands_where_metal_puts_it() {
     for rotation in 0..=4u8 {

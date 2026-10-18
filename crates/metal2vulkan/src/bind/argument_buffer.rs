@@ -54,11 +54,10 @@
 //!   These are Metal's answers on an M3 Max (macOS 26.7) and an M4 (macOS 27.0.1) over
 //!   `validation/fixtures/public/reflection/`'s `argument_buffers`, `buffers`, `encoders` and
 //!   `encoder_types` (every scalar, vector, matrix and atomic type alone in a plain buffer and
-//!   after a texture in an argument buffer; EVs UNI-reflfix-9 to -14 and -14-m3), and API
-//!   validation lets every one of these encoders be made. They differ in one rule: in a plain
-//!   buffer the M4 gives an integer or `bool` scalar its own size aligned to 1. This takes the M3
-//!   Max's, whose encoder is never shorter or less aligned, so memory sized and aligned by it holds
-//!   the encoder under either.
+//!   after a texture in an argument buffer), and API validation lets every one of these encoders be
+//!   made. They differ in one rule: in a plain buffer the M4 gives an integer or `bool` scalar its
+//!   own size aligned to 1. This takes the M3 Max's, whose encoder is never shorter or less
+//!   aligned, so memory sized and aligned by it holds the encoder under either.
 //!
 //! An index that two descriptors claim (the same index, or one inside another's array) is
 //! resolved to the later descriptor, as Metal's encoder resolves it.
@@ -203,7 +202,7 @@ impl ArgumentDescriptor {
 pub enum ArgumentLayoutError {
     /// The function takes no argument buffer at the buffer index: a plain buffer, or nothing.
     /// Metal's API validation stops it ("Buffer argument out (buffer index: 2) of function ... is
-    /// not an indirect argument buffer", an M4 under macOS 27.0.1, EV UNI-reflfix-11); without
+    /// not an indirect argument buffer", an M4 under macOS 27.0.1); without
     /// validation Metal answers an encoder of no bytes for a plain buffer.
     NoArgumentBuffer { index: u32 },
     /// The argument buffer holds an array of arrays, the argument at `id`: Metal's encoder
@@ -448,8 +447,7 @@ impl ArgumentBufferLayout {
     }
 }
 
-/// Which of Metal's two rules lays out a reflected struct (the module docs, EVs UNI-reflfix-9 to
-/// -14).
+/// Which of Metal's two rules lays out a reflected struct (the module docs).
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Rule {
     /// An argument buffer's: a constant takes its MSL size and alignment, and the encoder the
@@ -463,9 +461,9 @@ enum Rule {
 
 /// The bytes, and the alignment, a plain buffer's encoder gives each constant member whatever its
 /// type: Metal's answer on an M3 Max (macOS 26.7) for every scalar, vector, matrix and atomic
-/// type measured (EV UNI-reflfix-14-m3). An M4 (macOS 27.0.1, EV UNI-reflfix-14) gives an
-/// integer or `bool` scalar its own size aligned to 1 instead, and so never a longer or more
-/// aligned encoder: a buffer sized and aligned by this rule holds the encoder under either.
+/// type measured. An M4 (macOS 27.0.1) gives an integer or `bool` scalar its own size aligned to 1
+/// instead, and so never a longer or more aligned encoder: a buffer sized and aligned by this rule
+/// holds the encoder under either.
 const PLAIN_CONSTANT_BYTES: u64 = 8;
 
 /// One element of a reflected member: what it holds, its bytes and alignment, and the layout a

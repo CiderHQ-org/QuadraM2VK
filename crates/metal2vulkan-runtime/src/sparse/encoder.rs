@@ -114,16 +114,15 @@ impl ResourceStateCommandEncoder {
     /// block's unmapped tiles kept at zero.
     ///
     /// Through a view of a sparse texture (`new_texture_view`), the update maps the texture's own
-    /// tiles as Metal's does (a Metal sparse probe on an M3 Max and an M4; EVs RRX-sparse1-m4,
-    /// RRX-sparse2-m4 and -m3): `level` names the texture's level whatever the view's levels, past
-    /// them too (a view of levels 1 and 2 mapping its level 2 maps the texture's level 2), and
-    /// `slice` the view's slice, its texture's slice past the view's first, past the view's slices
-    /// too (a view of slices 1 and 2 mapping its slice 2 maps the texture's slice 3); a view of
-    /// another pixel format of the same tile maps the same tiles. Plain Metal; its validation stops
-    /// a level or slice past the view's.
+    /// tiles as Metal's does (a Metal sparse probe on an M3 Max and an M4): `level` names the
+    /// texture's level whatever the view's levels, past them too (a view of levels 1 and 2 mapping
+    /// its level 2 maps the texture's level 2), and `slice` the view's slice, its texture's slice
+    /// past the view's first, past the view's slices too (a view of slices 1 and 2 mapping its
+    /// slice 2 maps the texture's slice 3); a view of another pixel format of the same tile maps
+    /// the same tiles. Plain Metal; its validation stops a level or slice past the view's.
     ///
     /// A texture that is not sparse records nothing, as plain Metal maps nothing in it (an M4 under
-    /// macOS 27.0.1: its texels kept, the command buffer completed; EV RRP-probe1-m4; Metal's
+    /// macOS 27.0.1: its texels kept, the command buffer completed; Metal's
     /// validation stops it).
     ///
     /// Refused, recording nothing: a texture of another device, a level or slice past the
@@ -189,12 +188,11 @@ impl ResourceStateCommandEncoder {
 
     /// `updateTextureMapping:mode:indirectBuffer:indirectBufferOffset:`: map or unmap the regions
     /// `indirect_buffer` holds at `indirect_buffer_offset` when the update runs, after what the
-    /// work before it wrote there, as Metal reads them (SPR-probe1-m4): a 32-bit count, then that
+    /// work before it wrote there, as Metal reads them: a 32-bit count, then that
     /// many `MTLMapIndirectArguments` (each 32-bit: the region's origin and size in tiles, the
     /// level and the slice), each mapped as [`update_texture_mapping`](Self::update_texture_mapping)
     /// maps it. An offset that is not a multiple of 4 reads at the multiple of 4 below it, as
-    /// plain Metal reads it (an M4 under macOS 27.0.1, EV SPCrp-probe2-m4 `sp_ind_off1` to
-    /// `sp_ind_off3`, `sp_ind_off37`, `sp_ind_off38`; its validation takes it).
+    /// plain Metal reads it (an M4 under macOS 27.0.1; its validation takes it).
     ///
     /// The host reads the regions once the work before the update completed (the
     /// `host-read-mapping-arguments` performance degrade, announced once). A region the host
@@ -205,8 +203,8 @@ impl ResourceStateCommandEncoder {
     ///
     /// A texture that is not sparse records nothing, the buffer unread, as plain Metal maps
     /// nothing in it (as [`update_texture_mapping`](Self::update_texture_mapping)'s). Through a
-    /// view the regions name the texture's own tiles as a direct update's do (EVs RRX-sparse1-m4,
-    /// RRX-sparse2-m4 and -m3: the levels the texture's, the slices the view's).
+    /// view the regions name the texture's own tiles as a direct update's do (the levels the
+    /// texture's, the slices the view's).
     ///
     /// Refused, recording nothing: a texture or buffer of another device, or a count past the
     /// buffer of a sparse texture (`Invalid`); a view of a pixel format whose tile is not its
@@ -253,29 +251,27 @@ impl ResourceStateCommandEncoder {
     /// `source_size` tiles at `source_origin` of `source_level` and `source_slice` of `source` to
     /// the tile at the same place from `destination_origin` of `destination_level` and
     /// `destination_slice` of `destination`, where that tile is unmapped, as Metal does
-    /// (SPR-probe1-m4, SPR-probe2-m4, and a Metal sparse probe on the M3 Max and an M4): a tile
-    /// whose destination is mapped stays where it is, and the heaps' `usedSize` does not change.
-    /// The tiles move one at a time in Metal's order (x, then y, then z), each where its
-    /// destination is unmapped as it moves, so a move within a texture whose regions overlap moves
-    /// only what lands on unmapped tiles (tiles 0 to 2 onto 1 to 3: only tile 2, onto 3). At
-    /// `firstMipmapInTail` the slice's whole tail moves, onto the other side's tail or onto one
-    /// tile of a tiled level, and one tile onto a whole tail, as Metal's validation takes and Metal
-    /// moves them (EVs RRX-sparse1-m4, RRX-sparse2-m4 and -m3); past it nothing moves, as plain
+    /// (and a Metal sparse probe on the M3 Max and an M4): a tile whose destination is mapped stays
+    /// where it is, and the heaps' `usedSize` does not change. The tiles move one at a time in
+    /// Metal's order (x, then y, then z), each where its destination is unmapped as it moves, so a
+    /// move within a texture whose regions overlap moves only what lands on unmapped tiles (tiles 0
+    /// to 2 onto 1 to 3: only tile 2, onto 3). At `firstMipmapInTail` the slice's whole tail moves,
+    /// onto the other side's tail or onto one tile of a tiled level, and one tile onto a whole
+    /// tail, as Metal's validation takes and Metal moves them; past it nothing moves, as plain
     /// Metal (validation stops it). Through a view, each side names its texture's own tiles as
-    /// [`update_texture_mapping`](Self::update_texture_mapping)'s does (EVs RRX-sparse1-m4,
-    /// RRX-sparse2-m4 and -m3: the levels the texture's, the slices the view's; validation stops a
-    /// region past the view's own level). Plain Metal moves between textures of different heaps and
-    /// of different formats, tiles of different sizes included (its validation stops different
-    /// formats); so does the runtime, tile for tile. The destination heap does not count the tiles
-    /// it gains, as Metal's does not. Each moved tile's texels go with it, as Metal's (a Metal
-    /// sparse probe on the M3 Max and an M4): the runtime copies them between textures it zeroes,
-    /// so the device's sparse units need not move whole, and a multisampled texture's whole units
-    /// take their memory with them; between formats of different texels, and between a tail and a
-    /// tile, the destination reads zero, as its bytes would be another layout's (a near-equivalent:
-    /// Metal's read those bytes).
+    /// [`update_texture_mapping`](Self::update_texture_mapping)'s does (the levels the texture's,
+    /// the slices the view's; validation stops a region past the view's own level). Plain Metal
+    /// moves between textures of different heaps and of different formats, tiles of different sizes
+    /// included (its validation stops different formats); so does the runtime, tile for tile. The
+    /// destination heap does not count the tiles it gains, as Metal's does not. Each moved tile's
+    /// texels go with it, as Metal's (a Metal sparse probe on the M3 Max and an M4): the runtime
+    /// copies them between textures it zeroes, so the device's sparse units need not move whole,
+    /// and a multisampled texture's whole units take their memory with them; between formats of
+    /// different texels, and between a tail and a tile, the destination reads zero, as its bytes
+    /// would be another layout's (a near-equivalent: Metal's read those bytes).
     ///
     /// Between two textures that are not sparse it records nothing, as plain Metal moves nothing
-    /// (an M4: both textures' texels kept; EV RRP-probe1-m4).
+    /// (an M4: both textures' texels kept).
     ///
     /// Refused, recording nothing: a texture of another device, a move between a sparse texture
     /// and one that is not (`NotSparse`, not measured), a level or slice past a texture's, or a
@@ -359,8 +355,7 @@ impl ResourceStateCommandEncoder {
     /// them in the queue's commit order (a bind waits for everything submitted before it, which
     /// holds that update). A wait for a fence this encoder updated waits for the update before
     /// the encoder, as the other encoders' waits do, and the updates are bound, as plain Metal
-    /// binds them (an M4 under macOS 27.0.1, EV SPCrp-probe2-m4 `sp_fence_update_then_wait`,
-    /// `sp_fence_update_then_wait_after_compute`; its validation stops the wait).
+    /// binds them (an M4 under macOS 27.0.1; its validation stops the wait).
     ///
     /// Refused (`Invalid`): a fence of another device.
     pub fn wait_for_fence(&mut self, fence: &Fence) -> Result<(), Error> {
@@ -441,14 +436,14 @@ impl ResourceStateCommandEncoder {
 
 /// The slice of its sparse texture `sparse` that slice 0 of `texture` names: a view's first slice,
 /// 0 for the texture itself. Through a view an update or a move names its texture's own tiles, as
-/// Metal's does (a Metal sparse probe on an M3 Max and an M4; EVs RRX-sparse1-m4, RRX-sparse2-m4
-/// and -m3): the level is the texture's whatever the view's levels, past them too (a view of levels
-/// 1 and 2 mapping its level 2 maps the texture's level 2, and a view of level 0 mapping level 1
-/// the texture's level 1); the slice is the view's, its texture's past the view's first, past the
-/// view's slices too (a view of slices 1 and 2 mapping its slice 2 maps the texture's slice 3); and
-/// a view of another pixel format of the same tile (`R32Uint`, `RGBA8Unorm` and `RG16Float` views
-/// of an `R32Float` texture) names the same tiles. Plain Metal; its validation stops a level or
-/// slice past the view's and a region past the view's own level, and takes the rest.
+/// Metal's does (a Metal sparse probe on an M3 Max and an M4): the level is the texture's whatever
+/// the view's levels, past them too (a view of levels 1 and 2 mapping its level 2 maps the
+/// texture's level 2, and a view of level 0 mapping level 1 the texture's level 1); the slice is
+/// the view's, its texture's past the view's first, past the view's slices too (a view of slices 1
+/// and 2 mapping its slice 2 maps the texture's slice 3); and a view of another pixel format of the
+/// same tile (`R32Uint`, `RGBA8Unorm` and `RG16Float` views of an `R32Float` texture) names the
+/// same tiles. Plain Metal; its validation stops a level or slice past the view's and a region past
+/// the view's own level, and takes the rest.
 ///
 /// Refused (`NotImplemented(SparseHeaps)`): a view of a pixel format whose tile is not the
 /// texture's (not measured).

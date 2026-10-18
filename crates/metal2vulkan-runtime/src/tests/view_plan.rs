@@ -208,7 +208,7 @@ fn view_formats_follow_metals_measured_verdicts() {
     }
     // Metal views an extended-range format as its sRGB twin alone, and no other format as one,
     // though their bytes per pixel match (the consumer's report, an M3 Max: 116 pairs abort;
-    // the two-plane ones' 72 pairs abort on an M4, EV APX2-xv1-m4).
+    // the two-plane ones' 72 pairs abort on an M4).
     let xr = [
         P::BGRA10XR,
         P::BGRA10XRSRGB,
@@ -510,7 +510,7 @@ fn swizzled_views_keep_the_private_usage_bits_metal_keeps() {
     }
 }
 
-/// Bit 0x8, which Metal's descriptor keeps and its texture drops (EV API-usage8-m4, an Apple M4):
+/// Bit 0x8, which Metal's descriptor keeps and its texture drops (an Apple M4):
 /// a texture of 0x8 alone answers no usage, as its views without a swizzle do, and Metal asserts
 /// on its swizzled view; one of 0x9 answers `ShaderRead`, its swizzled view too. A swizzled view
 /// of a texture of `ShaderWrite`, `RenderTarget` or `Video` alone answers no usage, made.

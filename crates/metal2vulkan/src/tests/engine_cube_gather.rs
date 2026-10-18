@@ -1,7 +1,7 @@
 //! Metal's gather of a cube texture, emulated by fetches on a device that does not sample through
 //! Metal's own sampler, on the CPU interpreter:
 //!
-//! - Metal's own answers: eight lanes of a probe RT13-cg-probe-m4 (Apple M4, macOS 27.0.1; its `gs`
+//! - Metal's own answers: eight lanes of a probe (Apple M4, macOS 27.0.1; its `gs`
 //!   run on the identity cube of 3x3 faces, `lanes-3.bin`), bit for bit: channel `w` through a
 //!   nearest sampler clamping to the edge and through one repeating, and channel `x` through the
 //!   first. Five lanes read across a face's edge and past both edges, and three wrap a face
@@ -1056,7 +1056,7 @@ fn depth_cube_comparison_gathers_take_metals_taps() {
 
 // ---- Metal's own lanes --------------------------------------------------------------------------
 
-/// Eight lanes of RT13-cg-probe-m4's `gs` run on the identity cube of 3x3 faces, by their index in
+/// Eight lanes of our probe's `gs` run on the identity cube of 3x3 faces, by their index in
 /// `lanes-3.bin`: the direction's bits, and Metal's gathers there of channel `w` through a nearest
 /// sampler clamping to the edge (`s_ne`) and one repeating (`s_nr`), and of channel `x` through
 /// the first. Lanes 0 to 5 read across an edge and past both edges; lanes 5130, 5132, and 5135
@@ -1175,7 +1175,7 @@ fn a_cube_gather_answers_metals_probe_lanes() {
     }
 }
 
-/// RT13-cg3-probe-m4's references, in each face's order (`refs-cc.bin`): every lane reads its
+/// Our probe's references, in each face's order (`refs-cc.bin`): every lane reads its
 /// face's centre, the face's four texels of a cube of 2x2 faces.
 const CG3_REFS: [u32; 19] = [
     0xbf80_0000,
@@ -1199,7 +1199,7 @@ const CG3_REFS: [u32; 19] = [
     0x3f7f_ff00,
 ];
 
-/// RT13-cg3-probe-m4's `Depth32Float` cube (`tex-depth32float.bin`, face after face, rows of the
+/// Our probe's `Depth32Float` cube (`tex-depth32float.bin`, face after face, rows of the
 /// face): texels outside `[0, 1]`, NaN, the infinities, `-0`, and subnormals.
 const CG3_FLOATS: [u32; 24] = [
     0xbf80_0000,
@@ -1228,14 +1228,14 @@ const CG3_FLOATS: [u32; 24] = [
     0x0000_0000,
 ];
 
-/// RT13-cg3-probe-m4's `Depth16Unorm` cube's codes (`tex-depth16unorm.bin`): 0, 1, 65534, 65535,
+/// Our probe's `Depth16Unorm` cube's codes (`tex-depth16unorm.bin`): 0, 1, 65534, 65535,
 /// and the codes beside 0.5.
 const CG3_CODES: [u64; 24] = [
     0, 65535, 0, 65535, 65535, 0, 1, 65534, 0, 0, 65535, 65535, 1, 65534, 32768, 32767, 65535,
     65535, 0, 1, 0, 32768, 65535, 65534,
 ];
 
-/// Metal's comparison gathers on RT13-cg3-probe-m4's cubes: per format and compare code
+/// Metal's comparison gathers on our probe's cubes: per format and compare code
 /// ([`compare_sampler`]), per face, per reference of [`CG3_REFS`], the taps that pass (bit `k`
 /// the gather-order tap `k`; `out-cc-<format>.bin`).
 type Cg3 = (PixelFormat, u64, [[u8; 19]; 6]);
@@ -1331,7 +1331,7 @@ const CG3: [Cg3; 4] = [
     ),
 ];
 
-/// The emulation answers Metal's own comparison gathers of RT13-cg3-probe-m4 ([`CG3`]) under
+/// The emulation answers Metal's own comparison gathers of our probe ([`CG3`]) under
 /// `less_equal` and `not_equal`, bit for bit: `Depth32Float` texels outside `[0, 1]`, NaN, and the
 /// infinities compared as held, and `Depth16Unorm`'s reference clamped and rounded to its code.
 #[test]
@@ -1386,7 +1386,7 @@ fn a_cube_comparison_answers_metals_probe_lanes() {
     }
 }
 
-/// 24 of RT13-cg4-probe-m4's references (`refs-q.bin`): per reference `m` the code `k` beside
+/// 24 of our probe's references (`refs-q.bin`): per reference `m` the code `k` beside
 /// it, and the code Metal compared it as, the exact product `m · 65535` rounded, where rounding
 /// its `f32` rounding (`k + 1/2` exactly) to even picks the other code.
 const CG4: [(u64, u32, u64); 24] = [
@@ -1417,7 +1417,7 @@ const CG4: [(u64, u32, u64); 24] = [
 ];
 
 /// A `Depth16Unorm` comparison compares the code of its reference's exact product with 65535, as
-/// Metal does on [`CG4`]'s references (RT13-cg4-probe-m4): on cubes of 2x2 faces, each face holding
+/// Metal does on [`CG4`]'s references: on cubes of 2x2 faces, each face holding
 /// the codes `k` and `k + 1` on either side of a reference's half-way point, `equal` passes on the
 /// taps holding Metal's code.
 #[test]

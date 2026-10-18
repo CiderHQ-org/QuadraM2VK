@@ -1,9 +1,9 @@
 //! `texture/heap_tiled`: Metal's layout of a heap texture's elements against the M3 probe's L rows,
-//! measured on an Apple M4 under macOS 27.0.1 (EVs TXN3-m3p4-m4 and TXN3-m3p5-m4; an M3 Max under
-//! macOS 26.7 alike on every row of a plain format): each row's answered size and alignment, its
-//! level bases and chain stride, and, for a plain format, the hash of its span with every element's
-//! units holding their numbers, as the probe wrote them; and the lossless compression's answers
-//! against the probe's C rows and EV TXN3-htlm1-m4.
+//! measured on an Apple M4 under macOS 27.0.1 (an M3 Max under macOS 26.7 alike on every row of a
+//! plain format): each row's answered size and alignment, its level bases and chain stride, and,
+//! for a plain format, the hash of its span with every element's units holding their numbers, as
+//! the probe wrote them; and the lossless compression's answers against the probe's C rows and a
+//! second probe's answers.
 
 use crate::metal_level::MetalLevel;
 use crate::texture::heap_tiled::{
@@ -500,7 +500,7 @@ fn the_layout_places_every_plain_l_row_s_elements_as_metal() {
     }
 }
 
-/// The M4's answers for the probe's block-compressed rows L29 to L36 (EV TXN3-m3p5-m4): their
+/// The M4's answers for the probe's block-compressed rows L29 to L36: their
 /// blocks' allocations are the layout's, a block an element.
 #[test]
 fn block_compressed_allocations_are_the_layout_s() {
@@ -541,7 +541,7 @@ fn block_compressed_allocations_are_the_layout_s() {
     }
 }
 
-/// A level's bytes as the heap lane's Metal answers state them (SPR-heaptex1, the M3 Max and the
+/// A level's bytes as the heap lane's Metal answers state them (the M3 Max and the
 /// M4 alike; `heap_textures.rs`'s shapes, uncompressed).
 #[test]
 fn level_bytes_are_metal_s() {
@@ -568,12 +568,11 @@ fn level_bytes_are_metal_s() {
     );
 }
 
-/// Which textures Metal compresses and what it answers for them (the probe's C rows, EV
-/// TXN3-m3p4-m4, and EV TXN3-htlm1-m4): a colour texture of neither `ShaderWrite` nor
-/// `PixelFormatView` usage with `allowGPUOptimizedContents` and a level 0 of 16 texels or more
-/// on its shorter side, a depth or stencil texture of any usage; its chains, then 2 bytes of
-/// metadata for each 8 x 8 texels of its level padded to powers of two, rounded up to 128, for
-/// each chain.
+/// Which textures Metal compresses and what it answers for them (the probe's C rows): a colour
+/// texture of neither `ShaderWrite` nor `PixelFormatView` usage with `allowGPUOptimizedContents`
+/// and a level 0 of 16 texels or more on its shorter side, a depth or stencil texture of any usage;
+/// its chains, then 2 bytes of metadata for each 8 x 8 texels of its level padded to powers of two,
+/// rounded up to 128, for each chain.
 #[test]
 fn lossless_answers_are_metal_s() {
     let read = TextureUsage::SHADER_READ;
@@ -621,11 +620,11 @@ fn lossless_answers_are_metal_s() {
 
 /// A mipmapped texture Metal compresses answers its full chain uncompressed, then for each chain
 /// metadata over the full chain's levels while level 0's sides, padded to multiples of 16 and
-/// halved, have a longer side of 16 or more, whatever levels it has (EVs FPV-hsz1-m4, an Apple
-/// M4 under macOS 27.0.1, and FPV-hsz1-m3, an M3 Max under 26.7, alike: the consumer's boot's
-/// `RGBA16Float` 224 x 928 and 216 x 928 textures of 3 levels among them, and the 7-level 64 x
-/// 64 `R32Uint` render target MoltenVK answered 0x5680 for); a 3D texture's chains, one a depth
-/// slice of level 0, and a cube array's alike (EV FPV-hsz2-m4).
+/// halved, have a longer side of 16 or more, whatever levels it has (an Apple M4 under macOS
+/// 27.0.1, and an M3 Max under 26.7, alike: the consumer's boot's `RGBA16Float` 224 x 928 and 216 x
+/// 928 textures of 3 levels among them, and the 7-level 64 x 64 `R32Uint` render target MoltenVK
+/// answered 0x5680 for); a 3D texture's chains, one a depth slice of level 0, and a cube array's
+/// alike.
 #[test]
 fn mipmapped_lossless_answers_are_metal_s() {
     // (element bytes, type, extent, levels, slices, Metal's size and alignment)
@@ -672,8 +671,8 @@ fn mipmapped_lossless_answers_are_metal_s() {
 
 /// A one-sample `Depth32Float_Stencil8` texture answers its two planes, `Depth32Float`'s answer
 /// rounded up to 16 KiB, then `Stencil8`'s, at the depth plane's alignment, compressed or not,
-/// in every type it takes (EV FPV-hsz2-m4, an Apple M4 under macOS 27.0.1: 12330 answers;
-/// FPV-hsz1-m4 and FPV-hsz1-m3, 14552 2D answers each, alike).
+/// in every type it takes (an Apple M4 under macOS 27.0.1: 12330 answers; 14552 2D answers each,
+/// alike).
 #[test]
 fn depth_stencil_answers_are_their_planes() {
     let rt = TextureUsage::RENDER_TARGET;
@@ -818,7 +817,7 @@ fn heap_textures_are_tiled_where_metal_s_layout_is_measured() {
         panic!("a multisample texture is tiled");
     };
     assert_eq!(untiled.kind, D::HeapTextureUntiledLayout);
-    // Two-aspect: its depth plane at 16 KiB, then its stencil plane (EV FPV-hsz2-m4), untiled.
+    // Two-aspect: its depth plane at 16 KiB, then its stencil plane, untiled.
     let ds = texture(
         T::Type2D,
         PixelFormat::Depth32FloatStencil8,
@@ -834,13 +833,13 @@ fn heap_textures_are_tiled_where_metal_s_layout_is_measured() {
     assert!(matches!(tiled_depth.layout, HeapLayout::Tiled(_)));
 }
 
-/// A multisample texture's answers and layout kind (EVs FPV-hm2-m4 and FPV-hm3-m4 on an Apple M4
-/// under macOS 27.0.1; the M3 Max under 26.7 answered FPV-hm3-m4's descriptors alike, FPV-hm3-m3):
-/// compressed by the single-sample rule over its sample grid (`w x 2h` at 2 samples, `2w x 2h` at
-/// 4); uncompressed, its pixels elements of all their samples in Metal's tiles, a multisample
-/// array's slices an array's; compressed, that plus metadata over the sample grid for each slice.
-/// A `Depth32Float_Stencil8` texture answers neither (its device's); a compressed one is held in
-/// memory of its own (`Untiled::LOSSLESS_MULTISAMPLE`), any other refused over host pages.
+/// A multisample texture's answers and layout kind (on an Apple M4 under macOS 27.0.1; the M3 Max
+/// under 26.7 answered our probe's descriptors alike): compressed by the single-sample rule over
+/// its sample grid (`w x 2h` at 2 samples, `2w x 2h` at 4); uncompressed, its pixels elements of
+/// all their samples in Metal's tiles, a multisample array's slices an array's; compressed, that
+/// plus metadata over the sample grid for each slice. A `Depth32Float_Stencil8` texture answers
+/// neither (its device's); a compressed one is held in memory of its own
+/// (`Untiled::LOSSLESS_MULTISAMPLE`), any other refused over host pages.
 #[test]
 fn multisample_answers_are_metal_s() {
     use crate::degradation::Degradation as D;
@@ -1065,8 +1064,8 @@ fn multisample_answers_are_metal_s() {
         }
     }
     // `Depth32Float_Stencil8`: its depth plane rounded up to 16 KiB, then its stencil plane, at
-    // the depth plane's alignment (EVs FPV-hm4-m4 and FPV-hm3-m3; the consumer's 100 x 60 array
-    // of 2 samples, 98816 at 16 KiB on the M3 Max), held by the rule as any depth format.
+    // the depth plane's alignment (the consumer's 100 x 60 array of 2 samples, 98816 at 16 KiB on
+    // the M3 Max), held by the rule as any depth format.
     let ds_rows = [
         (2, false, ms, 1, [8, 8], (16512, 128)),
         (2, false, msa, 1, [100, 37], (81920, 16384)),
@@ -1151,7 +1150,7 @@ fn fresh_patterns_clear_colors_write_their_texels() {
 }
 
 /// The pattern covers each level whose shorter side is 16 or more of a texture Metal compresses,
-/// none of one it keeps uncompressed: the chains and sample grids EVs ZIN-zf1-m4 and ZIN-zf2-m4
+/// none of one it keeps uncompressed: the chains and sample grids our probes
 /// measured (a 2x texture's grid twice as tall, a 4x one's twice as wide too).
 #[test]
 fn pattern_levels_are_the_levels_of_16_or_more() {

@@ -488,13 +488,12 @@ fn a_tile_pass_and_dispatch_are_refused_where_metal_refuses_them() {
     });
 }
 
-/// A region tile dispatch runs the tiles its region touches as Metal does (probes
-/// RT11-metal-probe-19 to -19e on an M3 Max and an M4): over [`AREA`] in 16x16 tiles (3 by 2),
-/// the tiles from the origin's to the one holding the end, each origin and size taken in 32
-/// bits; a region of no width at a tile's edge runs nothing and one inside a tile runs that
-/// tile; a region past the pass is cut to it; an end that wraps past `2^32 - 1` to 0 runs to the
-/// pass's last tile and one that wraps further runs nothing. The array index draws into the
-/// pass's one layer. Every other pixel keeps its texels.
+/// A region tile dispatch runs the tiles its region touches as Metal does (on an M3 Max and an M4):
+/// over [`AREA`] in 16x16 tiles (3 by 2), the tiles from the origin's to the one holding the end,
+/// each origin and size taken in 32 bits; a region of no width at a tile's edge runs nothing and
+/// one inside a tile runs that tile; a region past the pass is cut to it; an end that wraps past
+/// `2^32 - 1` to 0 runs to the pass's last tile and one that wraps further runs nothing. The array
+/// index draws into the pass's one layer. Every other pixel keeps its texels.
 #[test]
 fn a_region_tile_dispatch_runs_the_tiles_its_region_touches() {
     /// A region, its array index, and the tiles (column, row) it runs.

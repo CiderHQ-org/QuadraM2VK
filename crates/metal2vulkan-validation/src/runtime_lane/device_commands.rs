@@ -185,7 +185,7 @@ fn make(
 /// its first word holds the magic from the priming's own submission on: the runtime puts the
 /// word back before every call the loader serves, priming's command buffer allocations
 /// included. Without that restore the device's creation died by `SIGSEGV` at `0x1cdc0de` in the
-/// loader's `vkAllocateCommandBuffers` (EV API-dc1-mvk4, an M4 under MoltenVK 1.4.1). Then a
+/// loader's `vkAllocateCommandBuffers` (an M4 under MoltenVK 1.4.1). Then a
 /// command buffer is committed on a new queue (an allocation through the loader with the magic
 /// in the word) and the device is dropped (`vkDestroyDevice`, likewise). Elsewhere nothing writes
 /// the word, and the test says so and ends.

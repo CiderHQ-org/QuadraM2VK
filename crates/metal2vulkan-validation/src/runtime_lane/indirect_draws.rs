@@ -17,9 +17,9 @@
 //! and an M4): behind a buffer barrier after and before the vertex stage, what the earlier draw
 //! wrote, through an index bounds pass before the draw's own render pass instance where the device
 //! takes one. Without the barrier, which Metal does not order: before any barrier of the encoder,
-//! the bytes from before the write, which Metal's draw read in every run of a stress probe
-//! RRS-race, through a copy taken before the pass, announced once (`unordered-draw-bytes`), on
-//! every device; after a barrier, where a rewrite since it was read in some runs (probe RRS-race2),
+//! the bytes from before the write, which Metal's draw read in every run of a stress probe,
+//! through a copy taken before the pass, announced once (`unordered-draw-bytes`), on
+//! every device; after a barrier, where a rewrite since it was read in some runs,
 //! the index bounds pass is refused typed.
 
 use super::degrade_notices::{
@@ -220,7 +220,7 @@ fn indirect_draws_read_misaligned_offsets_as_metal_reads_them() {
     });
     assert_eq!(answer, Some(Ok(())), "ind_index_offset_misaligned");
     assert_eq!(stored.color, full, "ind_index_offset_misaligned");
-    // The direct draw reads its indices so too (as probe `RT7-icb-probe7-m4`'s commands did).
+    // The direct draw reads its indices so too (as our probe's commands did).
     let stored = probe.run(PASS, |p, e, h| {
         prepare(p, e, h);
         answer = Some(e.draw_indexed_primitives(
@@ -337,7 +337,7 @@ const ZEROS: [u32; 2] = [0, 0];
 
 /// An indexed indirect draw whose arguments or indices an earlier draw of the encoder writes
 /// draws as probe 2 measured (the module docs); without a barrier, before any barrier, the bytes
-/// from before the write (a probe RRS-race), announced once; a rewrite after a barrier, where the
+/// from before the write (a probe), announced once; a rewrite after a barrier, where the
 /// device takes the index bounds pass, is refused `NotImplemented(IndirectDrawArguments)`.
 #[test]
 fn an_indexed_indirect_draw_reads_what_a_draw_wrote_behind_a_barrier() {
@@ -363,7 +363,7 @@ fn an_indexed_indirect_draw_reads_what_a_draw_wrote_behind_a_barrier() {
     use Step::{Barrier, Draw, Small};
     // Each case: its name, the arguments and the indices it starts with, its steps, and Metal's
     // texels where the runtime draws it (probe 2: the same on the M3 Max and the M4, plain and
-    // validated; without a barrier, the bytes from before the write, RRS-race on both chips),
+    // validated; without a barrier, the bytes from before the write, on both chips),
     // else `None` where it is refused with the index bounds pass.
     let full_rows = rows(&FULL);
     let empty_rows = rows(&EMPTY);
@@ -568,7 +568,7 @@ fn tile_writer(probe: &Probe) -> RenderPipelineState {
 
 /// An indexed indirect draw whose arguments or indices a tile dispatch of the encoder wrote
 /// before it draws the bytes from before the write, which Metal's draw read in every run of
-/// a probe RRS-tilew (an M3 Max and an M4, plain and validated): through the copy taken before the
+/// a probe (an M3 Max and an M4, plain and validated): through the copy taken before the
 /// pass, announced once (`unordered-draw-bytes`), on every device. Metal refuses a memory barrier
 /// after the tile stage, and a barrier before the dispatch did not order the write either (the draw
 /// read what a draw wrote before the barrier, not the dispatch's rewrite); the runtime's copy
@@ -596,7 +596,7 @@ fn an_indexed_indirect_draw_reads_the_bytes_from_before_a_tile_dispatchs_write()
     use TileStep::{Draw, Tile, WriteBehindBarrier};
     let empty_rows = rows(&EMPTY);
     // Each case: its name, the arguments and indices it starts with, its steps, and Metal's
-    // texels where the runtime draws them (RRS-tilew), else `None` where it is refused.
+    // texels where the runtime draws them, else `None` where it is refused.
     let cases = [
         (
             "tw_args",

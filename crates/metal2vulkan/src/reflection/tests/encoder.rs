@@ -2,8 +2,8 @@
 //! [`ArgumentBufferLayout::from_buffer_binding`]) against Metal's, beside the function's own
 //! (`newArgumentEncoderWithBufferIndex:`): `metal-answers.txt`'s `encoder_` sections over the
 //! `argument_buffers` and `buffers` fixtures and its `enc:` sections over the `encoders` and
-//! `encoder_types` fixtures, recorded by `probe.swift` on an M3 Max and an M4 (EVs UNI-reflfix-9
-//! to -14 and -14-m3; where the two differ, the M3 Max's).
+//! `encoder_types` fixtures, recorded by `probe.swift` on an M3 Max and an M4 (where the two
+//! differ, the M3 Max's).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -237,8 +237,8 @@ fn binding_encoders_place_arguments_as_metal() {
 
 /// A plain buffer's binding, the library's or the pipeline's, of a pointee that is no struct makes
 /// Metal's encoder of no bytes, alignment 1, which API validation lets through, while the
-/// function's encoder at that buffer's index is refused, as validation stops it (EV
-/// UNI-reflfix-11; Metal without validation answers the same empty encoder there).
+/// function's encoder at that buffer's index is refused, as validation stops it (Metal without
+/// validation answers the same empty encoder there).
 #[test]
 fn a_plain_buffer_binding_makes_an_empty_encoder() {
     let answers = encoder_answers();

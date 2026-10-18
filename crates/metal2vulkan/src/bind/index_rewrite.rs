@@ -4,7 +4,7 @@
 //! a list over its arguments, with primitive restart off.
 //!
 //! The one program today is an indexed strip after Apple's `setPrimitiveRestartEnabled:index:`,
-//! which restarts at the call's index `k'` alone (EV RFX-probe5-m4), where Vulkan restarts at the
+//! which restarts at the call's index `k'` alone, where Vulkan restarts at the
 //! index type's all-ones index alone: the strip's pieces between restarts, each triangle in
 //! Vulkan's strip order with its parity counted from its piece's start (a line strip's segments
 //! as pairs), in order, so every primitive keeps its winding, its provoking vertex and its place
@@ -25,7 +25,7 @@
 //!   the draw; [`RewritePhase::Write`] places each run within its group and writes its
 //!   primitives. Each run walks a few dozen positions of a million-position draw, so the walks
 //!   spread over the GPU: one workgroup walking every position (the first pass) took 56 ms for a
-//!   million positions on an M4 (EV RFX-lane3-mvk4).
+//!   million positions on an M4.
 //! - **Positions** are Metal's: from the arguments' first index, each position inside the
 //!   buffer's whole indices from the offset at its index, each past them at index 0, as the fetch
 //!   reads it, restart included. Past the buffer every position reads 0, so the walk stops

@@ -22,9 +22,9 @@ fn color(offset: u64, pitch: u64, [w, h]: [u64; 2]) -> BufferLayout {
 }
 
 /// Metal's GPU finds each texel's color word in plane 0 and its alpha byte in plane 1, each plane
-/// from its offset rounded down to 16 bytes in rows its `bytesPerRow` rounded down to 16 apart (EV
-/// XRR2-xrs1-m4, an Apple M4: CoreVideo `'b3a8'` surfaces of 64 x 64 and 37 x 5, and
-/// `IOSurfaceCreate` ones at 260/68 bytes a row with plane 1 4 bytes past plane 0, read at 0/256
+/// from its offset rounded down to 16 bytes in rows its `bytesPerRow` rounded down to 16 apart (an
+/// Apple M4: CoreVideo `'b3a8'` surfaces of 64 x 64 and 37 x 5, and `IOSurfaceCreate` ones at
+/// 260/68 bytes a row with plane 1 4 bytes past plane 0, read at 0/256
 /// and 1296/64, and at 272/80 with plane 1 48 bytes past it), and in the consumer's shape: the
 /// layout from plane 0's first byte, plane 1's GPU rows, and the span the moves stage.
 #[test]

@@ -95,7 +95,7 @@
 //!   sampled usage and view), so the fetching pass renders into a 4x scratch image that has it,
 //!   copied in before the pass and back after it at the same sample count, on every venue.
 //!
-//! - **Commands of an indirect command buffer** (EVs RFL-inst-m3 and -m4): an `R32Float` target
+//! - **Commands of an indirect command buffer**: an `R32Float` target
 //!   cleared to 0.75, then the encoder's draws, an execution of render commands of their own
 //!   pipelines (made with `supportIndirectCommandBuffers`) and the encoder's draws after it, each a
 //!   `fetch_scalar` or `rt6_resolve_white`. Metal draws a command that fetches as the encoder's own
@@ -111,7 +111,7 @@
 //!   made, copied in before it and back after.
 //! - **A blended 16-bit float target** (`blend16.rs`): an `RGBA16Float` target blended one over
 //!   one minus the source alpha, fetched by `fbl_fetch_blend16`'s functions, which return a loaded
-//!   `half4` or `float4`: Metal's blend in every channel (EV FBL-sw1-m3). In the pixel interlock
+//!   `half4` or `float4`: Metal's blend in every channel. In the pixel interlock
 //!   the function computes it, no Vulkan blend applying to the storage write.
 //! - **A BGRA-order target** (`bgra.rs`): a `BGRA8Unorm` target (and `RGBA8Unorm` beside it)
 //!   whose channels take every byte, halved by `fetch_ordered` one to three times in a pass,
@@ -121,7 +121,7 @@
 //!   (ANV), the attachment is read and written through its `R8G8B8A8_UNORM` view.
 //! - **An sRGB target** (`srgb.rs`): a `BGRA8Unorm_sRGB` target whose channels take every byte,
 //!   halved by `fetch_ordered` one to three times in a pass, with and without a depth and stencil
-//!   attachment that passes or fails half the draws' fragments: Metal's bytes (EV XRR2-halve1-m4).
+//!   attachment that passes or fails half the draws' fragments: Metal's bytes.
 //!   In the pixel interlock the attachment is read and written through its `R32_UINT` view, in a
 //!   scratch image made mutable to it.
 //! - **A memory-writing function beside depth** (`beside_depth.rs`): `fetch_coherent` counts each
@@ -129,7 +129,7 @@
 //!   states. Metal counts every fragment and keeps the color of those its tests drop. Through input
 //!   attachments every state is Metal's answer; in the pixel interlock the states that drop no
 //!   fragment are, and the others are refused at the draw at the depth attachment, typed.
-//! - **Multisampled commands** (EVs ICR-msfetch-m3 and -m4: Metal draws them as the encoder's own
+//! - **Multisampled commands** (Metal draws them as the encoder's own
 //!   draws): the same at 4x, a command that fetches after the encoder's own fetch, one before it,
 //!   and two about a plain command, resolved into a 4² texture (0.125, 0.25 and 0.25). Where the
 //!   device reads the attachment as sample planes (ANV, MoltenVK) each command's run has the
@@ -541,7 +541,7 @@ fn memoryless_attachments_are_fetched() {
 }
 
 /// A memoryless attachment loaded `DontCare` reads zero where a fragment fetches it, as Metal's
-/// does (an Apple M4 under macOS 27.0.1, EV ZIN-zp1-m4: a fetch read 0 in 52 runs of 52, also
+/// does (an Apple M4 under macOS 27.0.1: a fetch read 0 in 52 runs of 52, also
 /// after a pass that cleared other bytes into the tiles). A first pass clears the memoryless
 /// attachment to (5, 6, 7, 8), which a device keeping its memory as it lies would read again;
 /// then `exf2_fetch_unwritten` three times over the count cleared to (1, 2, 3, 4) with the
@@ -1606,6 +1606,7 @@ fn a_plain_draw_before_a_fetch_takes_the_devices_faster_form() {
     let blending = steps(&lane, &descriptor, &[&blended, &halve]).map(|()| read());
     expect(&lane, "after a blended draw", blending, &texels(0.5));
     // Each kind is announced once: where the plain draws' pass split, its split and backing
+    // were announced there (the RTX 3080), and this split announces neither.
     let kinds: Vec<Degradation> = Vec::new();
     let scratch = scratched(&messages);
     let first = forced(&[
@@ -1736,7 +1737,7 @@ fn a_callers_multisampled_image_without_the_fetch_usage_fetches_through_a_scratc
     );
     // Through the attachment's own multisampled storage image the fetching draw's instance
     // leaves the attachment out of its subpass, and the device's resolve needs it in one: the
-    // pass splits there (the RTX 3080's two instances, EV SDX-ff1-3080), announced where the
+    // pass splits there (the RTX 3080's two instances), announced where the
     // device announces the interlock's splits; the exact resolve, drawn after the pass, needs
     // none, and through sample planes it reads them: one instance either way.
     let split = !planes && !exact && announces_interlock_splits(&lane);
@@ -2140,16 +2141,16 @@ fn execute_between(
 }
 
 /// Commands that fetch a multisampled color attachment draw as the encoder's own draws of their
-/// pipelines do (Metal's answer, EVs ICR-msfetch-m3 and -m4), executed after the encoder's own
-/// fetch (0.125 in the resolve), before any (0.25), and about a plain command (0.25): through
-/// input attachments (lavapipe), the attachment's multisampled storage image (RADV, NVIDIA), or
-/// its sample planes (ANV, MoltenVK), split from the attachment before each command's run and
-/// merged into it after, and through the scratch standing in for the texture where the encoder's
-/// own fetch takes one (announced), copied in before the run and back after; through input
-/// attachments a command that fetches before the encoder's fetch, where that fetch takes a scratch,
-/// renders a scratch of its own in its run's framebuffer, where the commit was refused
-/// `NotImplemented(IndirectRenderCommands)`. Previously a command after the encoder's fetch through
-/// sample planes ran without their split and merge, reading stale samples and its writes lost.
+/// pipelines do (Metal's answer), executed after the encoder's own fetch (0.125 in the resolve),
+/// before any (0.25), and about a plain command (0.25): through input attachments (lavapipe), the
+/// attachment's multisampled storage image (RADV, NVIDIA), or its sample planes (ANV, MoltenVK),
+/// split from the attachment before each command's run and merged into it after, and through the
+/// scratch standing in for the texture where the encoder's own fetch takes one (announced), copied
+/// in before the run and back after; through input attachments a command that fetches before the
+/// encoder's fetch, where that fetch takes a scratch, renders a scratch of its own in its run's
+/// framebuffer, where the commit was refused `NotImplemented(IndirectRenderCommands)`. Previously a
+/// command after the encoder's fetch through sample planes ran without their split and merge,
+/// reading stale samples and its writes lost.
 #[test]
 fn indirect_render_commands_fetch_multisampled_attachments_as_the_encoder_s_draws() {
     let (messages, cache, lane) = lane();
@@ -2226,14 +2227,13 @@ fn indirect_render_commands_fetch_multisampled_attachments_as_the_encoder_s_draw
 
 /// Commands of an indirect command buffer that fetch a caller's `R32_SFLOAT` image of color
 /// attachment and transfer usage alone (`new_texture_with_vk_image`), which lacks the usage every
-/// fetch form needs, draw as the encoder's own draws of their pipelines do (Metal's answer, EVs
-/// RFL-inst-m3 and -m4): between the encoder's draws, about a plain command, and after the
-/// encoder's own fetch, which makes the pass's scratch (texels 0.25, 0.25, 0.5 and 0.125 of a
-/// pass cleared to 0.75). Each fetching command's run reads and writes a scratch a command's
-/// draw made, copied from the image the pass's instances render before the run and back after
-/// it: in the pixel interlock, and through input attachments (lavapipe) in the run's own
-/// framebuffer, where the commit was refused `NotImplemented(IndirectRenderCommands)`. The scratch
-/// is announced.
+/// fetch form needs, draw as the encoder's own draws of their pipelines do (Metal's answer):
+/// between the encoder's draws, about a plain command, and after the encoder's own fetch, which
+/// makes the pass's scratch (texels 0.25, 0.25, 0.5 and 0.125 of a pass cleared to 0.75). Each
+/// fetching command's run reads and writes a scratch a command's draw made, copied from the image
+/// the pass's instances render before the run and back after it: in the pixel interlock, and
+/// through input attachments (lavapipe) in the run's own framebuffer, where the commit was refused
+/// `NotImplemented(IndirectRenderCommands)`. The scratch is announced.
 #[test]
 fn indirect_render_commands_fetch_a_callers_image_through_a_scratch() {
     let (messages, cache, lane) = lane();

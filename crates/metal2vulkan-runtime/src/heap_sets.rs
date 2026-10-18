@@ -1,5 +1,5 @@
 //! Set 1, the heap, and the texture table, device-wide (residency part C): every live texture is at
-//! its resource ID for every command, as Metal's textures are (the M4 probe RFL-res-m4: a texture
+//! its resource ID for every command, as Metal's textures are (the M4 probe: a texture
 //! read through its ID in an argument buffer is reached with no encoder naming it, and through a
 //! later encoder's `use_resource`).
 //!

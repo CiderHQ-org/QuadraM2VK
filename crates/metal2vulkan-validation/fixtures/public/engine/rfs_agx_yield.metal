@@ -2,9 +2,9 @@
 // Owned fixture: `llvm.agx3.yield`, the backoff Apple's decoupled-lookback scans call
 // in their spin loops. MSL has no spelling for it, so the kernels call `rfs_yield`, which this
 // source declares and never defines, and the directive above renames every call to the
-// intrinsic in both companions (scripts/regen-air-fixtures). Measured on an M3 Max and an M4
-// (EVs RFS-yield-m3 and -m4): the yield delays the calling thread for a time that grows with its
-// operand and changes no word, with or without Metal's validation layers.
+// intrinsic in both companions (scripts/regen-air-fixtures). Measured on an M3 Max and an M4: the
+// yield delays the calling thread for a time that grows with its operand and changes no word, with
+// or without Metal's validation layers.
 #include <metal_stdlib>
 using namespace metal;
 

@@ -12,7 +12,7 @@
 //!   and `out[2 * pixel + 1]`) run between the draws, and `resolve_halves` resolves through a
 //!   layout of two halves and a word of the same eight bytes.
 //!
-//! As Metal does on an M4 (EV `CFIT-m4-probe4c`):
+//! As Metal does on an M4:
 //!
 //! - Tile dispatches and draws share each pixel's cell both ways and in encode order: a clear's
 //!   seed reaches the splats, which the resolve reads with their bits; a clear between splats

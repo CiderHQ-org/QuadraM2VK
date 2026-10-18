@@ -692,8 +692,7 @@ pub fn specialize_dynamic(
     let mut static_samplers: Vec<_> = abi.static_samplers.iter().filter_map(kept).collect();
     // A function a table can hold is numbered whole, what the entry reaches of it or not; a
     // private function's or a library symbol's as far as the entry reaches it, as the stage's
-    // own (Metal numbers none of a private function whose call a function constant removed, EV
-    // SID-sid19-m4).
+    // own (Metal numbers none of a private function whose call a function constant removed).
     let mut linked_sampler_groups = Vec::new();
     let unnumbered_linked_samplers = linked_samplers.unknown;
     for (group, origin) in &linked_samplers.groups {

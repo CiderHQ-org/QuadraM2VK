@@ -3,7 +3,7 @@
 //! descriptor pools its commands' sets came from (`descriptor_arena.rs`); the next command buffer
 //! takes them where it would make its own. Made, used once and destroyed, a command pool cost 38
 //! to 48 us and a descriptor pool 23 to 26 us on RADV (Radeon 780M), 7 to 8 and 3 on ANV, against
-//! 0.2 and 0.02, and 1.3 and 0.1, reset (EV PERF-raw1).
+//! 0.2 and 0.02, and 1.3 and 0.1, reset.
 //!
 //! - **Command pools are kept, never released while the device lives**. Every command pool a
 //!   command buffer gives back is kept, whatever its status, and every command buffer dropped with

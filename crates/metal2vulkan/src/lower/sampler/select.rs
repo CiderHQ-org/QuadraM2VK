@@ -1145,6 +1145,8 @@ fn select_extended(
             };
             (offset, None, at)
         }
+        // A bfloat texture's gather of a component, its taps' reads. So is an extended-range or
+        // padded one's, whose `half` result is refused below.
         TexOp::Gather {
             component,
             compare: false,
@@ -1243,7 +1245,7 @@ fn select_extended(
                     (Filter::Nearest, Filter::Nearest) => false,
                     _ => return Err(refused()),
                 };
-                // Metal's linear filter of a bfloat texture reads the nearest texel (EV FPV-pf5-m4),
+                // Metal's linear filter of a bfloat texture reads the nearest texel,
                 // and a gather follows no filter.
                 let linear = linear && !form.bfloat() && gather.is_none();
                 if s.max_anisotropy > 1 {
@@ -1319,7 +1321,7 @@ fn select_extended(
     }
     // A swizzled texture of the slot's variant: the sample swizzles its decoded texel, a border
     // texel included, and a gather of a component gathers the component its swizzle names, as
-    // plain Metal does (EV FPV-sw1-m4).
+    // plain Metal does.
     if swizzle {
         crate::lower::texture::swizzles(cx, index)?;
     }
@@ -2688,9 +2690,8 @@ fn select_one(
 /// - An argument buffer's sampler ([`PrecisionNote::ArgumentPixelSamplerScaling`]): never for a 2D
 ///   gather (snapped behind its word), nor, on a device with Metal's own sampler (`metal_sampler`),
 ///   for a sample without a comparison, which reads Metal's texels there (a nearest word's flagged
-///   fetch, a linear word's footprint cell; EVs SID-pix1-m4 and SID-pix-mvk4); always otherwise,
-///   since its word, which the specialized module cannot read, may filter where no emulation
-///   reaches it.
+///   fetch, a linear word's footprint cell); always otherwise, since its word, which the
+///   specialized module cannot read, may filter where no emulation reaches it.
 fn pixel_note(
     op: &SampleOp,
     (pixel, metal_sampler): (Pixel, bool),
@@ -2833,9 +2834,9 @@ fn places_wrapped_offset(
 /// the buffer and its command buffer fails; a run that never reaches one is Metal's. Where the
 /// stage cannot mark it, the planner refuses a listed cubic sampler beside the stage. A fragment
 /// stage never marks it: the mark is a store, and a fragment function holding one loses the
-/// device's hidden-surface removal and early depth test although the store never runs (EVs
-/// GSM2-crcb-mvk4 and GSM2-crcn-mvk4, an M4: 16 hidden layers cost 13.5 times what they cost
-/// without it), so the planner refuses a listed cubic sampler beside a fragment stage.
+/// device's hidden-surface removal and early depth test although the store never runs (an M4: 16
+/// hidden layers cost 13.5 times what they cost without it), so the planner refuses a listed cubic
+/// sampler beside a fragment stage.
 fn cubic_reach(cx: &mut SelectCx<'_>) {
     if cx.stage == Stage::Fragment {
         return;
@@ -2852,7 +2853,7 @@ fn cubic_reach(cx: &mut SelectCx<'_>) {
 /// names the slot (`LoweringInputs::cubic_samplers`), else `None`. Every texture operation
 /// through a runtime sampler slot records `RuntimeFact::CubicSampler`, so the binder asks for the
 /// variant wherever the bound sampler's min or mag filter is `Cubic`: Metal samples through such
-/// a sampler with its bicubic filter (EV GSM2-bcs2-m4), which the variant emulates as a constexpr
+/// a sampler with its bicubic filter, which the variant emulates as a constexpr
 /// bicubic sampler's (`bicubic::cubic_state`).
 fn cubic_slot(
     cx: &mut SelectCx<'_>,

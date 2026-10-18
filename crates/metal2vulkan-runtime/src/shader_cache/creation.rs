@@ -6,8 +6,8 @@
 //! stages_using_direct_arguments, unwritten_fragment_inputs}`), to learn the key its pipeline
 //! is found by (`Device::render_variant_key`), and, where asked, its reflection: 18 to 23 ms of
 //! a creation of the consumer's heaviest states on the RTX 5080 Laptop GPU's host made again in
-//! the same process, and most of the 33 to 39 ms of one in a new process over warm caches (EV
-//! SWA-wm1), where Metal answers in under 1 ms.
+//! the same process, and most of the 33 to 39 ms of one in a new process over warm caches, where
+//! Metal answers in under 1 ms.
 //!
 //! - **Keyed by everything the answers read.** Each answer is a function of the descriptor and
 //!   the device alone: `Device::render_descriptor_key` digests every field of the descriptor

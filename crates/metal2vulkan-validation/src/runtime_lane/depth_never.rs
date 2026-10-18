@@ -516,12 +516,11 @@ fn counting_commands(
 }
 
 /// An indirect command buffer's draw under `Never` counts no sample, as the encoder's does, in
-/// an execution beside commands that count and around it (EVs IRX-vis1-m3 and -m4, the M3 Max
-/// and an M4 alike): its query pauses around the draw in a spare the call lent the execution,
-/// and the spares no draw took count nothing. So do commands a barrier splits into runs, each
-/// run's draws counted (EV IRX-vis1-m4, plain Metal: its validation stops `setBarrier` on a
-/// buffer without mesh draws), one execution of the barrier's command and the one after it, and
-/// one of the barrier's alone before a `Never` command.
+/// an execution beside commands that count and around it (the M3 Max and an M4 alike): its query
+/// pauses around the draw in a spare the call lent the execution, and the spares no draw took count
+/// nothing. So do commands a barrier splits into runs, each run's draws counted (plain Metal: its
+/// validation stops `setBarrier` on a buffer without mesh draws), one execution of the barrier's
+/// command and the one after it, and one of the barrier's alone before a `Never` command.
 #[test]
 fn executed_never_draws_count_no_sample() {
     let (messages, _cache, lane) = Lane::new();

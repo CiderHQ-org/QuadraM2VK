@@ -1,5 +1,5 @@
 # The table of the second source's function drawn unblended (the dual-source table's inputs,
-# metal2vulkan-devtools `xr_blends`). Metal's answers: EV XRB-xrtdu-m4, plain Metal on an Apple M4
+# metal2vulkan-devtools `xr_blends`). Metal's answers: plain Metal on an Apple M4
 # under macOS 27.0.1 (26A434), the lane-table probe built with -fmetal-math-mode=safe, our own probe
 # over synthetic inputs. The function returns its own outputs at index 0 and a second output (index
 # 1) of its own values; its one band per format and output type is drawn with blending disabled

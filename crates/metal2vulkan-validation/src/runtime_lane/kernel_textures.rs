@@ -108,8 +108,7 @@ fn kernels_with_textures_and_samplers_match_metal(shard: usize) {
 }
 
 /// The pieces `kernels_with_textures_and_samplers_match_metal` is split into. As one test it took
-/// 63-164 s on the M4 under the validation layer (EVs CPF-ktex-tip-mvk4 and CPF-ktex-base-mvk4),
-/// past the Mac lane's 60 s a test.
+/// 63-164 s on the M4 under the validation layer, past the Mac lane's 60 s a test.
 const TEXTURE_SHARDS: usize = 16;
 
 census_shards!(
@@ -244,8 +243,7 @@ type Answers = (u32, u32, u32, bool);
 /// committed public kernel case of the census whose function, compiled under no lowering inputs,
 /// asks for a format. A case whose own formats do not compile is printed, not compared. In
 /// `STAND_IN_SHARDS` tests (`in_shard`): as one, compiling every texture case's function took 60 s
-/// on the M4 and 68 s on the 780M (EVs CPF2-lane3-mvk4, CPF2-lane3-radv), at the Mac lane's 60 s
-/// a test.
+/// on the M4 and 68 s on the 780M, at the Mac lane's 60 s a test.
 fn stand_in_states_answer_queries_as_their_formats_compile(shard: usize) {
     let cases = public_cases(in_shard(binds_textures, shard, STAND_IN_SHARDS)).unwrap();
     assert!(

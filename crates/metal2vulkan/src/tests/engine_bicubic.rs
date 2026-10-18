@@ -1000,7 +1000,7 @@ fn an_offset_on_a_repeating_axis_takes_metals_placement() {
 }
 
 /// Metal's bicubic filter on small levels and mirrored axes (`lower::sampler::bicubic`'s module
-/// docs; the RT13-bc2 and RT13-bc3 probes on the M3 Max, the primary):
+/// docs; the probes probes on the M3 Max, the primary):
 /// - On a 12x10 level, a mirrored axis of a format Metal filters bicubically reads texel 1 at
 ///   fraction 0 whatever the coordinate (with both axes mirrored, texel `(1, 1)`), while the other
 ///   axis filters as it is addressed; a 32-bit float format's mirrored sample is the linear
@@ -1675,7 +1675,7 @@ fn image_slot(m: &TypedModule) -> ResourceSlot {
 }
 
 /// A sample through a runtime sampler whose min or mag filter is Metal's `Cubic` is the sample
-/// through a constexpr bicubic sampler of the same state (EV GSM2-bcs2-m4, bit for bit on Metal),
+/// through a constexpr bicubic sampler of the same state (bit for bit on Metal),
 /// so under the cubic-sampler variant the function emulates it as that one's, and here every lane
 /// of both kernels is the same bits, under each address mode and border color, at normalized and
 /// pixel coordinates, for formats of each family: a runtime `clamp_to_zero` reads the sampler's

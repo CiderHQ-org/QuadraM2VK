@@ -49,8 +49,8 @@
 //!   (`DriverFact::TimestampsWaitForEveryQueue`: MoltenVK 1.4.1 on Apple's GPUs) both devices
 //!   answer from the host's clock, and only the bare shapes with timestamps still write them.
 //!
-//! Ignored by default: a measurement, not a check. Run it by name with `--run-ignored all` (EVs
-//! CPF-cost*), in a build with `--cfg m2v_system_alloc`, whose lib test binary keeps the system
+//! Ignored by default: a measurement, not a check. Run it by name with `--run-ignored all`, in a
+//! build with `--cfg m2v_system_alloc`, whose lib test binary keeps the system
 //! allocator as a consumer's process does.
 
 use super::{

@@ -7,11 +7,10 @@
 //!
 //! - integers: `D = C + sum_{k < K} A(m, k) * B(k, n)` (or without `C` in `multiply` mode), with
 //!   an element of `A` or `B` past its tensor's extents read as zero and every tile element
-//!   written (TNS-metal2, 18 cases);
+//!   written (18 cases);
 //! - floats: `acc = C`, then `acc = fma(A(m, k), B(k, n), acc)` for `k` ascending, one rounding
-//!   per step (TNS-metal2, 56,064 elements in float, half, and bfloat); the same with relaxed
-//!   precision, and from `acc = +0` in `multiply` mode (TNS-dev1), the fixture's descriptors
-//!   respelled.
+//!   per step (56,064 elements in float, half, and bfloat); the same with relaxed precision, and
+//!   from `acc = +0` in `multiply` mode, the fixture's descriptors respelled.
 //!
 //! The owned fixture `tns_init` constructs a cooperative tensor (a destination or a right input)
 //! in a loop's body: each construction zeroes the elements the thread holds, the second after the
@@ -450,9 +449,9 @@ impl Format {
 enum FloatMode {
     /// `multiply_accumulate`, as compiled.
     Plain,
-    /// `multiply_accumulate` with relaxed precision: Metal's sums are the plain ones (TNS-dev1).
+    /// `multiply_accumulate` with relaxed precision: Metal's sums are the plain ones.
     Relaxed,
-    /// `multiply`: the sum starts from `+0`, not from `C` (TNS-dev1).
+    /// `multiply`: the sum starts from `+0`, not from `C`.
     Multiply,
 }
 

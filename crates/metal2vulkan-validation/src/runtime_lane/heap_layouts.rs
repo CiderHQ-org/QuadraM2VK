@@ -61,7 +61,7 @@ pub(super) const HEAP_LAYOUTS: [Degradation; 3] = [
 /// Where each texture lies in its heap: a multiple of every alignment Metal answers.
 const OFFSET: u64 = 64 << 10;
 
-/// Metal's largest tile of `unit`-byte elements, 16 KiB (EVs TXN3-htl1-m4 to TXN3-htl5-m4).
+/// Metal's largest tile of `unit`-byte elements, 16 KiB.
 fn largest_tile(unit: u64) -> [u64; 2] {
     match unit {
         1 => [128, 128],
@@ -519,7 +519,7 @@ fn heap_textures_laid_out_otherwise_than_metal_s_tiles_are_counted_and_announced
             TextureDescriptor::texture_2d(PixelFormat::Depth32FloatStencil8, 32, 32, false);
         aspects.resource_options = shared();
         aspects.usage = read | TextureUsage::RENDER_TARGET;
-        // Metal's answer for the compressed shape (SPR-heaptex1, `heap_textures`): its
+        // Metal's answer for the compressed shape (`heap_textures`): its
         // metadata included.
         let answer = device.heap_texture_size_and_align(&compressed).unwrap();
         assert!(answer.size >= 16512, "{answer:?}");
@@ -682,10 +682,9 @@ fn making_many_textures_of_a_layout_kind_announces_it_once_and_counts_each() {
 }
 
 /// A block-compressed texture's shape, one of the rows of `runtime::tests::heap_tiled_blocks`
-/// (EVs TXN3-htl5-m4 and TXN3-bcsw2-m4 to TXN3-bcsw4-m4, and the same probes on an Apple M3 Max):
-/// its format, block bytes and texels, type, level-0 extent, levels and array length, Metal's
-/// size, and the FNV-1a hashes of its span with every block numbered in turn, as each level's
-/// Metal lays it out.
+/// (and the same probes on an Apple M3 Max): its format, block bytes and texels, type, level-0
+/// extent, levels and array length, Metal's size, and the FNV-1a hashes of its span with every
+/// block numbered in turn, as each level's Metal lays it out.
 struct Blocks {
     format: PixelFormat,
     unit: u64,
@@ -1055,7 +1054,7 @@ fn block_rows_lie_as_their_level_lays_them_out(
 /// resolves it into a texture that reads the clear colour in every texel, and the heap's bytes
 /// keep every byte they held. Without it, which Metal keeps uncompressed, refused
 /// `NotImplemented(HostHeapUncompressedMultisample)`. The size query answers at least Metal's for
-/// each on every device (66048 and 65536 bytes at 128, EV FPV-hm2-m4; and measured for the
+/// each on every device (66048 and 65536 bytes at 128; and measured for the
 /// uncompressed one where the device cannot hold its samples in the heap's bytes, an NVIDIA GPU's:
 /// no optimal image in host-visible memory, no multisample linear image).
 #[test]

@@ -4615,8 +4615,7 @@ fn argument_buffer_samplers_are_heap_lookups() {
 /// (`RuntimeFact::CubicArgumentSampler`) in a kernel on every profile with the heap, marking the
 /// status by address where the device addresses buffers and through the kernel's binding of it
 /// elsewhere; a fragment function's never does, whose store would cost it the device's
-/// hidden-surface removal (EVs GSM2-crcb-mvk4 and GSM2-crcn-mvk4), so the planner refuses a listed
-/// cubic sampler beside it.
+/// hidden-surface removal, so the planner refuses a listed cubic sampler beside it.
 #[test]
 fn only_non_fragment_stages_test_argument_samplers_for_a_cubic_filter() {
     let Some(bc) = argument_samplers_fixture() else {

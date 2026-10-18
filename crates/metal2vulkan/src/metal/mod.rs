@@ -403,7 +403,7 @@ impl Default for TextureSwizzleChannels {
 }
 
 /// `textureWriteRoundingMode`, Apple's SPI on the pipeline descriptors: how a render pipeline
-/// state's `float` writes to half-float channels round (EV TXN2-twr-m4 on an M4 under macOS 27.0.1,
+/// state's `float` writes to half-float channels round (on an M4 under macOS 27.0.1,
 /// and the consumer's measurement on an M3 Max under macOS 26.7). Metal's raw 0 (the getter's
 /// default) and 1 write as a state made without it: toward zero; 2 rounds a render state's
 /// half-float color attachments, blended or not, and the half-float textures its fragment function
@@ -426,7 +426,7 @@ impl TextureWriteRoundingMode {
     /// The mode of Metal's raw value `raw`, where `supportsTextureWriteRoundingMode:` answers
     /// yes (0 to 2); a larger one is `InvalidDescriptor(UnknownEnumValue)`, where Metal's pipeline
     /// creation stops at its descriptor validation ("device does not support Unknown", with or
-    /// without the debug layer: EV TXN2-twr-m4).
+    /// without the debug layer).
     pub fn from_raw(raw: u64) -> Result<TextureWriteRoundingMode, crate::error::Error> {
         match raw {
             0 | 1 => Ok(TextureWriteRoundingMode::TowardZero),

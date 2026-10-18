@@ -71,7 +71,7 @@
 //!     wait for the command buffer whose making it is before it exits. Seen: with two seconds, two
 //!     lane processes on ANV ended with `SIGSEGV` and `SIGABRT` inside the validation layer 3 and
 //!     20 s after their test passed, where a bicubic kernel's making took 6.6 s under the lane's
-//!     load (EV `PRDC-gl1-anv`); a making in progress then is inferred from the timing.
+//!     load; a making in progress then is inferred from the timing.
 //! - **Registered again.** Drivers and layers also register destructors later, when a static is
 //!   made at its first use. Measured: with the hook registered only at the first device, polls
 //!   and device waits crashed inside the validation layer's synchronization code at exit while

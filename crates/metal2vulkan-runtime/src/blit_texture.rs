@@ -41,7 +41,7 @@
 //!   one aspect) goes through a scratch buffer, the whole source read before any of it is written,
 //!   which is `memmove`'s answer: Metal's for regions up to a few hundred texels, where past that
 //!   its copy races, some texels reading what the copy already wrote, differently from run to run
-//!   (probes; EV FPV-ov1b-m4). Announced once (`overlapping-texture-copy-as-memmove`). A
+//!   (probes). Announced once (`overlapping-texture-copy-as-memmove`). A
 //!   multisampled texture, which Vulkan copies into no buffer, stays refused
 //!   `NotImplemented(OverlappingTextureCopies)`.
 //! - **PVRTC**. A copy between a buffer and a PVRTC texture with a nonzero `bytesPerRow` moves its
@@ -259,7 +259,7 @@ fn unit(call: &'static str, texture: &Texture, option: BlitOption) -> Result<Cop
 /// `unit`s (`into_texture` from the buffer, which reads it to its copy reach). A PVRTC texture's
 /// blocks lie row by row at a nonzero `bytesPerRow`, with `MTLBlitOptionRowLinearPVRTC` or
 /// without it (plain Metal copies a PVRTC texture without the option, which its validation
-/// stops, as with it: EV RRP-probe6-m4 on an M4 under macOS 27.0.1, both directions, 4- and
+/// stops, as with it: our probe on an M4 under macOS 27.0.1, both directions, 4- and
 /// 2-bit formats, padded rows and a region; the reims-vgpu consumer's run on an M3 Max under
 /// macOS 26.7), and in plain Metal's block order at a `bytesPerRow` of 0, with the option or
 /// without it (`plan_block_order_copy`; its validation stops both), a region off its blocks as the
@@ -1056,7 +1056,7 @@ impl BlitCommandEncoder {
     /// sliceCount:levelCount:`: `slice_count` slices of `level_count` levels, whole, each level
     /// into a destination level. Levels of different sizes copy the region common to both from
     /// their origins, the rest of the larger one kept, as plain Metal copies them (an M4 under
-    /// macOS 27.0.1, EV SPCrp-probe3-m4 `sz_slices_*`; its validation stops them).
+    /// macOS 27.0.1; its validation stops them).
     ///
     /// Refused as [`copy_from_texture_to_texture`](Self::copy_from_texture_to_texture) is, and
     /// for levels or slices past either texture and compressed levels of different sizes
@@ -1873,7 +1873,7 @@ impl BlitCommandEncoder {
     /// `Managed` texture once the command buffer completes. Managed memory behaves as shared
     /// memory here (and on Apple silicon), so nothing more is recorded. On a texture of another
     /// storage mode it records nothing either, whatever the level, as plain Metal does
-    /// (SPH-managed1-m4: `Shared` and `Private` textures, level 0 and a level past the texture;
+    /// (`Shared` and `Private` textures, level 0 and a level past the texture;
     /// Metal's validation stops it).
     ///
     /// Refused (`Invalid`): a managed texture's slice or level past the texture; a texture of

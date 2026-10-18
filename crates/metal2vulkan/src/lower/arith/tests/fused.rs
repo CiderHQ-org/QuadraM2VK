@@ -57,8 +57,8 @@ fn exact_below_normal(a: u64, b: u64, c: u64) -> bool {
 }
 
 /// Metal's `fma` (probe cases e98b103f and f7850ba7): denormal operands read as zeros, the one
-/// rounding, a result whose exact value is below `2^-126` a zero of its sign before rounding (EV
-/// DNR-dn2-m3), and every NaN `0x7FC00000`.
+/// rounding, a result whose exact value is below `2^-126` a zero of its sign before rounding, and
+/// every NaN `0x7FC00000`.
 fn metal_fma32(a: u64, b: u64, c: u64) -> u64 {
     let (a, b, c) = (ftz(a), ftz(b), ftz(c));
     let r = fma32(a, b, c);
@@ -988,7 +988,7 @@ fn a_route_on_several_lane_counts_holds_its_sequence_once() {
         [r(Route::Wide, 3), r(Route::Soft, 2), r(Route::Soft, 4)]
     );
     // A double route on two vector lane counts gets its one-lane routine too, and so does one on
-    // three, which saves two sequences (EV PERF-sweep4), as does `half`'s on three.
+    // three, which saves two sequences, as does `half`'s on three.
     for lanes in [&[2u8, 4][..], &[2, 3, 4]] {
         let mut double: BTreeSet<Routine> = lanes.iter().map(|&n| r(Route::Wide, n)).collect();
         fma::complete(&mut double, q);

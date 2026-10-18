@@ -1,6 +1,6 @@
 //! An 8-bit sRGB color attachment fetched (the sRGB fetch form) on the device the cfg selects,
-//! under the validation layer: Metal's answers measured by EVs XRR2-halve1-m4 and XRR2-halve2-m4
-//! (an Apple M4, macOS 27.0.1; our own probes), the same passes.
+//! under the validation layer: Metal's answers measured by our probes
+//! (an Apple M4, macOS 27.0.1), the same passes.
 //!
 //! A `SIDE`² private `BGRA8Unorm_sRGB` or `RGBA8Unorm_sRGB` render target, single-sampled or of
 //! `MSAA` samples, holds in its texel or sample `k` (`k = i · samples + s` for sample `s` of texel
@@ -78,8 +78,8 @@ const Z: f32 = 0.5;
 const LEFT_Z: f32 = 0.25;
 
 /// What Metal stores in a red, green or blue byte of an 8-bit sRGB texel holding `c` when a draw
-/// returns half of what it fetched (`HALVED[c]`): EV XRR2-halve1-m4's `COLOR_HALF_F`, which
-/// XRR2-halve2-m4 measured the same for `RGBA8Unorm_sRGB` and at 4 samples.
+/// returns half of what it fetched (`HALVED[c]`): our probe's `COLOR_HALF_F`, which our probe
+/// measured the same for `RGBA8Unorm_sRGB` and at 4 samples.
 const HALVED: [u8; 256] = [
     0, 1, 1, 2, 2, 2, 3, 4, 4, 5, 5, 6, 6, 6, 7, 8, //
     9, 10, 10, 11, 12, 13, 13, 14, 15, 15, 16, 17, 18, 18, 19, 20, //

@@ -5,11 +5,11 @@
 //! quarter, and the depth its buffer holds. Each case is a pass of one draw of the fullscreen
 //! triangle over a fresh 4² `R32Float` target cleared to 0.75, beside a `Depth32Float_Stencil8`
 //! attachment cleared to depth 1 and stencil 0, no stencil test. Metal tests the depth the
-//! function returns, clamped by the depth clip mode (EVs DSX-ds2-m4 and DSX-ds3-m4, a probe): in
-//! clip mode to `[0, 1]`, in clamp mode to the viewport's range; any value with its sign bit set as
-//! +0, a negative NaN staying 0 in clamp mode, past the range; a positive NaN fails, `Always`
-//! included. A fragment that passes stores 0.625 and, under a written depth state, its clamped
-//! depth; one that fails keeps 0.75 and depth 1.
+//! function returns, clamped by the depth clip mode (a probe): in clip mode to `[0, 1]`, in clamp
+//! mode to the viewport's range; any value with its sign bit set as +0, a negative NaN staying 0 in
+//! clamp mode, past the range; a positive NaN fails, `Always` included. A fragment that passes
+//! stores 0.625 and, under a written depth state, its clamped depth; one that fails keeps 0.75 and
+//! depth 1.
 //!
 //! In the pixel interlock (RADV, ANV, NVIDIA, MoltenVK) the function stores its color before the
 //! device's tests, so a draw whose depth test can drop a fragment runs the variant that tests the

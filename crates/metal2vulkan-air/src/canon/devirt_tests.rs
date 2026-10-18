@@ -995,7 +995,7 @@ fn call_through(k: &mut FunctionBuilder<'_>, fp: Value, tid: Value) -> Value {
 /// A call through a pointer chosen at run time among functions' addresses (a `select` of two
 /// constant addresses, neither a table's entry) calls the function the pointer holds: each
 /// address is carried as its function's word, and the call is a switch over the two functions,
-/// each inlined (FPC-probe2 measured Metal's answers). It was the compute function-pointer row's
+/// each inlined (measured Metal's answers). It was the compute function-pointer row's
 /// tripwire (`runtime::families::features`), refused as `DynamicCall` before.
 #[test]
 fn a_pointer_chosen_at_run_time_calls_the_function_it_holds() {
@@ -1110,7 +1110,7 @@ fn function_pointers_compare_as_their_words() {
 
 /// The address of a visible function no linked function resolves is refused as a call to it
 /// is, `NeedsInput(LinkedFunction)`, where it survives, even when nothing calls through it:
-/// Metal refuses to make such a pipeline (FPC-probe2, "unresolved visible function reference").
+/// Metal refuses to make such a pipeline ("unresolved visible function reference").
 #[test]
 fn an_unresolved_reference_s_address_needs_its_linked_function() {
     let mut m = ModuleBuilder::new();
@@ -1249,8 +1249,8 @@ fn constant_chosen_kernel() -> (Module, AirAbi, GlobalId) {
     (module, abi, mode)
 }
 
-/// A call through a pointer function constants choose is decided before it becomes a switch
-/// (EV FPC-sweep2): with the constant supplied, a direct call to the function chosen, the only one
+/// A call through a pointer function constants choose is decided before it becomes a switch: with
+/// the constant supplied, a direct call to the function chosen, the only one
 /// inlined; unsupplied, the call is left as it was before item 27, so SCCP refuses the constant
 /// where the call stands and no switch inlines every function the pointer might be. The corpus's
 /// kernel choosing among 162 functions so inlined all of them, 2.5 times its memory, to refuse the

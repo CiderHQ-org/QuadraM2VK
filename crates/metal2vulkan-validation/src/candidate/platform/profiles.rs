@@ -220,7 +220,7 @@ impl ProfileRestriction {
     /// product reads a member it omits as its version's guarantee, or as none, and a feature its
     /// version requires as present, while the layer reports the device's own value for an omitted
     /// member (of a structure the context queries) and an omitted feature as absent. Under
-    /// `lunarg-desktop-baseline-2023` as extracted, the RTX 5080's context (EV COV-legs2-nvidia)
+    /// `lunarg-desktop-baseline-2023` as extracted, the RTX 5080's context
     /// found `shaderSubgroupExtendedTypes` absent and the five `VK_EXT_subgroup_size_control` and
     /// `VK_EXT_vertex_attribute_divisor` properties the document lists the extensions of but does
     /// not state at the device's values. Its regeneration now states every such member

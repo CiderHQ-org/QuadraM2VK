@@ -2,7 +2,7 @@
 //! coordinates (and every level's of a 3D texture) start from.
 //!
 //! An Apple M4 computes `1 / w` rounded to nearest even. The M3 Max's GPU computes it as a kernel's
-//! fast-math `1.0f / n` does (EV CPM-probe6-m3 `rcp`: every `n` from 1 to 16384, the same in each
+//! fast-math `1.0f / n` does (every `n` from 1 to 16384, the same in each
 //! run), which is one unit in the last place above the rounded quotient at 1505 of those sizes and
 //! one below at 26: the sizes below. A reciprocal's mantissa is that of the size's odd part, and
 //! so is the M3 Max's deviation (measured at every size), so the tables list odd parts. Metal's

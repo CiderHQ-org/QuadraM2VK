@@ -5,8 +5,8 @@
 //! M4 on macOS 27.0.1 and the M3 Max on 26.7, alike, each plain and under the debug layer).
 //! **Vulkan** converts a clear value to the attachment's format as the device likes, and the
 //! devices measured differ there: RADV writes a `half` NaN as `0xfe00`, and lavapipe an
-//! `RG11B10Float` NaN as `0x7c1` and `0x3e1` (lane `renders::clears_store_the_bytes_metal_stores`,
-//! EVs RRS-lane29-radv and -lvp262). An integer clear converts nothing.
+//! `RG11B10Float` NaN as `0x7c1` and `0x3e1` (lane `renders::clears_store_the_bytes_metal_stores`).
+//! An integer clear converts nothing.
 //!
 //! So a color attachment whose `Clear` load holds such a NaN ([`clear_value::nan_texel`]) is
 //! cleared before the pass instead: a scratch image of the unsigned-integer format of its texel
@@ -19,34 +19,32 @@
 //! **Kept sign**. Where Metal keeps the attachment's texture losslessly compressed, the
 //! attachment's level is 16 texels or more a side, and the pass has no draw call
 //! ([`keeps_nan_sign`]), its clear keeps a `half` NaN's sign, `0xfe00` for a negative one, in the
-//! texel and every sample; elsewhere it drops it (EVs ZIN-zms4-m4, ZIN-zms6-m4 and ZIN-zms8-m4,
-//! an M4 under macOS 27.0.1, sizes 1 to 256, 1x and 4x, `R16Float`, `RG16Float` and
-//! `RGBA16Float`; any draw call drops it, one wholly off the target, of no area or whose
-//! fragments all discard too; the consumer's M3 Max alike at 4x4). The scratch is mutable to the
-//! attachment's format (`stand_in_as`), so a device that
-//! copies between formats through a view copies so: MoltenVK's copy of a multisampled image
-//! between formats that take no such view goes through a buffer, which holds no samples, and
-//! left the NaN channels zero (EV ZIN-nc2-mvk4).
+//! texel and every sample; elsewhere it drops it (an M4 under macOS 27.0.1, sizes 1 to 256, 1x and
+//! 4x, `R16Float`, `RG16Float` and `RGBA16Float`; any draw call drops it, one wholly off the
+//! target, of no area or whose fragments all discard too; the consumer's M3 Max alike at 4x4). The
+//! scratch is mutable to the attachment's format (`stand_in_as`), so a device that copies between
+//! formats through a view copies so: MoltenVK's copy of a multisampled image between formats that
+//! take no such view goes through a buffer, which holds no samples, and left the NaN channels zero.
 //!
 //! **Resolves**. Metal's resolve of such a clear in a pass with no draw call stores the clear's
 //! texel, its sign kept, where the sign is kept and Metal also keeps the resolve texture compressed
 //! (at its level, of the attachment's extent); elsewhere it averages the samples, each NaN counted
 //! zero ([`clear_value::resolved_nan_texel`]): a `PixelFormatView` or unoptimized resolve texture,
-//! a level under 16 a side, or a later pass that loads the attachment and resolves it, alike (EV
-//! ZIN-zms8-m4). No device's resolve gives either (each keeps the NaN, or zeroes it where Metal
+//! a level under 16 a side, or a later pass that loads the attachment and resolves it, alike. No
+//! device's resolve gives either (each keeps the NaN, or zeroes it where Metal
 //! keeps it: MoltenVK after the copy), so in such a pass the resolve texture's render area is
 //! written after the pass's resolve, its copies included, the same way: a scratch image cleared to
 //! that texel's bits and copied in. A pass with a draw call resolves by the device
 //! (`device-rounded-resolve`).
 //!
 //! **32-bit floats**. Metal clears a `float` NaN as the double's conversion, its sign and top
-//! payload bits kept, at every level (EV ZIN-zms5-m4), as the devices' clears do
-//! ([`clear_value::color`] states the bits), so such a clear needs nothing before the pass. Its
-//! resolve in a pass with no draw call keeps the clear's texel where the `half` NaN's resolve keeps
-//! it, and makes `0x7fc00000` elsewhere (EVs ZIN-zms5-m4 and ZIN-zms7-m4). The exact resolve
-//! (`color_resolve.rs`) makes `0x7fc00000` everywhere, so the kept resolve is written after the
-//! pass as the `half` one's is ([`clear_value::float_nan_texel`]), on every device alike: where the
-//! device's resolve kept the texel already, the write stores the same bits.
+//! payload bits kept, at every level, as the devices' clears do ([`clear_value::color`] states the
+//! bits), so such a clear needs nothing before the pass. Its resolve in a pass with no draw call
+//! keeps the clear's texel where the `half` NaN's resolve keeps it, and makes `0x7fc00000`
+//! elsewhere. The exact resolve (`color_resolve.rs`) makes `0x7fc00000` everywhere, so the kept
+//! resolve is written after the pass as the `half` one's is ([`clear_value::float_nan_texel`]), on
+//! every device alike: where the device's resolve kept the texel already, the write stores the same
+//! bits.
 //!
 //! **Copies that convert NaNs**. A device whose copy into a multisampled float image draws the
 //! samples through that image's format (`RuntimeDriverDefect::MultisampledCopiesConvertFloatNans`:

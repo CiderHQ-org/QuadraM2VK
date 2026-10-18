@@ -166,7 +166,7 @@ fn ldexp(fb: &mut FunctionBuilder<'_>, f: Form, x: Value, k: Value) -> BResult<V
     }
 }
 
-/// [`ldexp`] of an `f32` container on its bits, as Metal's `float` answers (EV SDX-p1-m3, the
+/// [`ldexp`] of an `f32` container on its bits, as Metal's `float` answers (the
 /// denormal probes): a zero or a denormal `x` (reads as zero) is the zero of its sign; an infinity
 /// or a NaN is `x`, bit for bit; otherwise the exponent field `e + k` (with `k` clamped to
 /// `[-512, 512]`, which saturates every answer) is an infinity of `x`'s sign from 255 up, the
@@ -728,7 +728,7 @@ pub enum FloatFn {
     /// `llvm.minnum`: LLVM's function, the device's `NMin`, on the formats other than `float`.
     /// Metal's compiler emits it for `a < b ? a : b` under fast math, with every flag; on `float`
     /// it refines to [`FloatFn::Min`] with any flags, which Metal answers alike
-    /// (`nan_minmax_fast`, EV DNR-mm1-m3).
+    /// (`nan_minmax_fast`).
     MinNum,
     /// `llvm.maxnum`, as [`FloatFn::MinNum`] for `a > b ? a : b` and [`FloatFn::Max`].
     MaxNum,
@@ -1028,7 +1028,7 @@ impl FloatFn {
     /// `cos`, and `tan`, and `sinpi`, `cospi`, and `tanpi` do too on `float`: each is either the
     /// device's instruction where that is Metal's own function, or the translation's routine, which
     /// reads a denormal operand as Metal does (`denormal::operand`) and has no denormal result for
-    /// a normal operand (where llvmpipe's `atan(2^-126)` is `0x007fff52`, EV FMX-evidence); and
+    /// a normal operand (where llvmpipe's `atan(2^-126)` is `0x007fff52`); and
     /// `fast::sin`, `fast::cos`, and `fast::tan` keep a denormal operand as Metal does, where RADV,
     /// ANV, and NVIDIA flush it (case cc234732). `fast::atan2` does not: its quotient is the
     /// device's division, whose operands `denormal::coverage` reads as Metal does. The second stage's
@@ -1381,8 +1381,8 @@ pub fn float_fn(
 /// `f`, where that is not `op`'s own (`op` otherwise, and on another format): Metal's `half`
 /// `exp`, `exp10`, `log`, `log2`, `log10`, `cosh`, `pow`, and `powr` are its fast `float`
 /// functions of the widened operands, rounded, and so is its `sinh` from `2^-12`
-/// (`half_small`). Each is Metal's word at every `half` operand of EV MBB-half1-m3 (the M3; the
-/// M4's words, EV MBB-half1-m4, are the same), `pow` and `powr` at each of 65,536 operand pairs,
+/// (`half_small`). Each is Metal's word at every `half` operand of our probe (the M3; the
+/// M4's words, are the same), `pow` and `powr` at each of 65,536 operand pairs,
 /// and the precise function is not at 2 operands of `cosh`, 3 pairs of `pow` and `powr`, and 4
 /// operands of `sinh`, whose fast one is again Metal's with the translation's `exp2` and `log2`
 /// in place of Metal's. Its `tanh` is `half_tanh`, and its `atan`, `atan2`, `tan`, `sin`, `cos`,
@@ -1411,7 +1411,7 @@ pub(crate) fn metal_half(op: FloatFn, f: Form) -> FloatFn {
 /// Metal's `exp2` and reciprocal (the routines `libm::Fun::Exp2` and `libm::Fun::Recip`, or the
 /// device's instructions where they are Metal's), and `±1` from `|x| = 16`, where the answer
 /// rounds to `±1` (the quotient is a NaN past `x ≈ 44`, where Metal's `half` `tanh` is `1`).
-/// Below `2^-13` the operand itself (`half_small`). Every `half` of EV MBB-half1-m3 and -m4 is
+/// Below `2^-13` the operand itself (`half_small`). Every `half` of our probes is
 /// this, with the translation's `exp2` and reciprocal in place of Metal's (and with a correctly
 /// rounded reciprocal or quotient in place of the reciprocal); Metal's precise `float` `tanh`,
 /// rounded, is not at 7 of them, nor its fast one, rounded, below `2^-13` and past `44`.
@@ -1449,7 +1449,7 @@ fn half_tanh(fb: &mut FunctionBuilder<'_>, f: Form, x: Value, lib: &Lib<'_>) -> 
 /// itself, where the `float` function it rounds does not: `sinh` below `2^-12` and `tanh` below
 /// `2^-13`, where `fast::sinh(x)` and `fast::tanh(x)`, of a difference of nearly equal
 /// exponentials, lose the operand's low bits and the exact value rounds to the operand (every
-/// such `half` of EV MBB-half1-m3 and -m4). `None` for another function or format.
+/// such `half` of our probes). `None` for another function or format.
 fn half_small(op: FloatFn, f: Form) -> Option<f64> {
     if f.float_fmt() != Some(FloatFmt::Half) {
         return None;
@@ -1479,10 +1479,10 @@ fn half_small_answer(
 /// `r`, Metal's `half` `cospi(x)` (form `f`), with its zero's sign: at `x = n + 1/2` Metal
 /// answers `-0` where `n = floor(x)` is even and `+0` where it is odd, the sign of
 /// `-sinpi(x - 1/2)` of its `half` `sinpi`, whose zero at an odd integer is `-0` (each of the
-/// 4,096 such `half` operands of EV MBB-half1-m3 and -m4), where its `float` `cospi` answers
+/// 4,096 such `half` operands of our probes), where its `float` `cospi` answers
 /// `+0`. `n` and `n / 2` are exact in the container. The zero is chosen in the bits: in a
 /// fast-math entry (no `SignedZeroInfNanPreserve`) a float select between `-0` and `+0` may be
-/// folded, and the RTX 3090 answered `-0` at the odd `n` of case 32931370 (EV MBB-1v-nv3090).
+/// folded, and the RTX 3090 answered `-0` at the odd `n` of case 32931370.
 fn half_cospi_zero(fb: &mut FunctionBuilder<'_>, f: Form, x: Value, r: Value) -> BResult<Value> {
     let u = u32_form(f);
     let (ut, ft) = (ty(fb, u)?, ty(fb, f)?);
@@ -1538,8 +1538,8 @@ enum HalfZero {
 /// `sin`, `tan`, and `asin` of either zero are `+0`, and its `atan` of `-0` is `-0`, in both
 /// math modes (the half probe, cases dc0fee8f and 3ef7c1c5), where its `float` `sin(-0)` and
 /// `tan(-0)` are `-0`, precise `asin(-0)` is `-0`, and precise `atan(-0)` is `+0` (cases 087758cb
-/// and cc234732); and its `half` `sinpi(-0)` is `-0`, where its `float` one is `+0` (EV
-/// MBB-half1-m3 and -m4). `None` for any other function or format.
+/// and cc234732); and its `half` `sinpi(-0)` is `-0`, where its `float` one is `+0`. `None` for any
+/// other function or format.
 fn half_zero(op: FloatFn, f: Form) -> Option<HalfZero> {
     if f.float_fmt() != Some(FloatFmt::Half) {
         return None;
@@ -2004,10 +2004,9 @@ fn has_bits(fb: &mut FunctionBuilder<'_>, f: Form, x: Value, bits: u64) -> BResu
 }
 
 /// `r` (`round`'s result, floats of form `f`) with `+0` for `-0` on `float` and `half`: Metal's
-/// `round` never answers `-0` (`-0.3` and `-0` round to `+0`, precise and fast, EV
-/// HRD-nan-edge-metal; `half` in both flag states, `nan_half` and `nan_half_fast`), as `trunc(x)`
-/// plus a `+0` step does. Moved in the bits, so no signed-zero mode folds it; `bfloat` keeps `r`
-/// (not measured).
+/// `round` never answers `-0` (`-0.3` and `-0` round to `+0`, precise and fast; `half` in both flag
+/// states, `nan_half` and `nan_half_fast`), as `trunc(x)` plus a `+0` step does. Moved in the bits,
+/// so no signed-zero mode folds it; `bfloat` keeps `r` (not measured).
 fn positive_zero(fb: &mut FunctionBuilder<'_>, f: Form, r: Value) -> BResult<Value> {
     if !matches!(f.float_fmt(), Some(FloatFmt::F32 | FloatFmt::Half)) {
         return Ok(r);
@@ -2855,7 +2854,7 @@ pub(super) type FmaOf<'a> = &'a dyn Fn(&mut FunctionBuilder<'_>, &[Value]) -> BR
 /// quotient's reciprocal is a near-equivalent of Metal's (`PrecisionNote::DeviceArithmetic`), so
 /// `fmod(1e10, 3)` is Metal's `-512` exactly where that reciprocal of `3` is Metal's. Metal reads a
 /// denormal `x` or `y` as the zero of its sign and answers no denormal, with and without fast math
-/// (EV DNR-fm1-m3, every pair of 28 patterns): the caller flushes the operands and the result where
+/// (every pair of 28 patterns): the caller flushes the operands and the result where
 /// the fused multiply-add is the device's and the profile asks Metal's functions; under native
 /// device maths they are the device's (`PrecisionNote::DeviceDenormals`).
 pub(super) fn fast_fmod(
@@ -2875,7 +2874,7 @@ pub(super) fn fast_fmod(
 /// quotient `q = x / y` (`divide`, a call of the shared routine, which reads a denormal operand as
 /// a zero and flushes a denormal quotient), the product and the difference each rounded on its own
 /// (`NoContraction`), the product read as Metal reads an `f32` denormal where `flush` (the caller
-/// flushes the operands and the result). Not the exact remainder: on the M3 Max (EV TRF-frem2-m3)
+/// flushes the operands and the result). Not the exact remainder: on the M3 Max
 /// `frem(1, 0.1)` is `+0` where `fmod` gives `0x3dcccccb`, and this expression is Metal's answer on
 /// all 49,753 measured pairs, every class of operand.
 pub(super) fn metal_frem(
@@ -2898,8 +2897,8 @@ pub(super) fn metal_frem(
 /// number is this expression, where the blend `x * (1 - t) + y * t` misses lanes (`mix(inf, 1, 0)`
 /// is NaN: `fma(-0, inf, inf)`; `mix(-0, -0, 0)` is `+0`; `half` `mix(-0.3, 0.7, 0.2)` is
 /// `0xAE68`). `t` is negated on its bits, which no float mode changes. Each fused multiply-add
-/// reads an `f32` denormal operand as the zero of its sign and flushes a denormal result (EV
-/// DNR-dn2-m3, an Apple M3 Max under macOS 27.0.1: every finite triple of 28 patterns, denormals
+/// reads an `f32` denormal operand as the zero of its sign and flushes a denormal result (an Apple
+/// M3 Max under macOS 27.0.1: every finite triple of 28 patterns, denormals
 /// among them, in both modes); where `flush`, the inner one's result is read so
 /// ([`denormal::flush`]), for a device whose `OpFmaKHR` may keep one; the operands and the result
 /// are the caller's to flush.
@@ -3178,7 +3177,7 @@ fn exp2_of_product(
 /// entry declares no `SignedZeroInfNanPreserve`, so a device may compute those infinite
 /// intermediates otherwise: the RTX 5080 answered `1` at every one (case f6524207's `fast::pow`
 /// at infinite bases and `fast::powr` at zero and denormal ones, case 32931370's `half` `powr`),
-/// where Metal and the Mesa venues answer IEEE's value (EVs MBB-1v-*). `fast::powr` reads the
+/// where Metal and the Mesa venues answer IEEE's value. `fast::powr` reads the
 /// same classes for its NaN rule as well ([`fast_powr_special`]).
 pub(super) fn infinite_product(
     fb: &mut FunctionBuilder<'_>,
@@ -3565,7 +3564,7 @@ pub(super) type AtanOf<'a> = &'a dyn Fn(&mut FunctionBuilder<'_>, Value) -> BRes
 /// measured; it takes the second answer, which differs only where the divisor leaves the range
 /// MSL bounds the fast division in.
 ///
-/// Every finite normal pair of EV MBB-atan2-m4 (16.7 million, the M4) is `atan(q)` of Metal's fast
+/// Every finite normal pair of our probe (16.7 million, the M4) is `atan(q)` of Metal's fast
 /// `atan` and its fast quotient `q = y · rcp(x)`, and `RN(atan(q) ± RN(π))` toward a negative
 /// `x`: `divide` gives `q` (Metal's reciprocal's routine, or the device's quotient where it is
 /// Metal's), `atan` the arc tangent (Metal's fast `atan`'s routine, or the device's where it is

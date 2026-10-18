@@ -362,9 +362,9 @@ fn is_math(call: &Call, f: MathFn) -> bool {
 /// profile's (`RoundingOrderRoute::Metal`: `RoundingOrderPolicy::Exact`, or MoltenVK), Metal's
 /// fused chain over every lane, as on two to four lanes (`math::metal_chain`): on an Apple M3 Max
 /// under macOS 27.0.1 every answer of `dot` on 5, 8 and 16 `float` lanes and on 8 and 16 `half`
-/// lanes, with and without fast-math flags, is the chain's (EV DNR-dw1-m3: 16,384 rows of seeded
+/// lanes, with and without fast-math flags, is the chain's (16,384 rows of seeded
 /// random lanes each, where the chain backwards, the chunks' sums added, and the exact sum rounded
-/// once miss 6% to 70% of them; and EV DNR-d8-m3 at `float` denormals on 8 lanes). It reads its
+/// once miss 6% to 70% of them; and our probe at `float` denormals on 8 lanes). It reads its
 /// `float` operands and answers as Metal's `dot` of fewer lanes does: the lanes and the result
 /// flushed where the device keeps denormals, and the chain's values as [`ArithStrategy::Dot`]
 /// flushes them. Elsewhere the sum of each chunk's dot product, rounded once to a narrow format:

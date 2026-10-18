@@ -6,7 +6,7 @@
 //!   or the output of the engine candidate run afresh where the two differ ([`census`]).
 //! - `set_imageblock_size` takes what plain Metal takes and refuses the rest at the call, changing
 //!   nothing. A size set before the pipeline state holds for it, and an encoder that never sets one
-//!   runs a 1 by 1 imageblock, as Metal's does (probe RT11-metal-probe-6).
+//!   runs a 1 by 1 imageblock, as Metal's does.
 //! - A pipeline state answers `imageblock_memory_length_for_dimensions`: 0 without an imageblock,
 //!   and for one each side rounded up to a power of two.
 

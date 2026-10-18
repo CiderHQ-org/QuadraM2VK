@@ -3,11 +3,10 @@
 //! negative value or NaN, on the device the cfg selects, under the validation layer.
 //!
 //! **Metal's answer**: an Apple GPU's `Depth32Float` texture keeps a denormal through a blit in
-//! and out and a shader's read (EV FRT4-dm1-m4, an M4 under macOS 27.0.1); MoltenVK on the M4,
-//! whose clears, copies, draws and depth tests are Metal's, keeps one a clear, a copy or the CPU
-//! stores, stores 0 for a draw at a denormal depth, and its depth test compares a positive one
-//! above zero and a negative one not below zero (EV ZIN2-dn2-mvk4,
-//! `DriverFact::DepthTestKeepsDenormals`).
+//! and out and a shader's read (an M4 under macOS 27.0.1); MoltenVK on the M4, whose clears,
+//! copies, draws and depth tests are Metal's, keeps one a clear, a copy or the CPU stores, stores 0
+//! for a draw at a denormal depth, and its depth test compares a positive one above zero and a
+//! negative one not below zero (`DriverFact::DepthTestKeepsDenormals`).
 //!
 //! Each of four denormals (the smallest and largest of each sign) is stored into a 4x4
 //! single-sample `Depth32Float` render target by each way a program stores depth: a pass's clear,

@@ -273,8 +273,8 @@ fn a_swizzled_texture_of_unknown_usage_is_read_only() {
         ComponentMapping::IDENTITY,
     );
     // Metal reports such a texture's usage as `ShaderRead | PixelFormatView` (probe 4), and
-    // plain Metal writes it (RRP-probe1-m4 `swzdesc_*`); an image with storage usage takes the
-    // binding, whose swizzle is the runtime's gap but where the function applies it.
+    // plain Metal writes it; an image with storage usage takes the binding, whose swizzle is the
+    // runtime's gap but where the function applies it.
     match binding_view(&image, &r, &plan, true) {
         Err(ViewRefusal::Unsupported(u)) => assert_eq!(u.feature, Feature::TextureSwizzle),
         other => panic!("{other:?}"),

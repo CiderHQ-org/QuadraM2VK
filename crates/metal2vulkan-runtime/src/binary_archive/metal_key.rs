@@ -21,9 +21,9 @@
 //!   `threadgroup_size_matches_tile_size`; `max_total_threads_per_threadgroup`;
 //!   `support_adding_binary_functions`; `required_threads_per_threadgroup`; the buffers set
 //!   `Mutable`. Not the label.
-//! - **Buffer mutability** (EVs RTL-816e-m3 and -m4). A stage's key holds the index of each
-//!   buffer set `Mutable`, whether its function writes, reads or does not use it, in compute,
-//!   tile, vertex and fragment stages alike. `Immutable` and the default change nothing.
+//! - **Buffer mutability**. A stage's key holds the index of each buffer set `Mutable`, whether its
+//!   function writes, reads or does not use it, in compute, tile, vertex and fragment stages alike.
+//!   `Immutable` and the default change nothing.
 //! - **Render: each stage apart.** A render creation looks up its fragment stage's key, then its
 //!   vertex stage's, each in every archive listed, and misses naming the first function not
 //!   found: so two adds' stages combine. The fragment key: the fragment function, the vertex

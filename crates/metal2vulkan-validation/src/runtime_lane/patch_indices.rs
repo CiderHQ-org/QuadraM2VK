@@ -165,7 +165,7 @@ fn cases() -> Vec<(Case, [u32; 4])> {
         ),
         // An offset off a multiple of 4, which Metal's validation stops, read from the offset
         // rounded down, as plain Metal reads it (an indirect command buffer's patch draw of the
-        // words 9, 3, 1 at offset 2 drew patches 9 and 3, probe `RT7-icb-probe7-m4`; Metal probe
+        // words 9, 3, 1 at offset 2 drew patches 9 and 3; Metal probe
         // case `pib_offset2` on an M4 drew nothing through indices that read as 0x10000 and 0x30000
         // so): after the 2 zero bytes, the words 0x2_0000 and 0x1_0000 read as patches 0 and 2,
         // where the offset itself would read patches past the buffers.
@@ -460,8 +460,8 @@ type Expected = Result<[Option<u32>; 4], DrawProblem>;
 
 /// What Metal's validation stops of a control-point index buffer (Metal probes on an M4) is
 /// refused, typed, but for an offset that is not a multiple of the index size, which plain Metal
-/// reads from the offset rounded down (EVs ICBV-hostkinds-m3 and -m4) and the runtime likewise: a
-/// direct draw's `(patchStart + patchCount) · 3` indices past the buffer (a patch index buffer's
+/// reads from the offset rounded down and the runtime likewise: a direct draw's
+/// `(patchStart + patchCount) · 3` indices past the buffer (a patch index buffer's
 /// patch indices are not checked against it, nor an indirect draw's). A draw of the other kind than
 /// the pipeline's, direct or indirect, draws as plain Metal draws it. A draw Metal's validation
 /// lets through draws; the marks of patches whose control points lie past the buffer, which Metal
@@ -492,7 +492,7 @@ fn refused_as_metal_refuses_them(path: Path) {
         // Each draw, its pipeline's index type, and Metal's refusal or the marks compared.
         let rows: [(Case, T, Expected); 12] = [
             // Offsets that are not a multiple of the index size, read from the offset rounded
-            // down (EVs ICBV-hostkinds-m3 and -m4), direct and indirect.
+            // down, direct and indirect.
             (
                 Case::indexed("cpi32_offset2", Points::U32(SPLIT32), 2),
                 T::UInt32,

@@ -36,7 +36,7 @@
 //!   into `RGBA8Unorm` its red with zeros, and `RGBA16Float` into `RG32Float` a pattern of neither;
 //!   each stays refused (`ResolveFormat`). An integer format's resolve writes values no sample
 //!   holds, which change from run to run (`RGBA8Uint`, `R32Uint`): refused. Measured over every
-//!   integer color format (EV RCH-ires1-m4, an M4 with macOS 27.0.1, without API validation, which
+//!   integer color format (an M4 with macOS 27.0.1, without API validation, which
 //!   stops it; the 19 formats, 4 samples, every subset of covered samples over a clear, two runs):
 //!   a pixel whose samples differ resolves to a value no sample holds, not sample 0's, mostly
 //!   another one each run, and a 32-bit channel takes such a value even where the samples
@@ -80,7 +80,7 @@
 //! encoder's, stops Metal's validation, and plain Metal resolves nothing and leaves that texture
 //! untouched (a Metal probe on an M4), as the runtime does; so does a depth or stencil attachment's
 //! texture under such an action, or under `Unknown` still at `endEncoding`, and the attachment is
-//! stored by the action (`DontCare` for `Unknown`; EV RFX-probe2-m4, an M4 with macOS 27.0.1,
+//! stored by the action (`DontCare` for `Unknown`; an M4 with macOS 27.0.1,
 //! color, depth and stencil alike). So does the resolve of a single-sampled color attachment, and
 //! plain Metal resolves its one sample (probe 6m's `ref_single_sampled_source`): the runtime copies
 //! the attachment's texels into the resolve texture after the pass (`color_copy`), of the
@@ -387,8 +387,7 @@ impl<'a> Wanted<'a> {
 
 /// The refusal of a resolve from or into a texture of `pf` that the runtime does not model: an
 /// extended-range format's, whose resolve in Metal matches no average of its samples' values
-/// measured (EV XRR-rtp1-m4). The format's Resolve capability answers it too
-/// (`families::formats`).
+/// measured. The format's Resolve capability answers it too (`families::formats`).
 pub(crate) fn unmodelled_resolve(pf: PixelFormat) -> Option<Unsupported> {
     ExtendedRange::of(pf).map(|_| Unsupported::not_implemented(Feature::Format))
 }
@@ -403,7 +402,7 @@ fn problem(call: &'static str, p: RenderPassProblem) -> Error {
 /// `Store` or `DontCare` untouched and stores the attachment by the action, and a color
 /// attachment's resolving action without a texture resolves nothing (Metal probe cases
 /// `ref_resolve_without_texture` and `ref_texture_with_store` on an M4; depth and stencil alike in
-/// EV RFX-probe2-m4; its validation stops each).
+/// our probe; its validation stops each).
 fn resolves(call: &'static str, which: Attachment, wanted: &Wanted<'_>) -> Result<bool, Error> {
     let resolving = wanted.store.resolves() || wanted.store == StoreAction::Unknown;
     if let Attachment::Color(_) = which {

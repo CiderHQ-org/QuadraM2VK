@@ -4,8 +4,8 @@
 //! stands each texture of an IOSurface in with a texture of its plane over a new no-copy buffer of
 //! the surface's pages (`Buffer::new_texture_with_iosurface_plane`), so two textures of one surface
 //! lay over two buffers. Metal orders two textures over one IOSurface as it orders one resource's
-//! accesses: in one encoder, in one command buffer and across one queue's command buffers (EV
-//! `IOS-alias3-m4`, an M4, macOS 27.0.1, plain and under API validation; across queues only as
+//! accesses: in one encoder, in one command buffer and across one queue's command buffers (an M4,
+//! macOS 27.0.1, plain and under API validation; across queues only as
 //! the program orders them).
 //!
 //! - **One memory, one key.** A no-copy buffer made over exactly the bytes a live one covers
@@ -21,6 +21,14 @@
 //!   one resource to the driver, where the tracker's barriers are not all the ordering there is.
 //!   MoltenVK records no barrier between blits and leaves their order to Metal's hazard
 //!   tracking, which is by `MTLBuffer`: two imports were two, and a blit's write through one
+//!   raced a read through the other in one encoder and in one command buffer (an M4: mixed texels);
+//!   one import is one `MTLBuffer`, which Metal orders. Each buffer stays its own Metal object,
+//!   with its own Metal addresses, object ID, key, pages hold and release: a command buffer lists
+//!   and holds, and marks reached unnamed (`live_buffers.rs`), the buffers its commands use, not
+//!   their memory, as Metal marks them; its deallocator runs once nothing holds its pages, as an
+//!   import of its own would let it, while the import lives on in the buffers that still lie in it,
+//!   and its keep-alive goes then too, since those buffers keep the same bytes mapped
+//!   (`buffer.rs`'s `HostPages`). Copies between two such buffers are copies within one `VkBuffer`,
 //!   moved as within one buffer (`blit.rs`, `blit_texture.rs`). A buffer rebound onto the bytes a
 //!   live buffer was made over, of the class of its import, lies in that import too, joining no key
 //!   (`Device::rebind_host_pages`; a heap's own buffer, and bytes with a texture's aliasing image
@@ -33,7 +41,7 @@
 //!   the shadow copy in again, as a write through its own buffer does.
 //! - **Not joined.** Buffers over memory that overlaps without being the same range, a heap's
 //!   bytes, and the memory a rebound buffer takes, keep their own keys: Metal orders no two
-//!   no-copy buffers over one allocation (the same EV's `host` cases read stale or mixed
+//!   no-copy buffers over one allocation (the same probe's `host` cases read stale or mixed
 //!   texels), so the runtime's joining of the same range is the IOSurface's ordering, which a
 //!   race over plain no-copy buffers may also give. A rebound buffer leaves the memory it was
 //!   made over, keeping the key it joined (`Device::rebind_host_pages`); its pages stay in the

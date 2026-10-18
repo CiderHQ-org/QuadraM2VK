@@ -1,6 +1,6 @@
 //! `private_properties`: Apple's private device properties, as Metal answers them at each level
-//! (EVs API-props1-m3 and API-props1-m4) and as the runtime answers them on every committed device
-//! profile, read from what the runtime acts on.
+//! and as the runtime answers them on every committed device profile, read from what the runtime
+//! acts on.
 
 use std::collections::BTreeSet;
 
@@ -55,8 +55,8 @@ fn every_property_has_one_selector() {
 }
 
 /// Spot values as the probes printed them on an Apple M3 Max at each release (an Apple M4 under
-/// macOS 27.0.1 answers `gpuCoreCount` 10 and `supportsComputeCompressedTextureWrite` yes, EV
-/// API-props1-m4; the M3 Max 40 and no, EV M27-props1-m3).
+/// macOS 27.0.1 answers `gpuCoreCount` 10 and `supportsComputeCompressedTextureWrite` yes; the M3
+/// Max 40 and no).
 #[test]
 fn the_answers_are_the_probes() {
     for level in MetalLevel::ALL {

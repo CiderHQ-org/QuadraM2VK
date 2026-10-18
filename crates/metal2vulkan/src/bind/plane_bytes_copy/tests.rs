@@ -15,7 +15,7 @@ fn the_plane_bytes_copy_kernel_is_valid_on_every_committed_profile() {
     }
 }
 
-/// Bytes of a seeded generator, as the probe made a heap's (EV XRR2-tph1-m4).
+/// Bytes of a seeded generator, as the probe made a heap's.
 fn random_bytes(count: usize, seed: u64) -> Vec<u8> {
     let mut state = seed;
     (0..count)

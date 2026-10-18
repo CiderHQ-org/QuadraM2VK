@@ -1,25 +1,25 @@
 //! Metal's private texture fills, `BlitCommandEncoder::fill_texture` and `fill_texture_color`, on
 //! the device the cfg selects, under the validation layer, against Metal's bytes.
 //!
-//! Each case replays one of our probes' (`tfl.swift` and `tfl3.swift`; EVs XRR2-fill1-m4 and
-//! XRR2-fill3-m4, an Apple M4 under macOS 27.0.1): a private 2D or 2D array texture of the case's
-//! extent, levels and slices, every byte of every level, slice and aspect set to `0xEE` by copies
-//! from a buffer, one fill, and every level, slice and aspect read back by copies into a buffer;
-//! for a two-plane extended-range format, a one-level texture at byte 0 of a shared placement
-//! heap of Metal's size, every byte of the heap set to `0xEE` through a buffer over it and the
-//! heap's changed bytes read back. Metal's answer per format: the first 16 hex digits of the
-//! SHA-256 of its cases' lines, `<case> <answer>`, each answer the first 16 hex digits of the
-//! SHA-256 of the case's read-back lines as the probe printed them, `unpacked` where Metal's bytes
-//! do not follow the color (one constant of its process's for every color; the runtime's fill there
-//! must write what the bytes form writes for one zero byte, its one constant, and the device
-//! announce `unpacked-fill-color` once: changed), or the refusal the runtime gives where it has no
-//! measured layout (`unmeasured`: a heap's two-plane texture of more than one level or slice, which
-//! Metal fills). A format the device holds no texture of is skipped, with an
-//! `XR-TEXTURE-FILLS-SKIPPED` line, and so is `Depth32Float_Stencil8` where its uploads announce
-//! that the device may store depth outside `[0, 1]` clamped (`restricted-depth-upload`, checked to
-//! fire exactly where the runtime plans a depth image that may clamp); a differing format prints
-//! its cases on one `XR-TEXTURE-FILLS-DIFFERS` line. The two-plane formats in private textures of
-//! their own memory replay `tfl4.swift` (EV XRR2-fill4-m4) the same way, 5 and 8 texels wide.
+//! Each case replays one of our probes' (`tfl.swift` and `tfl3.swift`; an Apple M4 under macOS
+//! 27.0.1): a private 2D or 2D array texture of the case's extent, levels and slices, every byte of
+//! every level, slice and aspect set to `0xEE` by copies from a buffer, one fill, and every level,
+//! slice and aspect read back by copies into a buffer; for a two-plane extended-range format, a
+//! one-level texture at byte 0 of a shared placement heap of Metal's size, every byte of the heap
+//! set to `0xEE` through a buffer over it and the heap's changed bytes read back. Metal's answer
+//! per format: the first 16 hex digits of the SHA-256 of its cases' lines, `<case> <answer>`, each
+//! answer the first 16 hex digits of the SHA-256 of the case's read-back lines as the probe printed
+//! them, `unpacked` where Metal's bytes do not follow the color (one constant of its process's for
+//! every color; the runtime's fill there must write what the bytes form writes for one zero byte,
+//! its one constant, and the device announce `unpacked-fill-color` once: changed), or the refusal
+//! the runtime gives where it has no measured layout (`unmeasured`: a heap's two-plane texture of
+//! more than one level or slice, which Metal fills). A format the device holds no texture of is
+//! skipped, with an `XR-TEXTURE-FILLS-SKIPPED` line, and so is `Depth32Float_Stencil8` where its
+//! uploads announce that the device may store depth outside `[0, 1]` clamped
+//! (`restricted-depth-upload`, checked to fire exactly where the runtime plans a depth image that
+//! may clamp); a differing format prints its cases on one `XR-TEXTURE-FILLS-DIFFERS` line. The
+//! two-plane formats in private textures of their own memory replay `tfl4.swift` the same way, 5
+//! and 8 texels wide.
 
 use super::degrade_notices::{assert_made_once, forced, loses_depth_denormals, on_device};
 use super::degrade_notices::{
@@ -226,7 +226,7 @@ fn case(raw: u32, name: &str, wide: bool) -> Case {
     }
 }
 
-/// Metal's answers for two-plane textures of their own memory (EV XRR2-fill4-m4, `tfl4.swift`):
+/// Metal's answers for two-plane textures of their own memory (`tfl4.swift`):
 /// each format's raw value, whether 8 texels wide (else 5), and the digest of its cases' lines.
 const OWN_TWO_PLANES: [(u32, bool, &str); 4] = [
     (550, false, "6254dd68bd6a8801"),

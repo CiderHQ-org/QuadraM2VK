@@ -1,5 +1,5 @@
 //! IDs and placement of pipeline and depth/stencil states on the device the cfg selects, under the
-//! validation layer, as Metal answers on an M4 with macOS 27.0.1 (EVs `CFIT-m4-probe6` to `6e`):
+//! validation layer, as Metal answers on an M4 with macOS 27.0.1:
 //!
 //! - A compute or render state made with `supportIndirectCommandBuffers` takes the ID its
 //!   placement names (`PipelineOptions::placement`, Metal's `resourceIndex`), in the one space
@@ -13,7 +13,7 @@
 //!   Metal's validation stops it.
 //!
 //! - A state answers its descriptor's label, and one made from it with additional binary
-//!   functions keeps it (EV `CFR-probe5-m4`).
+//!   functions keeps it.
 //!
 //! The states are of the owned fixtures `icb_replay_template` (compute),
 //! `icb_render_replay_template` (render, rasterization disabled) and `cfit_tile_imageblock`
@@ -166,8 +166,7 @@ fn pipeline_states_take_the_id_their_placement_names() {
 
 /// A pipeline state answers the label its creation was given (`PipelineOptions::label`, the
 /// descriptor's), nil without one and an empty one as given, and a state made from it with
-/// additional binary functions keeps it, as Metal's compute, render and tile states do (EV
-/// CFR-probe5-m4).
+/// additional binary functions keeps it, as Metal's compute, render and tile states do.
 #[test]
 fn pipeline_states_answer_their_descriptors_label() {
     on_device(|device| {

@@ -597,8 +597,8 @@ impl Device {
         // A routed twin is moved to `GENERAL` alone as it is made, so a CPU decode may write it
         // from then on; its texels start as the CPU's decode of the zero blocks, written on the
         // host or the staging queue as the texture is made (`start_decoded_twin`): 6 to 10 ms for
-        // 2048 x 2048 (EVs XSH-mk1-anv, XSH-mk1-3090). No GPU decode the runtime stages of its
-        // own is in flight to race a later write's CPU decode.
+        // 2048 x 2048. No GPU decode the runtime stages of its own is in flight to race a later
+        // write's CPU decode.
         let identity = Identity::new(HazardTrackingMode::Default, false);
         let start = match routed {
             true => Start::Moved,

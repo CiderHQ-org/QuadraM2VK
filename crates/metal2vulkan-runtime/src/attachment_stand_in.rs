@@ -41,7 +41,7 @@
 //!   (`texture/wrapped.rs`). An image of a format the device does not copy both ways (no transfer
 //!   usage) stays refused (`NotImplemented(SamplePositionsAtBegin)`).
 //! - **A depth/stencil texture without `RenderTarget` usage**, whose image lacks depth/stencil
-//!   attachment usage, which plain Metal renders as a render target (EV RRS-probe-18-m4): one
+//!   attachment usage, which plain Metal renders as a render target: one
 //!   texture renders through a stand-in copied as the custom positions' one is, each aspect in
 //!   where Metal loads or keeps it and back where it stores or keeps it, so a `DontCare` store
 //!   leaves the texture as it was, as Metal leaves it. Separate depth and stencil textures render

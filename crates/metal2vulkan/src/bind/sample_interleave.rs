@@ -5,7 +5,7 @@
 //! `copyFromBuffer:...toTexture:` and `copyFromTexture:...toBuffer:` read and write such a
 //! texture per sample, the pixel's samples consecutive in the buffer: texel `(x, y)` sample `s`
 //! of an `n`-sample texture lies at `offset + y * bytesPerRow + (x * n + s) * bpp` (measured on
-//! an Apple M4 under macOS 27.0.1, EV ZIN2-bm1-m4). So the buffer, read row by row, is a
+//! an Apple M4 under macOS 27.0.1). So the buffer, read row by row, is a
 //! single-sample image `width * n` texels wide, column `x * n + s` holding sample `s` of pixel
 //! `x`; the runtime copies the buffer to and from that wide image with ordinary buffer-image
 //! copies (one per row, so any `bytesPerRow`, overlapping rows included, is exact) and moves the

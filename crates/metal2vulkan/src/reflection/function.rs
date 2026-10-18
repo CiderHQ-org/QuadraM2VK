@@ -270,8 +270,8 @@ pub(crate) fn visible_properties() -> FunctionProperties {
 /// control-point fields and per-patch inputs) in declaration order, each active unless
 /// `air.arg_unused`. A specialized entry has left out those its constants gate off. A function's
 /// control points are one argument: every field is active where the function reads any of them,
-/// one the AIR marks `air.arg_unused` too, and inactive where it reads none (EVs RRX-refl2-m4 and
-/// -m3, the same on the M3 Max and the M4).
+/// one the AIR marks `air.arg_unused` too, and inactive where it reads none (the same on the M3 Max
+/// and the M4).
 pub(crate) fn entry_properties(ep: &EntryPoint) -> Result<FunctionProperties, Error> {
     let mut attributes = Vec::new();
     for p in &ep.params {

@@ -1029,8 +1029,8 @@ fn weights(fb: &mut FunctionBuilder<'_>, x: SValue) -> BResult<SValue> {
 /// `x`, the `f32` lanes (of a `float` or `half` form `form`) of a varying the fragment function
 /// reads flat because its vertex function writes it the same at every vertex of a primitive
 /// ([`Source::Uniform`]), as Metal's interpolation returns such a value, measured on the M3 Max
-/// in every qualifier (`center`, `centroid` and `sample`, with and without perspective; EV
-/// FLT-m3b): a zero or subnormal as `+0`, an infinity as the largest finite value of its sign,
+/// in every qualifier (`center`, `centroid` and `sample`, with and without perspective): a zero or
+/// subnormal as `+0`, an infinity as the largest finite value of its sign,
 /// a NaN as `+FLT_MAX`, and every other value as it is. (Metal's word for a NaN under
 /// perspective varies by pixel; `+FLT_MAX` is its word without perspective.) Computed on the
 /// bits, so no device's float controls touch it; a `half` form's rounding then gives Metal's
@@ -1579,10 +1579,9 @@ pub fn emit_return(
     Ok(())
 }
 
-/// Metal's largest point, in pixels: a `[[point_size]]` past it draws as this size (EVs
-/// RRS3-reach11, -reach12 and RCH-reach13, an Apple M4; bracketed in `(510.996, 511.004]`), where
-/// a Vulkan device clamps only to its own `pointSizeRange`, up to 2047.94 on the RTX 5080 and
-/// 8191.875 on RADV.
+/// Metal's largest point, in pixels: a `[[point_size]]` past it draws as this size (an Apple M4;
+/// bracketed in `(510.996, 511.004]`), where a Vulkan device clamps only to its own
+/// `pointSizeRange`, up to 2047.94 on the RTX 5080 and 8191.875 on RADV.
 pub(crate) const METAL_POINT_SIZE_LIMIT: f32 = 511.0;
 
 /// Whether interface object `object` of `objects` is the `PointSize` output, whose stores take
@@ -1619,7 +1618,7 @@ pub(crate) fn metal_point_size(fb: &mut FunctionBuilder<'_>, size: SValue) -> BR
 pub(crate) const POINT_SIZE_WORDS: u64 = 3;
 
 /// Store the window depth `z / w` of position `position`, as the vertex function stores it, to
-/// its varying ([`WindowDepth`]): the division of the measured form (EV DSX-dz5-mvk4), unfused.
+/// its varying ([`WindowDepth`]): the division of the measured form, unfused.
 fn store_window_depth(
     cx: &mut EmitCx<'_>,
     fb: &mut FunctionBuilder<'_>,

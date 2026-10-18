@@ -1995,7 +1995,7 @@ fn the_predication_step_module_is_valid_where_device_addresses_are() {
 
 /// Each op moves the counter as the module docs state, from 0, 1, 2 and 5; an If reads its word,
 /// and the others read their own record, never Metal's word (it lies in no buffer for them, which
-/// the interpreter traps on) nor address 0 (llvmpipe faulted there, EV PRD-lane2-lvpx86).
+/// the interpreter traps on) nor address 0 (llvmpipe faulted there).
 #[test]
 fn a_predication_step_moves_its_counter_as_metals_blocks_nest() {
     let step = |op| PredicationStep::new(STEP_COUNTER, op);
@@ -2083,10 +2083,9 @@ fn a_predication_step_gates_its_dispatches() {
     assert_eq!(step_run(dead, 0, None, &gates).1, vec![[0; 3]; 3]);
 }
 
-/// A pass of the gate loop past the table's count, which llvmpipe runs with its uniform loads made
-/// (EVs PRD-lane2-lvpx86, PRD-lane5-lvpx86), reads the entry after the gates: every table, the
-/// record's own empty one included, names there the record's sink gate, which lies inside the
-/// record.
+/// A pass of the gate loop past the table's count, which llvmpipe runs with its uniform loads made,
+/// reads the entry after the gates: every table, the record's own empty one included, names there
+/// the record's sink gate, which lies inside the record.
 #[test]
 fn a_predication_table_ends_at_the_records_sink_gate() {
     let sink = STEP_RECORD + PredicationStep::SINK_GATE_OFFSET;

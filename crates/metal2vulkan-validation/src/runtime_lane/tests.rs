@@ -597,8 +597,7 @@ fn a_kernel_runs_the_functions_its_descriptor_links() {
             .unwrap();
         runs(&pipeline);
         // One function in `functions` and `binary_functions`: plain Metal takes it, with one
-        // handle, where its API validation stops the descriptor (probe `RT7-ftable-probe2`
-        // `number_same_function_in_both_lists`); the state runs it as linked once.
+        // handle, where its API validation stops the descriptor; the state runs it as linked once.
         let mut across = LinkedFunctions::new()
             .with_function(linked(&functions, "linked_scale"))
             .with_function(linked(&functions, "linked_blend"))
@@ -847,12 +846,12 @@ fn refused_compute_commands_record_nothing() {
 }
 
 /// Where Metal's API validation asserts and plain Metal's compute encoder gives a measured
-/// answer, the encoder gives it (EVs `SWP-misuse1-m4`, `SWP-misuse2-m4`): an offset set at an index
-/// with nothing bound changes nothing; a buffer bound past its length at a slot the kernel does not
-/// read is held; a threadgroup memory length of 4 is taken; a threadgroup of no threads, of more
-/// than the state's maximum or of `2^32 + 1` threads runs nothing, and so does a grid or a
-/// threadgroup count of `2^32` on an axis; a grid of `2^32 + 1` threads runs one. The kernel
-/// (`threadgroup-word`) writes 42 through its threadgroup memory.
+/// answer, the encoder gives it: an offset set at an index with nothing bound changes nothing; a
+/// buffer bound past its length at a slot the kernel does not read is held; a threadgroup memory
+/// length of 4 is taken; a threadgroup of no threads, of more than the state's maximum or of
+/// `2^32 + 1` threads runs nothing, and so does a grid or a threadgroup count of `2^32` on an axis;
+/// a grid of `2^32 + 1` threads runs one. The kernel (`threadgroup-word`) writes 42 through its
+/// threadgroup memory.
 #[test]
 fn compute_misuses_answer_as_plain_metal() {
     on_device(|device, _| {

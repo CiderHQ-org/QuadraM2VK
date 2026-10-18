@@ -10,7 +10,7 @@
 //! under `Subtract` and `ReverseSubtract`, for color and alpha) and the blend color
 //! [`DIFFERENCE_COLOR`].
 //!
-//! Metal's answer (EV FBL-sw1-m3: plain Metal on the M3 Max under macOS 27.0.1, our own MSL of this
+//! Metal's answer (plain Metal on the M3 Max under macOS 27.0.1, our own MSL of this
 //! shape, every channel of 16,384 random pixels of each of these blends, the differences under this
 //! blend color): one product fused into the sum, the other rounded first, in the output's
 //! arithmetic. For a `half4` output each step is rounded to `half`, nearest even, the fused
@@ -267,7 +267,7 @@ fn h(x: f64) -> f64 {
     half_value(half_bits(x, false))
 }
 
-/// Metal's blend `b` of `s` over the texel `d` (EV FBL-sw1-m3), as `half` bits: the destination's
+/// Metal's blend `b` of `s` over the texel `d`, as `half` bits: the destination's
 /// product fused into the sum under `Add` and `ReverseSubtract`, the source's under `Subtract`,
 /// the other product rounded first (a factor of one leaves its operand as it is).
 fn metal(case: Case, b: Blending, s: [f64; 4], d: [f64; 4]) -> [u16; 4] {

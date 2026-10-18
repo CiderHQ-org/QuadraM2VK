@@ -1805,7 +1805,7 @@ fn linear_3d_samples_take_metals_filter() {
 }
 
 /// A sample through a runtime sampler slot takes Metal's filter by the bound sampler's word, as a
-/// constexpr sampler of the same state does (EV MSFZ-m4-probe1): every lane is Metal's rule on the
+/// constexpr sampler of the same state does: every lane is Metal's rule on the
 /// interpreter under each address mode, a transparent, opaque-black, and white border (and
 /// `clamp_to_zero` beside a white and an opaque-black border color, which it reads as
 /// `clamp_to_border` does), pixel coordinates, 1D, a constant offset, 3D, and a `half` or `float`
@@ -2513,9 +2513,9 @@ fn check_depth(
 }
 
 /// A depth texture's linear sample is its color class's (`Depth32Float`'s `R32Float`'s,
-/// `Depth16Unorm`'s `R16Unorm`'s; RT13-px2-probe-m4 and RT13-px4-probe-m4, 2,191 lanes), emulated
-/// on lavapipe and Metal's on every lane of the interpreter: clamping to the edge, to zero, and to
-/// a white border, pixel coordinates, an offset, and an array's layer.
+/// `Depth16Unorm`'s `R16Unorm`'s; 2,191 lanes), emulated on lavapipe and Metal's on every lane of
+/// the interpreter: clamping to the edge, to zero, and to a white border, pixel coordinates, an
+/// offset, and an array's layer.
 #[test]
 fn depth_linear_samples_take_their_color_class() {
     const WHITE: [f64; 4] = [1.0; 4];
@@ -2550,7 +2550,7 @@ fn depth_linear_samples_take_their_color_class() {
 }
 
 /// A linear comparison is an `r8Unorm` linear sample of the taps' passes as codes 0 and 255
-/// (RT13-px2/px3-probe-m4, 8,640 lanes; RT13-px4-probe-m4 compares the border's depth as a
+/// (our probes, 8,640 lanes; our probe compares the border's depth as a
 /// texel's), on `Depth32Float` and `Depth16Unorm` (whose reference and texels compare as codes):
 /// every compare function clamping to the edge, `less` and `greater` against zero and white
 /// borders, `less` with an offset, and `less_equal` at an array's layer, on every lane of the

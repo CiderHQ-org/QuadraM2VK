@@ -31,23 +31,22 @@
 //! the debug layer asserts** (the orchestrator's parity rule):
 //! - `constant_data` at an index no argument has answers the arguments' start (offset 0), and at
 //!   an argument of another type that argument's own offset, as plain Metal's
-//!   `constantDataAtIndex:` did on an M4 (SPR-probe1-m4); `MTL_DEBUG_LAYER=1` asserts at both
+//!   `constantDataAtIndex:` did on an M4; `MTL_DEBUG_LAYER=1` asserts at both
 //!   ("Index 2 does not correspond to any valid member of the argument buffer");
 //! - every setter writes its word at the arguments' offset 0 for an index no argument has,
 //!   whatever argument lies there, a range's words in turn, so the last stands, and in a layout
-//!   of fewer than 8 bytes past its encoded length (an M4, EVs SWP-misuse3-m4, RFL-argmisuse1-m4
-//!   and RFL-argmisuse2-m4);
+//!   of fewer than 8 bytes past its encoded length (an M4);
 //! - `set_buffer` with no buffer writes 0 whatever the offset ("offset(16) must be 0 when buffer
 //!   is nil");
 //! - a sampler state made without `support_argument_buffers` is written as any other, and a
 //!   kernel samples through it as its descriptor says ("Sampler state did not have
-//!   supportArgumentBuffers flag set on creation"; EV RFL-argmisuse1-m4, and the probe 7 for an ID
+//!   supportArgumentBuffers flag set on creation"; and the probe 7 for an ID
 //!   written by hand);
 //! - a compute or render pipeline state made without `support_indirect_command_buffers`, a tile
 //!   pipeline's among them, is written as its resource ID, which is 0 ("Setting a pipeline that
 //!   does not have supportIndirectCommandBuffers = YES is invalid"). An indirect command a kernel
 //!   encodes with that word names no state, as one encoded from `None` does: Metal's GPU faulted
-//!   running one (RFL-argmisuse1-m4), and the runtime's execution runs nothing for it.
+//!   running one, and the runtime's execution runs nothing for it.
 //!
 //! Where plain Metal's result is undefined (memory-dependent, a crash, or unmeasured), the call is
 //! refused, as validation refuses it: the list above;
@@ -184,7 +183,7 @@ impl Function {
     /// (`library::Function::argument_buffer_layout`, decoded once per function and index).
     /// Refused: no argument buffer at the index, or an array of arrays (`Invalid`,
     /// [`ArgumentEncoderProblem::Layout`]), as Metal stops or raises (a plain buffer at the index
-    /// fails Metal's API validation, EV UNI-reflfix-11); the decode's errors as a pipeline
+    /// fails Metal's API validation); the decode's errors as a pipeline
     /// creation's (`Compile`, `Unsupported`).
     pub fn new_argument_encoder_with_buffer_index(
         &self,
@@ -253,7 +252,7 @@ pub(super) fn argument_place(
 }
 
 /// The offset in the arguments that `constantDataAtIndex:` answers for `index` of `layout`, as
-/// plain Metal answers it (an M4, SPR-probe1-m4): the offset of the argument at `index`, a
+/// plain Metal answers it (an M4): the offset of the argument at `index`, a
 /// constant's or one of any other type, and 0 where no argument of the layout has `index`. The
 /// debug layer asserts at the last two.
 pub(super) fn constant_offset(layout: &ArgumentBufferLayout, index: u32) -> u64 {
@@ -262,7 +261,7 @@ pub(super) fn constant_offset(layout: &ArgumentBufferLayout, index: u32) -> u64 
 
 /// The word `setBuffer:offset:atIndex:` writes for a buffer of Metal address `address` and
 /// `length` bytes (or none) at `offset`: the address plus the offset, or 0 for none whatever the
-/// offset, as plain Metal writes it (an M4, EV RFL-argmisuse1-m4; Metal's validation stops an
+/// offset, as plain Metal writes it (an M4; Metal's validation stops an
 /// offset other than 0 there). Refused as Metal's validation refuses: an offset at or past the
 /// length.
 pub(super) fn buffer_word(buffer: Option<(u64, u64)>, offset: u64) -> Result<u64, Problem> {
@@ -396,11 +395,10 @@ impl ArgumentEncoder {
 
     /// The offset of argument `index` for a write of type `ty`: the argument's, or, where no
     /// argument of the layout has `index`, the arguments' offset 0, whatever argument lies there,
-    /// as plain Metal writes every setter's word, a range's each in turn (an M4, EVs
-    /// SWP-misuse3-m4 and RFL-argmisuse1-m4; no other byte changed; Metal's debug layer asserts).
-    /// The 8 bytes pass the encoded length of a layout of fewer, as Metal's did in a layout of 4
-    /// (RFL-argmisuse2-m4); where they would pass the argument buffer's end, which holds memory
-    /// Metal's result depends on, the refusal stands (`NoArgument`).
+    /// as plain Metal writes every setter's word, a range's each in turn (an M4; no other byte
+    /// changed; Metal's debug layer asserts). The 8 bytes pass the encoded length of a layout of
+    /// fewer, as Metal's did in a layout of 4; where they would pass the argument buffer's end,
+    /// which holds memory Metal's result depends on, the refusal stands (`NoArgument`).
     fn offset(&self, call: &'static str, index: u32, ty: ArgumentType) -> Result<u64, Error> {
         let inside = |(buffer, at): &(Buffer, u64)| {
             at.checked_add(ARGUMENT_HANDLE_BYTES)

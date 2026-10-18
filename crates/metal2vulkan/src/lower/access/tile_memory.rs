@@ -1,8 +1,7 @@
 //! A fragment function's threadgroup memory: its tile's, which Metal keeps for the tile across the
 //! render pass, as it keeps a tile function's.
 //!
-//! **What Metal gives** (measured on an M4, EV `CFIT-m4-probe4c`, and on an M4 and an M3 Max, EV
-//! `REF-tg-probe`):
+//! **What Metal gives** (measured on an M4, and on an M4 and an M3 Max):
 //!
 //! - A fragment function's `[[threadgroup(n)]]` argument is its tile's threadgroup memory: the
 //!   allocation the pass's tile functions' arguments reach, placed where

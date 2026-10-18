@@ -13,7 +13,7 @@
 //! MTLGPUFamilyApple10", an M4 under macOS 27.0.1), and on the primary reference, an M3 under macOS
 //! 26.7, the plain call raises too (the consumer's measurement), so the runtime refuses it typed on
 //! a device that does not claim the family. macOS 27.0.1's plain call answers 0 for every state
-//! below Apple10 (EV SPCrp-probe1-m4 `dss_id`, two runs, three states): an OS version's difference,
+//! below Apple10 (two runs, three states): an OS version's difference,
 //! which [`DepthStencilState::gpu_resource_id`] would take in its one refusal if the primary
 //! reference moved to macOS 27. What the ID names on Apple10, a depth/stencil state an indirect
 //! render command sets, is not built.

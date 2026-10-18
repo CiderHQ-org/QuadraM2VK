@@ -20,7 +20,7 @@
 //!   copies the buffer back where the command buffer runs it. A program that skips them sees stale
 //!   bytes there, as on a Mac with a discrete GPU. A GPU writing host-cached memory across the bus
 //!   ran a kernel's writes at 0.03 to 0.1 GB/s on an RTX 3090 and an RTX 5080, where a device-local
-//!   write and a copy back ran at several GB/s (EV PERF-mem). A no-copy buffer is the caller's
+//!   write and a copy back ran at several GB/s. A no-copy buffer is the caller's
 //!   memory and has no device copy.
 
 use super::buffer::Buffer;
@@ -33,7 +33,7 @@ impl Buffer {
     /// after this call see it. Where the buffer has a host copy (a device without unified memory),
     /// the range is copied to its own bytes by the device's next submission, before any of its
     /// commands; the call does not wait for the GPU. On a buffer of another storage mode it does nothing, whatever the range, as
-    /// plain Metal does (RT2 `managed.didmodify.shared`; SPH-managed1-m4: `Shared` and `Private`
+    /// plain Metal does (RT2 `managed.didmodify.shared`: `Shared` and `Private`
     /// buffers, in range and past it; Metal's validation stops it). Refused for a managed
     /// buffer's range past the buffer.
     pub fn did_modify_range(&self, range: Range<u64>) -> Result<(), Error> {

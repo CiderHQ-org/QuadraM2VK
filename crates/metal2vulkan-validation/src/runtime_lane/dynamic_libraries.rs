@@ -1,6 +1,6 @@
 //! Dynamic libraries through the runtime, on the device the cfg selects, under the validation
-//! layer, against the answers Metal probes measured (EVs DYL-probe1-m3, -m4, DYL-probe2b-m3, -m4:
-//! an M3 Max on macOS 26.7 and an M4 on 27.0.1, the same on both).
+//! layer, against the answers Metal probes measured (an M3 Max on macOS 26.7 and an M4 on 27.0.1,
+//! the same on both).
 //!
 //! The libraries are the probes' MSL functions written here as the AIR Apple's toolchain makes of
 //! them (`llvm-as` assembles it), in the containers it writes (`metal2vulkan-devtools`): a dynamic
@@ -463,8 +463,8 @@ fn dynamic_libraries_are_made_and_loaded_as_metal_s_are() {
     });
 }
 
-/// `new_library_with_data` takes a metallib alone, as Metal's `newLibraryWithData:` does (EV
-/// RDX-airprobe-m4): a kernel's bare AIR, raw or in a bitcode wrapper, is refused as any other
+/// `new_library_with_data` takes a metallib alone, as Metal's `newLibraryWithData:` does: a
+/// kernel's bare AIR, raw or in a bitcode wrapper, is refused as any other
 /// bytes that are no metallib are, and the translator's parse of the same AIR is a library the
 /// device takes (`new_library_with_compile_library`), whose kernel runs as the metallib's does. A
 /// file of bare AIR holds no dynamic library (`InvalidFile`), as Metal answers. Metal source is

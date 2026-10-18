@@ -8,10 +8,10 @@
 //! lane in `T`'s shape, with no fast-math flags (the answer is the routine's, measured alike with
 //! and without fast math).
 //!
-//! **What Metal answers** (EVs REF-fx-probe-2 and -3, an M4, macOS 27.0.1; libraries compiled
-//! offline by `xcrun metal`, with and without `-fno-fast-math`, and with
-//! `air.compile.denorms_disable` stripped from the module, which changes nothing). For `x`'s
-//! `float` bits `u`, `a = u & 0x7fffffff`, and the biased exponent `E = a >> 23`:
+//! **What Metal answers** (an M4, macOS 27.0.1; libraries compiled offline by `xcrun metal`, with
+//! and without `-fno-fast-math`, and with `air.compile.denorms_disable` stripped from the module,
+//! which changes nothing). For `x`'s `float` bits `u`, `a = u & 0x7fffffff`, and the biased
+//! exponent `E = a >> 23`:
 //!
 //! | `x` | `frexp` (mantissa, exponent) | `ilogb` |
 //! | --- | --- | --- |

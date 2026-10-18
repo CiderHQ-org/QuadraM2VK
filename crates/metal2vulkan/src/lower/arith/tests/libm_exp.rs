@@ -225,8 +225,8 @@ mod logarithm_routines_are_metals {
         part_6_of_6 = 5);
 }
 
-/// The routines answer Metal's precise `log2`, `log`, and `log10` at measured words of the M4 (EV
-/// MATH-sweep2-m4): the far forms, the near polynomials and their edges, and the plain range's
+/// The routines answer Metal's precise `log2`, `log`, and `log10` at measured words of the M4: the
+/// far forms, the near polynomials and their edges, and the plain range's
 /// first operand.
 #[test]
 fn logarithm_routines_answer_metals_measured_words() {
@@ -413,8 +413,8 @@ mod exponential_routines_are_metals {
         part_5_of_6 = 4, part_6_of_6 = 5);
 }
 
-/// The `exp2` routine answers Metal's words where the model does, measured on the Apple M4 (EV
-/// MATH-sweep1-m4): `exp2(0.5)` is `0x3fb504f4`, an ulp above `√2`'s rounding, as Metal answers,
+/// The `exp2` routine answers Metal's words where the model does, measured on the Apple M4:
+/// `exp2(0.5)` is `0x3fb504f4`, an ulp above `√2`'s rounding, as Metal answers,
 /// and the other binades' and signs' reductions and flushes alike.
 #[test]
 fn exp2_routine_answers_metals_measured_words() {
@@ -935,10 +935,9 @@ mod inverse_hyperbolic_routines_are_metals {
         part_5_of_6 = 4, part_6_of_6 = 5);
 }
 
-/// [`arc_model`] is Metal's word at operands measured on the M3 (EVs MBB-hyp1-m3 and MBB-hyp2-m3)
-/// in every region, most where Metal's word is not the correctly rounded one (the last 16 where the
-/// forms with the correctly rounded inverse root are not Metal's word either), and the routines
-/// answer them bit for bit.
+/// [`arc_model`] is Metal's word at operands measured on the M3 in every region, most where Metal's
+/// word is not the correctly rounded one (the last 16 where the forms with the correctly rounded
+/// inverse root are not Metal's word either), and the routines answer them bit for bit.
 #[test]
 fn inverse_hyperbolics_answer_metals_measured_words() {
     let measured: [(Fun, u32, u32); 135] = [
@@ -1295,7 +1294,7 @@ fn half_asinh_model(b: u16) -> Option<u64> {
 }
 
 /// A `half` `asinh` call answers [`half_asinh_model`] at every `half` it gives a value for (the
-/// model is Metal's word at every `half` of EV MB2-half1-m3, the M3; the M4's are the same): part
+/// model is Metal's word at every `half` of our probe, the M3; the M4's are the same): part
 /// `part` of `of` of the runs of 2,048 operands.
 fn half_asinh_is_metals_form(part: usize, of: usize) {
     let h = float(16);
@@ -1328,8 +1327,8 @@ mod half_asinh_routine_is_metals_form {
         part_5_of_8 = 4, part_6_of_8 = 5, part_7_of_8 = 6, part_8_of_8 = 7);
 }
 
-/// Metal's `half` `asinh` words where they are not the correctly rounded ones (all four of EV
-/// MB2-half1-m3, the M3; the M4's are the same): the model and the routine answer them.
+/// Metal's `half` `asinh` words where they are not the correctly rounded ones (all four of our
+/// probe, the M3; the M4's are the same): the model and the routine answer them.
 #[test]
 fn half_asinh_answers_metals_words() {
     let h = float(16);
@@ -1361,7 +1360,7 @@ fn half_asinh_answers_metals_words() {
     );
 }
 
-/// [`rcp_model`] answers Metal's reciprocal at words measured on the Apple M4 (EV MATH-sweep3-m4, a
+/// [`rcp_model`] answers Metal's reciprocal at words measured on the Apple M4 (a
 /// library compiled with `mathMode` fast): where Metal's word is `RN(1 / y)`, one unit above it,
 /// and one below, in `[1, 2)`, the same significands in the lowest and highest binades whose
 /// reciprocal is normal, and negated.
@@ -1452,11 +1451,10 @@ fn metal_reciprocal_routine_answers_the_model() {
     }
 }
 
-/// [`rsqrt_model`] is Metal's fast `rsqrt` at words measured on the M3 Max and the M4 (EVs
-/// MBB-hyp2-m3, MBB-rsq1-m3, MBB-rsq1-m4, the same words): in `[1, 4)`, in the binades below and
-/// above (every 256th `float`), all where Metal's word is not the correctly rounded root, and its
-/// specials (`+inf` of a zero and a denormal, `+0` of `+inf`); and [`Fun::FastRsqrt`]'s routine
-/// answers them bit for bit.
+/// [`rsqrt_model`] is Metal's fast `rsqrt` at words measured on the M3 Max and the M4 (the same
+/// words): in `[1, 4)`, in the binades below and above (every 256th `float`), all where Metal's
+/// word is not the correctly rounded root, and its specials (`+inf` of a zero and a denormal, `+0`
+/// of `+inf`); and [`Fun::FastRsqrt`]'s routine answers them bit for bit.
 #[test]
 fn metal_fast_rsqrt_answers_metals_measured_words() {
     let measured: [(u32, u32); 43] = [
@@ -1575,7 +1573,7 @@ fn near_zero_model(q: &[u32], s: f32) -> f32 {
     horner_model(q, s).mul_add(s, 1.0)
 }
 
-/// Metal's precise `sinh`, `cosh`, or `tanh` of `x` (EV MATH-sweep2-m4) with its reciprocals the
+/// Metal's precise `sinh`, `cosh`, or `tanh` of `x` with its reciprocals the
 /// model's ([`rcp_model`]): the polynomials near zero, `(E -+ 1/E) / 2` of its precise
 /// `exp` ([`exp_model`]) and `e^a / 2` ([`exp_composed`]) past `12 ln 2`, `tanh`'s `(t - 1) (1 /
 /// (t + 1))` of `t = e^(2a)`, and its polynomial from 0.35 to 1.25.
@@ -1691,13 +1689,12 @@ mod hyperbolic_routines_are_metals {
         part_5_of_6 = 4, part_6_of_6 = 5);
 }
 
-/// The `sinh`, `cosh`, and `tanh` routines answer Metal's words, measured on the Apple M4 (EV
-/// MATH-sweep2-m4), at each region's edges and inside it, both signs: the operand itself to the
-/// tiny bound and the polynomials' first word past it, the polynomials, the compositions of the
-/// precise `exp`, among them words where the correctly rounded reciprocal is one unit off and
-/// Metal's is not, and `e^a / 2` and `tanh`'s 1 from `12 ln 2`; and `tanh`'s polynomial from 0.35
-/// to 1.25 at words measured on the M3 (EV MBB-hyp1-m3) where Metal's word is not the correctly
-/// rounded one.
+/// The `sinh`, `cosh`, and `tanh` routines answer Metal's words, measured on the Apple M4, at each
+/// region's edges and inside it, both signs: the operand itself to the tiny bound and the
+/// polynomials' first word past it, the polynomials, the compositions of the precise `exp`, among
+/// them words where the correctly rounded reciprocal is one unit off and Metal's is not, and
+/// `e^a / 2` and `tanh`'s 1 from `12 ln 2`; and `tanh`'s polynomial from 0.35 to 1.25 at words
+/// measured on the M3 where Metal's word is not the correctly rounded one.
 #[test]
 fn hyperbolic_routines_answer_metals_measured_words() {
     let measured: [(Fun, u32, u32); 54] = [
@@ -1955,7 +1952,7 @@ fn metals_special_values(part: usize, of: usize) {
         (Fun::Acosh, NEG_MAX, NAN),
         (Fun::Atanh, ONE, INF),
         (Fun::Atanh, NEG_ONE, NEG_INF),
-        // To `0x3a400000` Metal's `atanh` is its operand (EV MBB-hyp1-m3).
+        // To `0x3a400000` Metal's `atanh` is its operand.
         (Fun::Atanh, 0x39C0_0000, 0x39C0_0000),
         (Fun::Atanh, 0xB9FF_FF00, 0xB9FF_FF00),
         (Fun::Atanh, INF, NAN),
@@ -2302,11 +2299,10 @@ mod half_exponentials_and_hyperbolics_take_the_routines {
 
 /// Metal's `half` functions that are not its precise `float` functions rounded
 /// (`math::metal_half`, `half_tanh`, `half_small`, `half_cospi_zero`, and `sinpi(-0)`): Metal's
-/// words at measured operands of EV MBB-half1-m3 (the M4's, EV MBB-half1-m4, are the same),
-/// those where the precise routines rounded were not Metal's among them, the edges of the
-/// operand ranges each answers by, and others; and `tanpi`, its `float` form rounded. The binary
-/// functions' second operand is the probe's, `(i * 2654435761) >> 16` of the first's bits `i`
-/// (32-bit arithmetic).
+/// words at measured operands of our probe (the M4's, are the same), those where the precise
+/// routines rounded were not Metal's among them, the edges of the operand ranges each answers by,
+/// and others; and `tanpi`, its `float` form rounded. The binary functions' second operand is the
+/// probe's, `(i * 2654435761) >> 16` of the first's bits `i` (32-bit arithmetic).
 #[test]
 fn half_functions_answer_metals_measured_words() {
     let h = float(16);
@@ -2497,8 +2493,8 @@ fn half_functions_answer_metals_measured_words() {
 
 /// Metal's fast `pow` and `powr` (and its `half` ones, the same compositions) where `y · log2(x)`
 /// is infinite answer IEEE's value whatever the composition gave there (`math::infinite_product`
-/// over a composition that answered `1`, as the RTX 5080 did without `SignedZeroInfNanPreserve`,
-/// EV MBB-1v-nvidia): Metal's word at case f6524207's special pairs and case 32931370's `half`
+/// over a composition that answered `1`, as the RTX 5080 did without `SignedZeroInfNanPreserve`):
+/// Metal's word at case f6524207's special pairs and case 32931370's `half`
 /// ones, and the composition's own value where the product is finite, a NaN, or an operand is one.
 #[test]
 fn an_infinite_product_answers_ieee_whatever_the_composition_gave() {

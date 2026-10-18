@@ -2,7 +2,7 @@
 //! never written, which its views, its heap-set elements and its attachments name while its bytes
 //! are detached (`detach.rs`).
 //!
-//! - **What Metal answers** (EV TXN3-dtp-m4, an M4 under macOS 27.0.1): a texture over detached
+//! - **What Metal answers** (an M4 under macOS 27.0.1): a texture over detached
 //!   bytes keeps its descriptor's metadata (every size and level query answers it, its views'
 //!   too), and a function that reaches it unnamed, where nothing made its pages resident, reads
 //!   zero bytes in every texel and drops what it writes. So the stand-in is of the image's own

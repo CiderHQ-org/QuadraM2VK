@@ -591,7 +591,7 @@ declare {{ float, i8 }} @air.sample_compare_depth_2d.f32(ptr addrspace(1), ptr a
 }
 
 /// A constexpr pixel sampler with a compare function has no Metal answer. Apple's compiler rejects
-/// one ("invalid values combination in sampler initialization", RT13-px-probe-m4), so no AIR from
+/// one ("invalid values combination in sampler initialization"), so no AIR from
 /// Metal's toolchain carries it, and the compile layer refuses it
 /// `NotRepresentable(PixelSamplerCompare)` on every committed profile, whatever the device has. The
 /// same comparison through a normalized sampler compiles on `moltenvk-m3` and is not refused for
@@ -624,10 +624,10 @@ fn a_constexpr_pixel_sampler_with_a_compare_function_is_refused() {
 
 /// Plain Metal reads a constexpr sampler's minimum or maximum reduction as the weighted average on
 /// Apple's GPU (an Apple M4 on macOS 27.0.1, whose `supportsSamplerReductionMode` answers no;
-/// RT13-px3-probe-m4 and RT13-px5-probe-m4 for linear, nearest and bicubic samplers), so the
-/// translation lowers one as the weighted-average sampler: the same module, interface (its
-/// immutable sampler's words; the sampler a pipeline state numbers stays the module's), facts,
-/// notes and requirements on every committed profile, with no `samplerFilterMinmax`.
+/// for linear, nearest and bicubic samplers), so the translation lowers one as the weighted-average
+/// sampler: the same module, interface (its immutable sampler's words; the sampler a pipeline state
+/// numbers stays the module's), facts, notes and requirements on every committed profile, with no
+/// `samplerFilterMinmax`.
 #[test]
 fn a_constexpr_reduction_compiles_as_the_weighted_average() {
     let linear = EDGE_WORDS | 1 << 9 | 1 << 11;

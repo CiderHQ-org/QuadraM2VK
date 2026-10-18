@@ -354,7 +354,7 @@ fn only_numeric(shape: &TextureShape, t: &TextureSlot, class: &ImageHandleClass)
 /// format, nor one another variant reads raw (an extended-range or bfloat one; a two-plane YCbCr
 /// one). Plain Metal reads such a texture in its own class and hands back the words as `t`'s type,
 /// a `half` result each word's low 16 bits (measured on Apple M3 Max and M4 for 28 formats); and
-/// (EVs XCR-p1-m3 and XCR-p2-m3 on an Apple M3 Max) a `short` or `ushort` result an integer word's
+/// (on an Apple M3 Max) a `short` or `ushort` result an integer word's
 /// low 16 bits or a float texel's `half` bits, a storage, multisampled, sparse or texture-buffer
 /// read alike, and a write stores the written lanes' bits as the format's own class
 /// (`lower::texture::cross_write`). Two writes are left out: a storage slot bound to a swizzled
@@ -932,10 +932,9 @@ impl ResourcePlanner<'_> {
         let compat = shape.filter(|s| compatible(s, &t, &base));
         // A texture whose writes Metal drops (a 4:2:2 texture, and a YCbCr one;
         // `metal::format::writes_dropped`) at a storage slot its function only writes: plain Metal
-        // completes the writes and stores nothing (EVs CFR-probe8-m4, RRP-probe11-m4, XRR2-ycc2-m4:
-        // a filled texture keeps its bytes; its validation stops the binding), so the slot takes
-        // its neutral, which the writes leave as Metal leaves the texture. A slot that reads it
-        // keeps the format's refusal (`metal::format`).
+        // completes the writes and stores nothing (a filled texture keeps its bytes; its validation
+        // stops the binding), so the slot takes its neutral, which the writes leave as Metal leaves
+        // the texture. A slot that reads it keeps the format's refusal (`metal::format`).
         let only_written = storage && t.access.write && !t.access.read && !t.access.sample;
         let compat = compat.filter(|s| {
             !(only_written
@@ -1197,7 +1196,7 @@ impl ResourcePlanner<'_> {
                 // sampled view holds its raw codes, which a swizzle in the view's component mapping
                 // would move before the function decodes them (a `One` reading the code 1, a border
                 // texel unswizzled), where plain Metal swizzles the decoded texel, border texels
-                // included (EV FPV-sw1-m4): the function applies the swizzle there too, under the
+                // included: the function applies the swizzle there too, under the
                 // same variant, to the texels it reads, samples and gathers, and the view takes
                 // none.
                 let reads_extended =
@@ -1207,7 +1206,7 @@ impl ResourcePlanner<'_> {
                 // move onto another channel's lane before the function converts it, so its
                 // class would drop the field and a read, gather or one-texel sample keep the
                 // device's widening of a 4-, 5- or 6-bit code (NVIDIA's and ANV's replicate its
-                // bits, where Metal answers `c / (2^b - 1)`, EV FRT3-scout2-nv3090): on a device
+                // bits, where Metal answers `c / (2^b - 1)`): on a device
                 // that does not sample through Metal's own sampler, the function converts the
                 // unswizzled texel by the format's whole class and swizzles it, under the same
                 // variant, and the view takes none.

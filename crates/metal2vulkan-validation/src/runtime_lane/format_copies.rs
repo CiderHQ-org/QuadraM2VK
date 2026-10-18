@@ -398,7 +398,7 @@ fn the_stencil_view_of_a_combined_texture_copies_its_stencil() {
 
 /// Probes 7, 7b and 8b: a region copied onto itself keeps its texels, the whole texture or a
 /// part; between other overlapping regions of one texture, through the texture or a view of it,
-/// the copy gives `memmove`'s answer (Metal's for these small regions, EV FPV-ov1-m4), and the
+/// the copy gives `memmove`'s answer (Metal's for these small regions), and the
 /// device announces `overlapping-texture-copy-as-memmove` once.
 #[test]
 fn a_copy_onto_its_own_texels_keeps_them_and_another_overlap_moves_as_memmove() {

@@ -5,7 +5,7 @@
 //! fetched plus a quarter. Each case is a pass of one draw of the fullscreen triangle at depth 0.5
 //! over a fresh 4² `R32Float` target cleared to 0.75, beside a `Depth32Float_Stencil8` attachment
 //! cleared to depth 1 and stencil 0, the counters zero. Metal runs the function for every
-//! fragment and tests after it (EV XRR2-fx1-m4: device writes for every fragment, those the tests
+//! fragment and tests after it (device writes for every fragment, those the tests
 //! drop included, 4,096 of 4,096): every covered pixel's counter is 1; a fragment that passes the
 //! tests stores 0.625 and, under a written depth state, depth 0.5; one that fails keeps 0.75 and
 //! depth 1. The states:

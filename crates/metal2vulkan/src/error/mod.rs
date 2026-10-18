@@ -1792,7 +1792,7 @@ pub enum BindError {
     /// A vertex buffer layout with a per-bind stride (`MTLBufferLayoutStrideDynamic`) reads
     /// inline bytes (`setVertexBytes`) bound at `MTLAttributeStrideStatic`
     /// (`BoundBuffer::Bytes::attribute_stride` `Some(u32::MAX)`), which an M4 read as element 0
-    /// and zeros past it (EV `RFL-vbytes-m4`; Metal's debug layer stops the draw): not emulated.
+    /// and zeros past it (Metal's debug layer stops the draw): not emulated.
     /// Inline bytes and a buffer bound without a stride read at stride 0, as plain Metal's encoder
     /// reads them, and at the stride bound with one.
     MissingVertexStride { slot: SlotRef },
@@ -1853,7 +1853,7 @@ pub enum BindError {
     /// The encoder's tessellation factor scale (`bits`, the `float`'s) rounded to `half` is not a
     /// positive `half` (it is negative, zero, or NaN). Metal's validation stops
     /// `setTessellationFactorScale:` for a scale that is not a positive normal `float`, and
-    /// culls every patch for one that is 0 as a `half` (2^-30, EVs ICBV-scale2-m3 and -m4), which
+    /// culls every patch for one that is 0 as a `half` (2^-30), which
     /// a consumer draws as nothing.
     InvalidTessellationFactorScale { bits: u32 },
     /// A tile function's render area (`BindState::render_area`) has a width or height of 0: the

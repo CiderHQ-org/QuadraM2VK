@@ -1391,11 +1391,10 @@ pub(crate) fn linked_modules(
             });
         }
     }
-    // Metal's pipeline numbers the constexpr samplers of a function of `functions` nothing names
-    // (EVs SID-sid14-m4, SID-sid15-m4): one a table can hold that nothing reached is listed too,
-    // with its table word, where its module decodes and has constexpr samplers, so that
-    // canonicalization, which imports no such function, numbers its samplers as a group of its
-    // own (`Entry::linked_sampler_groups`).
+    // Metal's pipeline numbers the constexpr samplers of a function of `functions` nothing names:
+    // one a table can hold that nothing reached is listed too, with its table word, where its
+    // module decodes and has constexpr samplers, so that canonicalization, which imports no such
+    // function, numbers its samplers as a group of its own (`Entry::linked_sampler_groups`).
     for (s, handle) in linked.iter().zip(&handles) {
         m.tick(1)?;
         let key = &s.key;

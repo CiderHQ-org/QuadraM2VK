@@ -19,7 +19,7 @@
 //!   sample count above 1 exactly when multisampled, the numeric type, a depth format for a
 //!   depth-comparison class (as a compared slot takes), `ShaderRead` usage for a sampled class and
 //!   `ShaderWrite` or Apple's private `BlockWritesOnly` for a storage one (Metal's validation takes
-//!   a write of either, EV XRR2-usw1), which never holds a depth or stencil format), through its
+//!   a write of either), which never holds a depth or stencil format), through its
 //!   view: a sampled one as a slot's (`plan::resources::sampled_view`), a storage one the direct
 //!   format (an `A8Unorm` texture held in red its `R8_UNORM` image, whose texels a heap access
 //!   converts where the handle carries `A8Unorm`'s class), which the class's formatless declaration
@@ -1819,7 +1819,7 @@ fn handle_table_bytes(
 /// The depth class of a texture of pixel format `pf` in its table entry's flags: how Metal compares
 /// its texels against a depth comparison's reference, as measured. `Depth16Unorm` compares codes,
 /// the texel's against the reference's ([`FLAG_DEPTH_CODES`]); `Depth32Float` compares values, and
-/// `Depth32Float_Stencil8` as `Depth32Float` (EV MSFZ-m4-d32s8; [`FLAG_DEPTH_VALUES`]). Every other
+/// `Depth32Float_Stencil8` as `Depth32Float` ([`FLAG_DEPTH_VALUES`]). Every other
 /// format has no measured class, 0: the device compares a heap comparison of it, which the module
 /// records (`DeviceDepthComparison`).
 fn depth_flags(pf: metal::PixelFormat) -> u32 {

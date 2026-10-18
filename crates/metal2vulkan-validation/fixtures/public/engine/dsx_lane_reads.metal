@@ -7,11 +7,10 @@
 // vertex of the draw, then its last ones in a branch only the even vertices take. Vertex v writes
 // its K words to out[K v .. K v + K - 1]; an odd vertex leaves the branch's words unwritten.
 // No move in a branch repeats one made before it: Metal's compiler merges a repeated move with
-// the one before the branch, which every lane made (EV DSX-lc1-m4).
-// lane_moves_in_a_branch_of_a_kernel makes all eighteen moves in a branch the even lanes of a
-// kernel take, with the value loaded before the branch. Metal reads all-zero bits from a lane that
-// does not take part. The fills take an explicit modulo, the form Metal's compiler
-// takes in a vertex function. Loop-free.
+// the one before the branch, which every lane made. lane_moves_in_a_branch_of_a_kernel makes all
+// eighteen moves in a branch the even lanes of a kernel take, with the value loaded before the
+// branch. Metal reads all-zero bits from a lane that does not take part. The fills take an explicit
+// modulo, the form Metal's compiler takes in a vertex function. Loop-free.
 #include <metal_stdlib>
 using namespace metal;
 

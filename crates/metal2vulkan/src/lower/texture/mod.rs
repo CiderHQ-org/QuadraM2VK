@@ -475,9 +475,8 @@ pub struct CrossWrite {
 
 /// How an integer texel's write saturates each lane to its channel's range, as the image's
 /// signedness reads the 32-bit word (`emit::saturated`): Metal stores the nearest value the
-/// channel holds (`uint` 300 into `R8Uint` stores 255, `int` -200 into `R8Sint` -128; EVs
-/// XCR-p1-m3 and XCR-p2-m3), where a Vulkan write of a value the format cannot represent is
-/// undefined.
+/// channel holds (`uint` 300 into `R8Uint` stores 255, `int` -200 into `R8Sint` -128), where a
+/// Vulkan write of a value the format cannot represent is undefined.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum IntRange {
     /// Not an integer texel's write, or every channel holds the written word: stored as it is.
@@ -1743,8 +1742,8 @@ pub(crate) fn half_texel_nans(
 /// How a `half` read, sample or gather of `image` (shape `shape`), which reads one texel where
 /// `one` says, answers a NaN texel where the NaN switch asks for Metal's NaN
 /// (`NanMinMaxPolicy::Exact`, the profile's `TexelNanRoute::Metal`, on every device: whatever
-/// NaN the device's arithmetic answers, the texel's is the image's decode): by Metal's rule (EV
-/// NAN-hrn1-m3), a NaN texel read, sampled or gathered one texel at a time from a texture of
+/// NaN the device's arithmetic answers, the texel's is the image's decode): by Metal's rule, a NaN
+/// texel read, sampled or gathered one texel at a time from a texture of
 /// 16-bit float channels is its own (the device's decode, which a device that widens a half
 /// texel exactly decodes to its bits), and every other NaN `0x7e00`. The class of the texture
 /// bound says which: a slot's `TexelFormat` class, which the binder pushes as data
@@ -1821,7 +1820,7 @@ impl NanClass {
 /// half-float texel's NaN there stays the device's: `PrecisionNote::DeviceNanEncoding`.
 ///
 /// A depth texture's too, a comparison's never (its caller's test): Metal reads and samples one
-/// texel of `Depth16Unorm` as `c / 65535` correctly rounded (EV SID-d16r1-m4, every code), its
+/// texel of `Depth16Unorm` as `c / 65535` correctly rounded (every code), its
 /// class `R16Unorm`'s, where a device may multiply by the reciprocal (lavapipe: 512 codes one ulp
 /// off); a 32-bit float depth's class keeps the device's value. A heap's depth texture's handle
 /// carries that class as a colour one's does (`metal::texel_format::heap_class` of its format), so
@@ -2532,7 +2531,7 @@ pub(super) fn half_storage_facts(
 /// How a `half` texel's write to texture `image` stores a NaN as Metal does, and what it records.
 /// Metal stores a written half's NaN as the half's own bits in a 16-bit float channel and as its
 /// conversion of the canonical `0x7fc00000` in any other (the M3 Max under macOS 26.7, measured by
-/// the consumer; the M4 under macOS 27.0.1, EV SID-nan1-m4: every NaN class, both signs, `write`
+/// the consumer; the M4 under macOS 27.0.1: every NaN class, both signs, `write`
 /// and `read_write`, `Shared` and `Private`): a 16-bit float channel takes the half widened
 /// ([`HalfNans::Kept`]), which a device of `DriverDeviation::MetalHalfTexelWrites` stores as its
 /// bits, and any other float channel every NaN as `0x7fc00000` ([`HalfNans::Canonical`]), which a
@@ -2797,7 +2796,7 @@ pub(super) fn norm_storage(
 /// A fragment function's write of a texel of form `texel` to texture `image` (`extended`: an
 /// extended-range texture's raw texels, never such) that Apple's `textureWriteRoundingMode` 2
 /// stores otherwise than the default, under the pipeline's mode (`LoweringInputs::
-/// texture_write_rounding`; EV TXN2-twr-m4 on an Apple M4 under macOS 27.0.1 and the M3 Max's
+/// texture_write_rounding`; on an Apple M4 under macOS 27.0.1 and the M3 Max's
 /// package m3pkg-twr under macOS 26.7, alike): a `float` texel into a half-float texture (rounded
 /// to nearest even at mode 2) or a packed small-float one (`RG11B10Float`: rounded to nearest even,
 /// held at the largest finite value; `RGB9E5Float`: unmeasured), and a `half` texel into a packed
@@ -2975,9 +2974,9 @@ pub(crate) fn cross_class(cx: &SelectCx<'_>, image: ImageRef) -> Result<Option<T
 /// float class, a 32-bit integer for either integer class) of the same lanes, whose words plain
 /// Metal hands back as the declared result (`emit::reinterpret`; measured on Apple M3 Max and M4).
 /// A `short` or `ushort` result takes a 32-bit integer of an integer class, whose low 16 bits Metal
-/// hands back, and the `half` of the float class, whose bits it hands back (EVs XCR-p1-m3,
-/// XCR-p2-m3 on an Apple M3 Max). `None` for a declared `ulong` result, whose answer is not
-/// measured, which the slot's compile states no `RuntimeFact::CrossClassReads` for.
+/// hands back, and the `half` of the float class, whose bits it hands back (on an Apple M3 Max).
+/// `None` for a declared `ulong` result, whose answer is not measured, which the slot's compile
+/// states no `RuntimeFact::CrossClassReads` for.
 pub(crate) fn native_form(declared: TexelForm, bound: TexelClass) -> Option<TexelForm> {
     let conv = match (declared.conv, bound) {
         (TexelConv::F32 | TexelConv::F16 | TexelConv::I32, TexelClass::Float) => TexelConv::F32,
@@ -2994,11 +2993,11 @@ pub(crate) fn native_form(declared: TexelForm, bound: TexelClass) -> Option<Texe
 /// The form a write of declared texel `declared` takes on a storage slot whose variant binds a
 /// texture of class `bound` in format `format` (the slot's storage choice declares it): `bound`'s
 /// own form, into which `emit::cross_write` turns the written lanes as plain Metal stores them
-/// (EVs XCR-p1-m3, XCR-p2-m3 on an Apple M3 Max): a 32-bit integer of an integer class, a
-/// `float` of the float class from a 32-bit integer, and from a `short` or `ushort` the `half`
-/// its bits hold, or the `float` holding it where the format's channels are small floats (which
-/// Metal rounds to nearest even there). `None` for a `ulong` texel, or an integer texel into an
-/// `RGB9E5Float` texture, whose stores are not measured.
+/// (on an Apple M3 Max): a 32-bit integer of an integer class, a `float` of the float class from a
+/// 32-bit integer, and from a `short` or `ushort` the `half` its bits hold, or the `float` holding
+/// it where the format's channels are small floats (which Metal rounds to nearest even there).
+/// `None` for a `ulong` texel, or an integer texel into an `RGB9E5Float` texture, whose stores are
+/// not measured.
 pub(crate) fn native_write_form(
     declared: TexelForm,
     bound: TexelClass,
@@ -3252,7 +3251,7 @@ fn select_read(
 ) -> Result<TextureStrategy, Error> {
     let mut r = select_read_as(cx, (at, inst), ops, (image, shape, texel), None, m)?;
     // A sampled color heap group's read of one sample reads a member of another numeric class in
-    // that class, its words handed back as declared, as Metal reads it (EV FPV-xc1-m4's argument
+    // that class, its words handed back as declared, as Metal reads it (the probe's argument
     // buffer half, the slot's rule): one sibling read per other class.
     let (storage, _) = image_access(cx, image)?;
     let crosses = matches!(image, ImageRef::Heap { .. })
@@ -3369,7 +3368,7 @@ fn select_read_as(
     // A storage slot bound to a swizzled texture applies the swizzle under its variant, to the
     // converted texel, out of bounds too, as plain Metal reads it. A `ulong` texel's swizzle, and a
     // read of fewer lanes, are not measured. So does an extended-range sampled slot of the variant,
-    // to the decoded texel (EV FPV-sw1-m4). So does a packed normalized sampled slot of the
+    // to the decoded texel. So does a packed normalized sampled slot of the
     // variant, to the texel its class converts: the variant holds no other sampled slot.
     let storage_swizzle = shape.dim != ImageDim::Buffer && swizzled_storage(cx, image)?;
     if storage_swizzle && (texel.lanes != 4 || matches!(texel.conv, TexelConv::U64Words { .. })) {
@@ -3709,8 +3708,7 @@ fn select_write(
         true => half_nans(cx, image, (shape.dim == ImageDim::Buffer, heap_bits))?,
         false => HalfNans::Held,
     };
-    // A `half` texel's too, held widened: Metal stores its value by the same rule (EV
-    // FRT3-nsw4-m4).
+    // A `half` texel's too, held widened: Metal stores its value by the same rule.
     let norm = match texel.conv {
         TexelConv::F32 | TexelConv::F16 if extended.is_none() => {
             norm_storage(cx, image, shape, texel)?

@@ -3,7 +3,7 @@
 //! a texture over a surface's two planes too, at the planes' rows
 //! (`texture/surface_two_planes.rs`).
 //!
-//! **Metal's layout** (EV XRR2-xrh1-m4, an Apple M4 under macOS 27.0.1, plain; a buffer over
+//! **Metal's layout** (an Apple M4 under macOS 27.0.1, plain; a buffer over
 //! the heap's bytes from 0 in a placement heap, and one placed after `makeAliasable` in an
 //! automatic heap; `Shared` and `Private` storage alike, so a `Private` texture's bytes are not
 //! tiled or compressed; 2D textures of 1 x 1, 16 x 12, 37 x 5, 64 x 64, 300 x 70 and 333 x 61 at

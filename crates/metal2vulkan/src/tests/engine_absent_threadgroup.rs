@@ -1,9 +1,9 @@
 //! Threadgroup memory a function constant removes, still read and written.
 //!
 //! Removed threadgroup memory is not declared in the specialized function (MSL 5.8.1.2): what an
-//! access through it reads or changes is undefined, and on Metal it varies (EV `GTG-tg-metal`). When the body reaches the memory only as the address of
-//! loads, stores, and atomics (at its own address, or one derived from it), specialization makes
-//! each load and atomic with a result an absent read of its type
+//! access through it reads or changes is undefined, and on Metal it varies. When the body reaches
+//! the memory only as the address of loads, stores, and atomics (at its own address, or one derived
+//! from it), specialization makes each load and atomic with a result an absent read of its type
 //! (`FunctionConstant::AbsentMemory`): it marks the command buffer's execution status where it
 //! runs and takes zero, like a removed texture's read. Each store, and each atomic without a
 //! result, is dropped and marks nothing. A run that never reaches a read is Metal's.

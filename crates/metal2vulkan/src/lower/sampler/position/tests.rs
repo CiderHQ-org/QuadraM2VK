@@ -684,7 +684,7 @@ fn run_parent_rule(lanes: &[(u32, u32, u32)]) -> Vec<[u32; 4]> {
 }
 
 /// Whether Metal dropped a constant texel offset on a repeating or mirrored axis whose level size
-/// is `.0` under a base level of size `.1`: the offset probe, round 3 (EV WRN-off3-probe, Apple M4,
+/// is `.0` under a base level of size `.1`: the offset probe, round 3 (Apple M4,
 /// macOS 27.0.1), every level of 18 bases at an explicit level and through a view of one level,
 /// under `repeat` and `mirrored_repeat` alike, offsets -8 to 7.
 const MEASURED_RULE: [(u32, u32, bool); 85] = [
@@ -1178,7 +1178,7 @@ fn run_word_gather(lanes: &[(f32, u32, u32)], metal: bool, offset: i32) -> Vec<[
 /// A runtime sampler's gather hands the device the centre of the 2x2 block Metal reads, by its
 /// word: at Metal's position by the axis's mode for a normalized word (the constexpr gather's snap,
 /// bit for bit, but for its wider clamp of `i0`, which reads the same edge texels or border; a
-/// `MirrorClampToEdge` axis's a clamping axis's, TXN-gprobe), at the coordinate as given for a
+/// `MirrorClampToEdge` axis's a clamping axis's), at the coordinate as given for a
 /// pixel word, its index moved back by an offset where a repeating, mirrored or mirror-clamped
 /// axis's size drops it; on a device with Metal's own sampler it snaps a pixel word alone, never
 /// moved by an offset, which that sampler places as Metal places a pixel coordinate's. A word's
@@ -1191,7 +1191,7 @@ fn a_runtime_samplers_gather_centres_metals_block_by_its_word() {
     use crate::metal::SamplerAddressMode as M;
     let modes = [
         (M::ClampToEdge, Some(TapAddress::Edge)),
-        // Its position is a clamping axis's (TXN-gprobe).
+        // Its position is a clamping axis's.
         (M::MirrorClampToEdge, Some(TapAddress::Edge)),
         (M::Repeat, Some(TapAddress::Repeat)),
         (M::MirrorRepeat, Some(TapAddress::Mirror)),

@@ -1,12 +1,12 @@
 //! The blit encoder's indirect command buffer commands (`copyIndirectCommandBuffer:...`,
 //! `resetCommandsInBuffer:withRange:`, `optimizeIndirectCommandBuffer:withRange:`).
 //!
-//! - **What Metal answers** (probe `RT7-icb-probe2`, an M3 Max, with and without
-//!   `MTL_DEBUG_LAYER`). A copy between buffers of one descriptor copies the commands: the
-//!   destination's getters and execution read them. Between buffers of different descriptors the
-//!   copy is garbled, and a copy that runs past the destination's end corrupts its command 0;
-//!   validation stops neither. A reset resets the commands as `resetWithRange:` does. An optimize
-//!   changes nothing a getter or an execution observes.
+//! - **What Metal answers** (an M3 Max, with and without `MTL_DEBUG_LAYER`). A copy between buffers
+//!   of one descriptor copies the commands: the destination's getters and execution read them.
+//!   Between buffers of different descriptors the copy is garbled, and a copy that runs past the
+//!   destination's end corrupts its command 0; validation stops neither. A reset resets the
+//!   commands as `resetWithRange:` does. An optimize changes nothing a getter or an execution
+//!   observes.
 //! - **The runtime.** The commands are records of one format whatever the descriptor, so a copy
 //!   copies the records' bytes ([`BlitCommandEncoder::copy_from_buffer_to_buffer`], which moves
 //!   overlapping ranges of one buffer as `memmove` does); a record the destination's descriptor
@@ -18,7 +18,7 @@
 //!   the work before them completed. An optimize records nothing.
 //! - **Refused** (`Invalid`, changing nothing): a buffer of another device, and a range past
 //!   either buffer's size, which Metal runs as a corruption no program relies on.
-//! - **What a command holds** (the M4 probe MESH-icb1-m4, plain Metal). A copy and a reset hold the
+//! - **What a command holds** (the M4 probe, plain Metal). A copy and a reset hold the
 //!   records they read and write until the command buffer completes, but not the buffers: a buffer
 //!   the program releases meanwhile gives its ID back at once, as Metal handed a blit's buffer's ID
 //!   out again while the blit waited. An optimize holds nothing.
@@ -58,8 +58,8 @@ impl BlitCommandEncoder {
         const CALL: &str = "copy_indirect_command_buffer";
         self.core().check_device(CALL, source.device())?;
         self.core().check_device(CALL, destination.device())?;
-        // Two buffers of no command types copy (EV RFC-probe3-m4 `t0_blit_copy`); one beside a
-        // buffer of command types was not measured.
+        // Two buffers of no command types copy; one beside a buffer of command types was not
+        // measured.
         if source.has_no_command_types() != destination.has_no_command_types() {
             source.check_command_types(CALL)?;
             destination.check_command_types(CALL)?;

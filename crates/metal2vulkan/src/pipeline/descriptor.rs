@@ -706,15 +706,12 @@ impl VertexDescriptor {
     ///
     /// - a set attribute whose buffer has no layout ("Attribute at index N references a buffer at
     ///   index M that has no stride"), whether the vertex function reads it, declares it unread,
-    ///   or does not declare it (EVs RFL-layoutprobe-m3 and -m4); checked first, in attribute
-    ///   order;
+    ///   or does not declare it; checked first, in attribute order;
     /// - a layout of a nonzero or dynamic stride whose buffer no set attribute names ("None of
     ///   the attributes set bufferIndex to M, but MTLVertexDescriptor set buffer
-    ///   layout[M].stride(S)"), whatever its step; a stride of 0 passes (EVs RFL-layoutprobe3-m4
-    ///   and RFL-layoutprobe4-m4); then, in buffer order.
+    ///   layout[M].stride(S)"), whatever its step; a stride of 0 passes; then, in buffer order.
     ///
-    /// An attribute of format `Invalid` is unset, whatever buffer it names (EVs
-    /// RFL-layoutprobe2-m3 and -m4).
+    /// An attribute of format `Invalid` is unset, whatever buffer it names.
     pub(crate) fn check_layouts(&self) -> Result<(), crate::error::Error> {
         let set = self
             .attributes
@@ -823,10 +820,9 @@ impl StageInputDescriptor {
     /// That the descriptor's layouts and set attributes agree as Metal requires, or the first
     /// buffer where they do not as `InvalidDescriptor(StageInputLayout)`: the rules of
     /// [`VertexDescriptor::check_layouts`], which Metal's assertions state alike for a kernel's
-    /// attributes (read, declared unread or not declared) and its layouts (EVs
-    /// RFL-layoutprobe-m3 and -m4 through RFL-layoutprobe4-m4). Then, in buffer order, each
-    /// layout but Metal's unset one whose step Metal's pipeline creation stops at an assertion
-    /// for, with and without API validation (EV SWP-stepfn-m4): a vertex step function
+    /// attributes (read, declared unread or not declared) and its layouts. Then, in buffer order,
+    /// each layout but Metal's unset one whose step Metal's pipeline creation stops at an assertion
+    /// for, with and without API validation: a vertex step function
     /// (`InvalidDescriptor(StageInputStepFunction)`, "invalid stepFunction value"), and a
     /// constant step at a step rate other than 0 (`InvalidDescriptor(StageInputStepRate)`,
     /// "stepRate(1) must be zero if stepFunction is MTLStepFunctionConstant").

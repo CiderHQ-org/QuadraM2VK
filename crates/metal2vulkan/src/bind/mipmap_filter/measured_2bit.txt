@@ -1,6 +1,6 @@
 # Plain Metal's generateMipmapsForTexture on an Apple M4 (macOS 27.0.1): the first computed level of
 # RGB10A2Unorm and BGR10A2Unorm textures whose first levels were designed, footprint by footprint,
-# so that the 2-bit alpha's weighted sums fall near the halves of its grid (EV FXR-fxr9-m4, our own
+# so that the 2-bit alpha's weighted sums fall near the halves of its grid (our own
 # probe). Every texel of those levels where the 2-bit code of the 12-bit grid of 2-bit codes and the
 # nearest 2-bit code of the 10-bit code the codes replicate to differ: 2,354 of the 475,136 values
 # measured, each the 10-bit code's (the rest agree on both). The 1,293 of a 1025x1025 texture are

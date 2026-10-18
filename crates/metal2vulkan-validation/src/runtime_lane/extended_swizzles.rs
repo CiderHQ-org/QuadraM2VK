@@ -5,7 +5,7 @@
 //! names, `Zero` 0 and `One` 1.0, border texels included, and a gather of a component gathers the
 //! swizzle's source of it. An extended-range or bfloat texture's image holds raw codes, which the
 //! function decodes; this lane asks whether the runtime's swizzled reads, samples and gathers of
-//! such a texture are its unswizzled ones swizzled, as Metal's are (EV FPV-sw1-m4, an Apple M4
+//! such a texture are its unswizzled ones swizzled, as Metal's are (an Apple M4
 //! under macOS 27.0.1: the same textures, swizzles, positions and samplers).
 //!
 //! The kernels are `fpv_swizzled_reads`'s: reads of every texel of an 8 x 4 texture and four past
@@ -21,7 +21,7 @@
 //! the same kernels, textures of the same bytes and the same swizzles, on `PACKED-SWIZZLE` lines:
 //! Metal converts each channel's code `c` of `b` bits to `c / (2^b - 1)`, which a swizzle in the
 //! view's component mapping would hand the function on another channel's lane, where NVIDIA and ANV
-//! read the code's bits replicated to 8 (EV FRT3-scout2-nv3090: up to 0.4/255 off). On a device
+//! read the code's bits replicated to 8 (up to 0.4/255 off). On a device
 //! without Metal's own sampler the function converts the unswizzled texel and swizzles it.
 //!
 //! A packed texture's read of a texel inside it, nearest sample inside it and gather of a footprint

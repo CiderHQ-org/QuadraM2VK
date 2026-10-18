@@ -330,7 +330,7 @@ pub(crate) fn answers(
     };
     let extended = ExtendedRange::of(pf).is_some();
     let filter = sampled.and_then(|plan| {
-        // Metal filters no bfloat texel: a linear sample reads the nearest texel (EV FPV-pf5-m4).
+        // Metal filters no bfloat texel: a linear sample reads the nearest texel.
         if ExtendedRange::of(pf).is_some_and(ExtendedRange::bfloat) {
             return Err(not_metal());
         }
@@ -360,7 +360,7 @@ pub(crate) fn answers(
         }
     });
     let blend = color.clone().and_then(|plan| {
-        // Metal blends no bfloat attachment: its validation asserts (EV FPV-pf1-m4).
+        // Metal blends no bfloat attachment: its validation asserts.
         if ExtendedRange::of(pf).is_some_and(ExtendedRange::bfloat) {
             return Err(not_metal());
         }

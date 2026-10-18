@@ -4,10 +4,9 @@
 //! texel's color word, 4 bytes) in rows `align(4 w, 16)` bytes apart and its alpha plane (a byte
 //! a texel) in rows `align(w, 16)` bytes apart: what a shader, `getBytes` and `replaceRegion`
 //! read and write. Metal's blits address both planes as if their rows were
-//! `⌊4 w / 16⌋ · 16` bytes apart ([`PlaneRows::blit`]; measured on an Apple M4, EV
-//! XRR2-pitch4-m4, every width from 1 to 21 and 23 to 257 sampled). A copy of `sw x sh` texels
-//! from `(sx, sy)` of a source to `(dx, dy)` of a destination moves, for each row `r < sh` and
-//! column `c < sw`:
+//! `⌊4 w / 16⌋ · 16` bytes apart ([`PlaneRows::blit`]; measured on an Apple M4, every width from 1
+//! to 21 and 23 to 257 sampled). A copy of `sw x sh` texels from `(sx, sy)` of a source to
+//! `(dx, dy)` of a destination moves, for each row `r < sh` and column `c < sw`:
 //!
 //! - the 4 color bytes at `(dy + r) · Bd + 4 (dx + c)` of the destination's plane 0 from
 //!   `(sy + r) · Bs + 4 (sx + c)` of the source's;

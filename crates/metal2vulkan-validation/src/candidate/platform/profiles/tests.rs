@@ -819,7 +819,7 @@ fn a_run_on_the_m4_at_the_m3_max_venue_stops_on_its_name_alone() {
 /// requirements document omits what its profile does not require; the layer then reports the
 /// device's own value for a member it omits (of a structure the context queries) and a feature it
 /// omits as absent, where the product reads the version's guarantee (or none) and a feature the
-/// version requires as present. EV COV-legs2-nvidia ran the RTX 5080 restricted to
+/// version requires as present. Our probe ran the RTX 5080 restricted to
 /// `lunarg-desktop-baseline-2023` as extracted (none of its stated members beyond the device): the
 /// context refused all four runs, in exactly these six members. The document lists
 /// `VK_EXT_subgroup_size_control` and `VK_EXT_vertex_attribute_divisor` but states none of their
@@ -1153,8 +1153,8 @@ fn layer_report(restriction: &ProfileRestriction, capture: &Value, minor: u32) -
     device.insert("features".into(), Value::Object(omitted_features));
     device.insert("properties".into(), Value::Object(omitted_properties));
     // The layer keeps one block's entry of a format, the last of the profile's blocks that states
-    // it, where the product's reader takes the union of every block's flags (EV COV-roadmap-cpu:
-    // `roadmap-2022`'s storage-only conditional entries replaced its required ones).
+    // it, where the product's reader takes the union of every block's flags (`roadmap-2022`'s
+    // storage-only conditional entries replaced its required ones).
     let mut formats = serde_json::Map::new();
     for block in profile_blocks(&document) {
         for (format, entry) in block["formats"].as_object().into_iter().flatten() {
@@ -1206,9 +1206,9 @@ fn presented(
 /// own version (the context a restricted run of it opens): modelled from each venue's capture, the
 /// layer's report of it passes the restricted context's check. The model is the evidence's: for
 /// `lunarg-desktop-baseline-2023` as extracted it gives exactly the six members the RTX 5080's
-/// context reported (EV COV-legs2-nvidia), and the completed one matched on RADV, ANV, and the RTX
-/// 5080 (EVs COV-lunarg-*). `roadmap-2022` as extracted omits the core members the product reads
-/// that the layer then reports at each device's value; completed, it omits none.
+/// context reported, and the completed one matched on RADV, ANV, and the RTX 5080. `roadmap-2022`
+/// as extracted omits the core members the product reads that the layer then reports at each
+/// device's value; completed, it omits none.
 #[test]
 fn a_completed_requirements_document_presents_as_the_product_reads_it_on_every_venue() {
     let venues = crate::c3::Venues::load(&crate::c3::Venues::committed_path()).unwrap();

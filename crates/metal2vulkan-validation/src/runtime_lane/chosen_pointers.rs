@@ -1,6 +1,6 @@
 //! Function pointers chosen at run time on the device the cfg selects: a kernel calls through a
-//! pointer among functions' addresses as Metal's does (EVs FPC-fx1-m4, an M4 on macOS 27.0.1, and
-//! FPC-fx1-m3, an M3 Max on 26.7, which ran the owned fixtures' own AIR).
+//! pointer among functions' addresses as Metal's does (an M4 on macOS 27.0.1, and an M3 Max on
+//! 26.7, which ran the owned fixtures' own AIR).
 //!
 //! The kernels are the owned `fpc_chosen_pointers` fixture's. Each writes word `tid` of buffer 0
 //! over 40 threads in one threadgroup: through a select of two addresses, a phi of three, a
@@ -197,7 +197,7 @@ fn pointers_chosen_at_run_time_call_the_functions_they_hold() {
 
 /// A pointer converted to a 64-bit integer, written to device memory, read back by the
 /// neighbouring thread and converted back calls its function. The bits are each function's own,
-/// the same in every thread; Metal's are its pipeline's and vary between pipelines (FPC-probe2),
+/// the same in every thread; Metal's are its pipeline's and vary between pipelines,
 /// so only that is compared.
 #[test]
 fn a_pointer_through_an_integer_calls_its_function() {
@@ -275,7 +275,7 @@ fn recursed(odd: bool, n: u32) -> u32 {
 }
 
 /// Recursion through pointers each function chooses between the two reaches depth `2k - 1` at
-/// `maxCallStackDepth` `k`, as plain Metal's does (FPC-probe1b, FPC-fx1): thread `t` runs depth
+/// `maxCallStackDepth` `k`, as plain Metal's does: thread `t` runs depth
 /// `t / 2`, up to that reach, through `fpc_rec_odd` for odd `t`.
 #[test]
 fn recursion_through_chosen_pointers_reaches_metal_s_depth() {
@@ -299,7 +299,7 @@ fn recursion_through_chosen_pointers_reaches_metal_s_depth() {
 }
 
 /// A visible function whose address a kernel takes and the pipeline does not link refuses the
-/// state, as Metal refuses it ("unresolved visible function reference", FPC-probe2).
+/// state, as Metal refuses it ("unresolved visible function reference").
 #[test]
 fn an_unlinked_function_s_address_refuses_the_state() {
     on_device(|device| {

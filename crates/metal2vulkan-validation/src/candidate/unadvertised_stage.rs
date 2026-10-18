@@ -25,7 +25,7 @@
 pub(crate) const ID_NAME: &str = "VUID-RuntimeSpirv-None-06343";
 
 /// What the message says of a vertex module: at `vkCreateShaderModule` the stages of the
-/// module's entry points, bracketed (as the lanes saw it on MoltenVK, EV GSM2-vl-mvk4); at
+/// module's entry points, bracketed (as the lanes saw it on MoltenVK); at
 /// pipeline creation the stage alone.
 const VERTEX: [&str; 2] = [
     " is used in [VK_SHADER_STAGE_VERTEX_BIT] which is not supported in subgroupSupportedStages (",
@@ -42,8 +42,8 @@ pub(crate) fn shape(id_name: &str, text: &str) -> bool {
 mod tests {
     use super::*;
 
-    /// The message as the layer gave it for a vertex module on MoltenVK 1.4.1 (EV GSM2-vl-mvk4,
-    /// layer 1.4.357), of the stages `stages`.
+    /// The message as the layer gave it for a vertex module on MoltenVK 1.4.1 (layer 1.4.357), of
+    /// the stages `stages`.
     fn seen(stages: &str) -> String {
         format!(
             "vkCreateShaderModule(): OpGroupNonUniformIAdd is used in {stages} which is not \

@@ -640,8 +640,8 @@ pub fn refuse_int64_interface(e: &Entry, ty: AirTypeId) -> Result<(), Error> {
 
 /// Refuse a `bfloat` scalar or vector of AIR type `ty` as a fragment function's color output of
 /// entry `e`. Apple's Metal compiler rejects such a return type ("invalid return type 'bfloat4'
-/// (vector of 4 'bfloat' values) for fragment function": an Apple M4 under macOS 27.0.1, EV
-/// FPV-pf5-m4, into `R16Float`, `RG16Float`, `RGBA16Float` and the three bfloat formats alike),
+/// (vector of 4 'bfloat' values) for fragment function": an Apple M4 under macOS 27.0.1, into
+/// `R16Float`, `RG16Float`, `RGBA16Float` and the three bfloat formats alike),
 /// so no fragment function it compiles writes one: `InvalidInput` (`Abi(RoleTypeMismatch)`) on
 /// every profile, as [`refuse_int64_interface`]. What Metal's runtime does with AIR made another
 /// way is not measured.

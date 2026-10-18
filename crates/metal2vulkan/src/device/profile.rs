@@ -1236,10 +1236,10 @@ pub enum DriverWorkaround {
     /// or `SClamp`) of a sum or difference of two values sign-extended from `N` bits: the
     /// result comes out sign-extended. Measured on the GeForce RTX 3090 (`deviceID` 0x2204,
     /// Ampere GA102) under NVIDIA's 615.71.09 (`VK_DRIVER_ID_NVIDIA_PROPRIETARY`), by
-    /// the bare-Vulkan probes WRG-0d-probe-3090 and WRG-0d-probe2-3090: at `N` = 16 and 8, scalar
-    /// and three lanes, every such program answered sign-extended, while `OpBitFieldUExtract(x, 0,
-    /// N)` in place of the mask answered right; the RTX 5080 (Blackwell) on the same release
-    /// answered every program right. Derived for NVIDIA's driver on the 3090's generation, GA10x
+    /// our bare-Vulkan probes: at `N` = 16 and 8, scalar and three lanes, every such program
+    /// answered sign-extended, while `OpBitFieldUExtract(x, 0, N)` in place of the mask answered
+    /// right; the RTX 5080 (Blackwell) on the same release answered every program right. Derived
+    /// for NVIDIA's driver on the 3090's generation, GA10x
     /// ([`NVIDIA_AMPERE_GA10X`](crate::device::NVIDIA_AMPERE_GA10X)), which its compiler
     /// targets alike. Every narrow integer's mask in a 32-bit container is
     /// emitted as `OpBitFieldUExtract(x, 0, N)` there (`lower::arith::ops::mask`), which is the
@@ -1263,7 +1263,7 @@ pub enum DriverWorkaround {
     /// `[[barycentric_coord, center_no_perspective]]`. MoltenVK (`VK_DRIVER_ID_MOLTENVK`)
     /// 1.4.1 converts the shader with SPIRV-Cross `adec7acb`, which throws "Cannot declare both
     /// BaryCoordNV and BaryCoordNoPerspNV in same shader in MSL." whatever the GPU (measured on
-    /// an Apple M4: `corpus-pipeline --fixtures` on `moltenvk-m4`, EV MLO-mvk1). It is keyed on
+    /// an Apple M4: `corpus-pipeline --fixtures` on `moltenvk-m4`). It is keyed on
     /// the driver's release (`device::driver_facts`): a newer release keeps it until a
     /// measurement says otherwise. Such a fragment function is refused there
     /// (`lower::stage_io`'s input builtins); one form alone compiles.
@@ -1273,35 +1273,34 @@ pub enum DriverWorkaround {
     /// `SampleMask`: Metal runs a fragment function that writes memory once per covered sample, and
     /// MoltenVK (`VK_DRIVER_ID_MOLTENVK`) on an Apple GPU (`vendor_id` 0x106B) hands Metal such a
     /// shader as such a function. Measured on the Apple M3 Max (macOS 26.7) and the M4 (27.0.1),
-    /// MoltenVK 1.4.1 (EVs VSM-cov-m3, VSM-covmvk-m4): the loop over the covered samples ran each
-    /// pass once per covered sample of each covered sample, at 2 and 4 samples, in both legs. It is
-    /// keyed on the driver's release and Apple's vendor ID (`device::driver_facts`): a newer
-    /// release keeps it until a measurement says otherwise. There a function that reads
-    /// `[[sample_mask]]` and writes memory runs as written, without the loop and without sample
-    /// shading (`CoverageLoop::DriverRunsPerSample`, `lower::fragment::coverage`); one that reads
-    /// `[[position]]` beside its sample index or a sample-qualified varying is refused as this
-    /// defect at more than one sample, as SPIRV-Cross then masks the coverage with
-    /// `1 << gl_SampleID`.
+    /// MoltenVK 1.4.1: the loop over the covered samples ran each pass once per covered sample of
+    /// each covered sample, at 2 and 4 samples, in both legs. It is keyed on the driver's release
+    /// and Apple's vendor ID (`device::driver_facts`): a newer release keeps it until a measurement
+    /// says otherwise. There a function that reads `[[sample_mask]]` and writes memory runs as
+    /// written, without the loop and without sample shading (`CoverageLoop::DriverRunsPerSample`,
+    /// `lower::fragment::coverage`); one that reads `[[position]]` beside its sample index or a
+    /// sample-qualified varying is refused as this defect at more than one sample, as SPIRV-Cross
+    /// then masks the coverage with `1 << gl_SampleID`.
     MemoryWritingFragmentsRunPerSample,
     /// The driver's `InterpolateAtSample`, and its `InterpolateAtOffset` at an offset other than
     /// (0, 0), read values that are not the input's in control flow that some invocations of the
     /// quad have left, as the helper invocations of a partly covered quad leave a loop over their
     /// coverage, which is empty. Measured on RADV (`VK_DRIVER_ID_MESA_RADV`), Mesa 26.0.8 and
-    /// 26.2.4, on the Radeon 780M with a bare Vulkan program (EVs VSM-radvrepro2-mesa260 and
-    /// VSM-radvrepro2-radv): in a 1x1 framebuffer, whose quad holds three helpers, a computed or a
-    /// constant sample index, or a nonzero offset, inside such a loop or branch read garbage, with
-    /// or without sample shading, while the same reads in control flow the whole quad runs, or in a
-    /// quad of four covered pixels, read the sample's position; an offset of (0, 0) reads the
-    /// center inside the branch too. It is keyed on the driver's release (`device::driver_facts`).
-    /// There the loop over the covered samples reads each sample-qualified varying at every sample
-    /// a pipeline of the device may have before the loop, where the whole quad runs, and each
-    /// pass reads its sample's value (`lower::fragment::coverage`).
+    /// 26.2.4, on the Radeon 780M with a bare Vulkan program: in a 1x1 framebuffer, whose quad
+    /// holds three helpers, a computed or a constant sample index, or a nonzero offset, inside such
+    /// a loop or branch read garbage, with or without sample shading, while the same reads in
+    /// control flow the whole quad runs, or in a quad of four covered pixels, read the sample's
+    /// position; an offset of (0, 0) reads the center inside the branch too. It is keyed on the
+    /// driver's release (`device::driver_facts`). There the loop over the covered samples reads
+    /// each sample-qualified varying at every sample a pipeline of the device may have before the
+    /// loop, where the whole quad runs, and each pass reads its sample's value
+    /// (`lower::fragment::coverage`).
     InterpolationNeedsTheWholeQuad,
     /// The driver reads a mesh shader's store into one component of a vector output (an
     /// `OpAccessChain` to a component of `PrimitiveLineIndicesEXT` or
     /// `PrimitiveTriangleIndicesEXT`) as a store into a later output slot, so the primitive keeps
     /// none of the index and another output takes it. Measured on lavapipe
-    /// (`VK_DRIVER_ID_MESA_LLVMPIPE`), Mesa 26.0.8, x86 (the Linux gate's; EV MESH-lane1-lvpx86):
+    /// (`VK_DRIVER_ID_MESA_LLVMPIPE`), Mesa 26.0.8, x86 (the Linux gate's):
     /// every triangle a mesh function wrote one index at a time (`set_index`) drew nothing, and
     /// RADV and NVIDIA drew every one. Mesa's source names the cause and its fix in 26.2.0
     /// ("lavapipe: lower array-deref-of-vec for mesh shader outputs", f5e42331). It is keyed on
@@ -1316,29 +1315,29 @@ pub enum DriverWorkaround {
     /// and the next iteration reads the inserted element where the module reads the original.
     /// MoltenVK (`VK_DRIVER_ID_MOLTENVK`) 1.4.1 converts with SPIRV-Cross `adec7acb`, whose MSL
     /// backend does this whatever the GPU (its `OpCompositeInsert` case, `can_modify_in_place`):
-    /// measured on the Apple M3 Max and the M4 (EVs RVC-v2-mvk and RVC-v2-mvkm4, the dumped MSL
-    /// of EV RVC-v2d-mvkm4: `_174.x = (_332 + _207) + _174.x;` in the loop), where three
-    /// authored cases whose loop builds each iteration's coordinate from one vector wrote their
-    /// second iteration at `32 + 2 * lane` instead of `32 + lane`. It is keyed on the driver's
-    /// release (`device::driver_facts`): a newer release keeps it until a measurement says
-    /// otherwise. There the serializer inserts into a copy made where the insert stands when the
-    /// composite is defined outside the innermost loop holding the insert
-    /// (`spirv::serialize::serialize_for`), which SPIRV-Cross declares in the loop.
+    /// measured on the Apple M3 Max and the M4 (the dumped MSL of our probe: `_174.x =
+    /// (_332 + _207) + _174.x;` in the loop), where three authored cases whose loop builds each
+    /// iteration's coordinate from one vector wrote their second iteration at `32 + 2 * lane`
+    /// instead of `32 + lane`. It is keyed on the driver's release (`device::driver_facts`): a
+    /// newer release keeps it until a measurement says otherwise. There the serializer inserts into
+    /// a copy made where the insert stands when the composite is defined outside the innermost loop
+    /// holding the insert (`spirv::serialize::serialize_for`), which SPIRV-Cross declares in the
+    /// loop.
     CompositeInsertsWrittenInPlace,
     /// The driver's shader converter writes every function the module defines as one to inline
     /// at each call (`static inline __attribute__((always_inline))`), whatever its function
     /// control, so the GPU's compiler compiles a routine's body once per call. MoltenVK
     /// (`VK_DRIVER_ID_MOLTENVK`) 1.4.1 converts with SPIRV-Cross `adec7acb`, whose MSL backend
-    /// does this whatever the GPU: measured on the Apple M3 Max and the M4 (EVs UNM-cc2-m3 and
-    /// UNM-cc2-m4, about half of corpus row `69a35b6f`'s compile; EV UNM-scdi-m3, a synthetic
-    /// routine called 300 times compiled in 0.54 to 0.58 s against 0.11 to 0.13 s as calls).
-    /// It is keyed on the driver's release (`device::driver_facts`). There each routine
-    /// (`spirv::builder::ModuleBuilder::routine`: the math routines, and the texel conversions, the
-    /// filters' sums and the cube's face fold) is declared `DontInline`, the standard SPIR-V
-    /// statement that its calls stay calls, for a converter that honours it; elsewhere a routine
-    /// takes no function control, since NVIDIA's 615.71.09 honours `DontInline` and ran a
-    /// routine-heavy kernel 8.1 times as long with it on the RTX 3090 (EV UNM-gt2-nv3090), and
-    /// Mesa's drivers inline every function whatever the control. It changes no answer.
+    /// does this whatever the GPU: measured on the Apple M3 Max and the M4 (about half of corpus
+    /// row `69a35b6f`'s compile; a synthetic routine called 300 times compiled in 0.54 to 0.58 s
+    /// against 0.11 to 0.13 s as calls). It is keyed on the driver's release
+    /// (`device::driver_facts`). There each routine (`spirv::builder::ModuleBuilder::routine`: the
+    /// math routines, and the texel conversions, the filters' sums and the cube's face fold) is
+    /// declared `DontInline`, the standard SPIR-V statement that its calls stay calls, for a
+    /// converter that honours it; elsewhere a routine takes no function control, since NVIDIA's
+    /// 615.71.09 honours `DontInline` and ran a routine-heavy kernel 8.1 times as long with it on
+    /// the RTX 3090, and Mesa's drivers inline every function whatever the control. It changes no
+    /// answer.
     FunctionsInlinedAtEveryCall,
     /// The driver's shader converter writes a value loaded before a loop into the text of each
     /// instruction in the loop that reads it, so the loop reads that memory again on every
@@ -1362,62 +1361,59 @@ pub enum DriverWorkaround {
     /// declares those variables in the entry point and so leaves them out of the variables whose
     /// forwarded loads an atomic or a call invalidates (a plain store invalidates its own
     /// variable's), whatever the GPU: measured on authored case `8b812530` on the Apple M3 Max
-    /// and the M4 (EVs RVC-v4-mvk, RVC-v4-mvkm4; EV RVC-scmsl-m4 logged its MSL, which reads a
-    /// threadgroup counter after the sub-word store's atomics that overwrite it), and in the MSL
-    /// the `spirv-cross` CLI writes for synthetic modules of our own, where GLSL and a device
-    /// buffer are written right. It is keyed on the driver's release (`device::driver_facts`): a
-    /// newer release keeps it until a measurement says otherwise. There the serializer
-    /// materializes each load from such a variable in a function holding such a write, where it
-    /// is defined (`spirv::serialize::serialize_for`), which SPIRV-Cross declares there.
+    /// and the M4 (our probe logged its MSL, which reads a threadgroup counter after the
+    /// sub-word store's atomics that overwrite it), and in the MSL the `spirv-cross` CLI writes for
+    /// synthetic modules of our own, where GLSL and a device buffer are written right. It is keyed
+    /// on the driver's release (`device::driver_facts`): a newer release keeps it until a
+    /// measurement says otherwise. There the serializer materializes each load from such a variable
+    /// in a function holding such a write, where it is defined (`spirv::serialize::serialize_for`),
+    /// which SPIRV-Cross declares there.
     LocalizedLoadsForwardedPastAtomicsAndCalls,
     /// The driver groups a draw's vertices into subgroups otherwise than Apple's GPUs group them
     /// into simdgroups: ANV (`VK_DRIVER_ID_INTEL_OPEN_SOURCE_MESA`) on Mesa 26.2.4 ran the
     /// vertex fixtures `rvc_simd_vertex` and `rvc_simd_vertex_fill` (forty points) in subgroups
     /// of 8 vertices, interleaved (vertices 0, 2, ..., 14 in one, 1, 3, ..., 15 in another),
     /// where the Apple M4 fills a simdgroup with 32 consecutive vertices and RADV and NVIDIA ran
-    /// them as the M4 does (EVs RVC-vx-anv, RVC-vx-radv, RVC-vx-nv5080). Each such subgroup is a
-    /// Metal simdgroup of 8 active lanes, which Metal's API allows, since it does not fix which
-    /// vertices share one. It is keyed on the driver's release (`device::driver_facts`): a newer
-    /// release keeps it until a measurement says otherwise. Where the vertex stage also takes no
-    /// required subgroup size, a vertex function that runs a simdgroup or quad operation records
-    /// `PrecisionNote::VertexSimdgroupGrouping` (`lower::simd::finish`); no exact path exists.
+    /// them as the M4 does. Each such subgroup is a Metal simdgroup of 8 active lanes, which
+    /// Metal's API allows, since it does not fix which vertices share one. It is keyed on the
+    /// driver's release (`device::driver_facts`): a newer release keeps it until a measurement says
+    /// otherwise. Where the vertex stage also takes no required subgroup size, a vertex function
+    /// that runs a simdgroup or quad operation records `PrecisionNote::VertexSimdgroupGrouping`
+    /// (`lower::simd::finish`); no exact path exists.
     VertexGroupingNotApples,
     /// The driver reads a uniform buffer at its lanes' different addresses faster than a
     /// storage buffer. Measured with a fragment function's sRGB color writes, whose lanes read
-    /// the color table at their own channel's byte (EVs RRS2-ccost4-*): ANV
-    /// (`VK_DRIVER_ID_INTEL_OPEN_SOURCE_MESA`) on the UHD 770 of RPL-S and the Iris Xe of RPL-P
-    /// drew them in up to 1.5 and 4.0 times the time from a storage buffer as from a uniform
-    /// buffer, and lavapipe (`VK_DRIVER_ID_MESA_LLVMPIPE`) on 128-bit vectors (`subgroupSize`
-    /// 4, an arm64 host) in up to 1.3 times; NVIDIA's driver (the RTX 3090, the RTX 5080 Laptop
-    /// GPU) drew them in 3.5 to 8.6 times the time from the uniform buffer, lavapipe on 256-bit
-    /// vectors (`subgroupSize` 8, x86_64) in up to 1.5 times, and RADV in the same time from
-    /// either. Keyed on ANV whatever its GPU, and on lavapipe at `subgroupSize` 4. There the
-    /// color table lives in a uniform buffer (`lower::arith::srgb::ColorTable`). It changes no
-    /// answer.
+    /// the color table at their own channel's byte: ANV (`VK_DRIVER_ID_INTEL_OPEN_SOURCE_MESA`) on
+    /// the UHD 770 of RPL-S and the Iris Xe of RPL-P drew them in up to 1.5 and 4.0 times the time
+    /// from a storage buffer as from a uniform buffer, and lavapipe (`VK_DRIVER_ID_MESA_LLVMPIPE`)
+    /// on 128-bit vectors (`subgroupSize` 4, an arm64 host) in up to 1.3 times; NVIDIA's driver
+    /// (the RTX 3090, the RTX 5080 Laptop GPU) drew them in 3.5 to 8.6 times the time from the
+    /// uniform buffer, lavapipe on 256-bit vectors (`subgroupSize` 8, x86_64) in up to 1.5 times,
+    /// and RADV in the same time from either. Keyed on ANV whatever its GPU, and on lavapipe at
+    /// `subgroupSize` 4. There the color table lives in a uniform buffer
+    /// (`lower::arith::srgb::ColorTable`). It changes no answer.
     UniformReadsOutpaceStorageReads,
     /// The GPU's compiler drops the texture writes of every live thread of a simdgroup that
     /// holds a discarded thread, where the fragment function discards (`discard_fragment()`),
     /// then writes a texture, samples a texture bound through an argument buffer, and calls a
     /// `[[clang::optnone]]` function in a branch only discarded threads enter. Measured in plain
-    /// Metal on an Apple M4 (macOS 27.0.1, probes, EVs DSX-rog1-m4 to DSX-rog6b-m4 and
-    /// DSX-apple1-m4): the MSL MoltenVK wrote for a storage-form fragment of our own, which
-    /// discards twice, samples a noise texture and writes its color attachment's storage image,
-    /// lost the writes in whole 8-by-4-pixel blocks along its discarded pixels, three runs alike,
-    /// with or without the raster order group, the fence, or the helper guard on the write;
-    /// without the sample, with
-    /// the `optnone` call plain, in straight-line code or in a branch live threads enter too,
-    /// with the sampled texture bound directly, or with the discard recorded and taken after the
-    /// write, every write landed, and color outputs landed in every form. MoltenVK
-    /// (`VK_DRIVER_ID_MOLTENVK`) on an Apple GPU (`vendor_id` 0x106B) binds through argument
-    /// buffers and writes both a demote and a terminate as `discard_fragment()`, and an `OpFAdd`
-    /// decorated `NoContraction` as its `optnone` `spvFAdd`, so it has the defect. There a
-    /// fragment function that writes storage after such a discard predicates it and is killed
-    /// past those writes (`lower::fragment::discard`).
+    /// Metal on an Apple M4 (macOS 27.0.1, probes): the MSL MoltenVK wrote for a storage-form
+    /// fragment of our own, which discards twice, samples a noise texture and writes its color
+    /// attachment's storage image, lost the writes in whole 8-by-4-pixel blocks along its discarded
+    /// pixels, three runs alike, with or without the raster order group, the fence, or the helper
+    /// guard on the write; without the sample, with the `optnone` call plain, in straight-line code
+    /// or in a branch live threads enter too, with the sampled texture bound directly, or with the
+    /// discard recorded and taken after the write, every write landed, and color outputs landed in
+    /// every form. MoltenVK (`VK_DRIVER_ID_MOLTENVK`) on an Apple GPU (`vendor_id` 0x106B) binds
+    /// through argument buffers and writes both a demote and a terminate as `discard_fragment()`,
+    /// and an `OpFAdd` decorated `NoContraction` as its `optnone` `spvFAdd`, so it has the defect.
+    /// There a fragment function that writes storage after such a discard predicates it and is
+    /// killed past those writes (`lower::fragment::discard`).
     ///
     /// The defect needs no discard: the quad helpers past a primitive's right and bottom edges are
     /// threads only of their own branch too. Without any discard, the same fragment lost 1,040 to
     /// 1,063 of its 2,584 texels a run in 98 or 99 blocks where only those helpers took the branch
-    /// with the `optnone` call (the EV DSX-rog8-m4). There the selections whose arms hold such a
+    /// with the `optnone` call (the probe). There the selections whose arms hold such a
     /// call before a storage write send their helper invocations to another arm where that is exact
     /// (`spirv::helper_branches`).
     DiscardDropsSimdgroupStores,
@@ -1426,15 +1422,24 @@ pub enum DriverWorkaround {
     /// call and compiles each copy. A measured cost, not a defect: NVIDIA's
     /// (`VK_DRIVER_ID_NVIDIA_PROPRIETARY`) 615.71.09 on the RTX 3090 created a fragment of 256
     /// calls of one sample emulation in 0.39 to 0.40 s with the routine `DontInline` and in 10.1
+    /// to 10.2 s without (a probe, two rounds, shader caches off), and drew it in 15.2 against 10.3
+    /// ms; and its creation of the linear sums kept as calls fell from tens of seconds; the RTX
     /// 5080 Laptop GPU's, its measurement in `device::driver_facts`. Mesa's drivers inline every
+    /// function whatever its control, so the control changes nothing there, and MoltenVK states it
+    /// on every routine already (`FunctionsInlinedAtEveryCall`). It is keyed on the driver's
+    /// release (`device::driver_facts`) and on the GPU measured with it alone, as every cost fact
+    /// is: a release or a GPU not measured takes no control, the default, whose code and answers
+    /// are the same. There each sampling routine
+    /// (`spirv::builder::ModuleBuilder::sampling_routine`) is declared `DontInline`
+    /// (`spirv::serialize::serialize_for`). It changes no answer, only the
     /// making's and the draw's time.
     DontInlineKeepsCalls,
     /// The device's rasterizer does not split a primitive it clips as Apple's does: Apple's GPU
     /// draws a triangle that extends past the viewport as pieces whose shared edges cross pixels,
     /// and such a pixel's fragments can run once per piece, each reading that piece's coverage as
-    /// `[[sample_mask]]` (EVs VSM-metal-cov1/-cov2/-cov3 on an M3 Max and an M4), where a Vulkan
-    /// rasterizer hands the pixel's one fragment its coverage by the whole primitive (and lavapipe
-    /// splits along its own seams, `ClippedTrianglesSplitPixelFragments`). Vulkan states no split,
+    /// `[[sample_mask]]` (on an M3 Max and an M4), where a Vulkan rasterizer hands the pixel's one
+    /// fragment its coverage by the whole primitive (and lavapipe splits along its own seams,
+    /// `ClippedTrianglesSplitPixelFragments`). Vulkan states no split,
     /// and no Vulkan mechanism follows Apple's clipper, so this is the device's answer, not a
     /// defect. Every driver has it but MoltenVK (`VK_DRIVER_ID_MOLTENVK`) on an Apple GPU
     /// (`vendor_id` 0x106B), which draws through Metal and splits as Metal does. A fragment

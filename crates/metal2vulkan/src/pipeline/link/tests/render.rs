@@ -119,7 +119,7 @@ fn a_rounded_one_zero_blend_takes_no_vulkan_blend() {
 /// A blend of one and zero, added, of a 16-bit float attachment the fragment function rounds, from
 /// a module without fast math (`StageIo::half_blend_colors` for a `half` output,
 /// `StageIo::float_blend_colors` for a `float` one), takes the Vulkan blend: Metal keeps the
-/// destination's product by zero there (EV FBL-zf1-m3), which no write of the output stores, and
+/// destination's product by zero there, which no write of the output stores, and
 /// the pipeline records `HalfOutputPrecision`. Of a module that lists the attachment in neither
 /// set, or into `RGBA8Unorm`, it takes none and records nothing.
 #[test]
@@ -2512,8 +2512,8 @@ fn multisampled_fragment_invocations_follow_metals_measured_rules() {
 
 /// Lavapipe rasterizes a triangle it clips as several, so at more than one sample a pixel-rate
 /// fragment runs once per piece in a pixel on their shared edge, with that piece's coverage.
-/// Measured with a bare Vulkan program (EVs MSFF-probe2, MSFF-probe3): `SampleMask` holds part of
-/// the pixel's samples and a `Centroid` input moves to the first covered sample; a center input
+/// Measured with a bare Vulkan program: `SampleMask` holds part of the pixel's samples and a
+/// `Centroid` input moves to the first covered sample; a center input
 /// stays at the pixel center. So every committed profile whose driver is lavapipe, and only those,
 /// carries the defect, and link refuses there exactly a multisampled pixel-rate function that reads
 /// `[[sample_mask]]` or a centroid varying, naming the defect; at one sample, and with a center or

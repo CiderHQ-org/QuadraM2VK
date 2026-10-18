@@ -4,28 +4,27 @@
 //!
 //! - A 4:2:2 texture (`GBGR422`, `BGRG422`) answers its rows of 2-byte texels at a multiple of
 //!   16 bytes, the last unpadded, at an alignment of 16, as Metal does (an M4 under macOS
-//!   27.0.1, EV `APX-fmt1-m4`: 44 bytes for 6 x 3, 148 for 10 x 5, 6000 for 1000 x 3; an M3 Max
-//!   under 26.7 alike, the consumer's report), and its texels lie in a `Shared` heap's bytes
-//!   where Metal's do: a buffer over them reads each row at that pitch, the bytes between
-//!   untouched. An `X32_Stencil8` texture answers what a `Stencil8` texture of the descriptor
-//!   answers, as Metal sizes it (the M4, in every shape measured); `Unspecialized` answers 0
-//!   bytes at its texture type's alignment (128 for 1D and 2D, 16 for a texture buffer, 16 KiB
-//!   for the arrays, cubes and 3D textures: the M3 Max under macOS 26.7, EV `APX2-un2-m3`), and
-//!   its texture is refused as Metal's nil (`Error::Nil`, `TextureProblem::Unspecialized`); one of a
-//!   multisample type or of `ShaderAtomic` usage as Metal stops it, plain too (EV `APX2-un1-m4`).
+//!   27.0.1: 44 bytes for 6 x 3, 148 for 10 x 5, 6000 for 1000 x 3; an M3 Max under 26.7 alike, the
+//!   consumer's report), and its texels lie in a `Shared` heap's bytes where Metal's do: a buffer
+//!   over them reads each row at that pitch, the bytes between untouched. An `X32_Stencil8` texture
+//!   answers what a `Stencil8` texture of the descriptor answers, as Metal sizes it (the M4, in
+//!   every shape measured); `Unspecialized` answers 0 bytes at its texture type's alignment (128
+//!   for 1D and 2D, 16 for a texture buffer, 16 KiB for the arrays, cubes and 3D textures: the M3
+//!   Max under macOS 26.7), and its texture is refused as Metal's nil (`Error::Nil`,
+//!   `TextureProblem::Unspecialized`); one of a multisample type or of `ShaderAtomic` usage as
+//!   Metal stops it, plain too.
 //! - A two-plane extended-range texture (`RGB10A8_2P_XR10` and its sRGB twin) answers Metal's
-//!   size and alignment in every texture type Metal makes (an M4 under macOS 27.0.1, EVs
-//!   `APX2-xr1-m4`, `APX2-xr2-m4`: 20480 at 16 for 64 x 64, its first level and slice alone for
-//!   a mipmapped or 3D one, 128 for a 2D array), and a cube or cube array 0 bytes at 16 and no
-//!   texture: Metal's nil from the device (`Error::Nil`), and from a placement heap, where Metal
-//!   makes one (EV TTG-nil4-m4), a refusal as not implemented.
-//! - Apple's private usage bits (EV `APX2-spi1-m4`, an M4 under macOS 27.0.1, plain and validated):
-//!   a texture made with `NoConcurrentAccess` (0x4000), `Video` (0x8000) and `BlockWritesOnly`
-//!   (0x10000) by the device, a heap, a buffer or as a shared texture answers them in its usage, as
-//!   its views and shared opens do, and its heap answer is the one without them; usage bit 0x8 is
-//!   taken and dropped from the texture's usage (a texture of it alone answers none, EV
-//!   `API-usage8-m4`), while the heap answer of a descriptor of it alone is a usage's, not
-//!   `Unknown`'s (EV `API-hsa1-m4`).
+//!   size and alignment in every texture type Metal makes (an M4 under macOS 27.0.1: 20480 at 16
+//!   for 64 x 64, its first level and slice alone for a mipmapped or 3D one, 128 for a 2D array),
+//!   and a cube or cube array 0 bytes at 16 and no texture: Metal's nil from the device
+//!   (`Error::Nil`), and from a placement heap, where Metal makes one, a refusal as not
+//!   implemented.
+//! - Apple's private usage bits (an M4 under macOS 27.0.1, plain and validated): a texture made
+//!   with `NoConcurrentAccess` (0x4000), `Video` (0x8000) and `BlockWritesOnly` (0x10000) by the
+//!   device, a heap, a buffer or as a shared texture answers them in its usage, as its views and
+//!   shared opens do, and its heap answer is the one without them; usage bit 0x8 is taken and
+//!   dropped from the texture's usage (a texture of it alone answers none), while the heap answer
+//!   of a descriptor of it alone is a usage's, not `Unknown`'s.
 //! - Two such textures placed side by side at the answers in a placement heap keep their own
 //!   texels on every device: each blitted from a buffer, both read back after. Where the
 //!   device's image needs more than Metal's answer, the runtime holds the texture as a shadow of
@@ -46,8 +45,7 @@ use metal2vulkan_runtime::{
 /// The alignment Metal's heap query answers, with 0 bytes, for an array, a cube, a cube array, a 3D
 /// texture or a multisample array of a format it makes no texture of and that has no planes
 /// (`Unspecialized`, `RGBA16Float_XR`, `AnyDepth`, `AnyStencil`), at `device`'s Metal level:
-/// 16 KiB on an Apple M3 Max under macOS 26.7 (EVs APX2-un2-m3, TTG-nil2-m3), 128 under 27.0.1
-/// (EV M27-heap1-m3; an M4 alike, EVs APX2-un1-m4, TTG-nil1-m4, TTG-nil4-m4).
+/// 16 KiB on an Apple M3 Max under macOS 26.7, 128 under 27.0.1 (an M4 alike).
 pub(super) fn stacked_nil_alignment(device: &Device) -> u64 {
     if device.properties().metal_level >= MetalLevel::MacOS27_0_1 {
         128
@@ -166,7 +164,7 @@ fn side_by_side(
 
 /// A 4:2:2 texture of `descriptor` (`Shared`, `extent`) at offset 0 of a placement heap, written
 /// by `replace_region`: a buffer over its `answer` reads each row at a multiple of 16 bytes, the
-/// bytes between untouched, as a buffer over Metal's reads them (EV APX-fmt1-m4).
+/// bytes between untouched, as a buffer over Metal's reads them.
 fn metal_s_rows(
     device: &Device,
     descriptor: &TextureDescriptor,
@@ -221,7 +219,7 @@ fn metal_s_rows(
 #[test]
 fn four_two_two_heap_textures_take_metal_s_size_and_layout() {
     on_device(|device| {
-        // Metal's sizes (EV APX-fmt1-m4).
+        // Metal's sizes.
         let shapes = [
             ([64, 32], 4096),
             ([8, 8], 128),
@@ -289,10 +287,10 @@ fn x32_stencil8_heap_textures_take_a_stencil8_texture_s_size() {
     });
 }
 
-/// A two-plane extended-range texture answers Metal's size and alignment on every device (EVs
-/// APX2-xr1-m4, APX2-xr2-m4), in each storage mode; two side by side keep their color words,
-/// which blits move (`two_planes.rs`); a cube and a cube array answer 0 bytes at 16, and no
-/// texture is made of either, on the device or in a heap.
+/// A two-plane extended-range texture answers Metal's size and alignment on every device, in each
+/// storage mode; two side by side keep their color words, which blits move (`two_planes.rs`); a
+/// cube and a cube array answer 0 bytes at 16, and no texture is made of either, on the device or
+/// in a heap.
 #[test]
 fn two_plane_heap_textures_take_metal_s_size() {
     on_device(|device| {
@@ -366,7 +364,7 @@ fn two_plane_heap_textures_take_metal_s_size() {
                         ResourceOptions::private(),
                     ))
                     .unwrap();
-                // A placement heap's Metal makes, a gap of the runtime's (EV TTG-nil4-m4).
+                // A placement heap's Metal makes, a gap of the runtime's.
                 assert!(
                     matches!(
                         heap.new_texture_at_offset(&d, 0),
@@ -383,8 +381,8 @@ fn two_plane_heap_textures_take_metal_s_size() {
 /// `Unspecialized`: Metal answers 0 bytes from the heap query, at its texture type's alignment
 /// ([`stacked_nil_alignment`] for the arrays, cubes and 3D textures), and nil for the texture, a heap's (automatic and placement) and a
 /// buffer's (`newTextureWithDescriptor:offset:bytesPerRow:` and the linear form), in every storage
-/// mode and usage (EV APX-fmt1-m4); it stops a multisample one and one of `ShaderAtomic` usage,
-/// plain too, in the query and the calls alike (EV APX2-un1-m4).
+/// mode and usage; it stops a multisample one and one of `ShaderAtomic` usage, plain too, in the
+/// query and the calls alike.
 #[test]
 fn unspecialized_answers_metal_s_nothing() {
     on_device(|device| {
@@ -532,7 +530,7 @@ fn unspecialized_answers_metal_s_nothing() {
 /// and then Metal's nil (`Error::Nil`) from the device, either heap, a buffer and its linear
 /// form, a placement heap whose storage is not the descriptor's too; the query answers 0 bytes at
 /// the type's alignment, the M3 Max's at the device's level ([`stacked_nil_alignment`] for the
-/// arrays, cubes and 3D textures; EVs TTG-nil1-m4, TTG-nil2-m3, TTG-nil4-m4, M27-heap1-m3).
+/// arrays, cubes and 3D textures).
 #[test]
 fn formats_without_textures_answer_metal_s_stops_then_its_nil() {
     use TextureType as T;
@@ -674,7 +672,7 @@ fn formats_without_textures_answer_metal_s_stops_then_its_nil() {
                     assert_eq!(answer, stopped(call, past.clone()), "{what} {call}");
                 }
                 // A placement heap whose storage is not the descriptor's answers Metal's nil
-                // first, where it stops a texture of a format (EV TTG-nil1-m4).
+                // first, where it stops a texture of a format.
                 let mut other = of(T::Type2D);
                 other.resource_options = if options == ResourceOptions::private() {
                     ResourceOptions::shared()
@@ -693,8 +691,8 @@ fn formats_without_textures_answer_metal_s_stops_then_its_nil() {
 
 /// A texture of Apple's private `BlockWritesOnly` usage (0x10000) answers what the descriptor
 /// without the bit answers, as Metal does (an M3 Max: a 16x16 `BGRA8Unorm` `Private` texture of
-/// `ShaderRead | RenderTarget | BlockWritesOnly` answers 1152, as without the bit; EV
-/// RRS3-bwo1-m3), in 2D, mipmapped and array shapes, `Private` and `Shared`, though its image
+/// `ShaderRead | RenderTarget | BlockWritesOnly` answers 1152, as without the bit), in 2D,
+/// mipmapped and array shapes, `Private` and `Shared`, though its image
 /// takes the storage usage, which MoltenVK sizes as a `ShaderWrite` texture's. Two such textures
 /// side by side at the answer keep their own texels.
 #[test]
@@ -763,10 +761,9 @@ fn a_block_writes_only_texture_answers_the_size_without_the_bit() {
 
 /// Apple's private usage bits stay in the usage of a texture every creator makes, of its views
 /// and of its shared open, and change no heap answer; 0x8 is dropped from the texture's usage, as
-/// Metal drops it (EV `APX2-spi1-m4`: an M4, plain and validated alike), while the descriptor keeps
-/// it, so a descriptor of 0x8 alone answers the compressed size Metal answers (EV `API-hsa1-m4`),
-/// no smaller than `Unknown`'s, and its texture answers no usage, as Metal's does (EV
-/// `API-usage8-m4`).
+/// Metal drops it (an M4, plain and validated alike), while the descriptor keeps it, so a
+/// descriptor of 0x8 alone answers the compressed size Metal answers, no smaller than `Unknown`'s,
+/// and its texture answers no usage, as Metal's does.
 #[test]
 fn private_usage_bits_stay_as_metal_keeps_them() {
     on_device(|device| {
@@ -827,7 +824,7 @@ fn private_usage_bits_stay_as_metal_keeps_them() {
             let over = buffer.new_texture(&of(described, options), 0, 256).unwrap();
             assert_eq!(over.usage(), usage, "{what}: a buffer's");
             // 0x8 alone: the texture answers no usage, where one of `Unknown` usage answers
-            // `ShaderRead | ShaderWrite | RenderTarget | PixelFormatView` (EV API-usage8-m4), and
+            // `ShaderRead | ShaderWrite | RenderTarget | PixelFormatView`, and
             // the heap query at least the compressed size Metal answers, where `Unknown`'s is
             // Metal's plain size (the same image, so no smaller anywhere).
             let alone = TextureUsage::try_from(0x8).unwrap();
@@ -996,13 +993,13 @@ fn a_heap_size_past_metal_s_is_announced_once() {
 }
 
 /// `Device::metal_heap_texture_size_and_align` answers Metal's own heap size and alignment, the
-/// same on every device, whatever the device's answer: 68 shapes of our probes (the rows of EVs
-/// FPV-hsz1-m4 and FPV-hsz1-m3, an Apple M4 under macOS 27.0.1 and an M3 Max under 26.7, which
-/// answered alike: mipmapped 2D textures that Metal compresses or not, the consumer's boot's two
-/// among them, 2D arrays and cubes, `Shared` ones; and of EV FPV-hsz2-m4, the M4's: 3D textures,
-/// cube arrays, arrays of 6, depth and stencil textures with `allowGPUOptimizedContents` off,
-/// `Depth32Float_Stencil8` ones). The device's own answer, where it makes one, is at least Metal's;
-/// each pair is printed (`METAL-MODEL`), with the count of shapes whose device answer is coarser
+/// same on every device, whatever the device's answer: 68 shapes of our probes (their rows on an
+/// Apple M4 under macOS 27.0.1 and an M3 Max under 26.7, which answered alike: mipmapped 2D
+/// textures that Metal compresses or not, the consumer's boot's two among them, 2D arrays and
+/// cubes, `Shared` ones; and the M4's alone: 3D textures, cube arrays, arrays of 6, depth
+/// and stencil textures with `allowGPUOptimizedContents` off, `Depth32Float_Stencil8` ones). The
+/// device's own answer, where it makes one, is at least Metal's; each pair is printed
+/// (`METAL-MODEL`), with the count of shapes whose device answer is coarser
 /// (every one on NVIDIA). No model answers a PVRTC texture or an 8-sample one (or the device's
 /// rules stop it); a texture buffer and a format plain Metal makes no texture of answer as the size
 /// query does.

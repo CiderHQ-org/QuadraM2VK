@@ -2,19 +2,18 @@
 //! bounds each at 4 ulp), and the growth step they and `powr` share.
 //!
 //! **Metal's `exp2`** ([`exp2`]): what Metal's hardware computes, measured on every `float` operand
-//! of the Apple M4 and on 2^24 of the M3, which answers alike (EVs MATH-sweep1-m4, MATH-sample1-m3,
-//! MATH-sample1-m4). An operand below `2^-23` in magnitude reads as 0, and a NaN gives
-//! `0x7fc00000`. Otherwise `k = floor(x 2^23)` exactly, `n = k >> 23` and `f = k mod 2^23`, and the
-//! answer is `2^n (1 + T(f) 2^-23)`: `+0` where its exponent field would be 0 or below (Metal
-//! flushes a denormal result: `exp2(-127)` is `+0`), `+inf` from 255. `T` is the 23-bit fraction of
-//! a cubic per 32nd of `f`, which [`TABLE`] gives as Horner's rule in fixed point with each product
-//! truncated: it answers Metal's `T` at 8,380,655 of the 2^23 fractions (99.905 %), and its word is
-//! one unit of the last place off at the other 7,953, which no fixed-point form tried reproduces
-//! (an open near-equivalent).
+//! of the Apple M4 and on 2^24 of the M3, which answers alike. An operand below `2^-23` in
+//! magnitude reads as 0, and a NaN gives `0x7fc00000`. Otherwise `k = floor(x 2^23)` exactly,
+//! `n = k >> 23` and `f = k mod 2^23`, and the answer is `2^n (1 + T(f) 2^-23)`: `+0` where its
+//! exponent field would be 0 or below (Metal flushes a denormal result: `exp2(-127)` is `+0`),
+//! `+inf` from 255. `T` is the 23-bit fraction of a cubic per 32nd of `f`, which [`TABLE`] gives as
+//! Horner's rule in fixed point with each product truncated: it answers Metal's `T` at 8,380,655 of
+//! the 2^23 fractions (99.905 %), and its word is one unit of the last place off at the other
+//! 7,953, which no fixed-point form tried reproduces (an open near-equivalent).
 //!
 //! **Metal's precise `exp` and `exp10`** ([`exp_base`]): Metal's own composition of its `exp2`,
 //! measured on every lane of case 7b283404 on the M3 and the M4, and on every operand of
-//! magnitude `[2^-40, 2^9)` whose answer is normal on the M4 (EV MATH-sweep2-m4): `E = exp2(p)`
+//! magnitude `[2^-40, 2^9)` whose answer is normal on the M4: `E = exp2(p)`
 //! of the rounded product `p = x c_hi` (`c_hi + c_lo` the constant `log2(e)` or `log2(10)`),
 //! corrected by the product's error `d = fma(x, c_lo, fma(x, c_hi, -p))` as the fused
 //! `fma(E, RN(d ln 2), E)`, and `E` itself where it is `+inf`, `+0`, or a NaN. Each fused step is
@@ -37,7 +36,7 @@ use std::f64::consts::{LN_2, LOG2_10, LOG2_E};
 /// `u1 = c1 + (u2 t >> 18)`, `Y = c0 + (u1 t >> 18)`, and `T = Y >> 9`. Each `Y` is below `2^32`
 /// (the largest is `0xfffffef0`, at the last fraction; every coefficient is positive, so `Y` grows
 /// with `t`), `c3 t` below `2^32`, and `u2 t` and `u1 t` below `2^39` and `2^46`. Fitted to Metal's
-/// `T` on every fraction (EV MATH-sweep1-m4): equal at 8,380,655 of 2^23.
+/// `T` on every fraction: equal at 8,380,655 of 2^23.
 pub(crate) const TABLE: [[u32; 4]; 32] = [
     [0x0000_01B8, 0x058B_90BC, 0x000F_5F93, 0x0000_1CF2],
     [0x059B_0EF9, 0x05AA_A5FA, 0x000F_B693, 0x0000_1CF3],

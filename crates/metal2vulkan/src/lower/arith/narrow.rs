@@ -211,8 +211,8 @@ enum Below {
 /// widening, `0x7FC00000`, of either sign and any payload: Metal converts every `float` NaN to
 /// `0x7E00` (the M3 Max, fast and safe math, a loaded and a computed `float`, every one of the
 /// 2^24 NaN patterns), which the NaN model's `half` arithmetic answers too. The rounding Metal's
-/// conversion does, measured on every `f32` (`DriverDeviation::MetalHalfConversion`'s EVs), on both
-/// chips.
+/// conversion does, measured on every `f32` (`DriverDeviation::MetalHalfConversion`'s measurements)
+/// , on both chips.
 fn integer(fb: &mut FunctionBuilder<'_>, wide: Form, x: Value, below: Below) -> BResult<Value> {
     let u = u32_form(wide);
     let ut = ty(fb, u)?;
@@ -1038,12 +1038,11 @@ pub fn f32_of_half_bits(h: u32) -> u32 {
 ///
 /// Under native half rounding ([`crate::spirv::builder::ModuleBuilder::native_half`]) the value
 /// need not be a half value: the device's compiler may fold [`converted`]'s conversion pair, which
-/// carries no barrier there, and hand over `x` unrounded (EVs `NKP-lane1-nv3090`,
-/// `NKP-lane2-lvpx86`: NVIDIA and lavapipe do). A finite magnitude from `65536` up then rebiases
-/// past the half's exponent, to a NaN's code or beyond 16 bits, whose bit 17 a store's pairing
-/// carries into the next lane; so there the finite code is capped at infinity's, `0x7C00`. Every
-/// other value takes the truncation, within the native conversion's bound (`NativeHalfConversion`:
-/// one ulp, and 65504 where Metal answers infinity).
+/// carries no barrier there, and hand over `x` unrounded (NVIDIA and lavapipe do). A finite
+/// magnitude from `65536` up then rebiases past the half's exponent, to a NaN's code or beyond 16
+/// bits, whose bit 17 a store's pairing carries into the next lane; so there the finite code is
+/// capped at infinity's, `0x7C00`. Every other value takes the truncation, within the native
+/// conversion's bound (`NativeHalfConversion`: one ulp, and 65504 where Metal answers infinity).
 fn f32_bits_to_half_bits(fb: &mut FunctionBuilder<'_>, u: Form, b: Value) -> BResult<Value> {
     let c = |fb: &mut FunctionBuilder<'_>, k: u64| splat(fb, u, k);
     let abs_mask = c(fb, 0x7FFF_FFFF)?;

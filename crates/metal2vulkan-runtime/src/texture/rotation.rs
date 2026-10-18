@@ -1,13 +1,12 @@
 //! Rotated and framebuffer-only textures (`TextureDescriptor::rotation`, `framebuffer_only`,
 //! `is_drawable`; the copies are `rotated.rs`'s). Plain Metal's answers, measured on an M4 under
-//! macOS 27.0.1 (EVs ZCI2-rotprobe5-m4 and ZCI2-rotprobe6-m4, each the same in two runs, a GPU's
-//! two or three times), are the rules:
+//! macOS 27.0.1 (each the same in two runs, a GPU's two or three times), are the rules:
 //!
 //! - **Render passes** store the pass's texel `(x, y)` where Metal turns it into the plane
 //!   (`rotated.rs`), and resolve into it likewise. They load it from there at rotations 1 to 3,
 //!   and from the plane's `(y, x)` at rotation 4, so a texel loaded and stored again lands
 //!   mirrored, in a pass that draws; one that draws nothing leaves every texel in place, as
-//!   Metal's does (EVs TTG-rot1-m4, TTG-rot1-m3; `rotated::Turn`, and the tiles no draw reaches,
+//!   Metal's does (`rotated::Turn`, and the tiles no draw reaches,
 //!   `Degradation::RotatedLoadTiles`). They render into the texture's twin
 //!   ([`Texture::pass_texture`]): an image of the pass's frame, a shadow of the plane's bytes
 //!   whose copies turn the texels (`rotated.rs`), made at the first pass that needs it and kept
@@ -30,15 +29,14 @@
 //!   and they act as the texture does, in their own format: the texture's frame extent, rotation
 //!   and framebuffer-only flag; passes store, load and resolve them turned as the texture's
 //!   (rotation 4's mirror too), functions read the stored frame unturned, and CPU access reads
-//!   the plane's rows (EVs TTG-rot4-m4 and TTG-rot4-m3, alike; Metal's validation stops every
-//!   view of a framebuffer-only texture, "texture view creation not allowed from frameBufferOnly
-//!   textures", at rotation 0 too). Measured, and made: the whole texture, its type and no
-//!   swizzle, as one 8-bit RGBA format of another ([`MEASURED_VIEWS`]), with or without
-//!   `PixelFormatView` usage. A view shares the texture's plane rows, so its passes render
-//!   through a twin of its format kept with them, and its functions bind the texture's image of
-//!   the stored frame where that image takes the view's format, else an image of the stored
-//!   frame of the view's own, a shadow of the same bytes. Every other view of a rotated texture
-//!   is refused (`NotImplemented(RotatedTexture)`).
+//!   the plane's rows (alike; Metal's validation stops every view of a framebuffer-only texture,
+//!   "texture view creation not allowed from frameBufferOnly textures", at rotation 0 too).
+//!   Measured, and made: the whole texture, its type and no swizzle, as one 8-bit RGBA format of
+//!   another ([`MEASURED_VIEWS`]), with or without `PixelFormatView` usage. A view shares the
+//!   texture's plane rows, so its passes render through a twin of its format kept with them, and
+//!   its functions bind the texture's image of the stored frame where that image takes the view's
+//!   format, else an image of the stored frame of the view's own, a shadow of the same bytes. Every
+//!   other view of a rotated texture is refused (`NotImplemented(RotatedTexture)`).
 
 use super::super::buffer_texture::Texels;
 use super::super::degradation::Degradation;
@@ -56,7 +54,7 @@ use metal2vulkan::vk::ImageUsageFlags;
 use std::sync::Arc;
 
 /// The formats a rotated texture is measured to take views between (the module docs): the
-/// 8-bit RGBA formats, each viewed as each (EVs TTG-rot4-m4, TTG-rot4-m3, TTG-rot5-m4).
+/// 8-bit RGBA formats, each viewed as each.
 pub(super) const MEASURED_VIEWS: [PixelFormat; 4] = [
     PixelFormat::BGRA8Unorm,
     PixelFormat::BGRA8UnormSRGB,

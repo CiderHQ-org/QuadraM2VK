@@ -9,17 +9,17 @@
 //!   among it a function that reaches an attachment without a format in the descriptor
 //!   (`InvalidDescriptor(ColorAttachment)`), where Metal's creation answers "Invalid pixel format
 //!   for render target 0", and a member whose type the attachment's format does not hold, which
-//!   Metal's API validation stops (probe RT11-metal-probe-10, an M3 Max and an M4).
+//!   Metal's API validation stops (an M3 Max and an M4).
 //! - **Answers.** A tile pipeline's state answers its descriptor's
 //!   `threadgroup_size_matches_tile_size`, no indirect command buffers, and the compiled
-//!   pipeline's `max_total_threads_per_threadgroup`: Metal's 1024, or the descriptor's limit
-//!   (probes RT11-metal-probe-10 and -11, TTG-probe1-m4), where the device runs a threadgroup of
-//!   1024 threads, else the device's lower limit. `imageblock_sample_length` is the aliased
-//!   explicit imageblock's size, which the compile records (`RuntimeFact::AliasedImageblock`), else
-//!   the attachments' texels packed as Metal packs them, after an explicit imageblock that stands
-//!   alone as a fragment function's (`RuntimeFact::TileImageblock`, 16 for two `uint`s beside an
-//!   `R32Uint` attachment, measured on an M4 by EV `CFIT-m4-probe4c`); its memory length for a tile
-//!   is that times the tile's cells, unrounded, as Metal's (probes RT11-metal-probe-10 and -11).
+//!   pipeline's `max_total_threads_per_threadgroup`: Metal's 1024, or the descriptor's limit, where
+//!   the device runs a threadgroup of 1024 threads, else the device's lower limit.
+//!   `imageblock_sample_length` is the aliased explicit imageblock's size, which the compile
+//!   records (`RuntimeFact::AliasedImageblock`), else the attachments' texels packed as Metal packs
+//!   them, after an explicit imageblock that stands alone as a fragment function's
+//!   (`RuntimeFact::TileImageblock`, 16 for two `uint`s beside an `R32Uint` attachment, measured on
+//!   an M4 by our probe); its memory length for a tile is that times the tile's cells,
+//!   unrounded, as Metal's.
 
 use super::render::RenderPipelineState;
 use super::texture_access::{TextureAccessMemo, TextureAccesses};

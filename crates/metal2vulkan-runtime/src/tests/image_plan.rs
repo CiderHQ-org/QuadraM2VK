@@ -1869,7 +1869,7 @@ fn a_four_two_two_texture_holds_its_texels_in_a_carrier() {
 }
 
 /// A texture of Apple's private `BlockWritesOnly` usage is written as one of `ShaderWrite` (plain
-/// Metal stores every write form into it, and its validation takes them; EV XRR2-usw1), so its
+/// Metal stores every write form into it, and its validation takes them), so its
 /// image is the image of the texture with `ShaderWrite` in its place, on every committed profile
 /// and for every pixel format: CoreAnimation's blur textures' `ShaderRead | RenderTarget |
 /// BlockWritesOnly` plans as `ShaderRead | RenderTarget | ShaderWrite` does, the storage usage

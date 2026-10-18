@@ -1,5 +1,5 @@
-# The extended-range blend table (metal2vulkan-devtools `xr_blends`). Metal's answers: EV
-# XRB-xrt1-m4, plain Metal on an Apple M4 under macOS 27.0.1 (26A434), our own probe over synthetic
+# The extended-range blend table (metal2vulkan-devtools `xr_blends`). Metal's answers: plain Metal
+# on an Apple M4 under macOS 27.0.1 (26A434), our own probe over synthetic
 # inputs. Each configuration drew into its own 64 x 4 band of every case's target (the same 256 raw
 # texels and outputs in every band) under its scissor and blend color, in one pass that loads and
 # stores it.

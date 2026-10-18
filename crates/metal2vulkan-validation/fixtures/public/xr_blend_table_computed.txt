@@ -1,5 +1,5 @@
 # The extended-range blend table of a computed float4 output under fast math (the blend table's
-# configurations, metal2vulkan-devtools `xr_blends`). Metal's answers: EV XRB-xrtc-m4, plain Metal
+# configurations, metal2vulkan-devtools `xr_blends`). Metal's answers: plain Metal
 # on an Apple M4 under macOS 27.0.1 (26A434), the lane-table probe's configurations with its float4
 # output computed as the source times a loaded vector of ones (whole-vector arithmetic over loads),
 # our own probe over synthetic inputs, each into its own 64 x 4 band of every case's target (the

@@ -353,7 +353,7 @@ fn library_reflection_matches_metal() {
             Ok(Some(r)) => render(&r),
             // Indices a function constant computes: Metal's library states 28, 4294967236 and
             // 18 for `base`, `base + 2` and `base * 2`, no value the constant gives, on both
-            // chips (EVs RTL-refl-m3c and -m4c). The crate refuses them, naming the index.
+            // chips. The crate refuses them, naming the index.
             Err(Error::Unsupported(u)) if COMPUTED_INDICES.contains(&(stem, name)) => {
                 assert_eq!(u.feature, Feature::Reflection, "{stem} {name}");
                 refused += 1;
@@ -1072,9 +1072,8 @@ fn pipeline_creation_stops_at_an_attribute_without_a_layout() {
 
 /// An attribute of format `Invalid` is unset, whatever buffer it names: added to each recorded
 /// case Metal accepts that has a vertex or stage input descriptor, naming a buffer without a
-/// layout, it changes neither the case's acceptance nor its reflection (EVs RFL-layoutprobe2-m3
-/// and -m4: Metal accepts it; RFL-layoutprobe3-m3 and -m4: its reflection lists only the set
-/// attributes' buffers).
+/// layout, it changes neither the case's acceptance nor its reflection (Metal accepts it: its
+/// reflection lists only the set attributes' buffers).
 #[test]
 fn an_invalid_attribute_changes_nothing() {
     let Some(libs) = libraries() else {
@@ -1126,9 +1125,9 @@ fn an_invalid_attribute_changes_nothing() {
 
 /// A descriptor whose every attribute names a laid-out buffer passes; one with an attribute no
 /// function declares naming a buffer without a layout is refused, naming the first such
-/// attribute's buffer, as Metal stops for it (EVs RFL-layoutprobe-m3 and -m4: an undeclared
-/// attribute of a vertex descriptor and of a stage input descriptor), and so is a layout of a
-/// nonzero or dynamic stride that no set attribute names; an `Invalid` attribute is unset.
+/// attribute's buffer, as Metal stops for it (an undeclared attribute of a vertex descriptor and of
+/// a stage input descriptor), and so is a layout of a nonzero or dynamic stride that no set
+/// attribute names; an `Invalid` attribute is unset.
 #[test]
 fn every_attribute_needs_its_buffers_layout() {
     let mut vd = VertexDescriptor::new();
@@ -1168,8 +1167,7 @@ fn every_attribute_needs_its_buffers_layout() {
             DescriptorError::StageInputLayout { layout: 3 }
         ))
     );
-    // An attribute of format `Invalid` is unset, whatever buffer it names (EVs
-    // RFL-layoutprobe2-m3 and -m4).
+    // An attribute of format `Invalid` is unset, whatever buffer it names.
     s.attributes.insert(
         4,
         StageInputAttributeDescriptor::new(AttributeFormat::Invalid, 0, 3),
@@ -1185,8 +1183,7 @@ fn every_attribute_needs_its_buffers_layout() {
     );
     assert_eq!(vd.check_layouts(), Ok(()));
     // A layout no set attribute names stops Metal at a nonzero or dynamic stride, whatever its
-    // step, an `Invalid` attribute naming it or not; at stride 0 it passes (EVs
-    // RFL-layoutprobe3-m4 and RFL-layoutprobe4-m4).
+    // step, an `Invalid` attribute naming it or not; at stride 0 it passes.
     let lonely = |stride: Option<u32>, step: VertexStepFunction| {
         let mut d = vd.clone();
         let mut layout = VertexBufferLayoutDescriptor::new(stride);
@@ -1216,7 +1213,7 @@ fn every_attribute_needs_its_buffers_layout() {
         .insert(3, StageInputLayoutDescriptor::new(Some(0)));
     assert_eq!(lonely.check_layouts(), Ok(()));
     // A layout's step Metal's compute pipeline creation stops at, with and without API
-    // validation (EV SWP-stepfn-m4): a vertex stage's step function, the default per-vertex step of
+    // validation: a vertex stage's step function, the default per-vertex step of
     // a fresh layout among them, and a constant step at a rate other than 0. Metal's unset layout
     // (stride 0, per vertex, rate 1) passes, as layout 3 just did.
     let stepped = |step: StepFunction, rate: u32| {

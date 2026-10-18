@@ -4,10 +4,9 @@
 //! Apple's compiler takes a global `thread_index_in_quadgroup` and `threads_per_simdgroup` in a
 //! fragment function. Metal makes and runs the render pipeline of the second (the owned fixture
 //! `gsm_global_builtins_fragment`, 32 on an M4), and refuses the first's (`gsm_global_builtins_
-//! fragment_quad`) on an M4 under macOS 27.0.1 (EV GSM-gb2-m4) and an M3 Max under macOS 26.7 (EV
-//! GSM-gb-m3): "Encountered unlowered function call to air.get_thread_index_in_quadgroup.i32"
-//! (the M4 adds "Verify device or GPU architecture supports this feature"). The runtime refuses it
-//! as Metal does:
+//! fragment_quad`) on an M4 under macOS 27.0.1 and an M3 Max under macOS 26.7: "Encountered
+//! unlowered function call to air.get_thread_index_in_quadgroup.i32" (the M4 adds "Verify device or
+//! GPU architecture supports this feature"). The runtime refuses it as Metal does:
 //! `Unsupported` (`GlobalBuiltinInFragment`, `Needs::MetalRefuses` naming those devices) on a
 //! device that does not claim Apple10, and `NotImplemented` on one that does, which no
 //! measurement covers.

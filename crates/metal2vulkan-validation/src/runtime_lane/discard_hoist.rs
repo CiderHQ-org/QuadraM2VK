@@ -7,11 +7,10 @@
 //! (before - after) & 3, before < after)` from its simdgroup's lane counts before the discard and
 //! after it: values that hold however a device packs quads into simdgroups.
 //!
-//! Metal's answer, as Apple M4 and M3 Max give it (EVs REF-hfix and REF-hfix-m3, from the
-//! fixture's AIR and from source, with and without the debug layer), is `(0, 0, 0, 0)` for every
-//! `hoisted_*` shape (Metal's compiler moves the sum past the discard, so it counts only the kept
-//! quad's lanes) and `(1, 0, 0, 0)` for every `counted_*` shape (the sum counts the dropped quads
-//! that share the kept quad's simdgroup).
+//! Metal's answer, as Apple M4 and M3 Max give it (from the fixture's AIR and from source, with and
+//! without the debug layer), is `(0, 0, 0, 0)` for every `hoisted_*` shape (Metal's compiler moves
+//! the sum past the discard, so it counts only the kept quad's lanes) and `(1, 0, 0, 0)` for every
+//! `counted_*` shape (the sum counts the dropped quads that share the kept quad's simdgroup).
 //!
 //! The compile layer moves the sum where Metal's compiler moves it and keeps it ahead of the
 //! discard where Metal does, so a device whose fragment subgroup holds the kept quad with at
@@ -25,7 +24,7 @@
 //! a valid Metal answer for a partly occupied simdgroup, and that gap. `RECORDED` holds a measured
 //! venue's answers where they differ from these.
 //!
-//! Measured (EVs REF-hlane2-*): RADV (Radeon 780M, subgroup 64), RTX 3090 and RTX 5080 (32), ANV
+//! Measured: RADV (Radeon 780M, subgroup 64), RTX 3090 and RTX 5080 (32), ANV
 //! (Iris Xe RPL-P, 32), and lavapipe x86 (8) give these answers, the noted residue included;
 //! lavapipe arm64 (fragment subgroup 4, the gap) answers `(0, 0, 0, 0)` for all thirteen; MoltenVK
 //! on Apple M4 answers `hoisted_nested` as Metal does (`RECORDED`).
@@ -86,7 +85,7 @@ const SHAPES: [(&str, Answer); 13] = [
 const NOTED: [&str; 2] = ["counted_call_use", "hoisted_nested"];
 
 /// A measured venue's answers where they differ from [`expected`]'s, by its driver and reported
-/// subgroup size. MoltenVK on Apple M4 (EV REF-hlane2-mvk) answers the nested shape as Metal
+/// subgroup size. MoltenVK on Apple M4 answers the nested shape as Metal
 /// does: the module keeps the sum ahead of the discard, and Metal's compiler, which compiles
 /// MoltenVK's MSL, moves it past the discard as it does from the fixture's own AIR.
 const RECORDED: &[(DriverId, u32, &str, Answer)] =

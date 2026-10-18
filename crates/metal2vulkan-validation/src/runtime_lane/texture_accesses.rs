@@ -3,8 +3,7 @@
 //! layer. The state answers what Metal's `reflection:` out-parameter of
 //! `newRenderPipelineStateWithDescriptor:options:reflection:error:` states for the same
 //! functions. The answers were measured on an M4 with macOS 27.0.1, plain and under Metal's
-//! validation, alike under the `BindingInfo`, `BufferTypeInfo` and combined options (EV
-//! RFL-tacc-m4):
+//! validation, alike under the `BindingInfo`, `BufferTypeInfo` and combined options:
 //! - the vertex function's `access::read` texture 0 is read-only;
 //! - in the fragment function, `access::read` texture 0 is read-only, `access::write` 1
 //!   write-only, `access::read_write` 2 read-write, and the two `access::write` elements of the

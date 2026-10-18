@@ -6,7 +6,7 @@
 //!
 //! - `engine/dsm2_shuffle_past_n` writes `simd_shuffle` (a source lane per lane),
 //!   `simd_shuffle_down` (delta 8), and `simd_shuffle_xor` (mask 16) of a distinct word per
-//!   thread. Metal's readings (EV DSM2-metal-probe) are zero for every source past `N`, whatever
+//!   thread. Metal's readings are zero for every source past `N`, whatever
 //!   the inputs, the threadgroup, or the dispatch's shape; [`the_model_is_metals_reading`] checks
 //!   [`model`] against two of them word for word.
 //! - `engine/dsm2_shuffle_past_n_more` writes `simd_broadcast`, `simd_shuffle_rotate_down`,
@@ -145,7 +145,7 @@ fn model_more(x: &[u32], n: u32, t: u32) -> [u32; 10] {
     ]
 }
 
-/// EV DSM2-metal-probe's Metal readings (apple-m3-max-macos26.7, both passes) of
+/// Our probe's Metal readings (apple-m3-max-macos26.7, both passes) of
 /// `dsm2-shuffle-past-the-thread-count-sixteen` (16 threads, input A) and
 /// `dsm2-shuffle-past-the-thread-count-eight` (8 threads, input A): thread `t`'s three words.
 const SIXTEEN: [[u32; 3]; 16] = [

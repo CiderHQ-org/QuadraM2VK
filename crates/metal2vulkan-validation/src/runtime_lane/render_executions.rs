@@ -3,7 +3,7 @@
 //! commands draw the owned `icb_render_replay_template` fixture's vertex function (rasterization
 //! disabled: vertex `vid` of instance `iid` writes `params[0] * (vid + 1) + params[1] + 1000 * iid`
 //! to word `16 * iid + vid` of `out`) in a 1x1 pass without attachments, over 256-byte windows of
-//! `params` and `out`, and draw as Metal's (probe `RT7-icb-probe6`, an M4):
+//! `params` and `out`, and draw as Metal's (an M4):
 //!
 //! - as their records stand at commit, a CPU write after the call included; a command with no
 //!   draw or no pipeline state runs nothing, and its neighbours run; the encoder's draws before
@@ -17,15 +17,15 @@
 //! - commands a kernel writes (`icb_render_replay_encode_draw_only`) are drawn by a host step,
 //!   announced once;
 //! - what Metal's validation stops, and a buffer of compute commands, is refused at the call;
-//! - (probe `RT7-icb-probe7-m4`) indexed commands draw their indices as the encoder's
-//!   indexed draws do, and patch commands (the owned `rt6_patch_index` fixture) with their own
-//!   factor buffer and their pipeline's control points; their buffers resolve as the buffers do;
-//! - (probe `RT7-icb-probe8-m4`) patch commands a kernel writes multiply their factors
-//!   by the scale they hold, though their pipeline state never enables the scale;
+//! - indexed commands draw their indices as the encoder's indexed draws do, and patch commands (the
+//!   owned `rt6_patch_index` fixture) with their own factor buffer and their pipeline's control
+//!   points; their buffers resolve as the buffers do;
+//! - patch commands a kernel writes multiply their factors by the scale they hold, though their
+//!   pipeline state never enables the scale;
 //! - (Metal probes) patch commands the host encodes read a factor offset of 2 from that byte, step
 //!   an instance stride 2 past a multiple of 4 by the multiple below, and draw 33 control points
 //!   with their pipeline's;
-//! - (EV RFC-probe3-m4) a command whose barrier is set draws after the commands before it, their
+//! - a command whose barrier is set draws after the commands before it, their
 //!   writes visible to it;
 //! - a host step drawing a state made after the commit, on the variant for a mapped texture, makes
 //!   and counts a sampler set of its own;
@@ -360,11 +360,10 @@ fn commands_draw_as_their_records_stand_at_commit() {
 
 /// An inheriting buffer's commands draw with the encoder's pipeline state and buffers as the
 /// call found them; a state and buffers bound after it are the encoder's own. Refused at the
-/// call, changing nothing, as Metal's validation stops it and plain Metal's process ends (EV
-/// IRX-xfault2-m4 `fixed_one_nopipeline`): a range that is not empty with an inherited state that
-/// is unset. An empty range, at the start or at the size, runs nothing whatever the state, and
-/// the encoder goes on, as plain Metal's (EV CFR-probe1-m4 `fixed_empty_*`). One under a state made
-/// without `supportIndirectCommandBuffers` faults its encoder
+/// call, changing nothing, as Metal's validation stops it and plain Metal's process ends: a range
+/// that is not empty with an inherited state that is unset. An empty range, at the start or at the
+/// size, runs nothing whatever the state, and the encoder goes on, as plain Metal's. One under a
+/// state made without `supportIndirectCommandBuffers` faults its encoder
 /// (`an_execution_under_a_state_without_support_faults_its_encoder`).
 #[test]
 fn inheriting_commands_draw_with_the_encoder_s_state_at_the_call() {
@@ -424,16 +423,15 @@ fn inheriting_commands_draw_with_the_encoder_s_state_at_the_call() {
 }
 
 /// An execution of commands that inherit the encoder's pipeline state, made without
-/// `supportIndirectCommandBuffers`, faults its encoder, as Metal's GPU faults it (EVs
-/// CFR-probe1-m4, IRX-xfault1-m4 and IRX-xfault2-m4, an M4): the call is taken, for a range given
-/// and for one read from a buffer, `{0, 0}` included; the encoder runs nothing, its own draw
-/// before the call either; the encoders before and after it run and both event signals fire;
-/// the command buffer completes with status `Error` and `CommandBufferError::PageFault`, Metal's
-/// code 3; and the next command buffer of the queue completes, its work landed. The next one is
-/// committed while the faulting one is in flight: Metal runs such a command buffer as it would,
-/// committed at any point from the faulting one's commit to its completion, and on another queue
-/// (EV RRX-fail2-m4, an M4). Window 0 is the pass's before, window 1 the faulting passes' draws,
-/// windows 2 and 3 the pass's after and the next command buffer's.
+/// `supportIndirectCommandBuffers`, faults its encoder, as Metal's GPU faults it (an M4): the call
+/// is taken, for a range given and for one read from a buffer, `{0, 0}` included; the encoder runs
+/// nothing, its own draw before the call either; the encoders before and after it run and both
+/// event signals fire; the command buffer completes with status `Error` and
+/// `CommandBufferError::PageFault`, Metal's code 3; and the next command buffer of the queue
+/// completes, its work landed. The next one is committed while the faulting one is in flight: Metal
+/// runs such a command buffer as it would, committed at any point from the faulting one's commit to
+/// its completion, and on another queue (an M4). Window 0 is the pass's before, window 1 the
+/// faulting passes' draws, windows 2 and 3 the pass's after and the next command buffer's.
 #[test]
 fn an_execution_under_a_state_without_support_faults_its_encoder() {
     on_device(|device, _| {
@@ -537,7 +535,7 @@ fn addresses_outside_the_resident_resources_miss() {
     });
 }
 
-/// Residency is the command buffer's (EV RFL-res-m4, an M4: an indirect render command's vertex
+/// Residency is the command buffer's (an M4: an indirect render command's vertex
 /// buffer that only a later compute or render encoder made resident was reached, every run):
 /// a command's buffers that only a later encoder made resident, or an earlier one, draw as
 /// those its own encoder made resident, with no miss; and so do buffers of their own that no
@@ -611,8 +609,7 @@ fn commands_reach_what_any_encoder_of_their_command_buffer_made_resident() {
 
 /// The CPU's draw of primitives into a buffer whose command types lack `DRAW` (indexed draws,
 /// patch draws, indexed patch draws), whose records hold it, draws as on a buffer of its own
-/// kind, as plain Metal draws it (EVs ICBV-hostkinds-m3 and -m4), where Metal's validation stops
-/// the setter.
+/// kind, as plain Metal draws it, where Metal's validation stops the setter.
 #[test]
 fn a_draw_into_a_buffer_whose_records_hold_it_draws_as_on_its_own() {
     on_device(|device, _| {
@@ -804,11 +801,10 @@ fn a_host_step_draws_on_what_its_commit_compiled() {
 }
 
 /// A command whose barrier is set draws after the commands before it, their writes visible to
-/// it, as plain Metal orders it where its validation stops `setBarrier` (EVs RFC-probe1-m4
-/// `icb_render_barrier`, RFC-probe3-m4 `bar_icb_set`, an M4): command 0 writes window 0 of
-/// `out`, and command 1, behind its barrier, reads that window as its `params` and writes window
-/// 1, so window 1 holds what command 0's words make. A barrier set after the encoder that
-/// executes it ended, whose pass the encoder made without runs, refuses the commit.
+/// it, as plain Metal orders it where its validation stops `setBarrier` (an M4): command 0 writes
+/// window 0 of `out`, and command 1, behind its barrier, reads that window as its `params` and
+/// writes window 1, so window 1 holds what command 0's words make. A barrier set after the encoder
+/// that executes it ended, whose pass the encoder made without runs, refuses the commit.
 #[test]
 fn a_command_s_barrier_orders_its_draw_after_the_earlier_ones() {
     on_device(|device, _| {
@@ -882,8 +878,7 @@ fn a_command_s_barrier_orders_its_draw_after_the_earlier_ones() {
 
 /// Refused at the call, changing nothing: a range that ends past the size (Metal's validation
 /// stops it), and a buffer of dispatches alone. An empty range runs nothing, and so does a buffer
-/// of no command types, or of dispatches beside draws of primitives, as plain Metal's (EV
-/// RFC-probe2-m4 `t0_exec_render`, `mixed_exec_render`).
+/// of no command types, or of dispatches beside draws of primitives, as plain Metal's.
 #[test]
 fn what_metal_stops_is_refused_at_the_call() {
     on_device(|device, _| {
@@ -944,7 +939,7 @@ fn words(device: &Device, words: &[u32]) -> Buffer {
 }
 
 /// The encoder's indexed draw reads its indices from its offset's low 32 bits, as Metal reads
-/// them (EV STL-off2-m4, an M4: an offset of 2^32 + 16 into a buffer past 4 GiB read the index
+/// them (an M4: an offset of 2^32 + 16 into a buffer past 4 GiB read the index
 /// at 16): an offset of 2^32 + 16 into a 20-byte buffer draws the index at 16.
 #[test]
 fn an_indexed_draw_reads_from_its_offset_s_low_32_bits() {
@@ -976,12 +971,12 @@ fn an_indexed_draw_reads_from_its_offset_s_low_32_bits() {
     });
 }
 
-/// Indexed commands draw their indices as the encoder's indexed draws do (probe
-/// `RT7-icb-probe7-m4`): from the offset, each plus the signed base vertex, `ushort` and `uint`,
-/// over their instances from the base instance, beside a draw of primitives. An index buffer no
-/// encoder made resident draws, as Metal's did there (a buffer of its own, which the command
-/// buffer's resident set holds); one placed in a heap no encoder of the command buffer used misses:
-/// that command runs nothing, its neighbour runs, and the execution report counts it.
+/// Indexed commands draw their indices as the encoder's indexed draws do: from the offset, each
+/// plus the signed base vertex, `ushort` and `uint`, over their instances from the base instance,
+/// beside a draw of primitives. An index buffer no encoder made resident draws, as Metal's did
+/// there (a buffer of its own, which the command buffer's resident set holds); one placed in a heap
+/// no encoder of the command buffer used misses: that command runs nothing, its neighbour runs, and
+/// the execution report counts it.
 #[test]
 fn indexed_commands_draw_their_indices() {
     on_device(|device, messages| {
@@ -1097,13 +1092,13 @@ fn indexed_commands_draw_their_indices() {
 
 /// Patch commands draw with their own tessellation factor buffer, never the encoder's (whose
 /// factors of 0 would cull every patch), and with their pipeline's control points, whatever the
-/// record holds, as Metal's did (probe `RT7-icb-probe7-m4`): the `rt6_patch_index` fixture's
-/// marks are those of its encoder draw with the same patch index buffer (`patch_indices.rs`'s
-/// `pib` case, Metal's marks). A factor buffer of its own that no encoder made resident is
-/// reached, as the command buffer's resident set holds it; one placed in a heap no encoder of the
-/// command buffer used misses: the command runs nothing. A tessellation pipeline that
-/// scales its factors is refused with `supportIndirectCommandBuffers`, as Metal's validation
-/// refuses it. A device without tessellation shaders refuses the pipeline, reported as its refusal.
+/// record holds, as Metal's did: the `rt6_patch_index` fixture's marks are those of its encoder
+/// draw with the same patch index buffer (`patch_indices.rs`'s `pib` case, Metal's marks). A factor
+/// buffer of its own that no encoder made resident is reached, as the command buffer's resident set
+/// holds it; one placed in a heap no encoder of the command buffer used misses: the command runs
+/// nothing. A tessellation pipeline that scales its factors is refused with
+/// `supportIndirectCommandBuffers`, as Metal's validation refuses it. A device without tessellation
+/// shaders refuses the pipeline, reported as its refusal.
 #[test]
 fn patch_commands_draw_with_their_own_factors() {
     patch_commands_draw_with_their_own_factors_on(Path::Native);
@@ -1220,16 +1215,15 @@ fn patch_commands_draw_with_their_own_factors_on(path: Path) {
 /// command `tid`'s draw of one patch of the owned `k7_tess_triangle_domain` fixture, its triangle
 /// factors 1, scaled by `scales[tid]`), executed one at a time by an encoder whose pipeline state,
 /// made with `supportIndirectCommandBuffers` and so never enabling the scale, and buffers the
-/// commands inherit. As Metal's (probe `RT7-icb-probe8-m4`, an M4): a scale of 2 marks what factors
-/// of 2 mark, 0.5 what factors of 1 mark (integer partitioning rounds 0.5 up to 1), and 0, -1 and
-/// NaN mark nothing. Metal rounds the scale to `half` first (EVs ICBV-scale-m3 and -m4, the M3 Max
-/// and the M4 alike): 1.0004 marks what 1 marks, 1.3 and 2.0005 what 2 marks, 10^-6 and 2^-24
-/// (subnormal `half`s) what factors of 1 mark, 70000 and `+∞` (infinite `half`s) what the maximum
-/// factor, 64, marks, and 2^-30 (0 as a `half`) nothing. The marks for factors of 1 and 2 are
-/// `patches.rs`'s (a Metal probe on an M4), those of the maximum factor the count and FNV-1a hash
-/// the EVs' probe printed for them (its grid is the fixture's: its hashes of factors 1, 2 and 3 are
-/// those of `patches.rs`'s marks). A device without tessellation shaders refuses the pipeline,
-/// reported as its refusal.
+/// commands inherit. As Metal's (an M4): a scale of 2 marks what factors of 2 mark, 0.5 what
+/// factors of 1 mark (integer partitioning rounds 0.5 up to 1), and 0, -1 and NaN mark nothing.
+/// Metal rounds the scale to `half` first (the M3 Max and the M4 alike): 1.0004 marks what 1 marks,
+/// 1.3 and 2.0005 what 2 marks, 10^-6 and 2^-24 (subnormal `half`s) what factors of 1 mark, 70000
+/// and `+∞` (infinite `half`s) what the maximum factor, 64, marks, and 2^-30 (0 as a `half`)
+/// nothing. The marks for factors of 1 and 2 are `patches.rs`'s (a Metal probe on an M4), those of
+/// the maximum factor the count and FNV-1a hash the probe printed for them (its grid is the
+/// fixture's: its hashes of factors 1, 2 and 3 are those of `patches.rs`'s marks). A device without
+/// tessellation shaders refuses the pipeline, reported as its refusal.
 #[test]
 fn patch_commands_scale_their_factors_as_metal_does() {
     on_device(|device, messages| {
@@ -1336,8 +1330,8 @@ fn patch_commands_scale_their_factors_as_metal_does() {
 /// Patch commands the host encodes read their factors as Metal's did where its validation stops
 /// the call (Metal probes, an M4 with macOS 27.0.1, a command and the encoder's draw alike): a
 /// factor offset of 2 from that byte, an instance stride 2 past a multiple of 4 by the multiple
-/// below, and 33 control points with the pipeline's own; and odd offsets and strides as EVs
-/// IRX-pat2-m4 and IRX-pat3-m4 read them, from the byte below and by the multiple of 4 below. Each
+/// below, and 33 control points with the pipeline's own; and odd offsets and strides as our probes
+/// read them, from the byte below and by the multiple of 4 below. Each
 /// command draws one patch of `patches.rs`'s fixture, its factors read per instance from `half`s
 /// then 16 bytes of zeros, and marks what `patches.rs`'s matching encoder case marks: instance 0
 /// reads an edge of 0 and culls, but at the offset of 2; instance 1 reads at the rounded stride,
@@ -1669,12 +1663,11 @@ const REVERSED: &[u32] = &[9, 10, 11, 6, 7, 8, 3, 4, 5, 0, 1, 2];
 /// indexed command on a pipeline without one draws the patches' own control points; a plain command
 /// and an indexed one execute side by side. The commands draw with their own factor buffer, never
 /// the encoder's (whose factors of 0 would cull every patch). An offset that is not a multiple of
-/// the index size reads the indices from the offset rounded down to a multiple of it (EVs
-/// ICBV-ipatch-m3 and -m4, an M3 Max and an M4 alike), and a patch index offset that is not a
-/// multiple of 4 reads them from the offset rounded down to one (probe `RT7-icb-probe7-m4`). A
-/// control-point index buffer of its own that no encoder made resident is reached; one placed in a
-/// heap no encoder of the command buffer used misses. A device without tessellation
-/// shaders refuses the pipeline, reported as its refusal.
+/// the index size reads the indices from the offset rounded down to a multiple of it (an M3 Max and
+/// an M4 alike), and a patch index offset that is not a multiple of 4 reads them from the offset
+/// rounded down to one. A control-point index buffer of its own that no encoder made resident is
+/// reached; one placed in a heap no encoder of the command buffer used misses. A device without
+/// tessellation shaders refuses the pipeline, reported as its refusal.
 #[test]
 fn indexed_patch_commands_draw_as_metal_s_did() {
     indexed_patch_commands_draw_as_metal_s_did_on(Path::Native);
@@ -1934,9 +1927,9 @@ fn indexed_patch_commands_draw_as_metal_s_did_on(path: Path) {
                 ["0", "0", "a2020678", "a00009ab"],
             ),
             // Patch indices at an offset of 2, which Metal's validation stops and plain Metal
-            // reads from offset 0 (probe `RT7-icb-probe7-m4`): after the 2 zero bytes, the words
-            // 0x2_0000 and 0x1_0000 read as patches 0 and 2, where read at the offset itself
-            // they would name patches past the buffers.
+            // reads from offset 0: after the 2 zero bytes, the words 0x2_0000 and 0x1_0000 read as
+            // patches 0 and 2, where read at the offset itself they would name patches past the
+            // buffers.
             (
                 "patch indices at 2",
                 vec![PatchCommand {
@@ -2018,14 +2011,13 @@ impl KernelPatchCase {
 /// Indexed patch commands a kernel writes (`icb_render_ipatch_encode`: thread 0's patch indices,
 /// control-point indices and factors in device memory, thread 1's in constant memory, thread 2
 /// with no patch index buffer, thread 3 with neither index buffer) into an inheriting buffer of
-/// indexed patch draws draw as Metal drew them (EVs ICBV-ipatch-m3 and ICBV-ipatch-m4, the M3 Max
-/// and the M4 alike, each as the host's command of the same values): the `rt6_patch_index`
-/// fixture's marks for 32- and 16-bit control-point indices, their offsets (one not a multiple
-/// of the index size, read from the offset rounded down to one), a patch start, a
-/// culled patch, patch indices from an offset, constant memory, a null control-point index
-/// buffer, an index past the buffer's end, and a pipeline without an index type. A host step
-/// records the commands, announced once. A device without tessellation shaders refuses the
-/// pipeline, reported as its refusal.
+/// indexed patch draws draw as Metal drew them (the M3 Max and the M4 alike, each as the host's
+/// command of the same values): the `rt6_patch_index` fixture's marks for 32- and 16-bit
+/// control-point indices, their offsets (one not a multiple of the index size, read from the offset
+/// rounded down to one), a patch start, a culled patch, patch indices from an offset, constant
+/// memory, a null control-point index buffer, an index past the buffer's end, and a pipeline
+/// without an index type. A host step records the commands, announced once. A device without
+/// tessellation shaders refuses the pipeline, reported as its refusal.
 #[test]
 fn indexed_patch_commands_a_kernel_writes_draw_as_metal_s_did() {
     use TessellationControlPointIndexType as T;
@@ -2077,9 +2069,9 @@ fn indexed_patch_commands_a_kernel_writes_draw_as_metal_s_did() {
                 ..KernelPatchCase::indexed("u16 at 2", REVERSED, both)
             },
             // Offsets that are not a multiple of the index size read from the offset rounded down
-            // to one (EVs ICBV-ipatch2-m3 and -m4): 32-bit indices after 4 bytes of zeros at 2
-            // read 0, 9, 10, 11, 6, 7, and at 6 the indices; 16-bit after 2 bytes at 3 read
-            // the indices. Read unaligned, each would be out of the points' range.
+            // to one: 32-bit indices after 4 bytes of zeros at 2 read 0, 9, 10, 11, 6, 7, and at 6
+            // the indices; 16-bit after 2 bytes at 3 read the indices. Read unaligned, each would
+            // be out of the points' range.
             KernelPatchCase {
                 points: words(REVERSED, 4),
                 point_offset: 2,
@@ -2428,7 +2420,7 @@ fn a_command_buffer_that_fails_before_its_last_batch_runs_no_submission_handler(
 /// command buffer's commit, whose fragment function samples its argument buffer's texture through a
 /// constexpr sampler, shares the sampler set the state's creation made and makes none of its own
 /// (`WorkCounts::host_step_sampler_sets_made` stays). Metal refuses the state's direct texture
-/// argument that once reached the step's own set (EV RRS3-icbtex3-m4), and the runtime refuses a
+/// argument that once reached the step's own set, and the runtime refuses a
 /// mapped texture an argument buffer can reach (`MappedSampling::Handles`), so no step's variant
 /// bakes a sampler the state's did not. The draw writes the source's texels, under the validation
 /// layer, announcing the host step once.

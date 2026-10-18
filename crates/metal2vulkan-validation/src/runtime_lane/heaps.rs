@@ -40,7 +40,7 @@ fn heap_problem(call: &'static str, problem: HeapProblem) -> Error {
     invalid(call, Problem::Heap(problem))
 }
 
-/// Plain Metal's nil for `call`'s heap `problem` (EV TTG-nil10-m4).
+/// Plain Metal's nil for `call`'s heap `problem`.
 fn heap_nil(call: &'static str, problem: HeapProblem) -> Error {
     Error::Nil(Nil::new(call, Problem::Heap(problem)))
 }
@@ -550,7 +550,7 @@ fn aliasable_rules(device: &Device) {
     let placed = placement
         .new_buffer_at_offset(100, ResourceOptions::shared(), 0)
         .unwrap();
-    // Aliasable from the start, as Metal's (EVs SPH-alias1-m3, -m4).
+    // Aliasable from the start, as Metal's.
     assert!(placed.is_aliasable());
     placed.make_aliasable().unwrap();
     assert!(placed.is_aliasable());
@@ -567,9 +567,8 @@ fn aliasable_rules(device: &Device) {
 
 /// Purgeable states (probes 1 and 3): a heap's answer as a buffer's; emptying a `Shared` heap
 /// zeroes its bytes until a committed command used the heap and keeps them from then on, and a
-/// `Private` one keeps them (EVs SPH-hpurge3b and SPH-hpurge4); every call on a heap's buffer
-/// answers `NonVolatile` and changes nothing. A buffer holds its heap: the heap's handle dropped,
-/// the GPU still writes the buffer.
+/// `Private` one keeps them; every call on a heap's buffer answers `NonVolatile` and changes
+/// nothing. A buffer holds its heap: the heap's handle dropped, the GPU still writes the buffer.
 fn purgeable_rules(device: &Device) {
     use PurgeableState::{Empty, KeepCurrent, NonVolatile, Volatile};
     let queue = device.new_command_queue().unwrap();
@@ -592,7 +591,7 @@ fn purgeable_rules(device: &Device) {
         assert_eq!(heap.set_purgeable_state(state), Ok(answer));
     }
     // A heap's buffer answers `NonVolatile` to every call and changes nothing: `Empty` keeps
-    // its bytes, and the heap's state stays (EV SPH-heapmis1-m4).
+    // its bytes, and the heap's state stays.
     write(&buffer, &words(0x7000, 256));
     assert_eq!(heap.set_purgeable_state(Volatile), Ok(NonVolatile));
     for state in [KeepCurrent, NonVolatile, Volatile, Empty] {
@@ -1227,12 +1226,11 @@ fn walk_unnamed(
     read_buffer(&buffers[&binding], offset, length).unwrap()
 }
 
-/// A pointer loaded from memory reaches what Metal's reaches (EVs RFL-reach-m3 and RFL-warm-m3,
-/// the M3 Max under macOS 26.7, and RFL-reach2-m4 and RFL-warm-m4, an M4, every run): every live
-/// buffer of its own, though no encoder of its command buffer named it; a buffer placed in a
-/// heap that a later encoder of its command buffer used, or one whose other buffer an earlier
-/// command buffer's blit read. A buffer placed in a heap that no command buffer's commands used
-/// is not reached: the walk reads zero and its output is not Metal's.
+/// A pointer loaded from memory reaches what Metal's reaches (the M3 Max under macOS 26.7, and an
+/// M4, every run): every live buffer of its own, though no encoder of its command buffer named it;
+/// a buffer placed in a heap that a later encoder of its command buffer used, or one whose other
+/// buffer an earlier command buffer's blit read. A buffer placed in a heap that no command buffer's
+/// commands used is not reached: the walk reads zero and its output is not Metal's.
 #[test]
 fn a_loaded_pointer_reaches_every_buffer_of_its_own_and_the_heaps_a_command_buffer_used() {
     on_device(|device| {
@@ -1293,10 +1291,9 @@ fn a_loaded_pointer_reaches_every_buffer_of_its_own_and_the_heaps_a_command_buff
 }
 
 /// A pointer loaded from memory reaches a no-copy buffer of its own only once a command used it,
-/// as Metal's (EVs RFL-reach-m3, RFL-warm-m3, RFL-reach2-m4 and RFL-warm-m4, the M3 Max and an
-/// M4, every run): before, the walk reads zero and its output is not Metal's; after an earlier
-/// command buffer's blit read it, the walk is Metal's. A venue that refuses the import has
-/// nothing to run.
+/// as Metal's (the M3 Max and an M4, every run): before, the walk reads zero and its output is not
+/// Metal's; after an earlier command buffer's blit read it, the walk is Metal's. A venue that
+/// refuses the import has nothing to run.
 #[test]
 fn a_loaded_pointer_reaches_a_no_copy_buffer_once_a_command_used_it() {
     on_device(|device| {
@@ -1344,11 +1341,10 @@ fn a_loaded_pointer_reaches_a_no_copy_buffer_once_a_command_used_it() {
 }
 
 /// Of two no-copy buffers over one memory, which lie in one import, a loaded pointer reaches the
-/// one a command used and not the other until a command uses it, as Metal's (EVs IOS-pairreach1-m4
-/// and IOS-pairreach2-m3, an M4 under macOS 27.0.1 and the M3 Max under 26.7, plain and validated:
-/// a pointer loaded from memory or an argument buffer's reaches B only after a command used B; an
-/// earlier command buffer's, an earlier encoder's or the dispatch's own use of A leaves B's
-/// accesses dropped).
+/// one a command used and not the other until a command uses it, as Metal's (an M4 under macOS
+/// 27.0.1 and the M3 Max under 26.7, plain and validated: a pointer loaded from memory or an
+/// argument buffer's reaches B only after a command used B; an earlier command buffer's, an earlier
+/// encoder's or the dispatch's own use of A leaves B's accesses dropped).
 #[test]
 fn a_loaded_pointer_reaches_only_the_buffer_over_a_memory_a_command_used() {
     on_device(|device| {
@@ -1567,8 +1563,8 @@ fn a_loaded_pointer_reaches_a_rebound_heap_s_buffer_once_a_command_used_the_heap
 
 /// Of two no-copy buffers over one memory, which lie in one import, a rebind of one ends only its
 /// own use: a loaded pointer still reaches the other, over the memory they shared, as each keeps
-/// its own use on Metal (EV IOS-pairreach1-m4) and a rebind clears the rebound one's (the
-/// consumer's measurement on the M3 Max).
+/// its own use on Metal and a rebind clears the rebound one's (the consumer's measurement on the M3
+/// Max).
 #[test]
 fn a_rebind_of_one_of_two_buffers_over_a_memory_ends_only_its_use() {
     on_device(|device| {
@@ -1676,10 +1672,10 @@ const COMMITS: usize = 15;
 /// buffer of one walk, whose plan reads a root table (the commit's other work included): `steady`,
 /// no buffer made or gone since the last commit, so the device's table is reused; `churn`, a buffer
 /// dropped and one made before each commit, so it is made again. And the table's bytes: 32 for each
-/// buffer, at most (adjacent ranges coalesce). Ignored: the cost EV runs it in release mode on an
+/// buffer, at most (adjacent ranges coalesce). Ignored: a cost run takes it in release mode on an
 /// Apple and a Linux venue.
 #[test]
-#[ignore = "a measurement: the cost EV runs it in release mode"]
+#[ignore = "a measurement: a cost run takes it in release mode"]
 fn the_resident_set_s_cost() {
     let cache = ScratchCache::new().unwrap();
     let mut options = validated_options(&Messages::default(), cache.path());

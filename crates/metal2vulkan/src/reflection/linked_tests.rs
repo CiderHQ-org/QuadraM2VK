@@ -1,8 +1,7 @@
 //! The linked-use answers against Metal's, for the owned fixture `examples/icb_linked_arguments`
-//! (its functions' bodies are the probes', EVs RRS3-icbtex7, -icbtex9 and -icbtex10 on an M4 under
-//! macOS 27.0.1): which stages of a pipeline use a direct texture or sampler once linked, and
-//! whether a vertex function returns a value. The runtime lane's test
-//! (`indirect_command_buffers.rs`) makes the same states.
+//! (its functions' bodies are the probes', on an M4 under macOS 27.0.1): which stages of a pipeline
+//! use a direct texture or sampler once linked, and whether a vertex function returns a value. The
+//! runtime lane's test (`indirect_command_buffers.rs`) makes the same states.
 
 use super::{DirectArgumentUse, LinkedUseGap};
 use crate::budget::Budget;
@@ -57,7 +56,6 @@ fn a_vertex_function_uses_its_texture_where_metal_keeps_it_once_linked() {
     let vertex = [(Stage::Vertex, None)].as_slice();
     let none: &[(Stage, Option<LinkedUseGap>)] = &[];
     for (vertex_function, fragment, raster, stages) in [
-        // EV RRS3-icbtex7.
         ("varying_vertex", Some("varying_fragment"), true, vertex),
         (
             "sampled_varying_vertex",
@@ -86,7 +84,6 @@ fn a_vertex_function_uses_its_texture_where_metal_keeps_it_once_linked() {
         ("plain_vertex", Some("varying_fragment"), true, none),
         // A fragment function a pipeline that does not rasterize never runs.
         ("varying_vertex", Some("varying_fragment"), false, none),
-        // EV RRS3-icbtex9.
         ("branch_vertex", Some("declaring_fragment"), true, vertex),
         ("branch_vertex", None, true, vertex),
         (
@@ -107,7 +104,6 @@ fn a_vertex_function_uses_its_texture_where_metal_keeps_it_once_linked() {
         ("select_vertex", Some("varying_fragment"), true, vertex),
         ("select_vertex", Some("declaring_fragment"), true, none),
         ("select_vertex", None, true, none),
-        // EV RRS3-icbtex10.
         ("point_size_vertex", Some("point_fragment"), true, vertex),
         ("point_size_vertex", None, true, vertex),
         (
@@ -157,8 +153,8 @@ fn a_vertex_function_uses_its_texture_where_metal_keeps_it_once_linked() {
     }
 }
 
-/// The mesh function's texture is used as Metal answers (EVs RRS3-icbtex7 and -icbtex10), and an
-/// object function's wherever its reflection lists it.
+/// The mesh function's texture is used as Metal answers, and an object function's wherever its
+/// reflection lists it.
 #[test]
 fn a_mesh_function_uses_its_texture_where_metal_keeps_it_once_linked() {
     let Some(library) = library() else {
@@ -226,7 +222,7 @@ fn a_mesh_function_uses_its_texture_where_metal_keeps_it_once_linked() {
 }
 
 /// A vertex function returns a value where its return type is not `void`: a struct of varyings,
-/// a struct of its position alone, or a bare position (EV RRS3-icbtex10).
+/// a struct of its position alone, or a bare position.
 #[test]
 fn a_vertex_function_returns_a_value_where_its_type_is_not_void() {
     let Some(library) = library() else {
@@ -238,7 +234,7 @@ fn a_vertex_function_returns_a_value_where_its_type_is_not_void() {
         ("plain_vertex", true),
         ("position_value_vertex", true),
         ("void_store_vertex", false),
-        // A post-tessellation vertex function returning its position (EV RRS3-icbtex17).
+        // A post-tessellation vertex function returning its position.
         ("post_tess_vertex", true),
     ] {
         let mut descriptor = RenderPipelineDescriptor::new(source(&library, vertex_function));
@@ -252,7 +248,7 @@ fn a_vertex_function_returns_a_value_where_its_type_is_not_void() {
 }
 
 /// A mesh pipeline's fragment function writes depth without a depth attachment where it has a
-/// `[[depth(...)]]` output and the pipeline no depth format (EV RRS3-icbtex17): with or without a
+/// `[[depth(...)]]` output and the pipeline no depth format: with or without a
 /// color attachment; not with a depth attachment, nor for a fragment function without one.
 #[test]
 fn a_mesh_pipelines_fragment_writes_depth_unattached_as_a_render_pipelines() {
@@ -284,7 +280,7 @@ fn a_mesh_pipelines_fragment_writes_depth_unattached_as_a_render_pipelines() {
     }
 }
 
-/// A pipeline configuration of Metal's fragment rows (EVs RRS3-icbtex11 and -icbtex12).
+/// A pipeline configuration of Metal's fragment rows.
 #[derive(Clone, Copy, Debug)]
 enum Setup {
     /// Color 0 of `RGBA8Unorm`, every channel written.
@@ -357,8 +353,8 @@ fn setup(
 /// A fragment function's texture is used once linked where Metal keeps it: a texel that reaches
 /// a side effect, a depth, stencil or sample mask output, or a color its attachment writes, with or
 /// without rasterization; not one that reaches only a color the pipeline has no attachment for,
-/// writes no channel of, or a dual-source second color without blending (one row per row of EVs
-/// RRS3-icbtex11 and -icbtex12 on an M4 under macOS 27.0.1). A color under a partial write mask
+/// writes no channel of, or a dual-source second color without blending (one row per row of our
+/// probes on an M4 under macOS 27.0.1). A color under a partial write mask
 /// is kept channel by channel on Metal (an alpha the mask leaves out is dropped, a red it writes
 /// kept), which the analysis does not track: unproven, `UnmeasuredColorWrite`, whatever Metal
 /// answers.
@@ -376,7 +372,6 @@ fn a_fragment_function_uses_its_texture_where_metal_keeps_it_once_linked() {
     let proven = Some(None);
     let partial = Some(Some(LinkedUseGap::UnmeasuredColorWrite));
     for (fragment, configuration, used) in [
-        // EV RRS3-icbtex11.
         ("texel_fragment", Setup::Color, proven),
         ("texel_fragment", Setup::NoColor, None),
         ("texel_fragment", Setup::NoColorDepth, None),
@@ -404,7 +399,7 @@ fn a_fragment_function_uses_its_texture_where_metal_keeps_it_once_linked() {
         ("second_color_fragment", Setup::NoColor, None),
         ("second_color_fragment", Setup::SecondColor, proven),
         ("second_color_fragment", Setup::RasterOff, None),
-        // EV RRS3-icbtex12: Metal refuses, refuses, makes, refuses, makes, refuses.
+        // Metal refuses, refuses, makes, refuses, makes, refuses.
         ("texel_fragment", Setup::Mask(rgb), partial),
         ("alpha_fragment", Setup::Color, proven),
         ("alpha_fragment", Setup::Mask(rgb), partial),
@@ -581,7 +576,7 @@ fn input_locations(words: &[u32]) -> Vec<u32> {
 
 /// A fragment function's stage input that the vertex function writes no output of, and that the
 /// linking drops, is absent from the compiled fragment module: it has no input variable and is
-/// read as zero. Metal makes such a state (EV RRS3-icbtex14's `vc`+`fd` without a color
+/// read as zero. Metal makes such a state (the probe's `vc`+`fd` without a color
 /// attachment, on an M4 under macOS 27.0.1). This holds where the input reaches only a color the
 /// pipeline drops, by its value or by a branch on it. An input the linking keeps, by its value
 /// or by a branch whose arms make a kept color, keeps its variable, and the link refuses the
@@ -660,8 +655,8 @@ fn a_dropped_unwritten_fragment_input_is_absent_from_the_compiled_fragment() {
 }
 
 /// A post-tessellation vertex function's and a mesh function's unwritten fragment input are
-/// answered as a vertex function's. Metal refuses with color 0 attached and makes without (EV
-/// RRS3-icbtex16 on an M4 under macOS 27.0.1). Kept, the descriptors name the input and the link
+/// answered as a vertex function's. Metal refuses with color 0 attached and makes without (on an M4
+/// under macOS 27.0.1). Kept, the descriptors name the input and the link
 /// refuses the pair; dropped, the compile reads it as zero (no input variable) and links.
 #[test]
 fn tessellated_and_mesh_pipelines_answer_an_unwritten_fragment_input_as_a_vertex_function_s() {

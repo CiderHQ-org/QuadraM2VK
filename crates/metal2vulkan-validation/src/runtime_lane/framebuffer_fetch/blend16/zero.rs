@@ -8,7 +8,7 @@
 //! exceeds 2, else `src[i]`): `fbl_safe_loaded` a `half4`, `fbl_safe_loaded_float` a `float4`. One
 //! draw of the fullscreen triangle under each blend.
 //!
-//! Metal's answer (EV FBL-zf1-m3: plain Metal on the M3 Max under macOS 27.0.1, our own MSL of this
+//! Metal's answer (plain Metal on the M3 Max under macOS 27.0.1, our own MSL of this
 //! shape, each operation with a zero factor beside each factor, color and alpha, into
 //! `RGBA16Float` and `RG16Float` from `half4` and `float4` outputs, three seeds of 16,384 pixels
 //! whose sources and texels hold signed zeros, infinities and NaNs: every lane): each product
@@ -136,7 +136,7 @@ fn metal_min(x: f64, y: f64) -> f64 {
     }
 }
 
-/// Metal's blend `b` without fast math of `s` over the texel `d` (EV FBL-zf1-m3), as `half` bits:
+/// Metal's blend `b` without fast math of `s` over the texel `d`, as `half` bits:
 /// each product rounded in the output's arithmetic, a zero factor's kept, the sum rounded, a
 /// `float` result converted toward zero. One term is a zero or a NaN, so the `f64` sum is exact.
 fn metal(case: Case, b: Blending, s: [f64; 4], d: [f64; 4]) -> [u16; 4] {

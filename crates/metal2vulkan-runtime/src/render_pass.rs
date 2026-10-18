@@ -11,10 +11,10 @@
 //!
 //! - **Attachments.** An attachment's texture needs a format of the attachment's kind; its level
 //!   and slice lie in the texture (a view counts its own). A color texture without `RenderTarget`
-//!   usage, which Metal's validation stops, renders as plain Metal renders it (EV RRS-probe-1-m4,
-//!   an M4: cleared, drawn, loaded and stored as a render target is, and left as it was under a
-//!   `DontCare` store; Metal probe case `usage_missing`) through a stand-in image that has it
-//!   (`attachment_stand_in.rs`). So does a depth or stencil one (EV RRS-probe-18-m4, an M4:
+//!   usage, which Metal's validation stops, renders as plain Metal renders it (an M4: cleared,
+//!   drawn, loaded and stored as a render target is, and left as it was under a `DontCare` store;
+//!   Metal probe case `usage_missing`) through a stand-in image that has it
+//!   (`attachment_stand_in.rs`). So does a depth or stencil one (an M4:
 //!   `Depth32Float`, `Depth16Unorm`, `Stencil8` and `Depth32Float_Stencil8` of shader-read usage
 //!   alone cleared, loaded, drawn and stored as a render target is, and left as they were under a
 //!   `DontCare` store): one texture through a stand-in, separate depth and stencil textures through
@@ -419,8 +419,7 @@ pub enum RenderPassProblem {
     /// under such an action, the descriptor's or a late one, is left untouched and the
     /// attachment stored by the action, as plain Metal does where its validation stops it
     /// ("must be one of MTLStoreActionMultisampleResolve or
-    /// MTLStoreActionStoreAndMultisampleResolve"): a color attachment's, a depth or stencil one's
-    /// (EV RFX-probe2-m4).
+    /// MTLStoreActionStoreAndMultisampleResolve"): a color attachment's, a depth or stencil one's.
     ResolveStoreAction(Attachment),
     /// A resolve of a single-sampled depth or stencil attachment, or a color one's target set
     /// late (measured: Metal's validation stops it; a color attachment's resolving store action
@@ -665,7 +664,7 @@ impl ColorTarget {
     /// resolve texture of another pixel format than the attachment's own (its sRGB twin, the only
     /// other format the runtime resolves into): pixel format identity, not the twin relation.
     /// Where such a pass has no draw call, Metal keeps the samples' earlier texels, its texture
-    /// compressed or not (EV ZIN2-xr1-m4: `RGBA8Unorm`, `BGRA8Unorm` and the extended-range
+    /// compressed or not (`RGBA8Unorm`, `BGRA8Unorm` and the extended-range
     /// formats, each way, an Apple M4 under macOS 27.0.1), where a resolve into the attachment's
     /// own format leaves the clear in a texture it compresses. The attachment's own texture is its
     /// stand-in's where one stands in for it.
@@ -930,7 +929,7 @@ pub(super) fn check_target(
         Attachment::Stencil => kind.contains(metal2vulkan::vk::ImageAspectFlags::STENCIL),
     };
     // A 4:2:2 texture as a color attachment: plain Metal makes the pass, whose clear stores the
-    // clear color in the format's encoding (EV RRP-probe11-m4; its validation stops the pass,
+    // clear color in the format's encoding (its validation stops the pass,
     // "not color renderable"). The runtime does not build it: its gap. Likewise a `YCBCR8_420_2P`
     // one, whose pass Metal stores converted back into the surface's two planes (the consumer's
     // report): the runtime's gap. But for a format whose store a rule matches, which renders
@@ -1091,8 +1090,8 @@ fn memoryless(texture: &Texture) -> bool {
 }
 
 /// The largest render target width and height Metal renders: a pass without attachments wider or
-/// taller fails its command buffer from the pass on (measured on an M4, by a Metal probe and EVs
-/// RRS-probe-13-m4 and -13b-m4: the encoder is made, and the command buffer ends with an internal
+/// taller fails its command buffer from the pass on (measured on an M4, by a Metal probe and our
+/// probes: the encoder is made, and the command buffer ends with an internal
 /// error, with and without API validation; [`past_target_size`]). An attachment is never larger:
 /// Metal's textures are at most 16384 wide and high.
 const MAX_TARGET_SIZE: u64 = 16384;
@@ -1117,14 +1116,14 @@ pub(super) enum DefaultSamples {
 }
 
 /// What plain Metal does with a pass without attachments at `defaultRasterSampleCount`
-/// `count`, by its low 8 bits (EVs RCH-msaa-m4 to RCH-msaa4-m4, an Apple M4 under macOS 27.0.1,
-/// every count from 0 to 256 and 257, 300, 511, 512, 513, 1024, 2^16, 2^31, 2^32, 2^63 and
-/// 2^64 - 1, each of them as its low 8 bits): 1 to 7 run (4x4 passes ended at once, so what 3, 5,
-/// 6 and 7 rasterize is not measured, and no pipeline of those counts is made), 0 (the descriptor's
-/// default), 8 to 15 and 128 to 255 end the process, and 16 to 127 fail the command buffer
-/// ("Internal Error (0000010c:Internal Error)" on the M3 Max under macOS 26.7, `0000010d` on the
-/// M4). The consumer's run of EV RCH-s0-m4's probe on the M3 Max under macOS 26.7 answered every
-/// case it shares alike, 0 included. Metal's API validation stops every count but 1, 2 and 4.
+/// `count`, by its low 8 bits (an Apple M4 under macOS 27.0.1, every count from 0 to 256 and 257,
+/// 300, 511, 512, 513, 1024, 2^16, 2^31, 2^32, 2^63 and 2^64 - 1, each of them as its low 8 bits):
+/// 1 to 7 run (4x4 passes ended at once, so what 3, 5, 6 and 7 rasterize is not measured, and no
+/// pipeline of those counts is made), 0 (the descriptor's default), 8 to 15 and 128 to 255 end the
+/// process, and 16 to 127 fail the command buffer ("Internal Error (0000010c:Internal Error)" on
+/// the M3 Max under macOS 26.7, `0000010d` on the M4). The consumer's run of our probe
+/// on the M3 Max under macOS 26.7 answered every case it shares alike, 0 included. Metal's API
+/// validation stops every count but 1, 2 and 4.
 pub(super) fn pass_default_samples(count: u64) -> DefaultSamples {
     match count & 0xff {
         1..=7 => DefaultSamples::Runs,
@@ -2173,7 +2172,6 @@ mod tests {
             ),
             (0, 0, 0, 0)
         );
-        // Probe RT11-metal-probe-10's `pass_defaults`.
         assert_eq!(
             (
                 d.tile_width,
@@ -2428,7 +2426,7 @@ mod tests {
             RenderPassProblem::SampleCounts
         );
         // Past 16384 without attachments Metal makes the encoder and fails the command buffer
-        // from the pass on (probe 3, EVs RRS-probe-13-m4 and -13b-m4).
+        // from the pass on (probe 3).
         assert_eq!(
             area("t", &[], [16384, 16384], 1).unwrap(),
             ([16384, 16384], 1)
@@ -2443,12 +2441,11 @@ mod tests {
         }
     }
     /// A pass without attachments at each default sample count measured answers as plain Metal
-    /// did on an Apple M4 under macOS 27.0.1 (EVs RCH-msaa-m4 to RCH-msaa4-m4: every count from
-    /// 0 to 256, and the larger ones below), and on the M3 Max under macOS 26.7 for the counts
-    /// it ran (EV RCH-s0-m4's probe, 0 included): 1 to 7 run, 0, 8 to 15 and 128 to 255 end the
-    /// process, and 16 to 127 fail the command buffer, by the count's low 8 bits. A stopped
-    /// count is `Invalid` making the encoder; a pass with attachments takes its attachments'
-    /// samples, whatever its default.
+    /// did on an Apple M4 under macOS 27.0.1 (every count from 0 to 256, and the larger ones
+    /// below), and on the M3 Max under macOS 26.7 for the counts it ran (the probe's probe, 0
+    /// included): 1 to 7 run, 0, 8 to 15 and 128 to 255 end the process, and 16 to 127 fail the
+    /// command buffer, by the count's low 8 bits. A stopped count is `Invalid` making the encoder;
+    /// a pass with attachments takes its attachments' samples, whatever its default.
     #[test]
     fn a_pass_without_attachments_answers_metal_s_default_sample_counts() {
         use DefaultSamples::{FailsCommandBuffer, Runs, Stops};

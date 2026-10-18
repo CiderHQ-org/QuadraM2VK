@@ -43,7 +43,7 @@
 //!   it, so Apple2's rows are a superset of Apple1's (Apple1, the A7, left the tables when its
 //!   devices left the OS). The macOS 27 SDK deprecates `MTLGPUFamilyMac1` since macOS 13. Metal
 //!   answers Apple1 and Mac1 wherever it answers Apple2 and Mac2: true on an M3 Max (macOS 26.7)
-//!   and an M4 (macOS 27.0.1), EV `RT10-famprobe2`.
+//!   and an M4 (macOS 27.0.1).
 //! - Metal4 has one row, [`FamilyRow::Metal4Api`]: the `MTL4` API, which the runtime does not
 //!   build. Its features have no column of their own, so none is listed.
 //! - MacCatalyst1 and MacCatalyst2 have one row, [`FamilyRow::MacCatalystProcess`]: a Mac

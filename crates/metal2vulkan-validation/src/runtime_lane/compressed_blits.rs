@@ -1,7 +1,6 @@
 //! Blits through textures Metal keeps losslessly compressed on the device the cfg selects, under
-//! the validation layer, at every Metal level (macOS 26.7 and 27.0.1), against what EVs
-//! FXR-fxr3-m4, FXR-fxr5-m4 and FXR-cblit-m4 measured on an Apple M4 and the package share-cblit on
-//! an Apple M3 Max:
+//! the validation layer, at every Metal level (macOS 26.7 and 27.0.1), against what our probes
+//! measured on an Apple M4 and the package share-cblit on an Apple M3 Max:
 //!
 //! - A GPU blit into, out of, or between textures of `ShaderRead` usage at least 16 texels on a
 //!   side writes `BGRA10_XR`'s, `RG11B10Float`'s and `RGB9E5Float`'s texels by

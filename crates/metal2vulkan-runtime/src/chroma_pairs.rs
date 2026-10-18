@@ -1,7 +1,7 @@
 //! 4:2:2 textures (`GBGR422`, `BGRG422`): two texels share their chroma, 4 bytes a pair (`G0 B G1
 //! R`, `B G0 R G1`), held as 2-byte texels.
 //!
-//! - **Metal's answers** (EV CFR-probe8-m4, an M4 under macOS 27.0.1, alike plain twice and under
+//! - **Metal's answers** (an M4 under macOS 27.0.1, alike plain twice and under
 //!   API validation where it passes): `newTextureWithDescriptor:` makes either format's 2D
 //!   texture (of an even width, `texture_descriptor`), `Private` and `Shared`, with `ShaderRead`,
 //!   `ShaderWrite` or `RenderTarget` usage, at 2 bytes a texel (a 16 x 16 texture allocates 512

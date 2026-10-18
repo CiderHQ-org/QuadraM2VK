@@ -1,7 +1,7 @@
 use super::*;
 
 /// A reset record is zero throughout, its buffer slots' strides too, as Metal's reset leaves a
-/// slot's getters answering 0 on a buffer of dynamic attribute strides (EV API-icbget1-m4).
+/// slot's getters answering 0 on a buffer of dynamic attribute strides.
 #[test]
 fn reset_clears_action_and_bindings_to_zero() {
     let mut bytes = vec![0xa5; COMMAND_BYTES];
@@ -566,10 +566,10 @@ fn a_render_descriptor_allows_the_draw_kinds_it_names() {
     assert!(none.encode_header(1, OWNED_STATE).is_err());
 }
 
-/// A slot's words hold what Metal's getters answer on a buffer of dynamic attribute strides
-/// (EVs API-icbget1-m4, API-icbget2-m4): an address and a stride of 0 where no setter set it, a
-/// nil buffer's offset as its address, all ones for the pipeline's stride and the stride of the
-/// stride form; each decodes back, and the words of 0 decode as no setter's.
+/// A slot's words hold what Metal's getters answer on a buffer of dynamic attribute strides: an
+/// address and a stride of 0 where no setter set it, a nil buffer's offset as its address, all ones
+/// for the pipeline's stride and the stride of the stride form; each decodes back, and the words of
+/// 0 decode as no setter's.
 #[test]
 fn buffer_slots_hold_the_answers_of_metal_s_getters() {
     let slot = |address, attribute_stride| {

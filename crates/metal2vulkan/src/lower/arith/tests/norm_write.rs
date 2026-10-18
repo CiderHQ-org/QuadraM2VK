@@ -1,6 +1,6 @@
 //! Interpreter differential tests of a written `float` texel rounded to the codes Metal stores in
 //! a normalized storage texture by the bound format's class (`lower::texture::norm_write`).
-//! References are plain Rust: Metal's measured rule (EV FRT3-nsw1-m4), each channel's value clamped
+//! References are plain Rust: Metal's measured rule, each channel's value clamped
 //! to its range (a NaN 0) times its maximum code `m` exactly, rounded to nearest with a tie away
 //! from zero, a 1-bit channel 1 only above one half; the value written `c / m` correctly rounded,
 //! with the clamped value's sign.
@@ -131,7 +131,7 @@ fn run(what: &str, class: u32, values: &[f32], reference: &dyn Fn(usize, f32) ->
 
 /// Every normalized format's class rounds each channel to Metal's code on its own scale: the 8-
 /// and 16-bit unorm and snorm families in every lane, the packed formats' 10:10:10:2, 5:6:5, 4:4:4:4
-/// and 5:5:5:1 channels each on its own, a 1-bit alpha's one half to 0 (EV FRT3-nsw1-m4).
+/// and 5:5:5:1 channels each on its own, a 1-bit alpha's one half to 0.
 #[test]
 fn a_normalized_write_rounds_each_channel_to_metals_code() {
     for pf in [

@@ -3,12 +3,11 @@
 //! three 32-bit attachments) and `k10ts_alias_probe` (an explicit imageblock, `Mixed`, aliased onto
 //! four attachments).
 //!
-//! - A tile state answers Metal's queries as an M3 Max and an M4 do (probes RT11-metal-probe-10
-//!   and -11): `imageblockSampleLength` is the attachments' texels packed, or the aliased layout's
-//!   size whatever the formats pack to; its memory length for a tile is that times the tile's
-//!   cells, unrounded; it supports no indirect command buffers and echoes the descriptor's
-//!   `threadgroupSizeMatchesTileSize`. Its thread limit is Metal's 1024 where the device runs it,
-//!   lowered by the descriptor's.
+//! - A tile state answers Metal's queries as an M3 Max and an M4 do: `imageblockSampleLength` is
+//!   the attachments' texels packed, or the aliased layout's size whatever the formats pack to; its
+//!   memory length for a tile is that times the tile's cells, unrounded; it supports no indirect
+//!   command buffers and echoes the descriptor's `threadgroupSizeMatchesTileSize`. Its thread limit
+//!   is Metal's 1024 where the device runs it, lowered by the descriptor's.
 //! - Creation refuses what Metal's does: a function reaching an attachment the descriptor gives
 //!   no format.
 //! - A binary archive holds a tile pipeline it was given (`add_tile_render_pipeline_functions`),

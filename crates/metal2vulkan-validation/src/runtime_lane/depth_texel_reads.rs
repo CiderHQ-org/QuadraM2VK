@@ -1,7 +1,7 @@
 //! A `Depth16Unorm` texture's texels read and sampled with a `float` result, on the device the cfg
 //! selects, under the validation layer, against plain Metal's: an Apple M4 under macOS 27.0.1
 //! reads and samples (nearest) every 16-bit code `c` as `c / 65535` correctly rounded to `float`
-//! (EV SID-d16r1-m4, our own probe: all 65,536 codes, both accesses, the outputs' SHA-256 below),
+//! (our own probe: all 65,536 codes, both accesses, the outputs' SHA-256 below),
 //! where a device that multiplies by the reciprocal answers 512 codes one ulp off (lavapipe, the
 //! format scout's `Depth16Unorm` read cell). The kernels are the format scout's (`format_scout.ll`):
 //! a 16x16 texture of 256 codes at a time, each code read and sampled at its texel's centre.
@@ -27,8 +27,7 @@ use metal2vulkan_runtime::{
 /// The side of the scout's kernels' texture.
 const SIDE: u64 = 16;
 
-/// The SHA-256 of Metal's 65,536 `float`s, code by code, read and sampled alike (EV
-/// SID-d16r1-m4).
+/// The SHA-256 of Metal's 65,536 `float`s, code by code, read and sampled alike.
 const METAL: &str = "a940e05b402805a0f114a2009566daa556ac9cc732c04127d1cfaf7d98c13b0d";
 
 /// Synthetic AIR written for this lane: `read_dh` reads, and `sample_dh` samples through sampler

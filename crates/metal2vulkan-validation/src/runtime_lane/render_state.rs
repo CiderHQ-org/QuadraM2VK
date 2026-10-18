@@ -1127,7 +1127,7 @@ fn render_state_draws_store_metals_texels() {
     });
     check("ds_less", stored.depth.unwrap(), depths(0x3e80_0000, 16));
     // `setDepthStencilState:nil` after a state is Metal's default state again: a draw behind the
-    // cleared depth passes `Always` and writes no depth (EV CFR-probe4-m4, plain Metal on an M4;
+    // cleared depth passes `Always` and writes no depth (plain Metal on an M4;
     // its validation stops nil).
     let stored = probe.run(PASS.depth(f32_depth, 0.5), |p, e, h| {
         e.set_depth_stencil_state(&p.state(CompareFunction::Less, true, None))
@@ -1560,7 +1560,7 @@ fn render_state_is_refused_as_metal_refuses_it() {
 /// plain Metal renders them (the runtime's `depth_stencil_scratch.rs`): probe 4b's
 /// `separate_sizes` (an 8x8 `Depth32Float` beside a 4x4 `Stencil8` and color, cleared to 0.5
 /// and 0x40, drawn at 0.25 under `Less` and a stencil increment) shades the 4x4 render area and
-/// clears the depth whole; EV RRS-probe-1-m4's `sep_d64_s4` (a 64x64 depth), whose clear Metal
+/// clears the depth whole; our probe's `sep_d64_s4` (a 64x64 depth), whose clear Metal
 /// stops at its first 32x32 tile, is `NotImplemented(Render)`.
 fn separate_sizes(probe: &Probe) {
     let device = &probe.device;

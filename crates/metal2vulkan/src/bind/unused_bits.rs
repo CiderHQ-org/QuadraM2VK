@@ -5,8 +5,8 @@
 //! `RGB10A8_2P_XR10`, their `_sRGB` twins) or a padded 10-bit one (`R10Unorm_X6`,
 //! `RG10Unorm_X12`, their `_sRGB` twins) and records a draw writes every texel of each tile it
 //! stores back, where a channel a fragment writes takes the write; every other texel keeps its
-//! codes, the bits they leave unused made canonical (EVs XRR2-xrb2 and -xrb3 on an Apple M4 and
-//! the consumer's Apple M3 Max, XRR2-x6g to -x6k, -x6is):
+//! codes, the bits they leave unused made canonical (on an Apple M4 and the consumer's Apple M3
+//! Max):
 //!
 //! - `BGR10_XR`'s word: bits 30 and 31 set;
 //! - `BGRA10_XR`'s four 16-bit fields: each field's low six bits cleared, and the alpha field's
@@ -17,7 +17,7 @@
 //!   `RG10Unorm_X12_sRGB`);
 //! - a bfloat format's 16-bit code (`R16Bfloat`, `RG16Bfloat`, `RGBA16Bfloat`): its value through
 //!   `half` to nearest even and back to the nearest bfloat code, ties to even, a NaN `0x7fc0`
-//!   (`ExtendedRange::load_code`; EV FRT-bfp1-m4 on an Apple M4 under macOS 27.0.1: 56,829 of the
+//!   (`ExtendedRange::load_code`; on an Apple M4 under macOS 27.0.1: 56,829 of the
 //!   65,536 codes move, in every tile a draw reaches).
 //!
 //! The same store writes a single-sampled signed normalized or `RGB9E5Float` attachment's tiles

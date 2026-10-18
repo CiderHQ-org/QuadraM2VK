@@ -5,7 +5,7 @@
 //! air64-apple-macos15.0`) to `air.simdgroup_matrix_8x8_{load,store}` with `i64 E`, `<2 x i64>
 //! origin` and `i1 transpose` after the pointer, and for macOS 26 (AIR 2.8) to the same names with
 //! three `<2 x i64>`: an extent, a stride and an origin. The same MSL compiled both ways gives the
-//! mapping (EV `GSM-probe1-m4`): untransposed, the extent `(E, 8)`, the stride `(1, E)` and the
+//! mapping: untransposed, the extent `(E, 8)`, the stride `(1, E)` and the
 //! origin as it is; transposed, the extent `(8, E)`, the stride `(E, 1)` and the origin's lanes
 //! swapped. `expand` rewrites each AIR 2.7 call whose transpose flag SCCP made a constant into
 //! the AIR 2.8 call, building the vectors as the AIR 2.8 front end does (`insertelement` of `E`

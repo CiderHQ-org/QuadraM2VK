@@ -3,10 +3,10 @@
 //! without `pixelFormat:` ([`BlitCommandEncoder::fill_texture_color`]), Apple SPI the runtime
 //! takes as plain Metal answers it.
 //!
-//! **Metal's answer** (EVs XRR2-fill1-m4, XRR2-fill2-m4 and XRR2-fill3-m4: an Apple M4 under
-//! macOS 27.0.1, our own probes; every byte of every level, slice and aspect read back after one
-//! fill over bytes of `0xEE`, 112 formats, one case a process). A fill writes the pattern, cut at
-//! a unit's bytes or repeated to them, into every unit of the region, and leaves every other byte:
+//! **Metal's answer** (an Apple M4 under macOS 27.0.1, our own probes; every byte of every level,
+//! slice and aspect read back after one fill over bytes of `0xEE`, 112 formats, one case a
+//! process). A fill writes the pattern, cut at a unit's bytes or repeated to them, into every unit
+//! of the region, and leaves every other byte:
 //! - a **compressed** format's unit is a block: the region's origin and size count blocks, cut at
 //!   the level's blocks (74 formats, PVRTC at square power-of-two extents);
 //! - every other format's unit is a texel, and the region counts texels, cut at the level: an
@@ -17,39 +17,38 @@
 //! - a **two-plane extended-range** texel (`RGB10A8_2P_XR10` and its sRGB twin) is its color word
 //!   in plane 0, 4 bytes, its alpha kept, at Metal's blit rows (`⌊4 w / 16⌋ · 16` bytes apart):
 //!   where a heap's bytes hold the planes (a one-level 2D texture), the fill writes those bytes
-//!   there, rows overlapping included. A texture of its own memory (EV XRR2-fill4-m4: one level, 8
-//!   and 12 texels wide, a 2D array's slice too) is written at its rows when its width is a
-//!   multiple of 4; at another width Metal's blit rows move texels between rows and into bytes
-//!   between them, which the runtime does not hold, and of a texture of more than one level Metal's
-//!   blits read back bytes no rule fits (both refused). A texture over a surface's planes is
-//!   written at its GPU rows (plane 0's `bytesPerRow` rounded down to 16, the rows Metal's blits
-//!   address it at) at any width, its alpha plane and every byte between the rows kept (EV
-//!   XRR2-xrs2-m4: `RGB10A8_2P_XR10` over 7 surfaces and the sRGB twin over one, 16, 33, 37, 61, 64
-//!   and the consumer's 384 texels wide, a region, a whole texture with a 3-byte pattern and a
-//!   region past the level, every byte of each surface read back).
+//!   there, rows overlapping included. A texture of its own memory (one level, 8 and 12 texels
+//!   wide, a 2D array's slice too) is written at its rows when its width is a multiple of 4; at
+//!   another width Metal's blit rows move texels between rows and into bytes between them, which
+//!   the runtime does not hold, and of a texture of more than one level Metal's blits read back
+//!   bytes no rule fits (both refused). A texture over a surface's planes is written at its GPU
+//!   rows (plane 0's `bytesPerRow` rounded down to 16, the rows Metal's blits address it at) at any
+//!   width, its alpha plane and every byte between the rows kept (`RGB10A8_2P_XR10` over 7 surfaces
+//!   and the sRGB twin over one, 16, 33, 37, 61, 64 and the consumer's 384 texels wide, a region, a
+//!   whole texture with a 3-byte pattern and a region past the level, every byte of each surface
+//!   read back).
 //!
 //! A **color fill** packs the color in `pixelFormat:` (the texture's own format without it) by
 //! the fill's own rules (`fill_value.rs`), which are not a `Clear` load action's, and fills that
-//! pattern: the packed texel's bytes, repeated or cut at the texture's texel (EV FRT-fil1-m4: 12
-//! pairs of formats, 256 colors each; EV FRT-fil4-m4: 128 colors packed in each of 70 formats into
-//! textures of 18 formats of 1 to 16 bytes). Packed in a format whose fills do not follow the color
-//! (compressed, 4:2:2, depth, stencil, two-plane, padded 10-bit), Metal's bytes are one constant
+//! pattern: the packed texel's bytes, repeated or cut at the texture's texel (12 pairs of formats,
+//! 256 colors each: 128 colors packed in each of 70 formats into textures of 18 formats of 1 to 16
+//! bytes). Packed in a format whose fills do not follow the color (compressed, 4:2:2, depth,
+//! stencil, two-plane, padded 10-bit), Metal's bytes are one constant
 //! for every color of a process, bytes it did not write for the color, which differ between
 //! processes and machines. (Refused before.) The runtime fills zero bytes there, one constant for
 //! every color, and announces it once (`Degradation::UnpackedFillColor`, one of Metal's answers).
 //!
-//! **Placement** (EV FRT-fil1-m4, 31 cases of a byte fill of `RGBA8Unorm` textures of each type,
+//! **Placement** (31 cases of a byte fill of `RGBA8Unorm` textures of each type,
 //! every byte of every slice and level read back): a level past the texture's writes nothing; a 1D,
 //! 2D or 3D texture ignores the slice, a cube takes the slice's face modulo 6, and an array (1D, 2D
 //! or cube) writes nothing at a slice past its own; a 3D texture writes the region's depth images,
 //! cut at the level's depth, and every other type one image, ignoring the region's `z` and depth. A
 //! texture of another type (multisample, texture buffer) is unmeasured.
 //!
-//! **`fillBuffer:range:pattern4:`** ([`BlitCommandEncoder::fill_buffer_pattern4`]; EV
-//! FRT-fil1-m4, 10 ranges of a 256-byte buffer) writes the 4-byte pattern from the range's
-//! start, restarting it at each multiple of 16 bytes of the buffer: byte `k` of the range takes
-//! the pattern's byte `k - start` modulo 4 before the first such multiple, and byte `k` modulo 4
-//! from it on.
+//! **`fillBuffer:range:pattern4:`** ([`BlitCommandEncoder::fill_buffer_pattern4`]; 10 ranges of a
+//! 256-byte buffer) writes the 4-byte pattern from the range's start, restarting it at each
+//! multiple of 16 bytes of the buffer: byte `k` of the range takes the pattern's byte `k - start`
+//! modulo 4 before the first such multiple, and byte `k` modulo 4 from it on.
 //!
 //! **How.** Each fill is copies the encoder already makes: a staging buffer of the pattern's units
 //! (4 MiB at most, copied again for a larger region) and `copy_from_buffer_to_texture` into the
@@ -115,7 +114,7 @@ fn fill_unit(pf: PixelFormat) -> Option<FillUnit> {
         P::Depth16Unorm => texels(2, BlitOption::None),
         P::Depth32Float => texels(4, BlitOption::None),
         _ if has_channels(pf).is_some() => texels(block_bytes(pf)?, BlitOption::None),
-        // A bfloat texel's words (EV FPV-pf8-m4: color fills of single texels and of 4 x 1).
+        // A bfloat texel's words (color fills of single texels and of 4 x 1).
         _ if ExtendedRange::of(pf).is_some_and(|form| {
             form.bfloat()
                 || matches!(
@@ -417,7 +416,7 @@ impl BlitCommandEncoder {
             }
             // Metal's fill rows are its blits' (`⌊4 w / 16⌋ · 16` bytes apart), the texture's own
             // only at a width that is a multiple of 4; of a texture of more than one level, its
-            // blits read back bytes no rule fits (EV XRR2-fill4-m4).
+            // blits read back bytes no rule fits.
             if texture.heap().is_some() || texture.mipmap_level_count() > 1 || !w.is_multiple_of(4)
             {
                 return Err(unmeasured());

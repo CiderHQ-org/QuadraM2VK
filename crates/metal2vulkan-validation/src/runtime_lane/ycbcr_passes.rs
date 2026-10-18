@@ -5,21 +5,19 @@
 //!
 //! - A pass into `YCBCR8_420_2P`, `YCBCR8_422_2P` or `YCBCR8_444_2P` stores every texel into
 //!   both planes as Metal stores it (`metal2vulkan::bind::ycbcr_store`, whose codes matched
-//!   Metal's bytes of our probe's clears and draws, EV XRR2-ycr1-m4): a clear, a draw over part
-//!   of a cleared texture (chroma blocks of drawn and cleared texels among them), and a
-//!   full-screen draw over a `DontCare` load, of values out of `[0, 1]`, NaNs, infinities and
-//!   values beside the grid's ties among them; every other byte is kept, and nothing is
-//!   announced. So does one into `YCBCR10_420_2P`, `YCBCR10_422_2P` or `YCBCR10_444_2P` (format gap
-//!   1 step 2; EV GSM2-ten2-m4), each code in the high 10 bits of its 16-bit word, over the
-//!   surfaces and conversions measured: `x420`, `xf20`, `x422`, `xf22`, `x444` and `xf44`, without
-//!   a matrix and under BT.709.
+//!   Metal's bytes of our probe's clears and draws): a clear, a draw over part of a cleared texture
+//!   (chroma blocks of drawn and cleared texels among them), and a full-screen draw over a
+//!   `DontCare` load, of values out of `[0, 1]`, NaNs, infinities and values beside the grid's ties
+//!   among them; every other byte is kept, and nothing is announced. So does one into
+//!   `YCBCR10_420_2P`, `YCBCR10_422_2P` or `YCBCR10_444_2P` (format gap 1 step 2), each code in the
+//!   high 10 bits of its 16-bit word, over the surfaces and conversions measured: `x420`, `xf20`,
+//!   `x422`, `xf22`, `x444` and `xf44`, without a matrix and under BT.709.
 //! - What is not measured is refused, typed (`Feature::Format`), leaving the surface's bytes: a
 //!   load, a `DontCare` store, a blend, a mask of some of red, green and blue, and the `_sRGB`
 //!   twins' pipelines and passes.
 //! - A packed 10-bit format's pipeline is made, as Metal makes it, and a pass into its texture
 //!   is refused, typed and naming the format, leaving the surface's bytes: Metal's pass fails,
-//!   its error and the bytes it leaves varying from run to run (EVs GSM2-pk1-m4 and
-//!   GSM2-pk2-m4), so no exact form exists.
+//!   its error and the bytes it leaves varying from run to run, so no exact form exists.
 
 use super::degrade_notices::{counts, on_device};
 use super::{buffer_with, read_buffer};
@@ -300,7 +298,7 @@ fn stored_bytes(
 }
 
 /// [`stored_bytes`] for a layout of 10-bit codes, each in the high 10 bits of its little-endian
-/// 16-bit word, the low 6 bits 0 (EV GSM2-ten2-m4).
+/// 16-bit word, the low 6 bits 0.
 fn stored_words(
     bytes: &[u8],
     codes: YCbCrCodes,

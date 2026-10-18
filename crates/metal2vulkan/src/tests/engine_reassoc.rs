@@ -235,7 +235,7 @@ fn expect(sums: &[&str]) -> BTreeSet<Grouping> {
     sums.iter().map(|s| parse(s)).collect()
 }
 
-/// The pinned sums take Metal's grouping, as measured on the fixture's own AIR (EV DGC-fx1-m4):
+/// The pinned sums take Metal's grouping, as measured on the fixture's own AIR:
 /// `regroup` and `tied`, whose leaves tie in rank as their reads are ordered. Every addition and
 /// subtraction rewritten carries no `reassoc`. The sum the rank does not pin (`unpinned`) keeps the
 /// AIR's grouping and its flags.

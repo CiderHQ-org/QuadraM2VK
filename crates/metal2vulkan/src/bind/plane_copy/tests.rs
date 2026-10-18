@@ -190,9 +190,9 @@ fn tags(rle: &str) -> Vec<u32> {
     out
 }
 
-/// Metal's copies between two `RGB10A8_2P_XR10` textures of the same size, 5 rows high (EV
-/// XRR2-pitch4-m4, an Apple M4 under macOS 27.0.1, shared and private textures, plain and under
-/// Metal's validation layer alike): the width, the region (`None`: the whole texture), and each
+/// Metal's copies between two `RGB10A8_2P_XR10` textures of the same size, 5 rows high (an Apple M4
+/// under macOS 27.0.1, shared and private textures, plain and under Metal's validation layer
+/// alike): the width, the region (`None`: the whole texture), and each
 /// destination texel's source texel plus 1 (0: the destination's own, which was 0) of plane 0
 /// and of the alpha plane.
 type Measured = (

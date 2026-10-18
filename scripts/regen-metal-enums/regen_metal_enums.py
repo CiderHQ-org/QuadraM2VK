@@ -73,18 +73,17 @@ EXHAUSTIVE = {
 
 # Enumerators the SDK headers do not declare but Metal makes on Apple GPUs, appended after a type's
 # header enumerators: each name is the one Metal prints in a texture's description for the raw
-# value (EVs TXN-xrprobe-m3 and TXN-xrprobe-m4, an Apple M3 Max on macOS 26.7 and an Apple M4 on
-# macOS 27.0.1). Programs that page Core Video surfaces create textures in them.
+# value (an Apple M3 Max on macOS 26.7 and an Apple M4 on macOS 27.0.1). Programs that page Core
+# Video surfaces create textures in them.
 PRIVATE = {
     "MTLPixelFormat": [
         ("MTLPixelFormatARGB8Unorm", 84),
         ("MTLPixelFormatRGB10A8_2P_XR10", 550),
         ("MTLPixelFormatRGB10A8_2P_XR10_sRGB", 551),
         # The names a texture descriptor's description prints for these raw values, on an Apple
-        # M4 under macOS 27.0.1: the two-plane YCbCr formats (EV XRR2-ycf3p1b-m4, plain) and the
-        # three after them (EV XRR2-ycc3-m4, plain and validated). Metal makes a texture of the
-        # two-plane ones only over an IOSurface plane, and none of the others from a descriptor
-        # alone (EVs XRR2-ycc1-m4 and XRR2-ycf3p1b-m4).
+        # M4 under macOS 27.0.1: the two-plane YCbCr formats (plain) and the three after them (plain
+        # and validated). Metal makes a texture of the two-plane ones only over an IOSurface plane,
+        # and none of the others from a descriptor alone.
         ("MTLPixelFormatYCBCR8_420_2P", 500),
         ("MTLPixelFormatYCBCR8_422_2P", 502),
         ("MTLPixelFormatYCBCR8_444_2P", 503),
@@ -158,9 +157,9 @@ PRIVATE = {
         ("MTLPixelFormatAnyDepth", 651),
         ("MTLPixelFormatAnyStencil", 652),
         # ASTC's 4x2 and 8x4 footprints, which the headers do not declare: the names a texture's
-        # description prints for these raw values, on an Apple M4 under macOS 27.0.1 (EV
-        # GSM2-fmt0-m4, a census of every raw value Metal makes a texture of). Metal
-        # makes a 2D texture of each from a descriptor alone.
+        # description prints for these raw values, on an Apple M4 under macOS 27.0.1 (a census of
+        # every raw value Metal makes a texture of). Metal makes a 2D texture of each from a
+        # descriptor alone.
         ("MTLPixelFormatASTC_4x2_sRGB", 185),
         ("MTLPixelFormatASTC_8x4_sRGB", 191),
         ("MTLPixelFormatASTC_4x2_LDR", 203),
@@ -168,12 +167,10 @@ PRIVATE = {
         ("MTLPixelFormatASTC_4x2_HDR", 221),
         ("MTLPixelFormatASTC_8x4_HDR", 227),
         # Every other raw value a texture descriptor's description names, on an Apple M4 under
-        # macOS 27.0.1, that neither the headers nor the entries above declare (EVs
-        # XRR2-pf576b-m4 and XRR2-pfi1-m4, every value from 0 to 1100): the
-        # descriptor's name for each, which `MTLPixelFormatGetInfoForDevice` gives too for all
-        # but `RGB16Bfloat` and the 12-bit `Uint` formats from 646 on. An Apple M3 Max under
-        # macOS 26.7 names each of them the same but `RGB16Bfloat`, and describes none from 630
-        # on (EV XRR2-pfi1-m3).
+        # macOS 27.0.1, that neither the headers nor the entries above declare (every value from 0
+        # to 1100): the descriptor's name for each, which `MTLPixelFormatGetInfoForDevice` gives too
+        # for all but `RGB16Bfloat` and the 12-bit `Uint` formats from 646 on. An Apple M3 Max under
+        # macOS 26.7 names each of them the same but `RGB16Bfloat`, and describes none from 630 on.
         ("MTLPixelFormatR16Bfloat", 26),
         ("MTLPixelFormatBGRA4Unorm", 44),
         ("MTLPixelFormatRG16Bfloat", 66),
@@ -244,12 +241,12 @@ PRIVATE = {
         ("MTLPixelFormatRGB10A8Uint_2P", 650),
     ],
     # Metal's own name for the raw value 2 of `minFilter` and `magFilter`, which a sampler
-    # descriptor's description prints (EV GSM2-bcs2-m4, an Apple M4 on macOS 27.0.1): Metal makes
+    # descriptor's description prints (an Apple M4 on macOS 27.0.1): Metal makes
     # a sampler state of it, and samples through it with its bicubic filter. The
     # descriptor keeps two bits; 3 stops the process in `newSamplerStateWithDescriptor:`.
     "MTLSamplerMinMagFilter": [("MTLSamplerMinMagFilterCubic", 2)],
     # Every texture creator takes these bits and the texture's usage keeps them, its views' and
-    # shared opens' too; the names are the ones its description prints (EV APX2-spi1-m4, an Apple
+    # shared opens' too; the names are the ones its description prints (an Apple
     # M4 on macOS 27.0.1, plain and validated).
     "MTLTextureUsage": [
         ("MTLTextureUsageNoConcurrentAccess", 0x4000),
@@ -260,9 +257,8 @@ PRIVATE = {
 
 # Bits of an option set the SDK headers do not declare that Metal takes and drops: every texture
 # creator takes usage bit 0x8 and makes the texture its other bits make, whose usage answers
-# without it (EV APX2-spi1-m4), while the heap size query of a descriptor of it
-# alone answers as for a usage (EV API-hsa1-m4). `TryFrom<u32>` keeps them;
-# `without_dropped` is what an object made of the value answers.
+# without it, while the heap size query of a descriptor of it alone answers as for a usage.
+# `TryFrom<u32>` keeps them; `without_dropped` is what an object made of the value answers.
 DROPPED = {
     "MTLTextureUsage": [0x8],
 }

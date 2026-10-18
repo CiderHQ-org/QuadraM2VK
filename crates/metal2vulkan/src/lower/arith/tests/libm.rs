@@ -522,7 +522,7 @@ mod precise_tan_routine_is_metals {
         part_3_of_4 = 2, part_4_of_4 = 3);
 }
 
-/// [`metal_tan_model`] is Metal's precise `tan` at words measured on the M3 Max (EV MBB-trig1-m3)
+/// [`metal_tan_model`] is Metal's precise `tan` at words measured on the M3 Max
 /// in each of its ranges (below 1/4, `[1/4, 1)`, `[1, 4)`, `[4, 2^21)` and from `2^21`), where
 /// Metal's word is not the correctly rounded value, and the routine answers them bit for bit, with
 /// and without `OpFmaKHR`.
@@ -600,8 +600,8 @@ fn precise_tan_answers_metals_measured_words() {
     }
 }
 
-/// [`precise_arc_model`] is Metal's precise `asin` and `acos` at words measured on the M4 (EV
-/// MBB-atan2-m4) in every region, where Metal's word is not the correctly rounded value, and the
+/// [`precise_arc_model`] is Metal's precise `asin` and `acos` at words measured on the M4 in every
+/// region, where Metal's word is not the correctly rounded value, and the
 /// routines answer them bit for bit.
 #[test]
 fn precise_asin_and_acos_answer_metals_measured_words() {
@@ -689,7 +689,7 @@ fn precise_asin_and_acos_answer_metals_measured_words() {
     }
 }
 
-/// Metal's fast `atan` (EV MBB-atan1-m3, the M3; the M4's words are the same) at lanes where its
+/// Metal's fast `atan` (the M3; the M4's words are the same) at lanes where its
 /// word is not the correctly rounded one: below `2^-12` (where it is `x` less an ulp), on `[2^-12,
 /// 1]`, on `(1, 4)` through Metal's reciprocal, and up to `2^126`; each word bit for bit, both
 /// signs.
@@ -765,7 +765,7 @@ fn fast_atan_answers_metals_words() {
     }
 }
 
-/// Metal's precise `atan` (EV MBB-atan1-m3, the M3) at lanes where its word is not the correctly
+/// Metal's precise `atan` (the M3) at lanes where its word is not the correctly
 /// rounded one: below `RN(tan(π/8))` (from `2^-12`), at it (where the next reduction starts), up to
 /// `RN(tan(3π/8))` and above it through Metal's reciprocal, and up to `2^126`; each word bit for
 /// bit, both signs. These lanes are among those where the reciprocal model is Metal's.
@@ -847,8 +847,8 @@ fn precise_atan_answers_metals_words() {
 
 /// Metal's fast `atan`, `asin`, and `acos` and its precise `atan` are within Apple's bound for them
 /// (5 ulp, MSL Tables 8.1 and 8.2) over their ranges; Metal's own words are within 3 ulp (both
-/// `atan`s, on every `float` of `[0.25, 4)`, EV MBB-atan1-m3) and 4 ulp (`asin` and `acos`, on
-/// every `float` of `[0.25, 1)`, both signs for `acos`, EV MBB-atan2-m4) of the exact value.
+/// `atan`s, on every `float` of `[0.25, 4)`) and 4 ulp (`asin` and `acos`, on every `float` of
+/// `[0.25, 1)`, both signs for `acos`) of the exact value.
 #[test]
 fn metal_arc_forms_stay_within_apples_bound() {
     let xs: Vec<u64> = operands(0x07A4_E297, 4000)
@@ -884,12 +884,11 @@ fn metal_arc_forms_stay_within_apples_bound() {
     }
 }
 
-/// Metal's fast `asin` and `acos` (EV MBB-atan2-m4, the M4; the M3's are the same at every `half`
-/// operand, EV MBB-half1-m3) at lanes where its word is not the correctly rounded one: below 0.25
-/// (stepping 16 `float`s from `2^-12`), on `[0.25, 0.7)`, and from 0.7 to 1, for `acos` both signs.
-/// Each word bit for bit (`asin` both signs). The last 8 of `asin` and 12 of `acos` are from 0.7 on
-/// where the form with the correctly rounded inverse root is not Metal's word either, and the
-/// hardware's inverse root's model is.
+/// Metal's fast `asin` and `acos` (the M4; the M3's are the same at every `half` operand) at lanes
+/// where its word is not the correctly rounded one: below 0.25 (stepping 16 `float`s from `2^-12`),
+/// on `[0.25, 0.7)`, and from 0.7 to 1, for `acos` both signs. Each word bit for bit (`asin` both
+/// signs). The last 8 of `asin` and 12 of `acos` are from 0.7 on where the form with the correctly
+/// rounded inverse root is not Metal's word either, and the hardware's inverse root's model is.
 #[test]
 fn fast_asin_and_acos_answer_metals_words() {
     let asin: [(u64, u64); 32] = [
@@ -1011,7 +1010,7 @@ fn fast_asin_and_acos_answer_metals_words() {
 
 /// The generic part of precise `atan2`, Metal's own form, is within Apple's bound (6 ulp, MSL Table
 /// 8.1) for finite nonzero normal operands, quotients from `2^-200` to `2^200` included; Metal's
-/// own words are within 3.3 ulp of the exact value (every finite normal pair of EV MBB-atan2-m4
+/// own words are within 3.3 ulp of the exact value (every finite normal pair of our probe
 /// whose answer is normal). Its quotients are the module's correctly rounded division routine's,
 /// whatever the device's.
 #[test]
@@ -1059,7 +1058,7 @@ fn atan2_routine_stays_within_its_bound() {
     eprintln!("Atan2: {w:.3}");
 }
 
-/// Metal's precise `atan2(y, x)` (EV MBB-atan2-m4, the M4) at pairs where its word is not the
+/// Metal's precise `atan2(y, x)` (the M4) at pairs where its word is not the
 /// correctly rounded one, five in each quadrant's quotients below `2^-12`, below `RN(tan(π/8))`,
 /// below `RN(tan(3π/8))`, and above, toward a positive and a negative `x`; each word bit for bit.
 /// These pairs are among those where the reciprocal model is Metal's.
@@ -1442,12 +1441,12 @@ pub(super) fn half_module(op: FloatFn, fun: Fun) -> TypedModule {
 
 /// A `half` `atan`, `tan`, `sin`, `cos`, or `atan2` call answers its model of Metal's own `half`
 /// form rounded to `half` ([`half_atan_form`], [`half_tan_form`], [`half_sin_cos_form`],
-/// [`half_atan2_form`]) at every `half` (`atan2`: at the 65,536 pairs of EV MBB-half1-m3's probe,
-/// `y` every pattern and `x` its hash, and at those of finite nonzero operands), a zero `sin` or
-/// `tan` operand giving `+0` and a NaN or an infinite operand a NaN. Rounded so, each model is
-/// Metal's word at every `half` of EVs MBB-half1-m3 and -m4 (`atan`, `atan2`) and MB2-half1-m3 and
-/// -m4 (`tan`, `sin`, `cos`; the M3 and the M4); Metal's words where they are not the correctly
-/// rounded ones are `half_forms_answer_metals_words`'. Part `part` of `of` checks every `of`-th
+/// [`half_atan2_form`]) at every `half` (`atan2`: at the 65,536 pairs of our probe, `y` every
+/// pattern and `x` its hash, and at those of finite nonzero operands), a zero `sin` or `tan`
+/// operand giving `+0` and a NaN or an infinite operand a NaN. Rounded so, each model is Metal's
+/// word at every `half` of our probes (`atan`, `atan2`, `tan`, `sin`, `cos`; the M3
+/// and the M4); Metal's words where they are not the correctly rounded ones are
+/// `half_forms_answer_metals_words`'. Part `part` of `of` checks every `of`-th
 /// run.
 fn half_forms(part: usize, of: usize) {
     let h = float(16);
@@ -1505,11 +1504,11 @@ mod half_forms_follow_their_model {
         part_9_of_12 = 8, part_10_of_12 = 9, part_11_of_12 = 10, part_12_of_12 = 11);
 }
 
-/// Metal's `half` `atan`, `tan`, `sin`, `cos`, and `atan2` words (EVs MBB-half1-m3 and
-/// MB2-half1-m3, the M3; the M4's are the same) where they are not the correctly rounded ones, bit
-/// for bit: `atan` and `tan` at 24 operands each, spread over the magnitudes where they differ
-/// (3,728 and 2,280 `half` values), `sin` and `cos` at every nonzero one (6 and 2), and `atan2` at
-/// six pairs per quadrant (of the 3,210 probe pairs where it differs).
+/// Metal's `half` `atan`, `tan`, `sin`, `cos`, and `atan2` words (the M3; the M4's are the same)
+/// where they are not the correctly rounded ones, bit for bit: `atan` and `tan` at 24 operands
+/// each, spread over the magnitudes where they differ (3,728 and 2,280 `half` values), `sin` and
+/// `cos` at every nonzero one (6 and 2), and `atan2` at six pairs per quadrant (of the 3,210 probe
+/// pairs where it differs).
 #[test]
 fn half_forms_answer_metals_words() {
     let h = float(16);
@@ -1930,8 +1929,8 @@ mod precise_sin_and_cos_routines_are_metals {
         part_8_of_8 = 7);
 }
 
-/// [`metal_sin_cos_model`] is Metal's precise `sin` and `cos` at words measured on the M3 Max (EV
-/// MBB-trig1-m3), 8 of each in `[2^-12, 1/4)` and in `[1/4, 1)`, where Metal's word is not the
+/// [`metal_sin_cos_model`] is Metal's precise `sin` and `cos` at words measured on the M3 Max, 8 of
+/// each in `[2^-12, 1/4)` and in `[1/4, 1)`, where Metal's word is not the
 /// correctly rounded value, and the routines answer them bit for bit, with and without `OpFmaKHR`.
 #[test]
 fn precise_sin_and_cos_answer_metals_measured_words() {
@@ -2167,7 +2166,7 @@ mod pi_routines_are_metals {
 
 /// [`metal_pi_model`] lies within 3 ulp of the exact value for `sinpi` and `cospi`, and within 5
 /// for `tanpi`, over [`pi_operands`] and every 4,099th finite normal `float`, both signs (the worst
-/// over every `float` from `2^-11` by the model, EV MBB-pi1-m3's analysis: 2.26 and 4.25); and it
+/// over every `float` from `2^-11` by the model, our probe's analysis: 2.26 and 4.25); and it
 /// answers a denormal operand as its zero.
 #[test]
 fn pi_model_stays_near_the_exact_value() {
@@ -2219,9 +2218,9 @@ fn pi_model_stays_near_the_exact_value() {
 }
 
 /// Metal's `sinpi`, `cospi`, and `tanpi` (precise and fast answer alike) at operands measured on
-/// the M3 Max (EV MBB-pi1-m3; the M4's, EV MBB-pi1-m4, are the same), two in each of five ranges
-/// where Metal's word is not the correctly rounded value: about `1/4`, about 1, the tiny operands,
-/// from 4, and the small negative ones.
+/// the M3 Max (the M4's, are the same), two in each of five ranges where Metal's word is not the
+/// correctly rounded value: about `1/4`, about 1, the tiny operands, from 4, and the small negative
+/// ones.
 const PI_WORDS: [(FloatFn, [(u32, u32); 10]); 3] = [
     (
         FloatFn::SinPi,

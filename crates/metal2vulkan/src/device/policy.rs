@@ -282,7 +282,7 @@ pub enum FloatMathsPolicy {
 /// device that does not sample through Metal's own texture unit (`VkProperty::MetalSampler`). On
 /// such a device Metal's conversion of a texel is emulated by a routine that tells the bound
 /// format's class apart at every access, and the class is data, so no driver folds it: on the
-/// consumer's fragments those routines were most of the driver's making time (EV SRT-nm1: 296 calls
+/// consumer's fragments those routines were most of the driver's making time (296 calls
 /// in `Xgc`, 311 in `A2Xghfc`).
 ///
 /// The choice is made per access. A read's texel is this policy's. A sample's or gather's is too
@@ -403,7 +403,7 @@ pub enum RoundingOrderPolicy {
 /// (`air.compile.fast_math_disable`, safe or relaxed math) blends into an `R16Float`, `RG16Float`
 /// or `RGBA16Float` attachment. Metal blends it in `half` arithmetic: the `half` the function
 /// returns, each factor (`1 - x` and the blend color's `half` included), each product and the sum
-/// rounded to `half`, nearest even (EV FLT-hb2-m3); a device's own blend adds in its arithmetic and
+/// rounded to `half`, nearest even; a device's own blend adds in its arithmetic and
 /// rounds once. It governs an attachment the function does not read: one the function fetches in
 /// the interlocked storage form takes Metal's blend there whatever this says, no Vulkan blend
 /// applying to a storage write.

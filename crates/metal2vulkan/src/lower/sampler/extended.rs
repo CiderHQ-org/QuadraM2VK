@@ -6,6 +6,17 @@
 //! texels' bytes in an unsigned integer format, which no device filters, so the shader reads
 //! the taps and filters them itself, on a device that samples through Metal's own sampler too.
 //!
+//! **Metal's answers** (an Apple M3 Max on macOS 26.7 and an Apple M4 on macOS 27.0.1,
+//! byte-identical): a nearest sample is the read of the texel at Metal's position, decoded
+//! (`extended_range::decode`, its `half` rounded with ties away from zero). A linear sample's
+//! footprint is the other formats' (`linear`, the position quantized to 1/256 of a texel, each tap
+//! addressed on its own, a border tap the sampler's border color through the format's channels),
+//! and its sum is the exact routine's on the format's grid (`bicubic::routines`,
+//! `BicubicTexels::EXTENDED`): each tap's code `16 (c - 384)` (an `_sRGB` color step `±s`, alpha
+//! `8 (c - 384)` of its clamped code), each term of the 2D product weights truncated (onto `2^-7`
+//! of a color lane's steps, `2^-4` of alpha's), the step rounded half up, divided by the grid
+//! exactly, and a `half` result rounded to nearest even but an `_sRGB` color lane's, which rounds
+//! the exact `f32` with ties away from zero. Every lane of 4,096 random 2D footprints per format
 //! and result type matched. A 2D linear sample of a form but a padded or bfloat one hands the
 //! routine each tap's step from its codes (`extended_range::steps`, a border tap's its value on
 //! each lane's grid), the integer the routine recovers from the decoded value, so no tap is decoded
@@ -16,7 +27,7 @@
 //! 17.5-17.6 s to make on the Iris Xe (ANV) with decoded taps and the general quotient, and 46,373
 //! (84:204) and 6.6 s so.
 //!
-//! **The two-plane formats** (EV XRR-tx1-m4, an Apple M4 on macOS 27.0.1: every lane of 4,096
+//! **The two-plane formats** (an Apple M4 on macOS 27.0.1: every lane of 4,096
 //! samples of a 16 x 16 texture per format, filter, address mode and result type): the color
 //! lanes are `BGR10_XR`'s (or its twin's), and the alpha byte `b` reads `b / 255` (a nearest
 //! sample's `half` rounded with ties away from zero, as the decode rounds it) and filters as an
@@ -96,7 +107,7 @@
 //! texture's bicubic sample are not measured, and are refused.
 //!
 //! The bicubic paragraph above is Metal's reading on these formats, except inferences, each the
-//! other formats' bicubic reading (`bicubic`; EV GSM2-bcs2-m4 for a runtime sampler) carried to
+//! other formats' bicubic reading (`bicubic`; for a runtime sampler) carried to
 //! these formats' decoded taps, which no reading of them covers:
 //! - a runtime `Cubic` sampler whose other filter is not `Cubic` (the readings' runtime sampler
 //!   had both filters `Cubic`): the other formats' runtime sampler answers as both filters bicubic
@@ -113,16 +124,16 @@
 //! - a texture of more than one level, read at its base level (the readings' textures had one
 //!   level), as the other formats' bicubic filter reads it.
 //!
-//! **The bfloat formats** (EV FPV-pf5-m4, an Apple M4 under macOS 27.0.1, every code of
-//! `R16Bfloat`, `RG16Bfloat` and `RGBA16Bfloat`; EV FPV-pf8-m4, 18, 432 positions of each under
-//! every address mode and border color): a sample is nearest under either filter, Metal's linear
-//! filter reading the nearest texel, the texel at `floor` of the unsnapped coordinate, so a runtime
-//! sampler's word selects no filter, and its `half` result is the `float` result toward zero
-//! (saturating at `65504`); a gather of a component reads the four taps of the linear footprint
-//! (`TapBase::Quantized`), each decoded, that component of each in Vulkan's order `(x0, y1)`, `(x1,
-//! y1)`, `(x1, y0)`, `(x0, y0)`, its `half` result rounded to nearest even.
+//! **The bfloat formats** (an Apple M4 under macOS 27.0.1, every code of `R16Bfloat`, `RG16Bfloat`
+//! and `RGBA16Bfloat`; 18, 432 positions of each under every address mode and border color): a
+//! sample is nearest under either filter, Metal's linear filter reading the nearest texel, the
+//! texel at `floor` of the unsnapped coordinate, so a runtime sampler's word selects no filter, and
+//! its `half` result is the `float` result toward zero (saturating at `65504`); a gather of a
+//! component reads the four taps of the linear footprint (`TapBase::Quantized`), each decoded, that
+//! component of each in Vulkan's order `(x0, y1)`, `(x1, y1)`, `(x1, y0)`, `(x0, y0)`, its `half`
+//! result rounded to nearest even.
 //!
-//! **Gathers and swizzles** (EV FPV-sw1-m4, an Apple M4 under macOS 27.0.1: reads, nearest and
+//! **Gathers and swizzles** (an Apple M4 under macOS 27.0.1: reads, nearest and
 //! linear samples under an opaque-white border, and gathers of each component, of an 8 x 4 texture
 //! of each `BGR10_XR`, `BGRA10_XR`, padded and bfloat format and `_sRGB` twin, at 540 positions,
 //! unswizzled and under four swizzles). An extended-range or padded form's `float` gather is the
@@ -1041,7 +1052,7 @@ fn derived_level(
 
 /// `x`, a sample's or a gather tap's decoded texel (a `vec4` of `f32`, a border texel included),
 /// swizzled by `tex`'s swizzle word where it has one, as plain Metal swizzles a sampled texture's
-/// texels after decoding them (EV FPV-sw1-m4, an Apple M4 under macOS 27.0.1: each read, nearest
+/// texels after decoding them (an Apple M4 under macOS 27.0.1: each read, nearest
 /// and linear sample under an opaque-white border, and gather of each component, of an 8 x 4
 /// texture of each extended-range, padded and bfloat format under four swizzles, is the
 /// unswizzled texture's, swizzled).
@@ -1426,6 +1437,8 @@ pub(super) fn nearest(
         };
         site.push(x);
     }
+    // A bfloat form's `half` result is its `float` result's toward zero, border texels included,
+    // where its reads and gathers round to nearest even.
     match (at.half, tex.decode) {
         (false, _) => texel(cx, fb, &fp, tex, &site, false),
         (true, Decode::Form { form, .. }) if form.bfloat() => {
@@ -1595,13 +1608,13 @@ fn decoded(
 /// (`metal::sampler::border_texel`: a channel the format lacks reads 0, alpha 1). A two-plane
 /// texel's alpha byte `b` arrives as `b / 255`, which the routine recovers as the code `16 b` on
 /// alpha's grid `8 · 510 = 16 · 255`: its truncated terms `b · w` are exact, so the step is
-/// Metal's, `⌊Σ 16 b w / 2^16 + 1/2⌋` (EV XRR-tx1-m4).
+/// Metal's, `⌊Σ 16 b w / 2^16 + 1/2⌋`.
 pub(super) fn flags(form: ExtendedRange) -> u32 {
     use crate::metal::texel_format::PackedTexels;
     let extended = BicubicTexels::EXTENDED;
     // A padded format's lanes sum as `RGB10A2Unorm`'s 10-bit ones (its field's grid `4 · 1023`,
     // each 2D term truncated onto `2^-4` of a step): Metal's linear filter of `R10Unorm_X6` and
-    // `RG10Unorm_X12` (EVs XRR2-x6d and -x6e, an Apple M4 and an Apple M3 Max, byte-identical:
+    // `RG10Unorm_X12` (an Apple M4 and an Apple M3 Max, byte-identical:
     // every channel of 303,104 samples at 256 x 256, and of 110,592 at each of 1298 x 1298,
     // 300 x 77, 17 x 9 and 1 x 1 under clamp-to-edge, normalized and pixel coordinates). Each tap
     // arrives as `c / 1023`, recovered on the scale 1023.
@@ -1609,8 +1622,8 @@ pub(super) fn flags(form: ExtendedRange) -> u32 {
     // `R10Unorm_X6_sRGB`'s red sums as a YCbCr field's on the grid `8192`, each tap its decode
     // step `s / 8192` ([`PackedTexels::YCbCr8192`]: each 2D term `s · wx · wy` truncated by
     // `2^7`, the step rounded half up, a `half` result rounded with ties away from zero), Metal's
-    // linear filter of it (EVs XRR2-x6ds, -x6es and -x6hs, an Apple M4 and an Apple M3 Max,
-    // byte-identical); `RG10Unorm_X12_sRGB`'s reads and filter are `RG10Unorm_X12`'s.
+    // linear filter of it (an Apple M4 and an Apple M3 Max, byte-identical); `RG10Unorm_X12_sRGB`'s
+    // reads and filter are `RG10Unorm_X12`'s.
     let padded_srgb = BicubicTexels::UNORM | PackedTexels::YCbCr8192.class().0;
     let (pf, channels, family) = match form {
         ExtendedRange::Bgr10 { srgb: false } => (PixelFormat::BGR10XR, 0b0111, extended),

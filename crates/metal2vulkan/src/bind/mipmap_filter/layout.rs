@@ -50,7 +50,7 @@ pub(super) const XR_COLOUR_FLOOR: u32 = 11;
 pub(super) const XR_ALPHA_FLOOR: u32 = 9;
 
 /// The shift an extended-range sRGB colour's term, its signed linear step (of `2^-13`) times its
-/// weight of `2^24`, is floored by before the sum: to `2^-9` step (EV M27-mips4-m3: every one of
+/// weight of `2^24`, is floored by before the sum: to `2^-9` step (every one of
 /// 167,136 values of five chains of the M3 Max's under macOS 27.0.1, each level from Metal's level
 /// above).
 pub(super) const XR_SRGB_FLOOR: u32 = 15;
@@ -237,10 +237,9 @@ pub(super) fn layout(pf: PixelFormat) -> Option<Layout> {
 /// source texel `x0` and the weight `q` (of 256) of the next, `min(x0 + 1, big - 1)`, the first
 /// weighing `256 - q`. Metal computes the centre's coordinate in `f32`, `u = (i + 0.5) * (1 /
 /// small)` and `c = u * big - 0.5`, each operation rounded to nearest even from the GPU's own
-/// reciprocal of `small`, and rounds the fraction of `c` half up to 8 bits (EV CPM-probe3-m4:
-/// 173,505 taps of widths, heights and depths from 257 to 16383 on an M4; EV CPM-probe6-m3:
-/// every level of R32Float ramps up to 16384 on an M3 Max). An axis of one texel that stays one
-/// is one tap.
+/// reciprocal of `small`, and rounds the fraction of `c` half up to 8 bits (173,505 taps of widths,
+/// heights and depths from 257 to 16383 on an M4: every level of R32Float ramps up to 16384 on an
+/// M3 Max). An axis of one texel that stays one is one tap.
 pub(super) fn axis_tap(i: u32, big: u32, small: u32, reciprocal: Reciprocal) -> (u32, u32) {
     if big == small {
         return (0, 0);

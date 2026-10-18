@@ -1,7 +1,7 @@
 //! Metal's `sinpi`, `cospi` and `tanpi` of a `float`: Metal's own forms, which follow Apple's
 //! runtime library, of half turns and its hardware's `sinc` (`sincos`), the same in both math
 //! modes. With the hardware's measured `sinc` and reciprocal they are Metal's word at every
-//! measured operand (EV MBB-pi1-m3); through the models of both, at 99.5 % to 99.99 %.
+//! measured operand; through the models of both, at 99.5 % to 99.99 %.
 //!
 //! **Half turns.** `2x = 2n + t` with `n` the integer nearest `x` (ties to even) and `t` in
 //! `[-1, 1]`, so `sin(π x) = ±sin(π t / 2)`: `s = RN(2x + b)` of `b = ±2^24` with `x`'s sign,

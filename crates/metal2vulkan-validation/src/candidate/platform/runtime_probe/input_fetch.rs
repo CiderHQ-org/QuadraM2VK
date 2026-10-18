@@ -10,7 +10,7 @@
 //! and the tests in the hardware. Vulkan leaves such a read unordered against the same draw's
 //! earlier writes without `VK_EXT_rasterization_order_attachment_access`; Metal orders its own
 //! framebuffer fetch (`[[color(n)]]`). This step measures what the device answers, for comparison
-//! with plain Metal's answer to the same draw (EV probe `fbprobe.swift`'s `fetch` mode): byte for
+//! with plain Metal's answer to the same draw (our probe's `fetch` mode): byte for
 //! byte, every sample.
 //!
 //! The draw: an `SIDE`² `B8G8R8A8_SRGB` target at `MSAA` samples cleared to (0.75, 0.5, 0.25, 1),

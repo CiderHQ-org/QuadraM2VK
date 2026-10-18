@@ -4,17 +4,16 @@
 //! drops whole when its compiler moves the operation past the discard. Measured on Apple M4
 //! (macOS 27.0.1, Metal 382.5.3, AGXCompilerCore 360.34.5) and Apple M3 Max (macOS 26.7, Metal
 //! 373.7, AGXCompilerCore 353.14) alike, at MSL 2.2 and 2.3, from the AIR `metalfe-32023.921.6`
-//! makes (EVs REF-dhoist, REF-dhoist-m3, REF-dhoist-air, and the owned fixture
-//! `fragment_discard_hoist` in REF-hfix and REF-hfix-m3): a `simd_sum` before an
-//! `if (c) discard_fragment();` counts only the lanes that survive the discard when nothing
-//! between them reads its result or has a side effect, the guard's block holds the discard alone,
-//! and the paths rejoin where the sum's block leads, whatever the condition reads (a constant or
-//! device buffer, one the function writes later, a texture sample or read, a loop's result, a
-//! call's). It counts the dropped quads too when the condition reads the sum, or when a device
-//! store or an atomic lies between. Where arithmetic reads the sum between (a call's, inlined),
-//! Metal counted them in the one shape measured, and where the guarded discard is nested in a
-//! further branch, Metal counted them in one shape and moved the sum in another: neither is known
-//! in general.
+//! makes (and the owned fixture `fragment_discard_hoist`): a `simd_sum`
+//! before an `if (c) discard_fragment();` counts only the lanes that survive the discard when
+//! nothing between them reads its result or has a side effect, the guard's block holds the discard
+//! alone, and the paths rejoin where the sum's block leads, whatever the condition reads (a
+//! constant or device buffer, one the function writes later, a texture sample or read, a loop's
+//! result, a call's). It counts the dropped quads too when the condition reads the sum, or when a
+//! device store or an atomic lies between. Where arithmetic reads the sum between (a call's,
+//! inlined), Metal counted them in the one shape measured, and where the guarded discard is nested
+//! in a further branch, Metal counted them in one shape and moved the sum in another: neither is
+//! known in general.
 //!
 //! `expand` moves such a sum to the start of the block where the discard's paths rejoin, so the
 //! fragment lowering meets it after the discard, where its whole-quad exit gives Metal's lanes.

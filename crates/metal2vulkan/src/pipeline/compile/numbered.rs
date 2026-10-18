@@ -3,8 +3,8 @@
 //!
 //! Metal's pipeline creation gives each of these a plain sampler resource ID (the runtime's
 //! `resource_ids.rs` numbers them as Metal does). Measured on an Apple M4 (macOS 27.0.1) and an
-//! M3 Max (macOS 26.7), plain Metal, EVs TTG-sid5-m4 to TTG-sid7-m4 (the M3's 108 rows the same)
-//! and SID-sid8-m4 to SID-sid10-m4:
+//! M3 Max (macOS 26.7), plain Metal, in two sets of probes (the M3's 108 rows of the first the
+//! same):
 //!
 //! - **Constexpr samplers**, each once by state (two of equal state are one), in the reverse of
 //!   the order the module's `!air.sampler_states` lists them (Apple's compiler lists them in the
@@ -22,27 +22,25 @@
 //!   function constant that removes the read removes it.
 //! - **`Write`**, last, where the body writes a texel (`TexOp::Write`): 2D textures and texture
 //!   buffers, in a kernel, a vertex or a fragment function, or a visible function it links. A
-//!   write from an imageblock slice (`TexOp::WriteImageblockSlice`) numbers nothing (EV
-//!   SID-sid12-m4).
+//!   write from an imageblock slice (`TexOp::WriteImageblockSlice`) numbers nothing.
 //!
-//! **Linked visible functions** (EVs SID-sid13-m4 to SID-sid18-m4, an M4 under macOS 27.0.1;
-//! sampler states differing only in their reduction are distinct, sid13). The constexpr samplers
-//! of a visible function the stage links (`MTLLinkedFunctions.functions` or
-//! `.privateFunctions`, called directly or through a visible-function table; a render stage's
-//! own linked functions alike) are numbered after the function's own constexpr samplers and
-//! before `Read`, each linked function's in the reverse of its first use, as a module's own are
-//! (`Entry::linked_sampler_groups`, one group per function linking imported). The stage's
-//! function and the state hold them, not the linked function's library (sid13). A function of
-//! `functions` the stage never names is numbered too (sid14 and sid15), and so is every
-//! constexpr sampler of one the stage calls where pruning removed the call or the sample: Metal
-//! numbers a function a table can hold whole, called or not (`LinkedSamplerGroup::states`, a group
-//! of its own for a function linking did not import). One of `privateFunctions` is numbered as far
-//! as the stage reaches it, as the stage's own: not where the stage never names it, as linking
-//! imports none, nor where a function constant removed its only call (SID-sid19-m4). Where two or
-//! more linked functions bring constexpr samplers, Metal numbers them in an order the pipeline's
-//! inputs do not decide: it followed neither the call, prototype, library or array order, the
-//! names, nor the functions' hashes, and differed between two M4 minis for the same program (sid15
-//! to sid18). So the module numbers them in linking's order and records
+//! **Linked visible functions** (an M4 under macOS 27.0.1; sampler states differing only in their
+//! reduction are distinct, sid13). The constexpr samplers of a visible function the stage links
+//! (`MTLLinkedFunctions.functions` or `.privateFunctions`, called directly or through a
+//! visible-function table; a render stage's own linked functions alike) are numbered after the
+//! function's own constexpr samplers and before `Read`, each linked function's in the reverse of
+//! its first use, as a module's own are (`Entry::linked_sampler_groups`, one group per function
+//! linking imported). The stage's function and the state hold them, not the linked function's
+//! library (sid13). A function of `functions` the stage never names is numbered too (sid14 and
+//! sid15), and so is every constexpr sampler of one the stage calls where pruning removed the call
+//! or the sample: Metal numbers a function a table can hold whole, called or not
+//! (`LinkedSamplerGroup::states`, a group of its own for a function linking did not import). One of
+//! `privateFunctions` is numbered as far as the stage reaches it, as the stage's own: not where the
+//! stage never names it, as linking imports none, nor where a function constant removed its only
+//! call. Where two or more linked functions bring constexpr samplers, Metal numbers them in an
+//! order the pipeline's inputs do not decide: it followed neither the call, prototype, library or
+//! array order, the names, nor the functions' hashes, and differed between two M4 minis for the
+//! same program (sid15 to sid18). So the module numbers them in linking's order and records
 //! [`PrecisionNote::LinkedSamplerNumbering`](crate::pipeline::PrecisionNote::LinkedSamplerNumbering)
 //! (the runtime announces it once), as it does where a linked function may bring samplers the
 //! groups lack (`Entry::unnumbered_linked_samplers`: an unimported function a table can hold

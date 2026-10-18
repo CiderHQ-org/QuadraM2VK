@@ -20,13 +20,12 @@
 //!   (`metal2vulkan-degrade-private-properties-unknown`).
 //!
 //! [`MetalLevel::private_count`], [`MetalLevel::private_flag`] and
-//! [`MetalLevel::supports_primitive_type`] are Metal's measured answers on an Apple M3 Max (EVs
-//! API-props1-m3: macOS 26.7, each getter in a process of its own, none faulted; M27-props1-m3:
-//! macOS 27.0.1). An Apple M4 under 27.0.1 answers every one alike (EV API-props1-m4) but
-//! `gpuCoreCount` (10) and `supportsComputeCompressedTextureWrite` (yes). Like [`MetalLevel`]
-//! itself, a level conflates the chip and the release: Metal's `gpuCoreCount` is the measured
-//! chip's, and the device's own is its driver's ([`DeviceProperties::gpu_core_count`]), where it
-//! reports one.
+//! [`MetalLevel::supports_primitive_type`] are Metal's measured answers on an Apple M3 Max (macOS
+//! 26.7, each getter in a process of its own, none faulted: macOS 27.0.1). An Apple M4 under 27.0.1
+//! answers every one alike but `gpuCoreCount` (10) and `supportsComputeCompressedTextureWrite`
+//! (yes). Like [`MetalLevel`] itself, a level conflates the chip and the release: Metal's
+//! `gpuCoreCount` is the measured chip's, and the device's own is its driver's
+//! ([`DeviceProperties::gpu_core_count`]), where it reports one.
 //!
 //! Metal's public properties are [`DeviceProperties`]'s, not repeated here.
 
@@ -48,7 +47,7 @@ use metal2vulkan::metal::{PixelFormat, PrimitiveType, TextureType};
 
 /// The family whose rows judge the device for the measured levels: Apple9, the newest family
 /// both measured chips are (an M3 Max and an M4 answer `supportsFamily:` yes for 1009 and no for
-/// 1010, EVs API-props1-m3 and API-props1-m4).
+/// 1010).
 pub(crate) const MEASURED_FAMILY: GpuFamily = GpuFamily::Apple9;
 
 /// How the runtime answers a private property on a device (the module docs).
@@ -425,8 +424,7 @@ fn at(level: MetalLevel) -> usize {
 }
 
 /// The primitive types Metal's `supportsPrimitiveType:` answers yes for at each measured level:
-/// raw 0 to 8, the five public types and four private ones (EVs API-props1-m3 and M27-props1-m3,
-/// raw 0 to 12; an Apple M4 alike, API-props1-m4).
+/// raw 0 to 8, the five public types and four private ones (raw 0 to 12; an Apple M4 alike).
 const MEASURED_PRIMITIVE_TYPES: [u64; 2] = [9, 9];
 
 impl MetalLevel {

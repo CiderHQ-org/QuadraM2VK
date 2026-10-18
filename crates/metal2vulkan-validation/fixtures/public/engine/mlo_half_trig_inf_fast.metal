@@ -1,7 +1,7 @@
 // Owned fixture: `mlo_half_trig_inf` compiled with the
 // default fast math. The `half` calls carry LLVM's fast flags, under which an infinite operand is
 // undefined (MSL section 7.1); the case reads which answers Metal gives there all the same (a Metal
-// probe measured them equal to the answers without fast math, EV UNV-metal-probe-1).
+// probe measured them equal to the answers without fast math).
 //
 // Thread i reads the `half` pattern `in[i]` as `x` and writes one `uint4`: `sin(x) | cos(x) << 16`,
 // `tan(x) | s << 16`, `c`, and the pattern of `x`, where `s = sincos(x, c)`. The operands are

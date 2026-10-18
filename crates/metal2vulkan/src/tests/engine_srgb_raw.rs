@@ -1120,12 +1120,11 @@ fn raw_filters_sum_the_steps_as_metal_does() {
 
 /// Under the variant a linear sample through a runtime sampler (3D, 2D, and 1D, `half` and
 /// `float`) of an 8-bit sRGB texture is its constexpr sampler's raw emulation where the bound
-/// sampler's word reaches it (EVs TXN-srgbprobe-m3 and -m4: Metal's runtime sampler answers as
-/// its constexpr sampler of the same state, bit for bit), on the interpreter (lavapipe): random
-/// codes in every channel, coordinates on a 1/512 grid inside and past each edge, through the raw
-/// view alone (the texture's own view holds NaNs, and the interpreter samples nothing, so the
-/// device's arm would fail the run). The device's decode is noted only where the word does not
-/// reach the emulation.
+/// sampler's word reaches it (Metal's runtime sampler answers as its constexpr sampler of the same
+/// state, bit for bit), on the interpreter (lavapipe): random codes in every channel, coordinates
+/// on a 1/512 grid inside and past each edge, through the raw view alone (the texture's own view
+/// holds NaNs, and the interpreter samples nothing, so the device's arm would fail the run). The
+/// device's decode is noted only where the word does not reach the emulation.
 #[test]
 fn runtime_raw_filters_sum_the_steps_where_the_word_reaches() {
     use crate::metal::sampler::SamplerWord;

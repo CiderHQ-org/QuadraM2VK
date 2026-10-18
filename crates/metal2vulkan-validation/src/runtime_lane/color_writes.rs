@@ -2,10 +2,10 @@
 //! half-float color attachment, against Metal's measured conversion, on the device the cfg
 //! selects, under the validation layer.
 //!
-//! Metal probes (`RPL-encode-probe-m3` and `RPL-encode-probe3-m3`, an Apple M3 Max, macOS 26.7; and
-//! an M4, 27.0.1) drew every code's exact value, every tie between neighbouring codes with two
-//! `f32` steps either side, and specials into each format below, plain and through blending with
-//! factors one and zero, and closed each conversion as one rule (every input measured):
+//! Metal probes (an Apple M3 Max, macOS 26.7; and an M4, 27.0.1) drew every code's exact value,
+//! every tie between neighbouring codes with two `f32` steps either side, and specials into each
+//! format below, plain and through blending with factors one and zero, and closed each conversion
+//! as one rule (every input measured):
 //!
 //! - a unorm channel of `b` bits: `x` clamped to `[0, 1]` (a NaN 0), times `2^b - 1` exactly,
 //!   rounded to nearest (its only tie, `x = 0.5`, up);
@@ -22,7 +22,7 @@
 //!   largest, an infinity as itself, and a NaN as the quiet NaN (`0x7e0`, `0x3f0`);
 //! - `A8Unorm`'s alpha (probe 6): as an 8-bit unorm channel;
 //! - a packed 16-bit format's channel (`B5G6R5Unorm`, `A1BGR5Unorm`, `ABGR4Unorm`,
-//!   `BGR5A1Unorm`; EV TXN2-pk16b-m3, an M3 Max): `x` rounded to `half` to nearest even first, then
+//!   `BGR5A1Unorm`; an M3 Max): `x` rounded to `half` to nearest even first, then
 //!   as a unorm channel of its bits, a tie (a 1-bit channel's 0.5) to even.
 //!
 //! A `half` output (probe 5, an M4) converts as its value does, and a half-float channel stores it
@@ -515,7 +515,7 @@ pub(super) fn half() -> Vec<f32> {
     out
 }
 
-/// The packed formats' inputs (EV TXN2-pk16b-m3's): every half in `[0, 1]` and every midpoint
+/// The packed formats' inputs (our probe's): every half in `[0, 1]` and every midpoint
 /// between neighbouring halves there with one `f32` step either side, and every code's exact
 /// value and tie of 1, 4, 5 and 6 bits with two `f32` steps either side.
 fn packed() -> Vec<f32> {

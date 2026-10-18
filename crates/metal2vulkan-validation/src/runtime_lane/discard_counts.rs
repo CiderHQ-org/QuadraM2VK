@@ -7,7 +7,7 @@
 //! quad keeps a thread, and a kept thread writes `(after - before, after - kept, before, after)`:
 //! differences that hold whatever the simdgroup's size and however quads pack into it.
 //!
-//! Metal's answer, as an M4 gives it (EV REF-dcount-fixture: from the fixture's AIR and from the
+//! Metal's answer, as an M4 gives it (from the fixture's AIR and from the
 //! source compiled at MSL 2.2, with and without the debug layer), is `(0, 0, n, n)` in both modes:
 //!
 //! - **Half of each quad discarded** (`whole` 0, each quad's right column): a discarded thread
@@ -22,7 +22,7 @@
 //! it or has a side effect), and canonicalization moves it there too (SEMANTICS 1094), so it also
 //! counts Metal's lanes: every device gives Metal's answer in both modes. Before 1094 the count
 //! ran ahead of the discard, counting the quads it drops (`Answer::BeforeCountsDroppedQuads`)
-//! wherever a device packed a dropped quad beside a kept one (EVs REF-plane-*).
+//! wherever a device packed a dropped quad beside a kept one.
 
 use super::buffer_with;
 use super::resolves::{lane, quiet, Lane};

@@ -278,7 +278,7 @@ pub(super) enum FailedSignals {
     Dropped,
     /// Those encoded before ended encoder `n`: Metal fails a command buffer from a render pass
     /// without attachments past 16384 a side, and signals what was encoded before the pass,
-    /// not after it (EV RRS-probe-13b-m4).
+    /// not after it.
     From(usize),
 }
 
@@ -445,7 +445,7 @@ pub(super) struct State {
     /// `Scheduled` waits until it did.
     submitting: bool,
     /// Its scheduled handlers ran: `wait_until_scheduled` returns, as Metal's does only once
-    /// they ran (EV SUB-sched1-m4).
+    /// they ran.
     scheduled_ran: bool,
     /// The threads sleeping on its `changed` condition variable: a change wakes it only where
     /// one does ([`CommandBufferShared::wake_parked`]).
@@ -2019,7 +2019,7 @@ impl CommandBuffer {
         // Each making the batches wait for wakes the scheduler as it finishes, with no lock
         // held (`render/pending.rs`), registered before the scheduler first looks at the batches:
         // a making that finished between that look and a later registration left the batch held
-        // with nothing to wake the scheduler (17 lane tests timed out, EV PPC-lane1-mvk4).
+        // with nothing to wake the scheduler (17 lane tests timed out).
         if !made_later.is_empty() {
             let waker = device.shared().scheduler.waker();
             for work in &made_later {
@@ -2270,7 +2270,7 @@ impl CommandBuffer {
     }
 
     /// `waitUntilScheduled`: block until the command buffer's scheduled handlers ran, or it
-    /// failed. As Metal's (measured on an M4, macOS 27.0.1, EV SUB-sched1-m4), it returns only
+    /// failed. As Metal's (measured on an M4, macOS 27.0.1), it returns only
     /// once every scheduled handler returned, though [`status`](Self::status) reads `Scheduled`
     /// just before they start.
     ///
@@ -3076,7 +3076,7 @@ impl CommandBufferShared {
     /// context, once the submitting thread ran its submission handlers, become `Scheduled`, then run the scheduled handlers on
     /// this thread, in the order added, then let `wait_until_scheduled` return. Metal's status
     /// reads `Scheduled` just before its first scheduled handler starts, and its wait returns
-    /// once the last returned (EV SUB-sched1-m4: an M4, macOS 27.0.1).
+    /// once the last returned (an M4, macOS 27.0.1).
     fn run_scheduled(self: &Arc<Self>) {
         {
             let mut state = lock(&self.state);
@@ -3648,7 +3648,7 @@ impl Run for Item {
 }
 
 /// Whether `wait_until_scheduled` returns: the command buffer's scheduled handlers ran (Metal's
-/// wait returns only then, EV SUB-sched1-m4), or it finished, or failed without being scheduled.
+/// wait returns only then), or it finished, or failed without being scheduled.
 fn scheduled(state: &State) -> bool {
     state.scheduled_ran
         || matches!(

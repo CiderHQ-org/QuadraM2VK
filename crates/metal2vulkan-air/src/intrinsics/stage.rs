@@ -105,7 +105,7 @@ pub enum FunctionConstant {
     /// result something observes: `T ()`, where `T` is the scalar or vector it reads. Metal gives
     /// such an access no defined value (its compiler dropped stores of a load's value, and an
     /// atomic changed the threadgroup memory of another argument under its validation layer and
-    /// not without it, EV GTG-tg-metal), so lowering marks the command buffer's execution status
+    /// not without it), so lowering marks the command buffer's execution status
     /// where it runs and yields zero, as for [`FunctionConstant::AbsentRead`]. Not an AIR
     /// intrinsic: no name parses to it. Specialization makes it (`canon::interface`).
     AbsentMemory(AbsentAccess),

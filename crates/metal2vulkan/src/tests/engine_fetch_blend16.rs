@@ -257,7 +257,7 @@ fn a_blended_sixteen_bit_float_fetch_computes_metals_blend() {
 /// `OneMinusBlendColor`, `BlendAlpha` with `OneMinusBlendAlpha`, either as the source factor, under
 /// `Subtract` and `ReverseSubtract`, for color and alpha): on every committed profile that orders
 /// fetch through the pixel interlock alone, `fbl_over_loaded` and `fbl_over_loaded_float` compute
-/// it in the storage form, Metal's form (EV FBL-sw1-m3: the minuend's product fused, the
+/// it in the storage form, Metal's form (the minuend's product fused, the
 /// subtrahend's rounded first), so neither records `HalfOutputFastMathBlend`, and pass L3. Before,
 /// the color channels' blend color difference took a rounded near-equivalent and every difference
 /// recorded the note.

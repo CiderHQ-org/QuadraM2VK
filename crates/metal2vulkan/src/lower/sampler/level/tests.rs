@@ -35,7 +35,7 @@ fn nearest_level(lambda: f32, levels: f32) -> f32 {
     ((lambda + 0.5).ceil() - 1.0).clamp(0.0, levels - 1.0)
 }
 
-/// MSFZ-m4-mipc1's `r32Float` 2D texture of five levels, level `L` holding `L`: rows of (level
+/// Our probe's `r32Float` 2D texture of five levels, level `L` holding `L`: rows of (level
 /// `x`'s bits; the nearest-mip and linear-mip samples; and those of samplers clamping the level
 /// into `[0.75, 2.5]`, linear then nearest), Apple M4 on macOS 27.0.1. A linear mip filter's
 /// sample is `L + q`, a nearest one's the level it reads.
@@ -344,8 +344,8 @@ fn snap_level_of(word: u32, nearest: f32) -> u32 {
 }
 
 /// Metal's level and weight at level `x` through a runtime sampler clamping it into `[lo, hi]`
-/// (`f32`s) in a texture of `levels` levels: the rule with the clamp held as `f32`s, which EV
-/// UNV-metal-probe-2 reads on all 37,080 of its lanes (Apple M4, macOS 27.0.1). The nearest mip
+/// (`f32`s) in a texture of `levels` levels: the rule with the clamp held as `f32`s, which our
+/// probe reads on all 37,080 of its lanes (Apple M4, macOS 27.0.1). The nearest mip
 /// filter's level, and the linear one's `L + q`.
 fn metal_runtime(x: f32, (lo, hi): (f32, f32), levels: f32) -> (f32, f32) {
     let h = if x.is_nan() {
@@ -359,7 +359,7 @@ fn metal_runtime(x: f32, (lo, hi): (f32, f32), levels: f32) -> (f32, f32) {
     (l + if q > 0.5 { 1.0 } else { 0.0 }, l + q)
 }
 
-/// Rows EV UNV-metal-probe-2 measured through runtime samplers (Apple M4, macOS 27.0.1, an
+/// Rows our probe measured through runtime samplers (Apple M4, macOS 27.0.1, an
 /// `r32Float` texture of five levels, level `L` holding `L`): the clamp `[lo, hi]`'s bits, level
 /// `x`'s bits, and the nearest and linear mip filters' samples (nearest filters). Bounds just
 /// below `33/64` and `21/64` read as `f32`s, where `half`s would round them onto the step.
@@ -386,7 +386,7 @@ const MEASURED_RUNTIME: [(u32, u32, u32, f32, f32); 9] = [
 /// A runtime sampler's level handed to a device as the word rule makes it, through the `VkSampler`
 /// the runtime makes of it (its clamp on Metal's grid, `metal::sampler::vk_sampler`), reads Metal's
 /// level under a nearest mip filter and Metal's `L + q` under a linear one, at every level of
-/// [`levels`] and through every clamp EV UNV-metal-probe-2 measured; and Metal's rule with `f32`
+/// [`levels`] and through every clamp our probe measured; and Metal's rule with `f32`
 /// clamps answers the probe's measured rows.
 #[test]
 fn a_runtime_samplers_word_level_reads_metals_level_through_its_grid_clamp() {

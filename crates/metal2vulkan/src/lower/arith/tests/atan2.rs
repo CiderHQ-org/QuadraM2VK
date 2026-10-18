@@ -580,7 +580,7 @@ fn fast_atan2_answers_as_metal_at_every_special_operand() {
 }
 
 /// Metal's `fast::atan2(y, x)` with the translation's routines (Metal's fast `atan` and its
-/// reciprocal) at pairs of EV MBB-atan2-m4 (the M4) where Metal's word is not the correctly rounded
+/// reciprocal) at pairs of our probe (the M4) where Metal's word is not the correctly rounded
 /// one: `atan(y · rcp(x))`, turned by `±RN(π)` toward a negative `x`, bit for bit, in both of its
 /// compiles.
 #[test]

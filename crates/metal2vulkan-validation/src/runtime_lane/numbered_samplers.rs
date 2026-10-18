@@ -2,9 +2,9 @@
 //! under the validation layer: a pipeline state's creation takes plain sampler IDs for its
 //! functions' samplers, and the device's own for a render pipeline with a fragment function, held
 //! by the state, its function objects and their library, as Metal's are. Each test replays a row of
-//! an M4 probe (EVs TTG-sid6-m4, TTG-sid7-m4 and SID-sid8-m4; the M3 Max answered TTG2's the same)
-//! on our own AIR: sampler states marked `label=ID` between steps that make and drop the objects,
-//! each state kept to the test's end (plain allocation hands each the lowest free ID).
+//! an M4 probe (the M3 Max answered TTG2's the same) on our own AIR: sampler states marked
+//! `label=ID` between steps that make and drop the objects, each state kept to the test's end
+//! (plain allocation hands each the lowest free ID).
 
 use super::{validated_device, Messages, ScratchCache};
 use crate::air_library::AirLibrary;
@@ -193,7 +193,7 @@ fn on_device(row: impl FnOnce(&mut Row)) -> String {
     answers
 }
 
-/// SID-sid8-m4's `nq_q8_own_v_fread` and `nq_q8_own_f_fread`: a render pipeline state of `v`
+/// Our probe's `nq_q8_own_v_fread` and `nq_q8_own_f_fread`: a render pipeline state of `v`
 /// and `f_read` takes the device's sampler ID (2) and a read's (3); with the library, the state
 /// and one function object gone, the fragment function's object holds both and the vertex
 /// function's neither.
@@ -222,7 +222,7 @@ fn a_render_state_numbers_the_device_s_sampler_and_its_fragment_function_s_read(
     }
 }
 
-/// SID-sid8-m4's `nq_q8_k1_holds`: a compute state of `k_read` takes a read's sampler ID (2),
+/// Our probe's `nq_q8_k1_holds`: a compute state of `k_read` takes a read's sampler ID (2),
 /// and no device sampler; its kernel's function object holds it once the library and the state
 /// are gone.
 #[test]
@@ -243,7 +243,7 @@ fn a_compute_state_numbers_its_kernel_s_read_held_by_its_function_object() {
     assert_eq!(got, "a=1 b=3 c=4 d=5 e=2 f=6");
 }
 
-/// TTG-sid6-m4's `nq_q5_queue_after_render`: a command queue made after a render state of `v`
+/// Our probe's `nq_q5_queue_after_render`: a command queue made after a render state of `v`
 /// and `f_const` keeps the device's sampler ID the state took (2) for good.
 #[test]
 fn a_queue_keeps_the_device_s_sampler_a_render_state_numbered() {
@@ -266,10 +266,9 @@ fn a_queue_keeps_the_device_s_sampler_a_render_state_numbered() {
     assert_eq!(got, "a=1 b=3 c=4 d=5 e=6");
 }
 
-/// A constexpr sampler's ID is the device's for its state (TTG-sid6-m4's and TTG-sid7-m4's
-/// orders, SID-sid10-m4's): the compute states of `k_sample` and of the same kernel of a library
-/// of other content (renamed `k_other`) share one (1) while either lives, and it comes back after
-/// both.
+/// A constexpr sampler's ID is the device's for its state (the probes' orders): the compute states
+/// of `k_sample` and of the same kernel of a library of other content (renamed `k_other`) share one
+/// (1) while either lives, and it comes back after both.
 #[test]
 fn equal_constexpr_samplers_share_one_id_device_wide() {
     let other = MODULE.replace("@k_sample", "@k_other");

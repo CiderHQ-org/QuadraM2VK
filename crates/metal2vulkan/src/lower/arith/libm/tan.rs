@@ -1,5 +1,5 @@
 //! Metal's precise `tan` of a `float`: its own form, which follows Apple's runtime library and
-//! matches Metal's measured words (EV MBB-trig1-m3, the M3 Max: every `float` of `[0.25, 4)`, every
+//! matches Metal's measured words (the M3 Max: every `float` of `[0.25, 4)`, every
 //! 16th from `2^-11`, every 256th from 4, and every 4096th from `2^21`).
 //!
 //! **Reduction** to quarter turns, `r = x 2/π - k`, by Metal's own reduction

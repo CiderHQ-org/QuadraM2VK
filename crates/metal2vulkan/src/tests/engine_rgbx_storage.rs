@@ -1,7 +1,7 @@
 //! RGBX textures at storage slots (`metal::format::x_channel`): under a slot's choice with
 //! `x_channel`, the function reads every texel with alpha 1 and writes green into the fourth
-//! channel, Metal's X field, as plain Metal reads and stores the RGBX formats (EVs FPV-pf1-m4 to
-//! FPV-pf4-m4, an M4 under macOS 27.0.1).
+//! channel, Metal's X field, as plain Metal reads and stores the RGBX formats (an M4 under macOS
+//! 27.0.1).
 //!
 //! On the CPU interpreter, each kernel runs under the choice without the conversion and with it,
 //! on the same image and values, for `float`, `half`, `uint` and `int` texels and the classes a

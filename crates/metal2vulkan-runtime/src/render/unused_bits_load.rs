@@ -1,21 +1,20 @@
 //! The load pass of an extended-range, padded 10-bit or bfloat color attachment, and under the
 //! exact tile store of a signed normalized or `RGB9E5Float` one.
 //!
-//! - **Metal's answer** (EVs XRR2-xrb2 and -xrb3 on an Apple M4 under macOS 27.0.1 and on the
-//!   consumer's Apple M3 Max under macOS 26.7, alike; EVs XRR2-x6g to -x6k, -x6is on both).
-//!   An Apple GPU stores a render pass's attachments a 32 x 32 tile at a time. A pass that loads
-//!   a color attachment of `BGR10_XR`, `BGRA10_XR`, `RGB10A8_2P_XR10`, `R10Unorm_X6`,
-//!   `RG10Unorm_X12` or one of their `_sRGB` twins and records a draw writes every texel of each
-//!   tile it stores back: a channel a fragment writes takes the write, and every other texel
-//!   keeps its codes with the bits they leave unused made canonical (`bind::unused_bits_module`:
-//!   `BGR10_XR`'s bits 30 and 31 ones, `BGRA10_XR`'s low six bits of each field zeros and its
-//!   alpha code clamped to `[384, 894]`, the two-plane color word's top two bits zeros, a padded
-//!   word's low six bits zeros, the padded `_sRGB` twins' codes through Metal's table). That
-//!   includes the texels no fragment covers, fragments that discard or fail a test, and channels
-//!   a write mask leaves out. A pass that loads a bfloat color attachment (`R16Bfloat`,
-//!   `RG16Bfloat`, `RGBA16Bfloat`) and draws does so too, its tiles holding `half` values: every
-//!   code of each tile it stores back goes through `half` to nearest even and back to the nearest
-//!   bfloat code, a NaN to `0x7fc0` (`ExtendedRange::load_code`; EV FRT-bfp1-m4 on an Apple M4
+//! - **Metal's answer** (on an Apple M4 under macOS 27.0.1 and on the consumer's Apple M3 Max under
+//!   macOS 26.7, alike; on both). An Apple GPU stores a render pass's attachments a 32 x 32 tile at
+//!   a time. A pass that loads a color attachment of `BGR10_XR`, `BGRA10_XR`, `RGB10A8_2P_XR10`,
+//!   `R10Unorm_X6`, `RG10Unorm_X12` or one of their `_sRGB` twins and records a draw writes every
+//!   texel of each tile it stores back: a channel a fragment writes takes the write, and every
+//!   other texel keeps its codes with the bits they leave unused made canonical
+//!   (`bind::unused_bits_module`: `BGR10_XR`'s bits 30 and 31 ones, `BGRA10_XR`'s low six bits of
+//!   each field zeros and its alpha code clamped to `[384, 894]`, the two-plane color word's top
+//!   two bits zeros, a padded word's low six bits zeros, the padded `_sRGB` twins' codes through
+//!   Metal's table). That includes the texels no fragment covers, fragments that discard or fail a
+//!   test, and channels a write mask leaves out. A pass that loads a bfloat color attachment
+//!   (`R16Bfloat`, `RG16Bfloat`, `RGBA16Bfloat`) and draws does so too, its tiles holding `half`
+//!   values: every code of each tile it stores back goes through `half` to nearest even and back to
+//!   the nearest bfloat code, a NaN to `0x7fc0` (`ExtendedRange::load_code`; on an Apple M4
 //!   under macOS 27.0.1, every code of each format: 56,829 move, and only in the tiles the draws'
 //!   primitives reach). The tiles it stores are those a draw's primitives reach (the half of a rect
 //!   whose edge lies on x = 32 reaches the tiles right of it; a zero-area rect or one off the

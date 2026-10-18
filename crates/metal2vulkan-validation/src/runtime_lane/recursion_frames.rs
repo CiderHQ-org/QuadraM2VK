@@ -1,6 +1,6 @@
 //! A recursion's frames on the device the cfg selects: the owned fixture `fpc_frames`' recursive
 //! visible functions, linked into their kernels' pipelines, answer every depth Metal answers
-//! correctly at `maxCallStackDepth` 1, 2 and 4 (EV FPC-fx3-m4 on an M4 under macOS 27.0.1 ran the
+//! correctly at `maxCallStackDepth` 1, 2 and 4 (on an M4 under macOS 27.0.1 ran the
 //! fixture's own AIR).
 //!
 //! Each kernel `frames_*` calls its function at the depth word `tid` of buffer 2 holds, with the
@@ -127,7 +127,7 @@ fn value(f: Fr, n: u32) -> u32 {
 const PAIR: &[&str] = &["fr_pa", "fr_pb"];
 
 /// A kernel's call in one mode: the kernel, the functions its pipeline links, the mode, the
-/// function it calls, and Metal's deepest correct depth at `k` (FPC-fx3-m4).
+/// function it calls, and Metal's deepest correct depth at `k`.
 type Call = (
     &'static str,
     &'static [&'static str],

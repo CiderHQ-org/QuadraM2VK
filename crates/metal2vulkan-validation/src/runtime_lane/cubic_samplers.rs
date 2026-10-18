@@ -1,16 +1,16 @@
 //! Samples through a runtime sampler whose min or mag filter is `MTLSamplerMinMagFilterCubic`
 //! (raw value 2) on the device the cfg selects, under the validation layer.
 //!
-//! Metal's answer (our probe, EVs GSM2-bcs2-m4 and GSM2-bcs3-m4 on an M4 under macOS 27.0.1, and
-//! GSM2-bcs2-m3 and GSM2-bcs3-m3 on the M3 Max under macOS 26.7, the chips alike on every row):
-//! without a mip filter, a sample through such a sampler is bit for bit the sample through a
-//! constexpr `filter::bicubic` sampler of the same address modes, border color and coordinates,
-//! whatever the other filter (nearest, linear or cubic) and the level the sample asks; a
-//! `clamp_to_zero` axis reads the sampler's border color, as every runtime sampler's does. The
-//! runtime binds the slot under its pipeline's cubic-sampler variant, whose function emulates the
-//! constexpr bicubic sampler's filter, so here the two samples of each lane must be the same bits.
-//! A cubic sampler with a mip filter, whose level Metal's answers do not settle, is refused typed
-//! (`NotImplemented(SamplerBicubicFilter)`) at the dispatch.
+//! Metal's answer (our probe, on an M4 under macOS 27.0.1, and our probes on the
+//! M3 Max under macOS 26.7, the chips alike on every row): without a mip filter, a sample through
+//! such a sampler is bit for bit the sample through a constexpr `filter::bicubic` sampler of the
+//! same address modes, border color and coordinates, whatever the other filter (nearest, linear or
+//! cubic) and the level the sample asks; a `clamp_to_zero` axis reads the sampler's border color,
+//! as every runtime sampler's does. The runtime binds the slot under its pipeline's cubic-sampler
+//! variant, whose function emulates the constexpr bicubic sampler's filter, so here the two samples
+//! of each lane must be the same bits. A cubic sampler with a mip filter, whose level Metal's
+//! answers do not settle, is refused typed (`NotImplemented(SamplerBicubicFilter)`) at the
+//! dispatch.
 //!
 //! The owned fixture `gsm2_cubic_samplers` writes, per lane, the runtime sampler's sample and
 //! then the constexpr sampler's that `which` names (`gsm2_cubic_samples`), or, through `half`,
@@ -399,12 +399,11 @@ fn cubic_samplers_sample_as_constexpr_bicubic_ones() {
     });
 }
 
-/// A cubic sampler's compare function leaves its plain sample alone, as Metal does (EV
-/// GSM2-cmp-m4, an M4 under macOS 27.0.1: four color formats and two depth formats, three
-/// compare functions, 2,048 lanes each, every lane the sampler's without the function and the
-/// constexpr bicubic sampler's; Metal's debug layer stops making such a sampler): every lane of
-/// each format and address mode, through each compare function, is the constexpr bicubic
-/// sampler's, bit for bit.
+/// A cubic sampler's compare function leaves its plain sample alone, as Metal does (an M4 under
+/// macOS 27.0.1: four color formats and two depth formats, three compare functions, 2,048 lanes
+/// each, every lane the sampler's without the function and the constexpr bicubic sampler's; Metal's
+/// debug layer stops making such a sampler): every lane of each format and address mode, through
+/// each compare function, is the constexpr bicubic sampler's, bit for bit.
 #[test]
 fn a_cubic_sampler_s_compare_function_leaves_its_sample_alone() {
     use metal2vulkan::metal::CompareFunction;

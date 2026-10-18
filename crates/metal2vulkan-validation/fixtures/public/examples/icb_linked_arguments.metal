@@ -4,8 +4,7 @@
 // indirect command buffers whose vertex or mesh function's texel reaches the position or another
 // built-in output, a varying the fragment function reads, a store, or a branch, switch or loop
 // trip count those depend on, and makes one whose texel reaches only a varying no fragment input
-// reads (EVs RRS3-icbtex7, -icbtex9 and -icbtex10, whose probes compile these bodies from source).
-// Written from scratch for the runtime lane;
+// reads (whose probes compile these bodies from source). Written from scratch for the runtime lane;
 // `scripts/regen-air-fixtures/regen-air-fixtures.sh --dir examples icb_linked_arguments` compiles
 // it. No translator sweep reads this directory.
 #include <metal_stdlib>
@@ -271,12 +270,11 @@ fragment float4 point_fragment(PointVaryings in [[stage_in]]) {
     return float4(0.25, 0.5, 0.75, 1.0);
 }
 
-// Fragment functions that use a direct texture (EVs RRS3-icbtex11 and -icbtex12): Metal refuses a
-// state that supports indirect command buffers where the texel reaches a side effect, a depth,
-// stencil or sample mask output, or a color channel its attachment writes, and makes one where it
-// reaches only a color the pipeline has no attachment for, a channel the write mask leaves out, or
-// a dual-source second color without blending.
-// The texel is the color.
+// Fragment functions that use a direct texture: Metal refuses a state that supports indirect
+// command buffers where the texel reaches a side effect, a depth, stencil or sample mask output, or
+// a color channel its attachment writes, and makes one where it reaches only a color the pipeline
+// has no attachment for, a channel the write mask leaves out, or a dual-source second color without
+// blending. The texel is the color.
 fragment float4 texel_fragment(Varyings in [[stage_in]], texture2d<float> tint [[texture(0)]]) {
     return tint.read(uint2(1, 0));
 }

@@ -3,7 +3,7 @@
 //! kernel's call stack is Function storage, which a driver backs with scratch memory (lavapipe: the
 //! worker thread's stack), and no Vulkan property states how much a thread holds. Past it a driver
 //! can answer wrongly with no error: the Radeon 780M under RADV at 256 KiB a thread over 4096
-//! threads (UNI-B2-pm-radv).
+//! threads.
 //!
 //! Each test compiles one kernel through the runtime whose thread holds a private array of `words`
 //! 32-bit words (`alloca [words x i32]`). It writes the first word of each 64-byte line (`line ^
@@ -16,7 +16,7 @@
 //! correctly ends the size with `STOP`. Nothing is asserted but the validation layer's silence: a
 //! refusal or a wrong answer is the measurement. Each size is its own test, so a size that ends
 //! the process (a worker thread's stack overflow on lavapipe) ends only that test. The measurement
-//! EVs run the sizes in ascending order, each alone and bounded; they stop at the first size with
+//! runs take the sizes in ascending order, each alone and bounded; they stop at the first size with
 //! a `STOP` or no end, so no larger size runs after a timeout or a lost device.
 
 use super::host_memory::on_device;
@@ -27,7 +27,7 @@ use metal2vulkan_devtools::llvm_assemble_text;
 use metal2vulkan_runtime::{ComputePipelineState, Device, PipelineOptions, ResourceOptions, Size};
 use std::time::{Duration, Instant};
 
-/// The longest wait for one run's command buffer (the EVs bound a whole size at 60 s).
+/// The longest wait for one run's command buffer (the runs bound a whole size at 60 s).
 const WAIT: Duration = Duration::from_secs(50);
 
 /// The read order's stride: prime, so steps `0..lines` visit every line of the sizes measured.
@@ -208,7 +208,7 @@ fn measure(words: u32) {
 macro_rules! sizes {
     ($($name:ident: $kib:expr;)*) => {$(
         #[test]
-        #[ignore = "a measurement (the Function storage a thread holds): its EV runs each size alone"]
+        #[ignore = "a measurement (a thread's Function storage): a run takes each size alone"]
         fn $name() {
             measure($kib * 256);
         }

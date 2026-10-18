@@ -55,7 +55,7 @@ fn a_pass_writes_back_the_runs_of_metal_s_elements_alone() {
     }
     // Whole tiles lie end to end from the first byte: one run.
     assert_eq!(element_runs(&layout(4, [128, 64])), vec![0..128 * 64 * 4]);
-    // The end of Metal's last element at 19x7 (EV SID-pdl6-m4, "the rule's span"), short of
+    // The end of Metal's last element at 19x7 ("the rule's span"), short of
     // the tile's 32x8.
     for (unit, end) in [(4, 692), (2, 346), (1, 173)] {
         let runs = element_runs(&layout(unit, [19, 7]));

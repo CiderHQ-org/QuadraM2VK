@@ -6,8 +6,8 @@
 //! one, and a 1,024-threadgroup chain of them completes on the M3 Max and the M4). On Mesa's RADV
 //! and ANV, with the robust buffer access the device states, a relaxed one never saw a store that
 //! arrived after its first read: a 64-threadgroup chain stopped at the first group whose first
-//! load missed its predecessor's word, in every run, and completed with acquire (EVs RFS-lbp1 and
-//! -lbp2, Mesa 26.2.4; with the robustness features withheld it completed either way). Acquire is
+//! load missed its predecessor's word, in every run, and completed with acquire (Mesa 26.2.4; with
+//! the robustness features withheld it completed either way). Acquire is
 //! an order Metal's relaxed one admits, so every answer stays one Metal can give, on every device;
 //! the rule reads the function's structure only.
 //!

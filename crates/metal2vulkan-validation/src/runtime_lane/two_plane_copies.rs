@@ -19,9 +19,9 @@
 //!   (3, 5) to (11, 2), and whole into a texture of the other format (`twin`), both planes read
 //!   back.
 //!
-//! Metal's answer: the SHA-256 of each output ([`METAL`]; EV XRR-tx1-m4, an Apple M4 under macOS
-//! 27.0.1, plain and under Metal's validation layer alike, which stops only `twin`), which the EV
-//! keeps. A texture-to-texture copy's planes are also checked against Metal's byte model
+//! Metal's answer: the SHA-256 of each output ([`METAL`]; an Apple M4 under macOS
+//! 27.0.1, plain and under Metal's validation layer alike, which stops only `twin`), which the
+//! probe keeps. A texture-to-texture copy's planes are also checked against Metal's byte model
 //! (`bind::plane_copy`, which Metal's measured copies pin), at 48 x 20 and at widths that are not a
 //! multiple of 4; a copy whose rows overlap in the destination is announced once
 //! (`two-plane-texture-copy`), and so is a buffer blit at a width off 4 (`two-plane-buffer-blit`).
@@ -742,7 +742,7 @@ fn modelled(
 }
 
 /// Blits between two such textures move both planes' bytes as Metal's blit does: at 48 x 20 plane 0
-/// against Metal's digests (EV XRR-tx1-m4) and both planes against the model, whole, a region and
+/// against Metal's digests and both planes against the model, whole, a region and
 /// into the other format; at widths that are not a multiple of 4 (plane 0's texels lost or moved
 /// too) whole copies and regions whose rows do not overlap against the model; none of them
 /// announced. A copy whose rows overlap in the destination with other bytes, where Metal's blit
@@ -833,7 +833,7 @@ fn texture_blits_move_both_planes_as_metal_does() {
 }
 
 /// Metal's blit keeps the bytes it writes outside a level's texels (a row's padding, past a
-/// plane) and reads them back in a later blit (EV XRR2-pitch6-m4); the kernel holds the texels
+/// plane) and reads them back in a later blit; the kernel holds the texels
 /// alone, so a copy reading such bytes of a texture an earlier blit wrote them into is announced
 /// once (`two-plane-texture-copy`), and the earlier copy, from a fresh texture, is not.
 #[test]
@@ -895,7 +895,7 @@ fn buffer_blits_at_widths_off_4_are_announced() {
 }
 
 /// The generator gives the probe's texels: the FNV-1a digests the probe printed of seed 1's
-/// planes and of seed 2's bytes (EV XRR-tx1-m4's results).
+/// planes and of seed 2's bytes (the probe's results).
 #[test]
 fn the_generator_is_the_probes() {
     let fnv = |bytes: &[u8]| {

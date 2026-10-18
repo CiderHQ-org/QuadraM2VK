@@ -2,7 +2,7 @@
 //! on the device the cfg selects, under the validation layer.
 //!
 //! Metal renders into such a view in the view's format and encoding, and its bytes are the
-//! texture's (a probe, `CFB-probe1b`, an M3 Max on macOS 26.7 and an M4 on macOS 27.0.1 alike,
+//! texture's (a probe, an M3 Max on macOS 26.7 and an M4 on macOS 27.0.1 alike,
 //! plain; API validation accepts them): an sRGB view of an `RGBA8Unorm` texture stores the sRGB
 //! encoding of a draw's color and of a clear, and blends in linear; an `RGBA8Unorm` view of an
 //! `RGBA8Unorm_sRGB` texture stores the unorm one; a `BGRA8Unorm`, `RG16Float` or `R32Uint` view
@@ -58,7 +58,7 @@ const RT: TextureUsage = TextureUsage::RENDER_TARGET.union(TextureUsage::SHADER_
 const READ_WRITE: TextureUsage = TextureUsage::SHADER_READ.union(TextureUsage::SHADER_WRITE);
 
 /// The bytes Metal stored for the left half (the draw) and the right half (the clear) of each
-/// texel row, by the view's format (`CFB-probe1b`'s `v_*` cases).
+/// texel row, by the view's format (the probe's `v_*` cases).
 const SRGB: ([u8; 4], [u8; 4]) = ([0x7c, 0xaa, 0xcb, 0xcc], [0xbc, 0x89, 0xe1, 0xff]);
 const UNORM: ([u8; 4], [u8; 4]) = ([0x33, 0x66, 0x99, 0xcc], [0x80, 0x40, 0xbf, 0xff]);
 const BGRA_SRGB: ([u8; 4], [u8; 4]) = ([0xcb, 0xaa, 0x7c, 0xcc], [0xe1, 0x89, 0xbc, 0xff]);
@@ -331,9 +331,7 @@ fn on_device(test: impl FnOnce(&Lane)) {
 
 /// A view of another format renders in that format's encoding into its texture's bytes: the
 /// sRGB twins both ways (with and without `PixelFormatView` usage), `BGRA8Unorm_sRGB` over
-/// `BGRA8Unorm`, `BGRA8Unorm` over `RGBA8Unorm`, `RG16Float` and `RGBA8Unorm` over `R32Uint`
-/// (`CFB-probe1b`'s `v_srgb`, `v_srgb_pfv`, `v_unorm_of_srgb`, `v_bgra_srgb`, `v_bgra`, `v_rg16f`
-/// and `v_rgba8_of_r32uint`).
+/// `BGRA8Unorm`, `BGRA8Unorm` over `RGBA8Unorm`, `RG16Float` and `RGBA8Unorm` over `R32Uint`.
 #[test]
 fn views_render_in_their_format() {
     on_device(|lane| {
@@ -431,7 +429,7 @@ fn views_render_in_their_format() {
 
 /// A blend through an sRGB view blends in linear: an `RGBA8Unorm` texture of (0x80, 0x40, 0xc0,
 /// 0xff), loaded through its sRGB twin, takes (0.2, 0.4, 0.6, 0.5) by its alpha as Metal's did
-/// (`CFB-probe1b`'s `v_srgb_load_blend`: 0x7e 0x83 0xc6 0x80).
+/// (the probe's `v_srgb_load_blend`: 0x7e 0x83 0xc6 0x80).
 #[test]
 fn an_srgb_view_blends_in_linear() {
     on_device(|lane| {
@@ -458,7 +456,7 @@ fn an_srgb_view_blends_in_linear() {
 }
 
 /// An `R32Uint` view of an `RGBA8Unorm` texture stores its words' bytes: a clear of 0x11223344
-/// and a draw's word, as Metal's (`CFB-probe1b`'s `v_r32uint` and `v_no_pfv_r32uint`, whose draw
+/// and a draw's word, as Metal's (the probe's `v_r32uint` and `v_no_pfv_r32uint`, whose draw
 /// wrote 0xa1b2c3d4; here `rt6_layered`'s word for instance 0 in layer 0, 0x100, scissored to the
 /// left half, in a pass of one layer, as its layer-writing function needs).
 #[test]
@@ -491,7 +489,7 @@ fn a_uint_view_stores_its_words() {
 }
 
 /// A view of one level and slice renders them, and an array view a slice it is attached at,
-/// leaving the rest (`CFB-probe1b`'s `v_subview_level_slice`: an 8x8 two-slice array of two
+/// leaving the rest (the probe's `v_subview_level_slice`: an 8x8 two-slice array of two
 /// levels, viewed sRGB at level 1 and slice 1; `v_array_view_slice1`: a three-slice array's sRGB
 /// view at slice 1).
 #[test]
@@ -577,7 +575,7 @@ fn subviews_render_their_level_and_slice() {
     });
 }
 
-/// An array view renders each layer of a layered pass (`CFB-probe1b`'s `v_array_view_layered`,
+/// An array view renders each layer of a layered pass (the probe's `v_array_view_layered`,
 /// two sRGB layers of an `RGBA8Unorm` array; here, with the layer-choosing fixture, an `R32Uint`
 /// view of such an array, `rt6_layered`'s instance `i` into layer `i`, each slice holding its
 /// instance's word as `v_r32uint` stores a word).
@@ -607,8 +605,8 @@ fn an_array_view_renders_each_layer() {
 }
 
 /// A multisampled attachment resolves into a view in its format, and a multisampled view
-/// resolves into a texture of its format (`CFB-probe1b`'s `v_resolve_into_srgb_view` and
-/// `v_ms_view_resolve`): the left half drawn and the right half cleared, every sample alike.
+/// resolves into a texture of its format: the left half drawn and the right half cleared, every
+/// sample alike.
 #[test]
 fn resolves_into_and_from_views() {
     on_device(|lane| {
@@ -655,8 +653,7 @@ fn resolves_into_and_from_views() {
 }
 
 /// An `X32_Stencil8` view of a `Depth32Float_Stencil8` texture is the stencil attachment of its
-/// texture's stencil: cleared to 0x5a, and 0x77 replaced over the left half
-/// (`CFB-probe1b`'s `v_stencil_view`).
+/// texture's stencil: cleared to 0x5a, and 0x77 replaced over the left half.
 #[test]
 fn a_stencil_view_attaches_its_texture_s_stencil() {
     on_device(|lane| {
@@ -700,15 +697,15 @@ fn a_stencil_view_attaches_its_texture_s_stencil() {
 }
 
 /// A texture made in `X32_Stencil8` is a stencil texture, as plain Metal makes it (an M4 under
-/// macOS 27.0.1, EV SPCrp-probe4-m4; Metal's API validation stops it but for a heap's texture):
-/// made in 2D, 2D array and cube types, `Private`, `Shared`, `Memoryless` and from a heap, of usage
+/// macOS 27.0.1; Metal's API validation stops it but for a heap's texture): made in 2D, 2D array
+/// and cube types, `Private`, `Shared`, `Memoryless` and from a heap, of usage
 /// `ShaderRead | ShaderWrite` (the consumer's) among others, and refused in 1D and 3D ones
 /// (`x_mk_*`, `x_ty_*`); the stencil attachment cleared to 0x10 with 0x33 replaced over the left
 /// half (`x_draw_replace`), and loaded and incremented (`x_draw_inc_load`); blits in and out at a
 /// byte a texel (`x_blit_roundtrip`) and copies between it and `Stencil8`, itself and `R8Uint`
-/// (`x_blit_*`); a `Shared` one's bytes through the CPU (`x_shared_rw`); a view in its own format
-/// (SPCrp-probe5-m4 `v_x32_same`), and none in another (`x_view_*`, `v_x32_as_d32s8`). A texture of
-/// `X24_Stencil8` is stopped as of no format, as an Apple GPU's Metal stops it.
+/// (`x_blit_*`); a `Shared` one's bytes through the CPU (`x_shared_rw`); a view in its own format,
+/// and none in another (`x_view_*`, `v_x32_as_d32s8`). A texture of `X24_Stencil8` is stopped as of
+/// no format, as an Apple GPU's Metal stops it.
 #[test]
 fn a_texture_made_in_x32_stencil8_is_a_stencil_texture() {
     on_device(|lane| {
@@ -766,8 +763,8 @@ fn a_texture_made_in_x32_stencil8_is_a_stencil_texture() {
             Some(texture_problem(TextureProblem::NotAFormat))
         );
 
-        // Views: its own format only (SPCrp-probe5-m4 `v_x32_same`; plain Metal views it as
-        // `Depth32Float_Stencil8` in its GPU's own layout, `v_x32_as_d32s8`, and stops the rest).
+        // Views: its own format only (plain Metal views it as `Depth32Float_Stencil8` in its GPU's
+        // own layout, `v_x32_as_d32s8`, and stops the rest).
         let viewed = made(
             TextureType::Type2D,
             RT | TextureUsage::PIXEL_FORMAT_VIEW,
@@ -968,10 +965,10 @@ fn a_texture_made_in_x32_stencil8_is_a_stencil_texture() {
 
 /// An sRGB view of a texture over a buffer renders its encoding into the buffer's texel bytes and
 /// leaves the bytes between its rows, over an ordinary and a no-copy buffer (the aliasing image or
-/// the shadow; Metal probe case `r.view_srgb` on the M3 Max and an M4, and `CFB-probe1b`'s values).
+/// the shadow; Metal probe case `r.view_srgb` on the M3 Max and an M4, and our probe's values).
 /// A render pipeline whose attachment is in a pixel format the device's Metal level describes none
 /// of is stopped, as plain Metal's descriptor validation stops it ("is not a valid MTLPixelFormat";
-/// EV XRR2-ol4-m4 on an Apple M4 under macOS 27.0.1, the consumer's run on an M3 Max under 26.7),
+/// on an Apple M4 under macOS 27.0.1, the consumer's run on an M3 Max under 26.7),
 /// on every venue: a color attachment of `RGB8Unorm`, which no level describes, blended or not; a
 /// depth or a stencil attachment of `Depth24Unorm_Stencil8` or `X24_Stencil8`, which an Apple GPU
 /// has neither of, whatever the Vulkan driver has; and at macOS 26.7's level
@@ -1173,7 +1170,7 @@ fn a_bgra_view_without_pixel_format_view_draws_and_presents() {
 }
 
 /// An `R32Uint` view of a texture buffer is an attachment and stores its words in the buffer's
-/// bytes, every other byte kept (`CFB-probe1b`'s `tb_view_r32uint`: a 16-texel `RGBA8Unorm`
+/// bytes, every other byte kept (the probe's `tb_view_r32uint`: a 16-texel `RGBA8Unorm`
 /// texture buffer's view cleared to 0x11223344 and its left half drawn a word; here
 /// `rt6_layered`'s word 0x100, scissored to the left 8 texels), over an ordinary and a no-copy
 /// buffer.
@@ -1280,7 +1277,7 @@ fn drawn_planes(drawn: &[u64], encoding: ([u8; 4], [u8; 4])) -> Vec<u8> {
 }
 
 /// A 3D texture's depth plane is an attachment and a resolve target, every other plane kept
-/// (`CFB-probe1b`, an M3 Max and an M4, API validation passing each): plane 2 of a 4x4x4
+/// (an M3 Max and an M4, API validation passing each): plane 2 of a 4x4x4
 /// `RGBA8Unorm` volume filled with 0x11 (`t3d_plane2`), plane 1 of level 1 of an 8x8x8 one
 /// (`t3d_level1_plane1`), plane 1 through an sRGB view (`t3d_view_srgb_plane1`), and plane 3
 /// resolved into from a 4x multisampled attachment (`t3d_resolve_plane3`).
@@ -1349,7 +1346,7 @@ fn a_volume_s_plane_is_an_attachment() {
 }
 
 /// A layered pass renders a 3D attachment's planes from its depth plane, instance `i` into the
-/// pass's layer `i` (`CFB-probe1b`'s `t3d_layered_from1`: planes 1 and 2 of a 4x4x4 volume, the
+/// pass's layer `i` (the probe's `t3d_layered_from1`: planes 1 and 2 of a 4x4x4 volume, the
 /// others kept, API validation passing; here, with the layer-choosing fixture, an `R32Uint`
 /// volume of 0x11111111 whose planes take `rt6_layered`'s words 0x100 and 0x201).
 #[test]
@@ -1410,7 +1407,7 @@ fn row_halves((left, right): ([u8; 4], [u8; 4])) -> Vec<u8> {
 /// A 1D texture is an attachment and a resolve target, its row rendered as a 2D target of one
 /// row's would be: Metal renders and resolves into one plain, and its validation stops the pass
 /// ("texture must not be MTLTextureType1D", "resolveTexture must not be MTLTextureType1D")
-/// (`CFB-probe1b`, an M3 Max and an M4: `t1d`, `t1d_array_slice1`, `t1d_resolve`): a 16-texel
+/// (an M3 Max and an M4: `t1d`, `t1d_array_slice1`, `t1d_resolve`): a 16-texel
 /// `RGBA8Unorm` texture cleared and its left half drawn, slice 1 of a two-slice 1D array (slice
 /// 0 kept), and the resolve of a 16x1 4x multisampled attachment.
 #[test]
@@ -1455,7 +1452,7 @@ fn a_line_is_an_attachment() {
     });
 }
 
-/// A layered pass renders a 1D array's slices (`CFB-probe1b`'s `t1d_array_layered`: two slices,
+/// A layered pass renders a 1D array's slices (the probe's `t1d_array_layered`: two slices,
 /// each instance its own; here, with the layer-choosing fixture, an `R32Uint` 1D array whose
 /// slices take `rt6_layered`'s words 0x100 and 0x201).
 #[test]

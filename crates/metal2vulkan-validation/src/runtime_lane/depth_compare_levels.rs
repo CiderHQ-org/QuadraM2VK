@@ -1,16 +1,15 @@
 //! A device test of the level a depth comparison reads on the device the cfg selects, under the
 //! validation layer: comparisons of a mipmapped texture through a runtime sampler slot, through an
-//! argument buffer's sampler, and through constexpr samplers, against Metal's measured rule (EVs
-//! TXN-cmplvl2-m4 and TXN-cmplvl3-m4, an Apple M4 on macOS 27.0.1, runtime, argument buffer's and
-//! constexpr samplers side by side; MSFQ-m4-mipd16-1 before them). Metal rounds the level to `half`
-//! (a NaN reads 0), clamps it into the sampler's level clamp (a runtime or argument buffer's
-//! sampler holds its bounds as `f32`s, a constexpr one as `half`s) and into the texture's levels;
-//! with `L` its whole levels and `q` its fraction truncated onto sixty-fourths, a nearest mip
-//! filter reads level `L + 1` where `q > 1/2`, else `L`, a linear one blends the comparisons of
-//! levels `L` and `L + 1` by `1 - q` and `q` as an `r8Unorm` texture's codes 0 and 255, rounded
-//! once onto sixteenths of a code, ties up, and a sampler without a mip filter reads level 0. A
-//! kernel's bias is the explicit level, and a kernel's sample with neither reads level 0, clamped
-//! as a level is.
+//! argument buffer's sampler, and through constexpr samplers, against Metal's measured rule (an
+//! Apple M4 on macOS 27.0.1, runtime, argument buffer's and constexpr samplers side by side;
+//! our probe before them). Metal rounds the level to `half` (a NaN reads 0), clamps it into
+//! the sampler's level clamp (a runtime or argument buffer's sampler holds its bounds as `f32`s, a
+//! constexpr one as `half`s) and into the texture's levels; with `L` its whole levels and `q` its
+//! fraction truncated onto sixty-fourths, a nearest mip filter reads level `L + 1` where `q > 1/2`,
+//! else `L`, a linear one blends the comparisons of levels `L` and `L + 1` by `1 - q` and `q` as an
+//! `r8Unorm` texture's codes 0 and 255, rounded once onto sixteenths of a code, ties up, and a
+//! sampler without a mip filter reads level 0. A kernel's bias is the explicit level, and a
+//! kernel's sample with neither reads level 0, clamped as a level is.
 //!
 //! The texture is 16x16 of five levels, every texel of level `L` one depth; each job compares
 //! `equal` against one level's depth at the texture's centre, so its answer is that level's

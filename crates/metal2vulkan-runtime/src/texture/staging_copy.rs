@@ -10,7 +10,7 @@
 //!   copies both ways, of one sample (Vulkan copies nothing into a multisampled image; a clear
 //!   writes its zeros). It is made concurrent among the device's families and the staging queue's,
 //!   so its uses change no owner: measured on the RTX 3090, 50 clears and 50 copies of a 1080p
-//!   image cost the same either way (0.24 ms and 1.32 ms, EV XSH-sqp1-3090).
+//!   image cost the same either way (0.24 ms and 1.32 ms).
 //! - **Made.** It is moved to `GENERAL` and zeroed on the staging queue as it is made, from a
 //!   staging buffer of zeros (a copy engine clears nothing), waited for
 //!   (`FirstMove::record_alone`): no batch finds its move waiting.

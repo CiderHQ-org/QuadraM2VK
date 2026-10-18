@@ -415,7 +415,7 @@ mod metal_recording {
     /// seed's Metal-side gap ([`METAL_GAP`]) with the crash's signature, and printed
     /// (`SEQUENCE-METAL-GAP`); its partial records are dropped.
     #[test]
-    #[ignore = "writes the committed sequence records; the recording EV runs it on a Mac"]
+    #[ignore = "writes the committed sequence records; a recording run on a Mac takes it"]
     fn record_metal() {
         let environment = crate::metal::identity().unwrap().environment_id();
         let fingerprint = fingerprint(&environment).unwrap();

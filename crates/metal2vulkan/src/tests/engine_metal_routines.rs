@@ -1,7 +1,7 @@
 //! Metal's `frexp` and `ilogb` runtime routines end to end: kernels calling
 //! `___metal_frexp_<T>_pthread<I>` and `___metal_ilogb_<T>` on `float` and `half` scalars and
 //! vectors compile on every profile below, link, pass L3, and on the CPU SPIR-V interpreter answer
-//! every input of EV REF-fx-probe-3 as Metal did (an M4, macOS 27.0.1, libraries compiled offline;
+//! every input of our probe as Metal did (an M4, macOS 27.0.1, libraries compiled offline;
 //! every offline build, with and without fast math and `air.compile.denorms_disable`, answered
 //! alike). The tables are those answers: the input's bits, `frexp`'s mantissa bits and exponent,
 //! and `ilogb`. Under the default NaN policy (`NanMinMaxPolicy::Native`) a module that records
@@ -29,7 +29,7 @@ const PROFILES: [&str; 4] = [
     "amd-rdna3-radv",
 ];
 
-/// Metal's answers (EV REF-fx-probe-3, `nofastmath-offline`): `(x, frexp mantissa, frexp
+/// Metal's answers (`nofastmath-offline`): `(x, frexp mantissa, frexp
 /// exponent, ilogb)`.
 const FLOATS: [(u32, u32, i32, i32); 76] = [
     (0x00000000, 0x00000000, 0, i32::MIN),

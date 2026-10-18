@@ -1,9 +1,9 @@
 //! Numbered samplers (`resource_ids/numbered.rs`): Metal's rows replayed on the runtime's IDs
-//! alone. Each row is one process of an M4 probe (EVs TTG-sid6-m4, TTG-sid7-m4, SID-sid8-m4,
-//! SID-sid10-m4 and SID-sid11-m4; the M3 Max answered TTG2's the same): sampler states marked
-//! `label=ID` between steps that make and drop libraries, function objects and pipeline states, a
-//! command queue first where the row does not start with `nq_`. Each state a mark makes is one no
-//! other equals, so plain allocation hands it the lowest free ID, and it is kept to the row's end.
+//! alone. Each row is one process of an M4 probe (the M3 Max answered TTG2's the same): sampler
+//! states marked `label=ID` between steps that make and drop libraries, function objects and
+//! pipeline states, a command queue first where the row does not start with `nq_`. Each state a
+//! mark makes is one no other equals, so plain allocation hands it the lowest free ID, and it is
+//! kept to the row's end.
 
 use crate::device::lock;
 use crate::resource_ids::{

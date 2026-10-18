@@ -2,17 +2,16 @@
 //! `MirrorClampToEdge`, with pixel and with normalized coordinates, on the device the cfg selects,
 //! under the validation layer.
 //!
-//! Metal's answer (EVs RRP-probe1-m4, RRP-probe5-m4 and RRP-probe7-m4, an M4 under macOS 27.0.1,
-//! alike plain twice; a pixel sampler in the mode is misuse, which Metal's validation stops at the
-//! descriptor, `validateMTLSamplerDescriptor:79: failed assertion 'Sampler Descriptor
-//! Validation'`, and plain Metal samples): per axis of size `N`, the position is the pixel
-//! coordinate as given, or the normalized one's `u N` rounded to `f32` with ties away from zero,
-//! never wrapped. A nearest filter's tap is `floor(x)`; a linear filter's, and a gather's pair,
-//! `q = floor(256 x - 127.5)`, the taps `q >> 8` and the next, weighted `256 - (q & 255)` and
-//! `q & 255` in 256ths. A constant texel offset moves each tap, but where the level's size drops
-//! it (3, 5, 6 or 7 texels at the base level, as on a repeating axis). Each tap's index is then
-//! mirrored once, `-1 - i` for a negative `i`, and clamped to `N - 1`. A comparison (`Less`)
-//! passes where the reference is below the texel.
+//! Metal's answer (an M4 under macOS 27.0.1, alike plain twice; a pixel sampler in the mode is
+//! misuse, which Metal's validation stops at the descriptor, `validateMTLSamplerDescriptor:79:
+//! failed assertion 'Sampler Descriptor Validation'`, and plain Metal samples): per axis of size
+//! `N`, the position is the pixel coordinate as given, or the normalized one's `u N` rounded to
+//! `f32` with ties away from zero, never wrapped. A nearest filter's tap is `floor(x)`; a linear
+//! filter's, and a gather's pair, `q = floor(256 x - 127.5)`, the taps `q >> 8` and the next,
+//! weighted `256 - (q & 255)` and `q & 255` in 256ths. A constant texel offset moves each tap, but
+//! where the level's size drops it (3, 5, 6 or 7 texels at the base level, as on a repeating axis).
+//! Each tap's index is then mirrored once, `-1 - i` for a negative `i`, and clamped to `N - 1`. A
+//! comparison (`Less`) passes where the reference is below the texel.
 //!
 //! The owned fixture `rrp_mirror_clamp` samples a `texture2d<float>` (`rrp_mc_sample`,
 //! `rrp_mc_gather`) or a `depth2d<float>` (`rrp_mc_compare`) through the runtime sampler at

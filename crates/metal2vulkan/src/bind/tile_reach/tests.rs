@@ -288,9 +288,8 @@ impl Row {
     }
 }
 
-/// Every measured case (EVs RRS3-reach1 to -reach12, RCH-reach13 and -reach14) reaches the tiles
-/// the M4 reached, and only the case across the near plane is flagged (its reach that of the
-/// clipped polygon).
+/// Every measured case reaches the tiles the M4 reached, and only the case across the near plane is
+/// flagged (its reach that of the clipped polygon).
 #[test]
 fn the_rule_reaches_every_measured_answer() {
     let mut rows = measured::rows();

@@ -1690,11 +1690,10 @@ pub(super) fn moves_depth(bias: Option<DepthBiasEffect>) -> bool {
 /// Announce, once (`biased-depth-past-unit-range`), a draw of triangles in depth clip mode under
 /// a depth bias that can move their depth past `[0, 1]` ([`moves_depth`]), on a device that
 /// enabled `VK_EXT_depth_range_unrestricted` but does not take depth ranges natively
-/// ([`native_depth_range`]): such a device stores the biased depth unclamped (RADV and NVIDIA,
-/// EVs DSX-dz2-radv and DSX-dz2-nv5080), where Metal clamps it to `[0, 1]` (EVs DSX-ds3-m4 and
-/// XRR2-dz1b-m4), and without `depthClampControl` and `depthClipEnable` no Vulkan clamp of
-/// `[0, 1]` that keeps the clipping exists. A draw whose vertex stage compensates its depth
-/// clamps it under its own Vulkan range (`compensated`).
+/// ([`native_depth_range`]): such a device stores the biased depth unclamped (RADV and NVIDIA),
+/// where Metal clamps it to `[0, 1]`, and without `depthClampControl` and `depthClipEnable` no
+/// Vulkan clamp of `[0, 1]` that keeps the clipping exists. A draw whose vertex stage compensates
+/// its depth clamps it under its own Vulkan range (`compensated`).
 pub(super) fn announce_unclamped_bias(
     device: &Device,
     state: &EncoderState,

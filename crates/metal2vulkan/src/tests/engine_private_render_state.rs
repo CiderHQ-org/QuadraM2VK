@@ -87,7 +87,7 @@ fn refused(field: PrivateRenderField) -> Error {
 
 #[test]
 fn defaults_and_properties_that_change_nothing_keep_the_pipeline() {
-    // Metal's defaults, as an M4 answers a new descriptor's (EV PRS-intro1-m4).
+    // Metal's defaults, as an M4 answers a new descriptor's.
     let s = PrivateRenderState::new();
     assert_eq!(s.sample_mask, u64::MAX);
     assert_eq!(s.sample_coverage, 1.0);
@@ -175,7 +175,7 @@ fn the_sample_mask_is_its_bits_within_the_sample_count() {
             graphics.sample_mask = None;
             assert_eq!(graphics, base.graphics, "{what}");
         }
-        // Without a fragment function Metal ignores the mask (EV PRS-sm2-m4).
+        // Without a fragment function Metal ignores the mask.
         for samples in [1, 4] {
             let what = format!("{stem} {samples}x without a fragment function");
             let mut d = render(&lib, samples);

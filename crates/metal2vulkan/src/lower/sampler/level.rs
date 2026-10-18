@@ -2,11 +2,11 @@
 //! the explicit level `x` outside a fragment function), and the level that makes a device's sample
 //! read it.
 //!
-//! **The rule** (Apple M4, macOS 27.0.1; EVs MSFQ-m4-mipd16-1 for comparisons of a mipmapped
-//! `depth32Float` texture, MSFZ-m4-mipc1 and MSFZ-m4-mipc2 for colour samples). Metal rounds the
-//! level `x` to `half`, to nearest even (a NaN reads 0), clamps it into the sampler's level clamp
-//! (whose bounds a constexpr sampler holds as `half`s), and into the texture's levels. With
-//! `L = floor(x)` and the fraction truncated onto sixty-fourths, `q = floor(64 (x - L)) / 64`:
+//! **The rule** (Apple M4, macOS 27.0.1; for comparisons of a mipmapped `depth32Float` texture, for
+//! colour samples). Metal rounds the level `x` to `half`, to nearest even (a NaN reads 0), clamps
+//! it into the sampler's level clamp (whose bounds a constexpr sampler holds as `half`s), and into
+//! the texture's levels. With `L = floor(x)` and the fraction truncated onto sixty-fourths, `q =
+//! floor(64 (x - L)) / 64`:
 //!
 //! - a nearest mip filter reads level `L + 1` where `q > 1/2`, else level `L`;
 //! - a linear mip filter blends levels `L` and `L + 1` with weights `1 - q` and `q`;
@@ -28,13 +28,13 @@
 //! clamp into its levels would decide the filter of a sampler whose filters differ.
 //!
 //! **A depth comparison** reads its level by the same rule through a runtime, an argument
-//! buffer's, and a constexpr sampler alike (EV TXN-cmplvl2-m4: 2,048,400 comparisons at 1,707
-//! levels through nearest filters under nearest, linear and no mip filters and eleven clamps, a
-//! runtime or argument buffer's sampler's as `f32`s); a linear mip filter blends the two levels'
-//! comparisons as an `r8Unorm` texture's codes 0 and 255, rounded once onto sixteenths of a code,
-//! ties up (EV TXN-cmplvl3-m4, `Depth32Float` and `Depth16Unorm`, one level, both, or neither
-//! passing). The shader makes those comparisons itself (`compared`); a filtered comparison left
-//! to the device keeps the device's level.
+//! buffer's, and a constexpr sampler alike (2,048,400 comparisons at 1,707 levels through nearest
+//! filters under nearest, linear and no mip filters and eleven clamps, a runtime or argument
+//! buffer's sampler's as `f32`s); a linear mip filter blends the two levels' comparisons as an
+//! `r8Unorm` texture's codes 0 and 255, rounded once onto sixteenths of a code, ties up
+//! (`Depth32Float` and `Depth16Unorm`, one level, both, or neither passing). The shader makes those
+//! comparisons itself (`compared`); a filtered comparison left to the device keeps the device's
+//! level.
 //!
 //! **The device** chooses its level from `λ` (Vulkan's explicit `Lod`), clamped into the
 //! sampler's `[minLod, maxLod]` (the same level clamp), at its own precision: a nearest mip filter
@@ -58,19 +58,18 @@
 //! leaves the level to it and requires the property. A level known when the function compiles takes
 //! no snap where it is on Metal's grid already, as `level(0)` is.
 //!
-//! **A runtime or argument buffer's sampler** holds its clamp as `f32`s, not `half`s (EV
-//! UNV-metal-probe-2, Apple M4 on macOS 27.0.1: all 37,080 lanes of `level(x)` and a kernel's
-//! `bias(x)` through eighteen clamps, nearest and linear filters and mip filters). The function
-//! does not know the clamp; the `VkSampler` holds it on Metal's grid instead where the sampler
-//! takes one filter both ways and no anisotropy (`metal::sampler::clamps_on_grid`): the level a
-//! nearest mip filter reads at each bound, or the bound truncated onto sixty-fourths under a
-//! linear one. Metal's rule is monotone in the level, so its level clamped by the bounds is the
-//! level clamped by those values; the function hands the device the unclamped level on the grid
-//! (`by_word`: `L` or `L + 1` under a nearest mip filter, `L + q` under a linear one), and the
-//! device's clamp moves it exactly as Metal's moves the level. The sampler's word says whether
-//! it takes its clamp so ([`SamplerWord::LEVEL_RULE`]); elsewhere the device keeps the level it
-//! is handed. With one filter both ways the level's sign chooses nothing, so a level handed to
-//! the device needs no fraction to stay minified.
+//! **A runtime or argument buffer's sampler** holds its clamp as `f32`s, not `half`s (Apple M4 on
+//! macOS 27.0.1: all 37,080 lanes of `level(x)` and a kernel's `bias(x)` through eighteen clamps,
+//! nearest and linear filters and mip filters). The function does not know the clamp; the
+//! `VkSampler` holds it on Metal's grid instead where the sampler takes one filter both ways and no
+//! anisotropy (`metal::sampler::clamps_on_grid`): the level a nearest mip filter reads at each
+//! bound, or the bound truncated onto sixty-fourths under a linear one. Metal's rule is monotone in
+//! the level, so its level clamped by the bounds is the level clamped by those values; the function
+//! hands the device the unclamped level on the grid (`by_word`: `L` or `L + 1` under a nearest mip
+//! filter, `L + q` under a linear one), and the device's clamp moves it exactly as Metal's moves
+//! the level. The sampler's word says whether it takes its clamp so ([`SamplerWord::LEVEL_RULE`]);
+//! elsewhere the device keeps the level it is handed. With one filter both ways the level's sign
+//! chooses nothing, so a level handed to the device needs no fraction to stay minified.
 //!
 //! **A level from derivatives or gradients** (a fragment function's implicit level, explicit
 //! gradients, an LOD query) is the device's level arithmetic: Vulkan's level of detail, whose
@@ -357,8 +356,7 @@ pub(super) fn snap_level(
 /// level 0, a kernel's sample without a level or bias), by its word `word` (a `u32`), before the
 /// texture's levels clamp it (a `u32`, [`snap_level`] of the level a nearest mip filter reads at
 /// `x`): under a nearest mip filter the level Metal's rule reads, clamped into the levels the
-/// word's clamp leaves, and level 0 without a mip filter. Metal reads a comparison's level so too
-/// (EV TXN-cmplvl2-m4).
+/// word's clamp leaves, and level 0 without a mip filter. Metal reads a comparison's level so too.
 pub(super) fn word_level(
     fb: &mut FunctionBuilder<'_>,
     word: SValue,

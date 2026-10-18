@@ -537,7 +537,7 @@ impl BlitCommandEncoder {
     /// `contents` maps (`managed.rs`), after the encoder's earlier commands.
     ///
     /// On a resource of another storage mode it records nothing, as plain Metal does (RT2
-    /// `managed.synchronize.shared`, `.private`; SPH-managed1-m4: `Shared` and `Private` buffers
+    /// `managed.synchronize.shared`, `.private`: `Shared` and `Private` buffers
     /// and textures; Metal's validation stops it).
     ///
     /// Refused (`Invalid`): a resource of another device.

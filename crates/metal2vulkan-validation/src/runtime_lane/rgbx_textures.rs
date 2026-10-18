@@ -1,6 +1,6 @@
 //! Apple's RGBX textures (`RGBX8Unorm` through `RGBX32Float`, Apple SPI) on the device the cfg
-//! selects, under the validation layer, against Metal's measured answers (EVs FPV-pf1-m4 through
-//! FPV-pf4-m4, an M4 under macOS 27.0.1, our own probes).
+//! selects, under the validation layer, against Metal's measured answers (an M4 under macOS 27.0.1,
+//! our own probes).
 //!
 //! An RGBX texture holds its RGBA twin's bytes (`metal::format::x_channel`). Every read sees
 //! alpha 1: a kernel's read, sample and fetch, whatever the X field holds. A kernel's write
@@ -242,7 +242,7 @@ fn values(read: Read, bits: u32, seed: u64) -> Vec<u8> {
 }
 
 /// Every kernel write of random values into every RGBX format over bytes of `0xA5`: the twin's
-/// bytes, the X field of each texel the green field (EV FPV-pf1-m4).
+/// bytes, the X field of each texel the green field.
 #[test]
 fn rgbx_writes_store_green_as_x() {
     on_device(|device, _| {
@@ -279,7 +279,7 @@ fn rgbx_writes_store_green_as_x() {
     });
 }
 
-/// Metal's color fills of every RGBX format (EV FPV-pf2-m4): three colors' texel bytes, and a
+/// Metal's color fills of every RGBX format: three colors' texel bytes, and a
 /// byte fill's pattern cut at the texel.
 #[test]
 fn rgbx_fills_store_metals_bytes() {

@@ -1,5 +1,5 @@
 //! The extended-range blend table (`metal2vulkan_devtools::xr_blends`) on the device the cfg
-//! selects, under the validation layer, against Metal's bytes (EV XRB-xrt1-m4, plain Metal on an
+//! selects, under the validation layer, against Metal's bytes (plain Metal on an
 //! Apple M4 under macOS 27.0.1).
 //!
 //! For each format and output type (`half4` through the owned fixture `rt6_samples`'s
@@ -19,20 +19,20 @@
 //! pass leaves them ([`as_metal_leaves`]), the codes exactly. A differing band is printed on an
 //! `XR-TABLE-DIFFERS` line.
 //!
-//! The table of the probe built without fast math (EV XRB-xrts-m4, `xr_blends::safe_table`) is
+//! The table of the probe built without fast math (`xr_blends::safe_table`) is
 //! drawn the same way through the fixture built so, its `air.compile.fast_math_enable` switched to
 //! `_disable` ([`Math::Safe`]).
 //!
-//! The second source's table without fast math (EV XRB-xrtd-m4, `xr_blends::dual_table`) is drawn
+//! The second source's table without fast math (`xr_blends::dual_table`) is drawn
 //! through the owned fixture `xrb_dual`, built without fast math, whose `xrb_dual_half` and
 //! `xrb_dual_float` return a second output (index 1) read from buffer 2, which holds the table's
 //! second outputs ([`Math::Second`]).
 //!
-//! The table of a computed `float4` output under fast math (EV XRB-xrtc-m4,
-//! `xr_blends::computed_table`) is drawn through the owned fixture `xrb_computed`, whose
-//! `xrb_computed_float` returns its value times buffer 2's ones ([`Math::Computed`]): a row the
-//! table says is made must announce no `extended-range-float-blend-source` (the `float` output
-//! kind; a `half4` output's is `extended-range-blend-source`) and store Metal's bytes; one it says
+//! The table of a computed `float4` output under fast math (`xr_blends::computed_table`) is drawn
+//! through the owned fixture `xrb_computed`, whose `xrb_computed_float` returns its value times
+//! buffer 2's ones ([`Math::Computed`]): a row the table says is made must announce no
+//! `extended-range-float-blend-source` (the `float` output kind; a `half4` output's is
+//! `extended-range-blend-source`) and store Metal's bytes; one it says
 //! is `announced` must announce it, and its band is not compared. The lane asks for both kinds at
 //! every occurrence, which announces them at each draw's bind, not at the making: an announced row
 //! draws in a pass of its own.
@@ -726,7 +726,7 @@ fn timed_run(
 /// stored color 0 through a fetch. Each band then holds what the same blend stores into a
 /// stored color 0 (drawn first, its bands Metal's digests), read through the same fetch and
 /// unblended write ([`fetched_back`]): Metal's memoryless attachment blends as a stored one does
-/// (a probe, EV TTG-xrb1-m4).
+/// (a probe).
 #[test]
 fn a_memoryless_color_2_blends_as_a_stored_color_does() {
     use super::extended_range_blends::tile_of;

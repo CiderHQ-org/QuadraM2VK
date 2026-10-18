@@ -5,7 +5,7 @@
 //! or the runtime sampler of the same state.
 //!
 //! Metal filters a heap texture as a slot's, and through an argument buffer's sampler as through
-//! a constexpr or a runtime sampler of the same state (EV MSFZ-m4-probe1, Apple M4), and the slot's
+//! a constexpr or a runtime sampler of the same state (Apple M4), and the slot's
 //! emulated filter is Metal's on the measured formats (the authored cases on every venue). Outside
 //! MoltenVK the heap texture's filter is emulated by the class its handle-table entry carries, else
 //! the device's; a device whose filter is not Metal's (an 8-bit format's weights, a half-float

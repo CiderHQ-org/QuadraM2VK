@@ -2,8 +2,8 @@
 //! rotation renders through an image of its pass's frame, whose texels the encoders turn into the
 //! plane's bytes after a pass that stores it and back before one that uses it.
 //!
-//! What plain Metal does, measured on an M4 under macOS 27.0.1 (EVs ZCI2-rotprobe-m4 to
-//! ZCI2-rotprobe5-m4) and an M3 Max under 26.7 (EV SPH-rot1-m3, the consumer's report):
+//! What plain Metal does, measured on an M4 under macOS 27.0.1 and an M3 Max under 26.7 (the
+//! consumer's report):
 //!
 //! - **Where a pass's texels land.** A pass draws a `W x H` frame (the texture's `width` and
 //!   `height`); its texel `(x, y)` lands in the plane at `(H - 1 - y, x)` for rotation 1 and 4,
@@ -12,26 +12,25 @@
 //!   ([`stored_extent`], [`source_map`]). Its positions, viewport and scissor are the frame's, a
 //!   resolve into it lands as a store does, and attachments of different rotations in one pass
 //!   each land by their own.
-//! - **Where a pass loads its texels from** (EVs TTG-rot1-m4 and TTG-rot2-m4 on an M4 under 27.0.1,
-//!   TTG-rot1-m3 and TTG-rot2-m3 on the M3 Max under 26.7, every frame, rotation and case twice). A
-//!   pass that loads the texture sees the stored image turned back, the inverse of the store, at
-//!   rotations 1 to 3. At rotation 4 it sees the plane transposed: its texel `(x, y)` is the
-//!   plane's `(y, x)`, so a texel it loads and stores again lands mirrored left to right, at `(H -
-//!   1 - x', y')` of the plane where it lay at `(x', y')`. Metal loads and stores only the 32x32
-//!   tiles of the frame (from its origin) that a draw's primitives reach, after the viewport and
-//!   scissor, fragments discarded or not, or every tile where another color attachment clears and
-//!   stores; a pass without a draw (or with a second attachment cleared but no draw) leaves every
-//!   texel where it lay, as does a tile no primitive reaches (a primitive off the frame reaches
-//!   none). On the M3 an 8x16 block of a reached tile was left in place in two of 88 passes, a
-//!   different block each time, Metal's own nondeterminism, which the runtime does not model; the
-//!   M4 answered the same each time. The runtime loads by Metal's map ([`Turn::Load`]) in a pass
-//!   whose draws reach tiles, every tile, and by the inverse of the store ([`Turn::Keep`]) in one
-//!   whose draws reach none, so its store leaves every texel in place (`clear_reach::PassReach`).
-//!   That is Metal's answer in a pass whose draws reach no tile or every tile (another attachment
-//!   cleared and stored). In any other pass that draws, the tiles no draw reaches, which Metal
-//!   keeps, turn: a near-equivalent announced once per device (`Degradation::RotatedLoadTiles`).
-//!   Which tiles a draw reaches depends on where the GPU places the vertices, as a `DontCare`
-//!   load's (`clear_reach.rs`).
+//! - **Where a pass loads its texels from** (on an M4 under 27.0.1, on the M3 Max under 26.7, every
+//!   frame, rotation and case twice). A pass that loads the texture sees the stored image turned
+//!   back, the inverse of the store, at rotations 1 to 3. At rotation 4 it sees the plane
+//!   transposed: its texel `(x, y)` is the plane's `(y, x)`, so a texel it loads and stores again
+//!   lands mirrored left to right, at `(H - 1 - x', y')` of the plane where it lay at `(x', y')`.
+//!   Metal loads and stores only the 32x32 tiles of the frame (from its origin) that a draw's
+//!   primitives reach, after the viewport and scissor, fragments discarded or not, or every tile
+//!   where another color attachment clears and stores; a pass without a draw (or with a second
+//!   attachment cleared but no draw) leaves every texel where it lay, as does a tile no primitive
+//!   reaches (a primitive off the frame reaches none). On the M3 an 8x16 block of a reached tile
+//!   was left in place in two of 88 passes, a different block each time, Metal's own
+//!   nondeterminism, which the runtime does not model; the M4 answered the same each time. The
+//!   runtime loads by Metal's map ([`Turn::Load`]) in a pass whose draws reach tiles, every tile,
+//!   and by the inverse of the store ([`Turn::Keep`]) in one whose draws reach none, so its store
+//!   leaves every texel in place (`clear_reach::PassReach`). That is Metal's answer in a pass whose
+//!   draws reach no tile or every tile (another attachment cleared and stored). In any other pass
+//!   that draws, the tiles no draw reaches, which Metal keeps, turn: a near-equivalent announced
+//!   once per device (`Degradation::RotatedLoadTiles`). Which tiles a draw reaches depends on where
+//!   the GPU places the vertices, as a `DontCare` load's (`clear_reach.rs`).
 //! - **The copies** ([`RotatedCopies`]): the shadow framework's (`shadow.rs`), the plane's bytes
 //!   the truth and the frame's image the shadow. Into the image: the bytes from the plane's first
 //!   texel to its last into a staging buffer, the rotation kernel (`bind::rotate_texels_module`)

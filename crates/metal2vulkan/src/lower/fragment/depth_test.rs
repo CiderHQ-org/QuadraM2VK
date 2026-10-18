@@ -25,7 +25,7 @@
 //! The ordered interlock makes each fragment's test, depth write and color store one step in
 //! primitive order across the draws of a subpass, so the next fragment tests against the depth
 //! the last one left: Metal's order. The body runs whole, every memory write included, for every
-//! fragment, as Metal runs it before its tests (EV XRR2-fx1-m4).
+//! fragment, as Metal runs it before its tests.
 //!
 //! **The fragment's depth**. At one sample it is `FragCoord.z`: the device's own depth, which its
 //! fixed-function test compares, with the draw's depth bias, at the pixel's one sample (on the M4,
@@ -46,8 +46,8 @@
 //! `InterpolateAtSample` at the invocation's sample, `v(centre)` read as it is, which that device
 //! reads at the pixel centre. On the M4 that is the depth MoltenVK stores at each sample in the
 //! flat, sloped and steep cases, under a constant bias, and where the clamp decides; under
-//! perspective, a slope-scaled bias, or a viewport range other than `[0, 1]` it is within 2 ulp
-//! (EV DSX-dz5-mvk4). The module records `PrecisionNote::ComputedSampleDepth`, which no draw's
+//! perspective, a slope-scaled bias, or a viewport range other than `[0, 1]` it is within 2 ulp.
+//! The module records `PrecisionNote::ComputedSampleDepth`, which no draw's
 //! state can rule out at compile time. Another device is refused at more than one sample.
 //!
 //! **A returned depth**. A function that returns `[[depth(...)]]` tests the depth it returns at
@@ -79,12 +79,11 @@
 //! `[[sample_mask]]` keeps a fragment only where the mask holds the invocation's sample's bit (bit
 //! 0 at one sample; a per-sample invocation's other bits do nothing): at each return, before the
 //! tests, a fragment without it is recorded as discarded, so it runs no test, writes neither
-//! stand-in, and stores no color, as Metal drops the samples outside the mask (measured on an M4,
-//! EV DSX-mask1-m4). Beside a returned stencil Metal still runs the stencil test for such a sample,
-//! with the returned reference, and fails its depth test whatever the draw's compare function: the
-//! stencil-failure operation where the stencil test fails, else the depth-failure operation, no
-//! depth write and no color (EV DSX-mask2-m4). So does the function, where it runs the stencil
-//! test.
+//! stand-in, and stores no color, as Metal drops the samples outside the mask (measured on an M4).
+//! Beside a returned stencil Metal still runs the stencil test for such a sample, with the returned
+//! reference, and fails its depth test whatever the draw's compare function: the stencil-failure
+//! operation where the stencil test fails, else the depth-failure operation, no depth write and no
+//! color. So does the function, where it runs the stencil test.
 
 use crate::device::requirements::{FormatUsage, VkFeature, VkProperty};
 use crate::device::DeviceProfile;
@@ -700,7 +699,7 @@ pub(super) fn emit_return(
     // A returned sample mask without the invocation's sample's bit (bit 0 at one sample) drops
     // the fragment before the tests, as Metal's coverage does: no test, no write, no store.
     // Beside a returned stencil the stencil test still runs for it, its depth test failing
-    // (measured, EV DSX-mask2-m4): `uncovered` reaches the tests.
+    // (measured): `uncovered` reaches the tests.
     let returned_stencil = plan.stencil.is_some_and(|t| t.returned.is_some());
     let (was, uncovered) = match plan.mask {
         Some(field) => {

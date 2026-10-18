@@ -1,14 +1,13 @@
 //! Texture buffers made with a swizzle (work-pile 0p) on the device the cfg selects, under the
 //! validation layer: every read takes the swizzle, out of bounds too.
 //!
-//! Metal applies a texture buffer's swizzle to every read (EVs UNV-metal-probe-3 and
-//! UNV-metal-probe-3b, an M3 Max under macOS 26.7 and an M4 under macOS 27.0.1, plain and
-//! validated alike). Each channel reads the texel's channel its swizzle names, `Zero` 0 and `One`
-//! 1 (`1.0` for a float format, `1` for an integer one); a format's missing green and blue read 0
-//! and its missing alpha 1. A read past the texture buffer reads the texel (0, 0, 0, 0), alpha 1
-//! where the format has no alpha, swizzled alike. A view made with a swizzle reads its own,
-//! replacing its texture's. A swizzle beside `ShaderWrite` usage is refused when the texture is
-//! made, by Metal and by the runtime, so only reads see one.
+//! Metal applies a texture buffer's swizzle to every read (an M3 Max under macOS 26.7 and an M4
+//! under macOS 27.0.1, plain and validated alike). Each channel reads the texel's channel its
+//! swizzle names, `Zero` 0 and `One` 1 (`1.0` for a float format, `1` for an integer one); a
+//! format's missing green and blue read 0 and its missing alpha 1. A read past the texture buffer
+//! reads the texel (0, 0, 0, 0), alpha 1 where the format has no alpha, swizzled alike. A view made
+//! with a swizzle reads its own, replacing its texture's. A swizzle beside `ShaderWrite` usage is
+//! refused when the texture is made, by Metal and by the runtime, so only reads see one.
 //!
 //! The kernels are public fixtures' (`validation/fixtures/public/engine`):
 //!

@@ -177,7 +177,7 @@ fn in_lockstep(words: &mut [u32], mut step: impl FnMut(usize, u32, &[u32]) -> Op
 
 /// Metal's answer of `rtl_lockstep_divergent_loop`: thread t's word after `counts[t]` iterations
 /// of `words[t] = words[t ^ 16] * 3 + i + 1`, the reads of an iteration before its writes.
-/// Measured on the Apple M3 Max and the Apple M4 (EVs RTL-probe-m3 and RTL-probe-m4).
+/// Measured on the Apple M3 Max and the Apple M4.
 fn lockstep_divergent_loop() -> Vec<u32> {
     let counts = counts();
     let mut words: Vec<u32> = (0..THREADS as u32).collect();
@@ -1375,8 +1375,8 @@ fn whole_block_lane(x: usize, y: usize) -> u32 {
 
 /// Metal's lanes of the partial triangle, one string a row of the target: `.` where the triangle
 /// does not reach, else the lane in base 32. Metal compiled the fixture's MSL at run time and drew
-/// it on the M3 Max (macOS 26.7, EV `GSM2-flanes-m3`) and the M4 (macOS 27.0.1, EV
-/// `GSM2-flanes-m4`), the same lanes on both, for each of the fixture's three forms of the lane.
+/// it on the M3 Max (macOS 26.7) and the M4 (macOS 27.0.1), the same lanes on both, for each of the
+/// fixture's three forms of the lane.
 const PARTIAL_LANES: [&str; LANE_SIDE] = [
     "................................",
     "................................",

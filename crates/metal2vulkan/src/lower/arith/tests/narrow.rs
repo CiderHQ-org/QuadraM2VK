@@ -152,7 +152,7 @@ fn a_half_round_trip_through_its_bits_is_compact() {
 /// Under native half rounding a `half` may reach its store unrounded (the device folds the
 /// conversion pair), and the store's bits then saturate: a finite magnitude from `65536` up is
 /// infinity, never a NaN's code or a code past 16 bits (whose bit 17 a pair's store carried into
-/// the next lane, EV `NKP-lane1-nv3090`); every other value is truncated toward zero onto the half
+/// the next lane); every other value is truncated toward zero onto the half
 /// grid, an infinity and a NaN as before, and a half value is its own bits. A module whose rounding
 /// is Metal's takes no cap.
 #[test]
@@ -1069,9 +1069,9 @@ fn converted_half_rounding_is_the_exactly_rounded_half() {
     }
 }
 
-/// Metal's conversion of the `f32` of bits `b` to `half` (EVs NAN-hcv3-m3 and NAN-hcv3-m4 on
-/// every `f32`, and the M3 Max's probe of every NaN): to nearest even on the half grid, half
-/// denormals and the sign of a zero kept, infinity from 65520 up, and `0x7E00` for every NaN.
+/// Metal's conversion of the `f32` of bits `b` to `half` (on every `f32`, and the M3 Max's probe of
+/// every NaN): to nearest even on the half grid, half denormals and the sign of a zero kept,
+/// infinity from 65520 up, and `0x7E00` for every NaN.
 fn metal_half(b: u64) -> u64 {
     let x = f32v(b);
     if x.is_nan() {

@@ -1801,7 +1801,7 @@ fn has_a_copy_engine(device: &Device) -> bool {
 /// Whether `device` has memory the host caches that a texture's host-transfer image takes, as
 /// Vulkan itself reports the physical device: a host-visible, coherent, host-cached type the
 /// runtime allocates, device-local, or any on a device with unified memory (a Radeon 780M's
-/// system memory, EV XSH-spq5-radv). A frame-sized `BGRA8Unorm` image may lie in it on every
+/// system memory). A frame-sized `BGRA8Unorm` image may lie in it on every
 /// device measured.
 fn takes_host_cached_memory(device: &Device) -> bool {
     use ash::vk;

@@ -1915,7 +1915,7 @@ fn an_unstated_word_the_product_approximates_keeps_its_reading_open() {
 /// A word within Apple's bound that shows a recorded near-equivalent's difference keeps its reading
 /// open, so the report refuses the sign-off; a word that shows none keeps its verdict, and the
 /// sign-off stands, whatever arithmetic notes the row records. A fast `sinpi` of a subnormal: +0
-/// where the operand is read as zero, as Metal reads it (EV MBB-pi1-m3), the subnormal pi times it
+/// where the operand is read as zero, as Metal reads it, the subnormal pi times it
 /// where the device keeps it (fast `sinpi`'s lowering records `DeviceDenormals`), and Table 8.2's
 /// absolute 2^-13 admits both. A product whose result is a subnormal keeps Apple's verdict: the
 /// product's multiply flushes it on every profile, so the note is not its. A product one rounding

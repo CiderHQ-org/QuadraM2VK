@@ -1,11 +1,11 @@
 //! Indirect command buffers on the device the cfg selects, under the validation layer: creation,
 //! CPU encoding of compute commands, resets and the typed read-back answer as Metal's measured ones
-//! do (probes `RT7-icb-probe1` to `4`, an M3 Max on macOS 26.7 and an M4 on 27.0.1), what Metal's
-//! validation stops or ends the process for is refused typed, and pipeline states made with
-//! `supportIndirectCommandBuffers` take dense IDs of their own space. The pipeline states are of
-//! the owned `icb_replay_template` fixture's kernel. Render commands (probe `RT7-icb-probe6`):
-//! their setters, read-back and refusals, and render states' IDs in the space compute states take
-//! theirs from, through the owned `icb_render_replay_template` fixture's vertex function.
+//! do (an M3 Max on macOS 26.7 and an M4 on 27.0.1), what Metal's validation stops or ends the
+//! process for is refused typed, and pipeline states made with `supportIndirectCommandBuffers` take
+//! dense IDs of their own space. The pipeline states are of the owned `icb_replay_template`
+//! fixture's kernel. Render commands: their setters, read-back and refusals, and render states' IDs
+//! in the space compute states take theirs from, through the owned `icb_render_replay_template`
+//! fixture's vertex function.
 
 use super::degrade_notices::{self as notices, counts};
 use super::host_memory::on_device;
@@ -148,7 +148,7 @@ fn assert_reset(command: &EncodedComputeCommand) {
     assert_eq!(command.stage_in_region, Region::default());
 }
 
-/// What creation answers (probe `RT7-icb-probe1`): the size asked for, 0 included; the options
+/// What creation answers: the size asked for, 0 included; the options
 /// asked for with hazard tracking resolved to tracked; no label, heap or aliasing; and the
 /// descriptor's defaults. `allocatedSize` is Metal's (docs/API.md section 10).
 #[test]
@@ -160,7 +160,7 @@ fn indirect_command_buffers_are_made_as_metal_makes_them() {
     assert_eq!(defaults.max_kernel_threadgroup_memory_bind_count, 31);
     assert!(!defaults.support_dynamic_attribute_stride);
     on_device(|device| {
-        // Metal's `allocatedSize`, whatever the storage mode (EV MESH-icb2-m4).
+        // Metal's `allocatedSize`, whatever the storage mode.
         for (count, allocated) in [(0, 16384), (1, 16384), (16, 16384), (1024, 802816)] {
             let made = icb(device, &compute_descriptor(), count);
             assert_eq!(made.size(), count);
@@ -220,11 +220,11 @@ fn indirect_command_buffers_are_made_as_metal_makes_them() {
 }
 
 /// An indirect command buffer's ID is the lowest free of the buffers' own space, from 1, given
-/// back when the buffer goes, as Metal's `gpuResourceID` (EVs ICR-icbid-m3 and ICR-icbid-m4, an M3
-/// Max on macOS 26.7 and an M4 on 27.0.1, identical): four buffers take 1 to 4; with 1 and 3 gone
-/// (in either order) the next three take 1, 3 and 5; with 2, 3 and 4 of five gone the next four
-/// take 2, 3, 4 and 6. Buffers of compute and of render commands share the space, and a pipeline
-/// state made with `supportIndirectCommandBuffers` takes none of it.
+/// back when the buffer goes, as Metal's `gpuResourceID` (an M3 Max on macOS 26.7 and an M4 on
+/// 27.0.1, identical): four buffers take 1 to 4; with 1 and 3 gone (in either order) the next three
+/// take 1, 3 and 5; with 2, 3 and 4 of five gone the next four take 2, 3, 4 and 6. Buffers of
+/// compute and of render commands share the space, and a pipeline state made with
+/// `supportIndirectCommandBuffers` takes none of it.
 #[test]
 fn indirect_command_buffers_take_the_lowest_free_id_of_their_own_space() {
     on_device(|device| {
@@ -271,7 +271,7 @@ fn indirect_command_buffers_take_the_lowest_free_id_of_their_own_space() {
         let render = icb(device, &render_descriptor(), 4);
         assert_eq!(ids(&[&compute, &render]), [1, 2]);
         // `resourceIndex` is the state's `gpuResourceID`: 0 without
-        // `supportIndirectCommandBuffers` (EV APX2-spi1-m4, an M4: compute 1 and render 2 with
+        // `supportIndirectCommandBuffers` (an M4: compute 1 and render 2 with
         // it, both 0 without).
         let render_state = render_template_state(device, true);
         assert_eq!(state.resource_index(), state.gpu_resource_id().0);
@@ -300,8 +300,7 @@ fn creation_refuses_what_metal_refuses() {
         };
         let shared = ResourceOptions::shared();
         // No command types: made, but its commands, reset and read-back are refused (plain
-        // Metal's process ends at a command's first setter and at a reset; EVs RFC-probe1-m4,
-        // RFC-probe2-m4).
+        // Metal's process ends at a command's first setter and at a reset).
         let none = icb(device, &IndirectCommandBufferDescriptor::new(), 4);
         assert_eq!(none.size(), 4);
         let no_types = |call| icb_problem(call, IndirectCommandBufferProblem::NoCommandTypes);
@@ -319,7 +318,7 @@ fn creation_refuses_what_metal_refuses() {
         );
         assert_eq!(none.commands(0..1).unwrap_err(), no_types("commands"));
         // Draws of any kind beside dispatches make a buffer of compute commands, as plain
-        // Metal's (EVs RFC-probe1-m4, RFC-probe3-m4).
+        // Metal's.
         for draws in [
             IndirectCommandType::DRAW,
             IndirectCommandType::DRAW_INDEXED,
@@ -364,8 +363,8 @@ fn creation_refuses_what_metal_refuses() {
             draws.command_types = held;
             assert_eq!(icb(device, &draws, 4).size(), 4);
         }
-        // Up to 65536 buffers of a stage, or threadgroup lengths, as plain Metal makes them
-        // (EVs RFC-probe1-m4, RFC-probe2-m4); past that its storage is not defined.
+        // Up to 65536 buffers of a stage, or threadgroup lengths, as plain Metal makes them; past
+        // that its storage is not defined.
         let counts = |count: u32| {
             let mut buffers = compute_descriptor();
             buffers.max_kernel_buffer_bind_count = count;
@@ -436,7 +435,7 @@ fn creation_refuses_what_metal_refuses() {
 }
 
 /// A buffer set on a command at an offset of 2^32 or more lies at the offset's low 32 bits, as
-/// Metal keeps it (EV STL-off1-m4, an M4: its getters and its GPU's reads, within a buffer past
+/// Metal keeps it (an M4: its getters and its GPU's reads, within a buffer past
 /// 4 GiB too): a kernel buffer plain and with a stride, a vertex buffer plain and with a stride,
 /// a fragment buffer; a patch draw's factor buffer and an indexed patch draw's control-point index
 /// buffer. An executed command reads its parameters and writes its output there.
@@ -523,7 +522,7 @@ fn a_command_keeps_a_buffer_offset_s_low_32_bits() {
         assert_eq!(read.fragment_buffers[0], at(&params, 8, None));
 
         // A patch draw's factor buffer and an indexed one's control-point index buffer, which no
-        // validation bounds, at their offsets' low 32 bits too (EV STL-off2-m4).
+        // validation bounds, at their offsets' low 32 bits too.
         let mut descriptor = render_descriptor();
         descriptor.command_types =
             IndirectCommandType::DRAW_PATCHES.union(IndirectCommandType::DRAW_INDEXED_PATCHES);
@@ -731,10 +730,10 @@ fn a_state_set_on_a_command_gives_its_id_back_at_the_program_s_last_release() {
     });
 }
 
-/// A command's setters write what Metal's getters read back (probes `RT7-icb-probe1`, `3` and
-/// `4`): a buffer's address plus its offset, whatever the offset; threadgroup lengths as set;
-/// sizes and stage-in regions to their low 32 bits; the pipeline state set, kept alive while the
-/// command names it; a nil buffer unsets; reset and `resetWithRange:` leave fresh commands.
+/// A command's setters write what Metal's getters read back (`3` and `4`): a buffer's address plus
+/// its offset, whatever the offset; threadgroup lengths as set; sizes and stage-in regions to their
+/// low 32 bits; the pipeline state set, kept alive while the command names it; a nil buffer unsets;
+/// reset and `resetWithRange:` leave fresh commands.
 #[test]
 fn compute_commands_read_back_what_was_set() {
     on_device(|device| {
@@ -850,8 +849,7 @@ fn compute_commands_read_back_what_was_set() {
 }
 
 /// Dynamic attribute strides: a buffer set with a stride reads it back, one set without reads
-/// the pipeline's own (probe `RT7-icb-probe2`); a buffer without them drops a kernel buffer's
-/// stride.
+/// the pipeline's own; a buffer without them drops a kernel buffer's stride.
 #[test]
 fn dynamic_strides_read_back_as_set() {
     on_device(|device| {
@@ -882,8 +880,8 @@ fn dynamic_strides_read_back_as_set() {
             ]
         );
         // A buffer without dynamic strides drops the stride and keeps the buffer, as plain
-        // Metal's reads back (all ones, the pipeline's own; probe `RT7-icb-probe1b`
-        // `set_stride_unsupported`, the M3 Max and the M4; Metal's API validation stops it).
+        // Metal's reads back (all ones, the pipeline's own; the M3 Max and the M4; Metal's API
+        // validation stops it).
         let fixed = icb(device, &compute_descriptor(), 1);
         let only = fixed.indirect_compute_command_at(0).unwrap();
         only.set_kernel_buffer_with_stride(Some(&buffer), 16, 12, 0)
@@ -895,10 +893,9 @@ fn dynamic_strides_read_back_as_set() {
     });
 }
 
-/// What Metal's validation stops at a setter, or ends the process for, is refused typed (probes
-/// `RT7-icb-probe1` and `3`), and an imageblock side the record cannot hold is a gap. A dispatch
-/// of the kind a buffer's command types lack, which Metal's validation stops but plain Metal runs
-/// (EVs ICBV-hostkinds-m3 and -m4), is set.
+/// What Metal's validation stops at a setter, or ends the process for, is refused typed, and an
+/// imageblock side the record cannot hold is a gap. A dispatch of the kind a buffer's command types
+/// lack, which Metal's validation stops but plain Metal runs, is set.
 #[test]
 fn setters_refuse_what_metal_refuses() {
     on_device(|device| {
@@ -914,8 +911,7 @@ fn setters_refuse_what_metal_refuses() {
                 IndirectCommandBufferProblem::CommandIndex { index: 2, size: 2 }
             )
         );
-        // A `Private` buffer's commands are the CPU's, as plain Metal encodes and reads them back
-        // (probe `RT7-icb-probe3` `encode_private`).
+        // A `Private` buffer's commands are the CPU's, as plain Metal encodes and reads them back.
         let private = device
             .new_indirect_command_buffer(&compute_descriptor(), 2, ResourceOptions::private())
             .unwrap();
@@ -974,8 +970,7 @@ fn setters_refuse_what_metal_refuses() {
         first.set_imageblock_size(65535, 8).unwrap();
 
         // A dispatch of the kind a buffer's command types lack: every compute buffer's records
-        // hold it, and plain Metal runs it as on its own (EVs ICBV-hostkinds-m3 and -m4), where
-        // its validation stops the call.
+        // hold it, and plain Metal runs it as on its own, where its validation stops the call.
         let mut threads_only = compute_descriptor();
         threads_only.command_types = IndirectCommandType::CONCURRENT_DISPATCH_THREADS;
         let threads_icb = icb(device, &threads_only, 1);
@@ -1006,15 +1001,14 @@ fn setters_refuse_what_metal_refuses() {
                 IndirectCommandBufferProblem::InheritedPipelineState
             )
         );
-        // A buffer of a buffer that inherits its buffers is kept and read back, as plain Metal's
-        // (EV RFC-probe1-m4).
+        // A buffer of a buffer that inherits its buffers is kept and read back, as plain Metal's.
         inherits.set_kernel_buffer(Some(&buffer), 0, 0).unwrap();
         inherits.set_threadgroup_memory_length(16, 0).unwrap();
     });
 }
 
 /// An emptied buffer's commands read as fresh ones, and its purgeable state answers as a
-/// buffer's (probes `RT7-icb-probe3` and `4`).
+/// buffer's.
 #[test]
 fn an_emptied_buffer_reads_fresh_commands() {
     on_device(|device| {
@@ -1050,8 +1044,7 @@ fn an_emptied_buffer_reads_fresh_commands() {
 }
 
 /// Pipeline states made with `supportIndirectCommandBuffers` take the lowest free ID of a space
-/// of their own, from 1, and give it back when they go; others answer 0 (probe
-/// `RT7-icb-probe2`).
+/// of their own, from 1, and give it back when they go; others answer 0.
 #[test]
 fn pipeline_states_that_support_indirect_commands_take_dense_ids() {
     on_device(|device| {
@@ -1070,13 +1063,12 @@ fn pipeline_states_that_support_indirect_commands_take_dense_ids() {
     });
 }
 
-/// `uniqueIdentifier` as Metal allocates it (measured by the consumer on an M3 Max; probes
-/// ICR-icbspace3-m4, ICR-icbspace4-m4 and ICR-icbspace4-m3 for buffers): a state made with
-/// `supportIndirectCommandBuffers` answers 2^36 plus an offset, the last released one's again
-/// for the next of its kind whatever ID it takes, render states apart from compute ones; any other a nonzero value
-/// of its own past them, a new one for each state of one descriptor; a buffer 2^36 plus the
-/// lowest gap from `0x18000` holding its `allocatedSize` and a 16-KiB page, at 32 KiB, and
-/// `resourceIndex` its ID.
+/// `uniqueIdentifier` as Metal allocates it (measured by the consumer on an M3 Max; for buffers): a
+/// state made with `supportIndirectCommandBuffers` answers 2^36 plus an offset, the last released
+/// one's again for the next of its kind whatever ID it takes, render states apart from compute
+/// ones; any other a nonzero value of its own past them, a new one for each state of one
+/// descriptor; a buffer 2^36 plus the lowest gap from `0x18000` holding its `allocatedSize` and a
+/// 16-KiB page, at 32 KiB, and `resourceIndex` its ID.
 #[test]
 fn unique_identifiers_follow_metal_s_allocations() {
     const BASE: u64 = 1 << 36;
@@ -1131,14 +1123,14 @@ pub(super) const UNMEASURED_IDENTIFIERS: [Degradation; 2] = [
 pub(super) const PAST_RECORD: [Degradation; 1] = [Degradation::IndirectValuePastRecord];
 
 /// `getCommandType` answers the type of the dispatch or draw a record holds, none fresh and after
-/// a reset (EV API-icbget1-m4 on an M4: `0x20`, `0x40`, 1 and 2, then 0). A buffer slot past the
-/// 32 a record holds, below the descriptor's count, reads back as set, as Metal's getters answer
-/// every slot below the count (slots 0 to 63 of 64, EV API-icbget1-m4): a buffer at slot 40 and
-/// a nil buffer at 0x30 at slot 63 of a descriptor of 64, carried by a GPU copy within the
-/// buffer, cleared by a GPU reset and by the command's reset, and announcing nothing. A copy into a
-/// buffer of another count carries the slots both hold and clears the destination's past the
-/// source's. A threadgroup length at index 40, which Metal keeps in storage not measured past about
-/// index 38, announces `indirect-value-past-record` once a device and reads back as fresh.
+/// a reset (on an M4: `0x20`, `0x40`, 1 and 2, then 0). A buffer slot past the 32 a record holds,
+/// below the descriptor's count, reads back as set, as Metal's getters answer every slot below the
+/// count (slots 0 to 63 of 64): a buffer at slot 40 and a nil buffer at 0x30 at slot 63 of a
+/// descriptor of 64, carried by a GPU copy within the buffer, cleared by a GPU reset and by the
+/// command's reset, and announcing nothing. A copy into a buffer of another count carries the slots
+/// both hold and clears the destination's past the source's. A threadgroup length at index 40,
+/// which Metal keeps in storage not measured past about index 38, announces
+/// `indirect-value-past-record` once a device and reads back as fresh.
 #[test]
 fn commands_read_back_their_type_and_slots_past_the_record() {
     notices::on_device(|device, messages| {
@@ -1261,12 +1253,11 @@ fn commands_read_back_their_type_and_slots_past_the_record() {
 }
 
 /// Metal's buffer getters read a command's slots as its setters left them, and a GPU copy
-/// carries them and a GPU reset clears them as Metal's do (EVs API-icbget1-m4 and
-/// API-icbget2-m4 on an M4): an address getter answers the buffer's address plus the offset's
-/// low 32 bits, the offset's low 32 bits alone for a nil buffer, 0 where none is set; a stride
-/// getter all ones without dynamic attribute strides, and with them 0 where none is set, all
-/// ones after the plain form (a nil buffer's too) and the stride after the stride form (0
-/// included); none at or past the descriptor's count.
+/// carries them and a GPU reset clears them as Metal's do (on an M4): an address getter answers the
+/// buffer's address plus the offset's low 32 bits, the offset's low 32 bits alone for a nil buffer,
+/// 0 where none is set; a stride getter all ones without dynamic attribute strides, and with them 0
+/// where none is set, all ones after the plain form (a nil buffer's too) and the stride after the
+/// stride form (0 included); none at or past the descriptor's count.
 #[test]
 fn buffer_getters_answer_metal_s_values_through_gpu_copies_and_resets() {
     on_device(|device| {
@@ -1473,7 +1464,7 @@ fn identifiers_not_metal_s_are_announced_once() {
     });
 }
 
-/// A render command's setters write what Metal's getters read back (probe `RT7-icb-probe6`): its
+/// A render command's setters write what Metal's getters read back: its
 /// pipeline state, kept alive while the command names it; each vertex and fragment buffer's
 /// address plus its offset, whatever the offset; a draw's values (the record's low 32 bits); a
 /// nil buffer unsets, and a reset leaves a fresh command.
@@ -1568,13 +1559,12 @@ fn render_commands_read_back_what_was_set() {
 }
 
 /// What Metal's validation stops at a render command's setter, or ends the process for, is
-/// refused typed (probe `RT7-icb-probe6`): an index past the descriptor's counts, a state
-/// without `supportIndirectCommandBuffers`, a state or buffer
-/// where the buffer inherits it, no instances, and a barrier on a buffer without mesh draws; so is
-/// a compute command of a render buffer (probe `RT7-icb-probe3`), while a render command of a
-/// buffer of dispatches answers as plain Metal's. A compute encoder's execution of render commands,
-/// which Metal's validation lets through, is a gap. A vertex buffer's stride without dynamic
-/// strides is dropped and the buffer set, as plain Metal's.
+/// refused typed: an index past the descriptor's counts, a state without
+/// `supportIndirectCommandBuffers`, a state or buffer where the buffer inherits it, no instances,
+/// and a barrier on a buffer without mesh draws; so is a compute command of a render buffer, while
+/// a render command of a buffer of dispatches answers as plain Metal's. A compute encoder's
+/// execution of render commands, which Metal's validation lets through, is a gap. A vertex buffer's
+/// stride without dynamic strides is dropped and the buffer set, as plain Metal's.
 #[test]
 fn render_setters_refuse_what_metal_refuses() {
     on_device(|device| {
@@ -1592,7 +1582,7 @@ fn render_setters_refuse_what_metal_refuses() {
             )
         );
         // A buffer of dispatches gives a render command, whose setters plain Metal ignores do
-        // nothing, the others refused (EVs RFC-probe1-m4, RFC-probe2-m4).
+        // nothing, the others refused.
         let of_compute = compute.indirect_render_command_at(0).unwrap();
         of_compute
             .draw_primitives(PrimitiveType::Point, 0, 1, 1, 0)
@@ -1655,8 +1645,7 @@ fn render_setters_refuse_what_metal_refuses() {
             )
         );
         // A buffer without dynamic strides drops a vertex buffer's stride and keeps the buffer
-        // at its offset, as plain Metal's reads back and draws (EV RFC-probe1-m4
-        // `icb_vertex_stride_unsupported`).
+        // at its offset, as plain Metal's reads back and draws.
         first
             .set_vertex_buffer_with_stride(Some(&buffer), 16, 12, 0)
             .unwrap();
@@ -1685,15 +1674,14 @@ fn render_setters_refuse_what_metal_refuses() {
             .draw_primitives(PrimitiveType::Point, 0, 3, 1, 0)
             .unwrap();
         // No instances (the count's low 32 bits): plain Metal runs nothing, where its validation
-        // stops the call (probe `RT7-icb-probe7-m4`).
+        // stops the call.
         first
             .draw_primitives(PrimitiveType::Point, 0, 3, 1 << 32, 0)
             .unwrap();
         first
             .draw_primitives(PrimitiveType::Point, 0, 0, 1, 0)
             .unwrap();
-        // A barrier is kept, as plain Metal keeps it, and a cleared one reads back none (EVs
-        // RFC-probe1-m4, RFC-probe3-m4).
+        // A barrier is kept, as plain Metal keeps it, and a cleared one reads back none.
         first.set_barrier().unwrap();
         assert!(render_command(&made, 0).barrier);
         first.clear_barrier().unwrap();
@@ -1711,7 +1699,7 @@ fn render_setters_refuse_what_metal_refuses() {
 }
 
 /// Render states made with `supportIndirectCommandBuffers` take their IDs from the space compute
-/// states take theirs from, as Metal's share one (probe `RT7-icb-probe2`); others answer 0; and
+/// states take theirs from, as Metal's share one; others answer 0; and
 /// an argument encoder writes a render or compute state's ID, 0 for a state without the support.
 #[test]
 fn render_states_share_the_pipeline_states_ids() {
@@ -1747,8 +1735,8 @@ fn render_states_share_the_pipeline_states_ids() {
             u64::from_le_bytes(bytes.try_into().unwrap())
         };
         assert_eq!(word(&arguments), 2);
-        // A state made without the support writes its ID, 0, as plain Metal writes it (an M4, EV
-        // RFL-argmisuse1-m4; Metal's debug layer asserts), a compute state's too.
+        // A state made without the support writes its ID, 0, as plain Metal writes it (an M4;
+        // Metal's debug layer asserts), a compute state's too.
         encoder
             .set_render_pipeline_state(Some(&without), 0)
             .unwrap();
@@ -1785,10 +1773,10 @@ fn indexed_patch_descriptor() -> IndirectCommandBufferDescriptor {
     descriptor
 }
 
-/// An indexed draw and a patch draw read back as set (probe `RT7-icb-probe7-m4`): each buffer as
-/// its address plus the offset, a patch draw without a patch index buffer as none; a base vertex
-/// (signed), a patch count and an instance count to their low 32 bits, as Metal keeps the first
-/// two; the control points as set, though an execution draws with its pipeline's.
+/// An indexed draw and a patch draw read back as set: each buffer as its address plus the offset, a
+/// patch draw without a patch index buffer as none; a base vertex (signed), a patch count and an
+/// instance count to their low 32 bits, as Metal keeps the first two; the control points as set,
+/// though an execution draws with its pipeline's.
 #[test]
 fn indexed_and_patch_draws_read_back_what_was_set() {
     on_device(|device| {
@@ -1866,15 +1854,14 @@ fn indexed_and_patch_draws_read_back_what_was_set() {
 }
 
 /// What Metal's validation stops at an indexed or patch draw's setter, or ends the process for,
-/// is refused typed (probe `RT7-icb-probe7-m4`): a draw whose record the buffer's records cannot
-/// hold (an indexed or a patch draw in a buffer of draws of primitives), no indices or instances,
-/// an index
-/// offset that is not a multiple of the index size, indices past the index buffer (of the whole
-/// count), a patch index offset that is not a multiple of 4; and as the encoder's draw refuses
-/// them, patch indices past the buffer (factor offsets and strides that are not multiples of 4,
-/// odd ones too, and more than 32 control points, are taken). A refused draw leaves the command as
-/// it was. A draw of primitives into a buffer of indexed and patch draws, whose records hold it, is
-/// set, as plain Metal runs it (EVs ICBV-hostkinds-m3 and -m4), where its validation stops it.
+/// is refused typed: a draw whose record the buffer's records cannot hold (an indexed or a patch
+/// draw in a buffer of draws of primitives), no indices or instances, an index offset that is not a
+/// multiple of the index size, indices past the index buffer (of the whole count), a patch index
+/// offset that is not a multiple of 4; and as the encoder's draw refuses them, patch indices past
+/// the buffer (factor offsets and strides that are not multiples of 4, odd ones too, and more than
+/// 32 control points, are taken). A refused draw leaves the command as it was. A draw of primitives
+/// into a buffer of indexed and patch draws, whose records hold it, is set, as plain Metal runs it,
+/// where its validation stops it.
 #[test]
 fn indexed_and_patch_setters_refuse_what_metal_refuses() {
     on_device(|device| {
@@ -1906,8 +1893,7 @@ fn indexed_and_patch_setters_refuse_what_metal_refuses() {
         let made = icb(device, &indexed_patch_descriptor(), 1);
         let command = made.indirect_render_command_at(0).unwrap();
         // A draw of primitives fits the records of a buffer of indexed and patch draws: plain
-        // Metal runs it as on its own (EVs ICBV-hostkinds-m3 and -m4), where its validation stops
-        // the call.
+        // Metal runs it as on its own, where its validation stops the call.
         command
             .draw_primitives(PrimitiveType::Point, 0, 3, 1, 0)
             .unwrap();
@@ -1934,8 +1920,7 @@ fn indexed_and_patch_setters_refuse_what_metal_refuses() {
         let draw = |call, problem| invalid(call, Problem::Draw(problem));
         const INDEXED: &str = "draw_indexed_primitives";
         // No indices or instances, and an offset off the index size: plain Metal runs nothing,
-        // or reads from the offset rounded down, where its validation stops the call (probe
-        // `RT7-icb-probe7-m4`).
+        // or reads from the offset rounded down, where its validation stops the call.
         assert_eq!(indexed(0, 0, 1), Ok(()));
         assert_eq!(indexed(3, 0, 1 << 32), Ok(()));
         assert_eq!(indexed(3, 2, 1), Ok(()));
@@ -1990,7 +1975,7 @@ fn indexed_and_patch_setters_refuse_what_metal_refuses() {
                 .unwrap_err()
         };
         // No instances, and a patch index offset off a multiple of 4: plain Metal runs nothing,
-        // or reads from the offset rounded down (probe `RT7-icb-probe7-m4`).
+        // or reads from the offset rounded down.
         command
             .draw_patches(3, 0, 1, None, 0, 0, 0, &buffer, 0, 0)
             .unwrap();
@@ -2010,8 +1995,8 @@ fn indexed_and_patch_setters_refuse_what_metal_refuses() {
         );
         // Factor offsets and strides that are not multiples of 4, odd ones too, and more than 32
         // control points, which Metal's validation stops (a probe: "numberOfPatchControlPoints(33)
-        // must be <= 32"), are taken, as plain Metal draws them (Metal probes, EVs IRX-pat2-m4 and
-        // IRX-pat3-m4; `render_executions.rs` draws them).
+        // must be <= 32"), are taken, as plain Metal draws them (Metal probes;
+        // `render_executions.rs` draws them).
         for (control_points, offset, stride) in [
             (32, 0, 0),
             (33, 0, 0),
@@ -2118,8 +2103,7 @@ fn indexed_patch_draws_read_back_what_was_set() {
 /// as the plain patch draw's are. The control-point index buffer, which Metal's setter does not
 /// check (an offset of 1 or 2, indices past its end, none at all), is taken. A refused draw leaves
 /// the command as it was. On a buffer of patch draws, whose records hold it, the draw is set, as
-/// plain Metal runs it (EVs ICBV-ipatch-m4, ICBV-hostkinds-m3 and -m4), where its validation stops
-/// it.
+/// plain Metal runs it, where its validation stops it.
 #[test]
 fn the_indexed_patch_setter_refuses_what_metal_refuses() {
     on_device(|device| {
@@ -2210,7 +2194,7 @@ fn the_indexed_patch_setter_refuses_what_metal_refuses() {
 
 /// Pipeline states that support indirect command buffers, of the owned fixture
 /// `examples/icb_direct_arguments.ll`, whose functions use a direct texture or sampler argument
-/// are refused as plain Metal answers them, nil with an `NSError` (EVs RRS3-icbtex3 to 6, an M3
+/// are refused as plain Metal answers them, nil with an `NSError` (an M3
 /// Max under macOS 26.7 and an M4 under 27.0.1): `MetalError` naming the stage Metal names (the
 /// fragment function before the vertex function, and before the mesh function, which goes before
 /// the object function), with Metal's code 3 and description and the M3 Max's domain. A state
@@ -2539,18 +2523,17 @@ fn states_whose_arguments_reflection_is_unmeasured_are_answered_from_their_roles
 
 /// Render and mesh pipeline states of the owned fixture `examples/icb_linked_arguments.ll`,
 /// whose vertex or mesh function uses a direct texture or sampler argument, refused or made as
-/// Metal answers each once it links the pipeline, one row per row Metal answered (EVs
-/// RRS3-icbtex7, -icbtex9 and -icbtex10 on an M4 under macOS 27.0.1, whose probes compile the
-/// same bodies from source). With `supportIndirectCommandBuffers`, refused where the value read
-/// reaches the position or the point size, a varying the fragment function reads, a store, or a
-/// branch, switch or loop trip count those depend on; made where it reaches only a varying no
-/// fragment input reads (the fragment function declares it and never reads it, declares no stage
-/// input, or the pipeline has none), through a select, a merge or a loop's body alike, and where
-/// the sample's result is discarded. An object function's texture is refused whatever the mesh
-/// function reads of its payload. Each made without `supportIndirectCommandBuffers`. And a state
-/// with rasterization disabled whose vertex function returns a value is refused with Metal's own
-/// error with or without indirect command buffers, before their refusal; a `void` one is made
-/// without them.
+/// Metal answers each once it links the pipeline, one row per row Metal answered (on an M4 under
+/// macOS 27.0.1, whose probes compile the same bodies from source). With
+/// `supportIndirectCommandBuffers`, refused where the value read reaches the position or the point
+/// size, a varying the fragment function reads, a store, or a branch, switch or loop trip count
+/// those depend on; made where it reaches only a varying no fragment input reads (the fragment
+/// function declares it and never reads it, declares no stage input, or the pipeline has none),
+/// through a select, a merge or a loop's body alike, and where the sample's result is discarded. An
+/// object function's texture is refused whatever the mesh function reads of its payload. Each made
+/// without `supportIndirectCommandBuffers`. And a state with rasterization disabled whose vertex
+/// function returns a value is refused with Metal's own error with or without indirect command
+/// buffers, before their refusal; a `void` one is made without them.
 #[test]
 fn linked_vertex_and_mesh_functions_are_refused_where_metal_keeps_their_texture() {
     /// Metal's answer to a state's creation.
@@ -2634,7 +2617,7 @@ fn linked_vertex_and_mesh_functions_are_refused_where_metal_keeps_their_texture(
         // (vertex function, fragment function, Metal's answer with indirect command buffers),
         // rasterization enabled.
         for (vertex_function, fragment, answer) in [
-            // EV RRS3-icbtex7: a varying the fragment function reads, or does not.
+            // A varying the fragment function reads, or does not.
             ("varying_vertex", Some("varying_fragment"), vertex),
             ("sampled_varying_vertex", Some("varying_fragment"), vertex),
             ("varying_vertex", Some("declaring_fragment"), Made),
@@ -2642,7 +2625,7 @@ fn linked_vertex_and_mesh_functions_are_refused_where_metal_keeps_their_texture(
             ("varying_vertex", None, Made),
             ("sampled_varying_vertex", Some("declaring_fragment"), Made),
             ("sampled_varying_vertex", None, Made),
-            // EV RRS3-icbtex7: the position.
+            // The position.
             ("depth_vertex", Some("declaring_fragment"), vertex),
             ("depth_vertex", Some("inputless_fragment"), vertex),
             ("depth_vertex", None, vertex),
@@ -2650,14 +2633,14 @@ fn linked_vertex_and_mesh_functions_are_refused_where_metal_keeps_their_texture(
             ("position_only_vertex", Some("depth_fragment"), vertex),
             ("position_only_vertex", Some("inputless_fragment"), vertex),
             ("position_only_vertex", None, vertex),
-            // EV RRS3-icbtex7: a store; a result discarded; no texture.
+            // A store; a result discarded; no texture.
             ("store_vertex", Some("declaring_fragment"), vertex),
             ("store_vertex", Some("varying_fragment"), vertex),
             ("store_vertex", None, vertex),
             ("discarded_vertex", Some("varying_fragment"), Made),
             ("discarded_vertex", None, Made),
             ("plain_vertex", Some("varying_fragment"), Made),
-            // EV RRS3-icbtex9: control flow.
+            // Control flow.
             ("branch_vertex", Some("varying_fragment"), vertex),
             ("branch_vertex", Some("declaring_fragment"), vertex),
             ("branch_vertex", None, vertex),
@@ -2670,7 +2653,7 @@ fn linked_vertex_and_mesh_functions_are_refused_where_metal_keeps_their_texture(
             ("select_vertex", Some("varying_fragment"), vertex),
             ("select_vertex", Some("declaring_fragment"), Made),
             ("select_vertex", None, Made),
-            // EV RRS3-icbtex10: the point size; another varying; merges, switches, loop bodies.
+            // The point size; another varying; merges, switches, loop bodies.
             ("point_size_vertex", Some("point_fragment"), vertex),
             ("point_size_vertex", None, vertex),
             ("other_varying_vertex", Some("first_varying_fragment"), Made),
@@ -2704,7 +2687,7 @@ fn linked_vertex_and_mesh_functions_are_refused_where_metal_keeps_their_texture(
             );
         }
         // (vertex function, Metal's answers with and without indirect command buffers),
-        // rasterization disabled, no fragment function: EVs RRS3-icbtex7 and -icbtex10.
+        // rasterization disabled, no fragment function.
         for (vertex_function, with, without) in [
             ("depth_vertex", Unrasterized, Unrasterized),
             ("position_only_vertex", Unrasterized, Unrasterized),
@@ -2724,7 +2707,7 @@ fn linked_vertex_and_mesh_functions_are_refused_where_metal_keeps_their_texture(
             );
         }
         // (object function, mesh function, fragment function, Metal's answer with indirect
-        // command buffers): EVs RRS3-icbtex7 and -icbtex10.
+        // command buffers).
         for (object, mesh_function, fragment, answer) in [
             (
                 None,
@@ -2790,17 +2773,16 @@ fn linked_vertex_and_mesh_functions_are_refused_where_metal_keeps_their_texture(
 
 /// Render pipeline states of the owned fixture `examples/icb_linked_arguments.ll` whose fragment
 /// function uses a direct texture, with `supportIndirectCommandBuffers`, refused or made as Metal
-/// answers each once it links the pipeline, one row per row Metal answered (EVs RRS3-icbtex11 and
-/// -icbtex12 on an M4 under macOS 27.0.1): refused where the texel reaches a discard, a store, a
-/// depth, stencil or sample mask output, or a color its attachment writes; made where it reaches
-/// only a color the pipeline has no attachment for, writes no channel of, or a dual-source second
-/// color without blending. A color under a partial write mask, which Metal keeps channel by
-/// channel and the analysis does not, is answered `Error::Unproven`
-/// (`IndirectCommandsDirectArgumentUnproven`, `UnmeasuredColorWrite`), whatever Metal answers, and
-/// so is a vertex function's texel the fragment function reads into such a color: never Metal's
-/// error. Each state is made without `supportIndirectCommandBuffers`, or refused by no rule of
-/// Metal's. (The rows with rasterization disabled are the compile layer's test's: the runtime
-/// does not take a fragment function there yet.)
+/// answers each once it links the pipeline, one row per row Metal answered (on an M4 under macOS
+/// 27.0.1): refused where the texel reaches a discard, a store, a depth, stencil or sample mask
+/// output, or a color its attachment writes; made where it reaches only a color the pipeline has no
+/// attachment for, writes no channel of, or a dual-source second color without blending. A color
+/// under a partial write mask, which Metal keeps channel by channel and the analysis does not, is
+/// answered `Error::Unproven` (`IndirectCommandsDirectArgumentUnproven`, `UnmeasuredColorWrite`),
+/// whatever Metal answers, and so is a vertex function's texel the fragment function reads into
+/// such a color: never Metal's error. Each state is made without `supportIndirectCommandBuffers`,
+/// or refused by no rule of Metal's. (The rows with rasterization disabled are the compile layer's
+/// test's: the runtime does not take a fragment function there yet.)
 #[test]
 fn fragment_functions_are_refused_where_metal_keeps_their_texture_and_unproven_uses_are_told_apart()
 {
@@ -2890,7 +2872,6 @@ fn fragment_functions_are_refused_where_metal_keeps_their_texture_and_unproven_u
         // (vertex function, fragment function, the pipeline, the answer with indirect command
         // buffers; Metal's where it is not `Unproven`).
         for (vertex_function, fragment_function, setup, answer) in [
-            // EV RRS3-icbtex11.
             ("plain_vertex", "texel_fragment", color, fragment),
             ("plain_vertex", "texel_fragment", no_color, Made),
             ("plain_vertex", "texel_fragment", no_color_depth, Made),
@@ -2925,7 +2906,7 @@ fn fragment_functions_are_refused_where_metal_keeps_their_texture_and_unproven_u
                 second_color,
                 fragment,
             ),
-            // EV RRS3-icbtex12: Metal refuses, refuses, makes, refuses, makes, refuses the
+            // Metal refuses, refuses, makes, refuses, makes, refuses the
             // partial masks' rows.
             (
                 "plain_vertex",
@@ -3062,13 +3043,12 @@ fn fragment_functions_are_refused_where_metal_keeps_their_texture_and_unproven_u
 /// Render pipeline states of the owned fixture `examples/icb_linked_arguments.ll` refused or made
 /// as Metal answers them for what the fragment function does once linked, with rasterization on
 /// and off (Metal links the fragment function either way), with and without
-/// `supportIndirectCommandBuffers`, one row per row Metal answered (EVs RRS3-icbtex11,
-/// -icbtex12, -icbtex13 and -icbtex14 on an M4 under macOS 27.0.1): a fragment function writing
-/// depth without a depth attachment is refused (before the indirect command buffers' refusal);
-/// one whose stage input the linking keeps is written by no vertex output is refused naming it
-/// (after that refusal); one reading nothing, or whose read reaches no color attachment, is made;
-/// and a fragment function's texture under rasterization disabled is refused for indirect command
-/// buffers where color 0 is attached.
+/// `supportIndirectCommandBuffers`, one row per row Metal answered (on an M4 under macOS 27.0.1): a
+/// fragment function writing depth without a depth attachment is refused (before the indirect
+/// command buffers' refusal); one whose stage input the linking keeps is written by no vertex
+/// output is refused naming it (after that refusal); one reading nothing, or whose read reaches no
+/// color attachment, is made; and a fragment function's texture under rasterization disabled is
+/// refused for indirect command buffers where color 0 is attached.
 #[test]
 fn fragment_functions_are_linked_with_or_without_rasterization_as_metal_links_them() {
     /// Metal's answer to a state's creation.
@@ -3163,7 +3143,7 @@ fn fragment_functions_are_linked_with_or_without_rasterization_as_metal_links_th
         // (vertex function, fragment function, the pipeline, Metal's answers with and without
         // indirect command buffers)
         for (vertex_function, fragment_function, setup, with, without) in [
-            // EVs RRS3-icbtex11 and -icbtex13: rasterization disabled.
+            // Rasterization disabled.
             (
                 "void_plain_vertex",
                 "texel_fragment",
@@ -3207,7 +3187,7 @@ fn fragment_functions_are_linked_with_or_without_rasterization_as_metal_links_th
                 Made,
                 Made,
             ),
-            // EV RRS3-icbtex14: rasterization on, a stage input no vertex output writes.
+            // Rasterization on, a stage input no vertex output writes.
             (
                 "position_value_vertex",
                 "varying_fragment",
@@ -3215,9 +3195,9 @@ fn fragment_functions_are_linked_with_or_without_rasterization_as_metal_links_th
                 Unwritten(&["color"]),
                 Unwritten(&["color"]),
             ),
-            // EVs RRS3-icbtex14 and -icbtex15: the input reaches only a color the pipeline has no
-            // attachment for, by its value or by a branch whose arms make the color, and is read as
-            // zero; a branch on it whose arms make a kept color keeps it.
+            // The input reaches only a color the pipeline has no attachment for, by its value or by
+            // a branch whose arms make the color, and is read as zero; a branch on it whose arms
+            // make a kept color keeps it.
             (
                 "position_value_vertex",
                 "varying_fragment",
@@ -3239,7 +3219,7 @@ fn fragment_functions_are_linked_with_or_without_rasterization_as_metal_links_th
                 Made,
                 Made,
             ),
-            // EVs RRS3-icbtex12 and -icbtex14: depth without a depth attachment.
+            // Depth without a depth attachment.
             (
                 "plain_vertex",
                 "depth_writing_fragment",
@@ -3315,7 +3295,7 @@ fn fragment_functions_are_linked_with_or_without_rasterization_as_metal_links_th
                 "{at}"
             );
         }
-        // EV RRS3-icbtex16: a post-tessellation vertex function's and a mesh function's unwritten
+        // A post-tessellation vertex function's and a mesh function's unwritten
         // input, as a vertex function's: refused with color 0 (the mesh's text naming the mesh
         // shader), made without, the input absent.
         const MESH: &str = "new_mesh_render_pipeline_state";
@@ -3373,7 +3353,7 @@ fn fragment_functions_are_linked_with_or_without_rasterization_as_metal_links_th
                 }
             }
         }
-        // EV RRS3-icbtex17: a post-tessellation vertex function returning a value, rasterization
+        // A post-tessellation vertex function returning a value, rasterization
         // disabled, is refused as any vertex function is; a mesh state's fragment depth without a
         // depth attachment is refused first, before its indirect command buffers' refusal.
         let metal = |call, problem, description: &str| {

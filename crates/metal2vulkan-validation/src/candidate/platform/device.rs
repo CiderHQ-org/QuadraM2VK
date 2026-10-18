@@ -2285,7 +2285,7 @@ mod tests {
     /// (`VK_KHR_acceleration_structure`'s commands, which load whether or not the extension is
     /// enabled: an absent command loads as one that panics), and `vkDestroyDevice` when the context
     /// drops. Without the context putting the word back, the loader reads `ICD_LOADER_MAGIC` as its
-    /// dispatch table and faults at `0x1cdc0de`. EV PS1a-wiring measured this at 9caf79a2, before
+    /// dispatch table and faults at `0x1cdc0de`. Our probe measured this at 9caf79a2, before
     /// the `vkGetDeviceProcAddr` step was added: the test passed on lavapipe and on MoltenVK, and
     /// on lavapipe a build without the allocation's and `Drop`'s restores failed it by `SIGSEGV`.
     /// Other drivers are expected to behave the same, since the context has no layer and no driver

@@ -473,7 +473,7 @@ fn writes_round_at_metals_boundaries() {
     }
 }
 
-/// Metal's own answers on an Apple M3 Max and an M4 (TXN-xrprobe): writes at its measured ties and
+/// Metal's own answers on an Apple M3 Max and an M4: writes at its measured ties and
 /// thresholds, and reads of its measured values.
 #[test]
 fn metals_measured_answers_hold() {
@@ -540,7 +540,7 @@ fn half(h: u16) -> f32 {
 }
 
 /// Metal's tile value of a texel of `form` whose codes are `rgba` (a two-plane form's alpha its
-/// byte), as the module docs of `tile_value` state the rule (EVs XRR-rtp1-m3 and -m4).
+/// byte), as the module docs of `tile_value` state the rule.
 pub(crate) fn tile_model(form: ExtendedRange, rgba: [u32; 4]) -> [f32; 4] {
     let srgb = form.srgb();
     let by_code = !srgb || matches!(form, ExtendedRange::Bgra10 { .. });
@@ -598,8 +598,8 @@ fn every_code_reads_metals_tile_value() {
 }
 
 /// The blend `eq` (added, source factor zero or one and destination factor zero, one, or one minus
-/// the source's alpha) of `half` source `s` over tile value `d` into `form`, as EVs XRR-rtp1-m4 and
-/// XRR2-g345-m4 measured it: the source clamped, a NaN color to the range's low end and a NaN alpha
+/// the source's alpha) of `half` source `s` over tile value `d` into `form`, as our probes measured
+/// it: the source clamped, a NaN color to the range's low end and a NaN alpha
 /// to 0, the factor `1 - a` rounded to `half`, nearest even, and `d * factor + s` exactly (at most
 /// 50 significant bits, exact in `f64`), `s` 0 under source factor zero, rounded once to `half`,
 /// nearest even.
@@ -685,9 +685,9 @@ const fn equation(
     }
 }
 
-/// The blends checked: XRR-rtp1's three (source factor one, added, destination zero, one, or one
+/// The blends checked: our probe's three (source factor one, added, destination zero, one, or one
 /// minus the source's alpha for color and alpha alike), two that mix them, and four of source
-/// factor zero (EV XRR2-g345-m4), the first the consumer's (color zero over one minus the source's
+/// factor zero, the first the consumer's (color zero over one minus the source's
 /// alpha).
 const D639_BLENDS: [BlendEquation; 9] = {
     use BlendFactor::{One, OneMinusSourceAlpha as Msa, Zero};
@@ -1239,9 +1239,9 @@ fn alpha_byte(v: f32) -> u32 {
 }
 
 /// A blended write under a mask stores the blended channels' codes and keeps the others as Metal
-/// keeps them (EVs XRB-sw1-m4 and XRB-sw2-m4): a color code as it is (1023 too), plane 0's and
-/// `BGR10_XR`'s top two bits as the write sets them, a two-plane texel's alpha byte, and
-/// `BGRA10_XR`'s alpha clamped to `[384, 894]`, its six low bits zero.
+/// keeps them: a color code as it is (1023 too), plane 0's and `BGR10_XR`'s top two bits as the
+/// write sets them, a two-plane texel's alpha byte, and `BGRA10_XR`'s alpha clamped to
+/// `[384, 894]`, its six low bits zero.
 #[test]
 fn masked_blends_keep_metals_codes() {
     let mut r = Rng(0x5852_4233);
@@ -1680,7 +1680,7 @@ fn the_model_picks_metals_forms() {
 /// The blend color's push words: the color clamped to the source range (a NaN to its low end) and
 /// alpha to `[0, 1]` (a NaN to 0), each rounded to `half`, nearest even, then `h(1 - x)` of the
 /// clamped color and `h(1 - h(a))` of alpha. A NaN of either sign, the infinities, and values
-/// beyond `half`'s range clamp so (EV XRB-bcx-m4). The first row's color is clamped to the
+/// beyond `half`'s range clamp so. The first row's color is clamped to the
 /// hull of the linear and `BGRA10_XR_sRGB` source ranges, which each blend clamps to its own range.
 #[test]
 fn the_blend_color_is_metals() {
@@ -1736,12 +1736,11 @@ fn the_blend_color_is_metals() {
 
 /// Without fast math, `BlendColor` into `BGRA10_XR_sRGB` reads a color channel at or past
 /// [`SRGB_DIRECT_BOUND`] as [`SRGB_DIRECT_TOP`] and the `f32` below it as the form's top, where
-/// `OneMinusBlendColor` reads one minus the top at both (EV XRB-bcs2-m4: every `f32` from
+/// `OneMinusBlendColor` reads one minus the top at both (every `f32` from
 /// `1.6689000129699707` to `1.6689451932907104` under both factors), but beside `BlendColor` in
-/// its class one minus `BlendColor`'s read (EV XRB-bcs3-m4 over the same sweep, and EV
-/// XRB-xrts-m4's configurations 17 and 40); every
-/// other form reads its own range's top under each. Through the shader the binder's words feed,
-/// a `half` source of one over a texel of zeros.
+/// its class one minus `BlendColor`'s read (our probe over the same sweep, and its
+/// configurations 17 and 40); every other form reads its own range's top under each. Through the
+/// shader the binder's words feed, a `half` source of one over a texel of zeros.
 #[test]
 fn the_blend_color_reads_metals_bound() {
     use BlendFactor as F;
@@ -1785,10 +1784,10 @@ fn the_blend_color_reads_metals_bound() {
 }
 
 /// A padded 10-bit form reads every 16-bit word as the code in its top 10 bits over 1023, correctly
-/// rounded (a `half` result to nearest even), blue 0 and alpha 1, whatever the low 6 bits hold (EVs
-/// XRR2-x6c-m4 and XRR2-x6f-m4: every word); and writes the code of the exact product of the value
-/// clamped to `[0, 1]` (a NaN 0) with 1023, rounded to nearest, in its word's top 10 bits, the low
-/// 6 bits zero (EV XRR2-x6c-m4: a grid, and three `f32`s about every midpoint, each lane).
+/// rounded (a `half` result to nearest even), blue 0 and alpha 1, whatever the low 6 bits hold
+/// (every word); and writes the code of the exact product of the value clamped to `[0, 1]` (a
+/// NaN 0) with 1023, rounded to nearest, in its word's top 10 bits, the low 6 bits zero (a grid,
+/// and three `f32`s about every midpoint, each lane).
 #[test]
 fn padded_forms_read_and_write_metals_codes() {
     let value = |w: u32| ((w >> 6) as f64 / 1023.0) as f32;
@@ -1855,10 +1854,10 @@ fn padded_forms_read_and_write_metals_codes() {
     }
 }
 
-/// The code Metal's write of `v` stores to a padded `_sRGB` form's channel (the form docs; EVs
-/// XRR2-x6c, -x6fs and -x6m): a NaN 0, the value clamped to `[0, 1]`; `R10Unorm_X6_sRGB`'s the
-/// largest code whose first encode index is at most the value rounded to `2^-13` (nearest
-/// even), `RG10Unorm_X12_sRGB`'s the table's code of `RG10Unorm_X12`'s.
+/// The code Metal's write of `v` stores to a padded `_sRGB` form's channel (the form docs): a NaN
+/// 0, the value clamped to `[0, 1]`; `R10Unorm_X6_sRGB`'s the largest code whose first encode index
+/// is at most the value rounded to `2^-13` (nearest even), `RG10Unorm_X12_sRGB`'s the table's code
+/// of `RG10Unorm_X12`'s.
 fn padded_srgb_code(form: ExtendedRange, v: f32) -> u32 {
     let v = match v.is_nan() {
         true => 0.0,
@@ -2044,7 +2043,7 @@ fn table_outcome(
     }
 }
 
-/// The lane table (`metal2vulkan_devtools::xr_blends`; EV XRB-xrt1-m4, plain Metal on an Apple M4):
+/// The lane table (`metal2vulkan_devtools::xr_blends`; plain Metal on an Apple M4):
 /// every row's outcome is the model's ([`table_outcome`]), and every blend the model makes stores
 /// Metal's bytes, plane 0 and alpha, over the table's 256 texels and outputs through the
 /// interpreter (a `float4` output under its own model unrounded, else rounded to `half` first, as
@@ -2063,10 +2062,9 @@ sharded_tests!(
     )
 );
 
-/// The lane table of the probe built without fast math (EV XRB-xrts-m4 under safe math; EV
-/// XRB-xrtr-m4 under relaxed math gave the same bytes) holds as the table does under
-/// [`BlendMath::Rounded`]: a `float4` output rounded to `half` first and blended as a `half4`
-/// one, each term's product rounded before the sum.
+/// The lane table of the probe built without fast math (under safe math; under relaxed math gave
+/// the same bytes) holds as the table does under [`BlendMath::Rounded`]: a `float4` output rounded
+/// to `half` first and blended as a `half4` one, each term's product rounded before the sum.
 fn the_blend_table_without_fast_math_is_metals(shard: usize, shards: usize) {
     blend_table_is_metals(
         &xr_blends::safe_table(),
@@ -2090,7 +2088,7 @@ sharded_tests!(
 );
 
 /// The lane table under fast math with the `float4` output computed (the source times a loaded
-/// vector of ones, EV XRB-xrtc-m4): a blend under a key of the computed class's tables
+/// vector of ones): a blend under a key of the computed class's tables
 /// (`extended_range::computed`), or into an `_sRGB` form, is announced, and every other made
 /// blend stores Metal's bytes through the interpreter, the loaded output's model's.
 #[test]
@@ -2098,7 +2096,7 @@ fn the_computed_blend_table_is_metals() {
     blend_table_is_metals(&xr_blends::computed_table(), BlendMath::Fast, true, (0, 1));
 }
 
-/// The second source's table without fast math (EV XRB-xrtd-m4, `xr_blends::dual_table`): every
+/// The second source's table without fast math (`xr_blends::dual_table`): every
 /// configuration reads the function's second output, each is made, and its every blend stores
 /// Metal's bytes through the interpreter, the second output rounded to `half` and clamped as the
 /// first.
@@ -2240,8 +2238,8 @@ fn blend_table_is_metals(
     );
 }
 
-/// Metal's `float` of bfloat code `c`, as bits (`metal::format::ExtendedRange::R16Bfloat`; EV
-/// FPV-pf5-m4): the code shifted up 16, any NaN code the quiet NaN.
+/// Metal's `float` of bfloat code `c`, as bits (`metal::format::ExtendedRange::R16Bfloat`): the
+/// code shifted up 16, any NaN code the quiet NaN.
 fn bfloat_read(c: u32) -> u32 {
     match c & 0x7FFF > 0x7F80 {
         true => 0x7FC0_0000,
@@ -2250,7 +2248,7 @@ fn bfloat_read(c: u32) -> u32 {
 }
 
 /// Metal's code of a kernel's write of the `f32` of bits `b` to a bfloat texture: its top 16 bits,
-/// a NaN `0x7fc0` (EV FPV-pf5-m4).
+/// a NaN `0x7fc0`.
 fn bfloat_write(b: u32) -> u32 {
     match b & 0x7FFF_FFFF > 0x7F80_0000 {
         true => 0x7FC0,
@@ -2261,8 +2259,8 @@ fn bfloat_write(b: u32) -> u32 {
 /// Every code of each bfloat form in each channel reads Metal's `float` and its `half` (rounded to
 /// nearest even, overflows to the infinities), the channels a form lacks 0 and alpha 1 whatever
 /// their words hold; a write stores Metal's codes: per code its bits and its tie's neighbours,
-/// every eighth `half` widened, and the specials, the components a form lacks zero (EV
-/// FPV-pf5-m4, an Apple M4: every code, read and written, in each bfloat format).
+/// every eighth `half` widened, and the specials, the components a form lacks zero (an Apple M4:
+/// every code, read and written, in each bfloat format).
 #[test]
 fn bfloat_forms_read_and_write_metals_codes() {
     let forms = [
@@ -2345,7 +2343,7 @@ fn bfloat_forms_read_and_write_metals_codes() {
 /// FNV-1a of Metal's codes (each little-endian, 2 bytes) of a fragment function's `float` outputs
 /// to a bfloat attachment, at the default `textureWriteRoundingMode` and at `NearestEven`: per
 /// code `c` the `float`s of bits `c << 16`, and `| 0x7fff`, `| 0x8000` and `| 0x8001`, in that
-/// order; every form's codes are these (EV FPV-pf5-m4, an Apple M4 under macOS 27.0.1, each
+/// order; every form's codes are these (an Apple M4 under macOS 27.0.1, each
 /// value into `R16Bfloat`, `RG16Bfloat` and `RGBA16Bfloat`).
 const METAL_FLOAT_OUTPUTS: [(bool, u64); 2] = [
     (false, 0x4334_841e_f3f2_1ba5),
@@ -2353,14 +2351,14 @@ const METAL_FLOAT_OUTPUTS: [(bool, u64); 2] = [
 ];
 
 /// FNV-1a of Metal's codes of a fragment function's `half` outputs to a bfloat attachment, every
-/// `half` code in order, at either mode (EV FPV-pf5-m4).
+/// `half` code in order, at either mode.
 const METAL_HALF_OUTPUTS: u64 = 0x9eb0_0b77_54b2_35e5;
 
 /// A fragment function's `float` and `half` outputs to a bfloat attachment store Metal's codes:
 /// a `float` rounded to `half` toward zero (65504 at most) or, at `NearestEven`, to nearest even,
 /// then the bfloat code nearest, ties to even, a NaN `0x7fc0`; every `float` around each code's
 /// tie and every `half` code against Metal's digests, the narrower forms keeping their lanes, and
-/// named answers (EV FPV-pf5-m4).
+/// named answers.
 #[test]
 fn bfloat_attachments_store_metals_codes() {
     let digest = |got: &[[u32; 4]]| {
@@ -2431,7 +2429,7 @@ fn bfloat_attachments_store_metals_codes() {
     }
 }
 
-/// A read of what the tile holds clamps as Metal's does (EV XSH-pxs-m4, an Apple M4: unblended
+/// A read of what the tile holds clamps as Metal's does (an Apple M4: unblended
 /// `half` writes read back by a fetch): each color lane to the form's source range, a NaN to its
 /// low end, the infinities and values past the range to its ends; alpha to `[0, 1]`, a NaN to 0;
 /// a subnormal `half` kept; `BGR10_XR`'s alpha one.

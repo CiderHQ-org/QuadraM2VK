@@ -24,7 +24,7 @@
 //!   that is not a mesh render pipeline's). A draw of primitives with a mesh render pipeline's
 //!   state, and a mesh draw with another state, stop Metal with or without its validation
 //!   (`DrawProblem::DrawKind`), but for a mesh draw of a grid with a zero axis, which plain Metal
-//!   draws nothing of with a drawing state too, and so does the encoder (EV RFX-probe2-m4, an M4;
+//!   draws nothing of with a drawing state too, and so does the encoder (an M4;
 //!   its validation stops it).
 //! - **The draw** is the binder's (`DrawCall::MeshThreadgroups`, `MeshThreads`,
 //!   `MeshThreadgroupsIndirect`): `vkCmdDrawMeshTasksEXT` of its first stage's threadgroups

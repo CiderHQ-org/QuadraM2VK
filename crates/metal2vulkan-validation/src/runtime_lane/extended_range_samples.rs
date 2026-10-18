@@ -9,11 +9,10 @@
 //!
 //! Metal's answer: `xr_samples.tsv` beside the fixture, 16 linear samples per format and result
 //! type an Apple M3 Max (macOS 26.7) took, byte-identical on an Apple M4 (macOS 27.0.1), through a
-//! runtime sampler of this state (EVs TXN-xrprobe4-m3 and -m4). A differing sample is printed on
-//! an `XR-SAMPLES-DIFFERS` line.
+//! runtime sampler of this state. A differing sample is printed on an `XR-SAMPLES-DIFFERS` line.
 //!
 //! A runtime sampler stating `MirrorClampToEdge` on `s` and `t` reads each tap mirrored once
-//! about the level's start and then clamped (RRP-probe5-m4), so its sample at a texel-space
+//! about the level's start and then clamped, so its sample at a texel-space
 //! position `x` off the texel boundaries and off the 1/512 ties is the clamp-to-edge sampler's at
 //! `|x|` on each axis: the same taps at the same weights (a nearest one's `floor(-x) = -1 -
 //! floor(x)`, a linear one's pair reversed). The lane compares the two on the device, nearest and

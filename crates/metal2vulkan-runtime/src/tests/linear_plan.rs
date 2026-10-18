@@ -21,7 +21,7 @@ use metal2vulkan::vk::{Format, FormatFeatureFlags2, ImageCreateFlags, ImageUsage
 
 /// The formats for which Metal answered 16 (the linear and the texture-buffer alignment alike);
 /// `ARGB8Unorm` and the two-plane extended-range formats, which are not in Metal's public header,
-/// were asked on the M3 Max (EV TXN-xrprobe-m3).
+/// were asked on the M3 Max.
 const ANSWERED: [P; 59] = [
     P::A8Unorm,
     P::R8Unorm,
@@ -85,7 +85,7 @@ const ANSWERED: [P; 59] = [
 ];
 
 /// The added linear formats for which an Apple M4 under macOS 27.0.1 answered 16, the linear and
-/// the texture-buffer alignment alike (EV XRR2-pla1-m4); it asserted on the other 18, the formats
+/// the texture-buffer alignment alike; it asserted on the other 18, the formats
 /// macOS 27.0.1 describes none of (`MetalLevel::describes`).
 const ANSWERED_M4: [P; 62] = [
     P::R16Bfloat,
@@ -152,9 +152,8 @@ const ANSWERED_M4: [P; 62] = [
     P::RG10UintPACKED,
 ];
 
-/// The formats of [`ANSWERED_M4`] an Apple M3 Max asserted on, under macOS 26.7 and 27.0.1 alike
-/// (EVs XRR2-pla1-m3 and M27-lin1-m3): the 16 from 630 to 645, which it describes none of, nor
-/// does either Metal level.
+/// The formats of [`ANSWERED_M4`] an Apple M3 Max asserted on, under macOS 26.7 and 27.0.1 alike:
+/// the 16 from 630 to 645, which it describes none of, nor does either Metal level.
 const ASSERTED_M3: [P; 16] = [
     P::BGRA10UintPACKED,
     P::BGRA10XRPACKED,
@@ -177,7 +176,7 @@ const ASSERTED_M3: [P; 16] = [
 /// Metal answers 16 for exactly the formats it answered for; it asserts on every other one
 /// (compressed formats, the 4:2:2 ones among them, and depth and stencil formats; on the M3 and
 /// M4, `Depth24Unorm_Stencil8` and `X24_Stencil8` as unsupported formats), which the runtime
-/// refuses, at each Metal level the M3 Max's (EV M27-lin1-m3 at macOS 27.0.1: of the raw values
+/// refuses, at each Metal level the M3 Max's (at macOS 27.0.1: of the raw values
 /// from 0 to 700, 175 answered and every other one asserted, each as the runtime answers).
 /// `Invalid` was not asked.
 #[test]
@@ -202,7 +201,7 @@ fn buffers_back_exactly_the_formats_metal_answers_for() {
         }
     }
     // Nor ASTC's 4x2 and 8x4 formats, which the runtime refuses as the compressed formats they
-    // are (their type rules are measured as `ASTC_4x4_LDR`'s, EV GSM2-a8r-m4).
+    // are (their type rules are measured as `ASTC_4x4_LDR`'s).
     let astc = [
         P::ASTC4x2LDR,
         P::ASTC4x2SRGB,
@@ -211,11 +210,11 @@ fn buffers_back_exactly_the_formats_metal_answers_for() {
         P::ASTC8x4SRGB,
         P::ASTC8x4HDR,
     ];
-    // + the 18 added linear formats Metal asserted on (EV XRR2-pla1-m4).
+    // + the 18 added linear formats Metal asserted on.
     assert_eq!(
         P::ALL.len() - 1 - unprobed - astc.len() - ANSWERED.len() - ANSWERED_M4.len(),
         83 + 18,
-        "probe 9 saw 83 formats refused, EV XRR2-pla1-m4 18 more"
+        "one probe saw 83 formats refused, another 18 more"
     );
     for level in MetalLevel::ALL {
         assert_eq!(
@@ -225,7 +224,7 @@ fn buffers_back_exactly_the_formats_metal_answers_for() {
             })
         );
         // Nor `AnyDepth` and `AnyStencil`, of which Metal makes no texture alone: it asserts as on
-        // every depth and stencil format (EV M27-lin1-m3, "Linear textures do not support
+        // every depth and stencil format ("Linear textures do not support
         // depth/stencil pixel formats").
         for pf in [P::AnyDepth, P::AnyStencil] {
             assert_eq!(
@@ -549,7 +548,7 @@ fn two_dimensional_textures_and_texture_buffers_follow_metal() {
 
 /// Metal's resource-option rules: a texture over a buffer takes the buffer's options whatever
 /// its descriptor names, through the public call and the SPI (probe 9d; `Buffer::texture_over`),
-/// and an IOSurface plane its descriptor's (IOS-modes2-m4), so the plan refuses no storage mode but
+/// and an IOSurface plane its descriptor's, so the plan refuses no storage mode but
 /// a plane's `Memoryless`, whose use is unmeasured.
 #[test]
 fn only_a_memoryless_plane_is_refused_its_storage_mode() {
@@ -1267,8 +1266,7 @@ const MEASURED: [&str; 5] = [
 ];
 
 /// The IOSurface stand-in's planes (`BufferTextureCall::IoSurfacePlane`) where plain Metal put
-/// them on the M3 Max and an M4 (EVs `SPH-iosurf1-m4`, `SPH-iosurf2-m4`, `SPH-iosurf3-m3` and
-/// `-m4`, `IOS-iosurf4-m4` and `-m3`): the CPU's layout is the plane's; the GPU's starts at the
+/// them on the M3 Max and an M4: the CPU's layout is the plane's; the GPU's starts at the
 /// plane's offset rounded down to 16, rows the pitch rounded down to 16 apart, or 16 apart under
 /// 16 bytes a row (`narrow`, where Metal's reads past the first row are memory-dependent); rows
 /// that would overlap are refused; a surface without planes takes only a pitch and an offset of
@@ -1322,7 +1320,7 @@ fn iosurface_planes_lie_where_metal_puts_them() {
         (P::RGBA32Uint, 16, (4, 4), (0, 65), (0, 64)),
         (P::RGBA32Uint, 16, (4, 4), (0, 88), (0, 80)),
         // Plane offsets: 4 from 0, 16 from 16, NV12 chroma planes' 36 from 32, 48 from 48 and 96
-        // from 96 (SPH-iosurf2-m4), the consumer's '420v' planes at 256 and 512.
+        // from 96, the consumer's '420v' planes at 256 and 512.
         (P::R8Unorm, 1, (4, 4), (4, 4), (0, 16)),
         (P::R8Unorm, 1, (4, 4), (16, 4), (16, 16)),
         (P::RG8Unorm, 2, (4, 2), (36, 10), (32, 16)),
@@ -1346,7 +1344,7 @@ fn iosurface_planes_lie_where_metal_puts_them() {
     let refused = |problem| Err(BufferRefusal::Metal(problem));
     let r8 = P::R8Unorm;
     let cases = [
-        // A surface without planes: a pitch and an offset of 16 bytes only (SPH-iosurf1-m4).
+        // A surface without planes: a pitch and an offset of 16 bytes only.
         (
             plane(r8, (4, 4), (0, 4), false, 16384),
             refused(Pr::RowPitchAlignment {
@@ -1369,7 +1367,7 @@ fn iosurface_planes_lie_where_metal_puts_them() {
                 narrow: false,
             }),
         ),
-        // Rows that overlap on the GPU: 20 bytes 16 apart (IOS-iosurf4: RGBA8Unorm 5 wide at 20
+        // Rows that overlap on the GPU: 20 bytes 16 apart (RGBA8Unorm 5 wide at 20
         // to 28, R8Unorm 20 and 17 wide, RGBA16Uint 3 wide at 24 and 28).
         (
             plane(P::RGBA8Unorm, (5, 4), (0, 20), true, 16384),

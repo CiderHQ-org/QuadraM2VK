@@ -10,7 +10,7 @@
 //! that releases it is submitted. Never for a command buffer that fails before its last batch is
 //! taken.
 //!
-//! Metal's answers (EV SUB-sched1-m4: an M4, macOS 27.0.1): `commit` returns before the command
+//! Metal's answers (an M4, macOS 27.0.1): `commit` returns before the command
 //! buffer is scheduled, on Metal's own thread; its status reads `Scheduled` just before its first
 //! scheduled handler starts, and Metal's wait for the scheduling returns only once every
 //! scheduled handler returned.
@@ -418,7 +418,7 @@ fn a_submission_handler_s_waits_for_what_has_not_happened_are_refused() {
     });
 }
 
-/// Metal's order (EV SUB-sched1-m4): the status reads `Scheduled` while a scheduled handler runs,
+/// Metal's order: the status reads `Scheduled` while a scheduled handler runs,
 /// and `wait_until_scheduled` returns only once it returned.
 #[test]
 fn wait_until_scheduled_returns_once_the_scheduled_handlers_returned() {

@@ -1,7 +1,6 @@
 //! What Metal's compiler keeps of a specialized entry once it has linked its pipeline: aggressive
 //! dead code elimination by LLVM ADCE's rules, which Metal's answers follow (measured on an M4
-//! under macOS 27.0.1, EVs RRS3-icbtex7, -icbtex9 and -icbtex10; the M3 Max's confirmation
-//! follows).
+//! under macOS 27.0.1; the M3 Max's confirmation follows).
 //!
 //! - **Roots.** Every instruction with an effect outside the function: a store, an atomic, a
 //!   fence, a volatile or ordered load, a memory copy or set into memory other than the
@@ -11,20 +10,20 @@
 //!   function's write of an output field the pipeline keeps ([`Roots::mesh`]). The `ret`, which
 //!   demands the returned fields the pipeline keeps ([`Returned`]), and `unreachable`. Every
 //!   loop: the terminator of each block with a retreating edge, LLVM ADCE's default, which
-//!   removes no loop, so a loop's trip count is kept whatever its result feeds (EV RRS3-icbtex9:
-//!   a texel that sets a trip count is kept with the loop's result going only to a varying no
+//!   removes no loop, so a loop's trip count is kept whatever its result feeds (a texel that sets a
+//!   trip count is kept with the loop's result going only to a varying no
 //!   fragment function reads).
 //! - **Propagation.** A kept instruction keeps its operands. A struct value is kept field by
 //!   field: an `insertvalue` keeps its member where that field is demanded and passes the other
 //!   demanded fields to its aggregate, an `extractvalue` demands its field, and a `phi`, `select`
 //!   or `freeze` of structs passes on the fields demanded of it. A kept instruction keeps its
 //!   block, and a kept block keeps the branch or switch of every block it is control dependent on
-//!   (its post-dominance frontier), so a texel that decides whether a kept store runs is kept
-//!   (EV RRS3-icbtex9). A kept `phi` keeps its incoming blocks, so the branch that chooses its
-//!   value is kept; a `select` keeps its condition only where its result is kept (EV
-//!   RRS3-icbtex9: a texel choosing an unread varying's value is not). A load from the function's
-//!   own stack (an `alloca`, through `getelementptr` and pointer casts) keeps every store, copy or
-//!   set into that allocation; an allocation whose address goes anywhere else keeps them all.
+//!   (its post-dominance frontier), so a texel that decides whether a kept store runs is kept. A
+//!   kept `phi` keeps its incoming blocks, so the branch that chooses its value is kept; a `select`
+//!   keeps its condition only where its result is kept (a texel choosing an unread varying's value
+//!   is not). A load from the function's own stack (an `alloca`, through `getelementptr` and
+//!   pointer casts) keeps every store, copy or set into that allocation; an allocation whose
+//!   address goes anywhere else keeps them all.
 //! - **Linear in the function.** Each instruction is processed once, and again only when the
 //!   fields demanded of a struct value grow (at most once per field); each block's control
 //!   dependences are its post-dominance frontier, computed once from the post-dominator tree.

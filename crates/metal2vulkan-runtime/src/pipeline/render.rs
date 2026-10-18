@@ -433,8 +433,7 @@ impl StateDescriptor {
     /// Number the samplers of a state of this descriptor on `device`, as Metal's creation
     /// numbers them (`resource_ids/numbered.rs`): the device's own sampler where it has a
     /// fragment function, then its functions' samplers (`interface`'s, the compiled pipeline's)
-    /// in the reverse of its stages, fragment, vertex or mesh, object (EVs TTG-sid6-m4,
-    /// SID-sid10-m4).
+    /// in the reverse of its stages, fragment, vertex or mesh, object.
     fn number_samplers(
         &self,
         device: &Device,
@@ -885,7 +884,7 @@ impl RenderPipelineState {
     /// the runtime reads from the descriptor the state was made from the first time it is asked,
     /// and keeps. Metal's own `reflection` property of a state made from a device is nil. The
     /// access is the declared one, measured on an M3 Max and an M4 (`reflection`'s rules in the
-    /// compile layer, a fragment function's slots by EV RFL-tacc-m4):
+    /// compile layer, a fragment function's slots by our probe):
     /// - `ReadOnly` for a texture declared `access::read`, or sampled;
     /// - `WriteOnly` for `access::write`;
     /// - `ReadWrite` for `access::read_write`, whether or not the function both reads and writes
@@ -953,7 +952,7 @@ impl RenderPipelineState {
 
     /// `resourceIndex`, Apple's private property: [`gpu_resource_id`](Self::gpu_resource_id)'s
     /// value, 0 for a state made without `supportIndirectCommandBuffers` (a tile pipeline's
-    /// included), as Metal answers (EV APX2-spi1-m4: equal to `gpuResourceID` for compute and
+    /// included), as Metal answers (equal to `gpuResourceID` for compute and
     /// render states made with and without it).
     pub fn resource_index(&self) -> u64 {
         self.gpu_resource_id().0
@@ -995,7 +994,7 @@ impl RenderPipelineState {
 
     /// `label`: the label of the descriptor the state was made with (a render, mesh or tile
     /// pipeline's, `PipelineOptions::label`), `None` for nil; a state made with additional
-    /// binary functions keeps its original's, as Metal's does (EV CFR-probe5-m4).
+    /// binary functions keeps its original's, as Metal's does.
     pub fn label(&self) -> Option<&str> {
         match &self.0 {
             Kind::Graphics(state) => state.0.label.as_deref(),
@@ -1514,7 +1513,7 @@ impl GraphicsState {
             Some(&descriptor.mesh)
         })?;
         let budget = options.budget();
-        // As a render state's, in Metal's order (EV RRS3-icbtex17): a fragment function writing
+        // As a render state's, in Metal's order: a fragment function writing
         // depth without a depth attachment, the indirect command buffers' refusal, then the
         // fragment function's stage inputs the linking keeps that the mesh function does not
         // write (`linked_fragment.rs`), before the compile.
@@ -1561,7 +1560,7 @@ impl GraphicsState {
     /// large-buffer form, may bind (`binding::make_neutrals`), at the state's creation, which
     /// may wait, so that no draw's encoding makes one: a neutral image takes memory of its own,
     /// and NVIDIA's `vkAllocateMemory` waited 2.37 s for other processes' GPU work inside an
-    /// encoding (EV XSH-nsu3-3090). Before, only a state that indirect command buffers may draw
+    /// encoding. Before, only a state that indirect command buffers may draw
     /// made them here: an execution's host step may draw it (one made after the commit
     /// included, `render/executions.rs`), and a host step makes no neutral (`neutral.rs`). Each
     /// plan is the one for nothing bound, which writes a neutral at every slot a bind could leave
@@ -1669,8 +1668,8 @@ impl GraphicsState {
     /// with the default options when a command first asks for it and kept while the state lives.
     /// Its control stage multiplies the factors by the encoder's scale, which the execution sets
     /// to the command's: Metal multiplies them by a kernel's scale whatever the pipeline, while a
-    /// state made with `supportIndirectCommandBuffers` never enables the scale (probe
-    /// `RT7-icb-probe8-m4`). What making it refuses refuses the draw.
+    /// state made with `supportIndirectCommandBuffers` never enables the scale. What making it
+    /// refuses refuses the draw.
     pub(crate) fn factor_scaling(&self) -> Result<Option<GraphicsState>, Error> {
         if crate::tessellation::patches(&self.base().graphics).is_none() {
             return Ok(None);

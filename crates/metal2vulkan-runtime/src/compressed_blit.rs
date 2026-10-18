@@ -1,19 +1,18 @@
 //! Blits through a texture Metal keeps losslessly compressed.
 //!
-//! **Metal's answers** (EVs FXR-fxr3-m4, FXR-fxr4-m4 and FXR-fxr5-m4: an Apple M4 under macOS
-//! 27.0.1, plain; random bytes through every blit direction, every level, slice and texture type,
-//! heap textures and views; the package share-cblit on an Apple M3 Max under 26.7, every line of
-//! the predicate and the rules identical to the M4's; and EV M27-cblit1-m3, the M3 Max under
-//! 27.0.1: the rules and the predicate identical to the M4's at every texel of 11 formats' blits
-//! and CPU copies). Metal keeps a texture losslessly compressed where `texture/heap_tiled.rs`'s
-//! rule holds (`metal_compresses`: `allowGPUOptimizedContents`, the shorter side of level 0 16
-//! texels or more, a colour format of neither `ShaderWrite` nor `PixelFormatView` usage). A GPU
-//! blit that reads or writes such a texture (a buffer into it, it into a buffer, a texture into
-//! another either way) writes the texels the compression keeps: for `BGRA10_XR` (and its `_sRGB`
-//! twin), `RG11B10Float` and `RGB9E5Float` other bytes than it read, by the rule of
-//! `bind::CompressedBlit`, at every level of the texture; the 70 other formats the census tried
-//! keep their bytes. A texture over a buffer or of an IOSurface is not compressed, and CPU copies
-//! (`replace_region`, `get_bytes`) keep the bytes whatever the texture.
+//! **Metal's answers** (an Apple M4 under macOS 27.0.1, plain; random bytes through every blit
+//! direction, every level, slice and texture type, heap textures and views; the package share-cblit
+//! on an Apple M3 Max under 26.7, every line of the predicate and the rules identical to the M4's;
+//! and the M3 Max under 27.0.1: the rules and the predicate identical to the M4's at every texel of
+//! 11 formats' blits and CPU copies). Metal keeps a texture losslessly compressed where
+//! `texture/heap_tiled.rs`'s rule holds (`metal_compresses`: `allowGPUOptimizedContents`, the
+//! shorter side of level 0 16 texels or more, a colour format of neither `ShaderWrite` nor
+//! `PixelFormatView` usage). A GPU blit that reads or writes such a texture (a buffer into it, it
+//! into a buffer, a texture into another either way) writes the texels the compression keeps: for
+//! `BGRA10_XR` (and its `_sRGB` twin), `RG11B10Float` and `RGB9E5Float` other bytes than it read,
+//! by the rule of `bind::CompressedBlit`, at every level of the texture; the 70 other formats the
+//! census tried keep their bytes. A texture over a buffer or of an IOSurface is not compressed, and
+//! CPU copies (`replace_region`, `get_bytes`) keep the bytes whatever the texture.
 //!
 //! **Held**: the runtime's copies keep the bytes on every device, so after a blit that reads or
 //! writes such a texture the runtime rewrites what the blit wrote, in the same command of the
@@ -25,6 +24,7 @@
 //! MoltenVK, whose copies of a compressed image may already make the rewrite, it changes nothing
 //! more. There a CPU copy, which the runtime makes a Vulkan copy, would make it too
 //! (`RuntimeDriverDefect::CompressedImageCopiesRewriteTexels`: an `RG11B10Float` or
+//! `RGB9E5Float` image), so the image of a `Shared` or `Managed` texture that
 //! takes a rule is made uncompressed there, and so is a device's own texture's without
 //! `allowGPUOptimizedContents`, whose blits Metal makes on an uncompressed texture: its image of
 //! the texture's own usage would be compressed (`Device::copy_exact_usage`; a heap's texture still
@@ -100,7 +100,7 @@ fn rule_for(
 /// Whether a driver of `RuntimeDriverDefect::CompressedImageCopiesRewriteTexels` rewrites texels
 /// in its copies of a compressed image of `format`: the Vulkan formats MoltenVK makes Metal's
 /// `RG11B10Float` and `RGB9E5Float` textures of. `BGRA10_XR`'s images are of a format whose
-/// copies keep their bytes (EV FXR-cbl1-mvk4).
+/// copies keep their bytes.
 fn copies_rewrite(format: Format) -> bool {
     matches!(
         format,

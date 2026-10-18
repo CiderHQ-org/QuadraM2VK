@@ -2,8 +2,7 @@
 //!
 //! Apple's compiler service crashes building the compute pipeline of a kernel that samples a
 //! texture at an implicit level with a positive or NaN `min_lod_clamp`: `makeComputePipelineState`
-//! fails with `XPC_ERROR_CONNECTION_INTERRUPTED` (macOS 26.7, M3 Max, Metal 32023.921; EVs
-//! TRI-minlod-metal2 and TRI-minlod-metal3). Measured:
+//! fails with `XPC_ERROR_CONNECTION_INTERRUPTED` (macOS 26.7, M3 Max, Metal 32023.921). Measured:
 //!
 //! - `a2_kernel_lod_filter` itself, by the oracle's route for a public fixture (`metal-as`,
 //!   `metallib`, the compute pipeline): its clamp-only call and its bias-and-clamp call each crash
@@ -225,7 +224,7 @@ fn clamp_operand(text: &str) -> Option<&str> {
 /// Whether the typed operand `operand` (`float %15`, `float 1.000000e+00`, possibly with parameter
 /// attributes before the value) is a clamp Metal refuses in a kernel: a value computed at run time,
 /// or a constant that is not at most zero (positive, +infinity, or a NaN). Zero of either sign and
-/// negative constants build (EV TRI-minlod-metal3), and any other spelling is no claim.
+/// negative constants build, and any other spelling is no claim.
 fn clamps(operand: &str) -> bool {
     let Some(value) = operand.split_whitespace().last() else {
         return false;

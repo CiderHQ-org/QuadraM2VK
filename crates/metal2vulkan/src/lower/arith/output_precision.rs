@@ -262,7 +262,7 @@ pub(crate) fn half_output_note(cx: &SelectCx<'_>) -> PrecisionNote {
 /// than the function: in a module compiled without fast math (`air.compile.fast_math_disable`)
 /// the attachment itself (`StageIo::half_blend_colors`), whose note the pipeline decides by
 /// whether the attachment blends, since Metal stores the `half` the function returns wherever it
-/// does not (the sweep, EV FLT-hb2-m3: the `half4` output and a `float4` of its `half` store alike
+/// does not (the sweep: the `half4` output and a `float4` of its `half` store alike
 /// under every blend and format); in a module compiled with fast math the attachment too
 /// (`StageIo::half_fast_colors`), whose note the pipeline decides by whether the attachment stores
 /// some channel, since one that stores none (its write mask none, or absent from the pipeline)
@@ -385,31 +385,29 @@ pub fn plan(cx: &mut SelectCx<'_>, m: &mut Meter) -> Result<(), Error> {
 /// Record `PrecisionNote::ExtendedRangeBlendSource` where Metal's blend of the function's color
 /// output into an extended-range attachment may round the output otherwise than
 /// `extended_range::blend`'s model, which holds for an output Metal cannot see into under fast
-/// math: a `float4` output loaded from memory (EVs XRB-pf4b-fast-m4 and XRB-rplf4-mvk4: all 63
-/// blends of 21 tuples into 550, 552 and 554, byte for byte). Metal's compiler folds the blend
-/// into the function, so its rounding of the source follows how the function computed it and the
-/// module's math mode (an Apple M4 under macOS 27.0.1):
+/// math: a `float4` output loaded from memory (all 63 blends of 21 tuples into 550, 552 and 554,
+/// byte for byte). Metal's compiler folds the blend into the function, so its rounding of the
+/// source follows how the function computed it and the module's math mode (an Apple M4 under macOS
+/// 27.0.1):
 ///
 /// - a module that names no math mode: whether Metal's compiler fuses the blend is unknown.
 ///   A module without fast math (`air.compile.fast_math_disable`, safe and relaxed math alike)
 ///   records none: Metal rounds every product to `half` before its sum, for any output, which the
-///   function computes (`extended_range::blend::BlendMath::Rounded`; EVs XRB-sw1s-m4, XRB-sw2s-m4,
-///   XRB-sw1r-m4 and XRB-sw2r-m4: every key of both sweeps under safe and relaxed math;
-///   XRB-sw1as-m4, XRB-sw2as-m4 and XRB-sw1ar-m4: the source computed, a product with a loaded one;
-///   XRB-pf4-safe-m4: 21 computed `float4` tuples; XRB-xrts-m4 and XRB-xrtr-m4: the lane table's
-///   every made blend into the six forms, the `_sRGB` ones too);
-/// - under fast math, an output whose lanes are not each a load, of either type (a product, EV
-///   XRB-pf4-fast-m4: six of the 21 tuples differ by a code on 35 to 432 of 4, 096 texels; the
-///   lerp, common-factor and kept forms; 26 computed `float4` shapes, EVs XRB-pf4p-fast-m4 and
-///   XRB-pf4q-fast-m4, each of 21 tuples, of which Metal's compiler rounds a third of the shapes
-///   otherwise again; and the consumer's `half4` of an integer hash, which Metal on its M3 Max
-///   blends one code apart from the model under five of 22 tuples into 550, 552 and 554).
+///   function computes (`extended_range::blend::BlendMath::Rounded`: every key of both sweeps under
+///   safe and relaxed math: the source computed, a product with a loaded one: 21 computed `float4`
+///   tuples: the lane table's every made blend into the six forms, the `_sRGB` ones too);
+/// - under fast math, an output whose lanes are not each a load, of either type (a product: six of
+///   the 21 tuples differ by a code on 35 to 432 of 4, 096 texels; the lerp, common-factor and kept
+///   forms; 26 computed `float4` shapes, each of 21 tuples, of which Metal's compiler rounds a
+///   third of the shapes otherwise again; and the consumer's `half4` of an integer hash, which
+///   Metal on its M3 Max blends one code apart from the model under five of 22 tuples into 550, 552
+///   and 554).
 ///
 /// A computed `half4` under fast math matched the model in the shapes first measured (a product
-/// used once, "over" and one-and-one; EVs XRB-pxr2-m4, SUB-hop3-m4), but not in every shape, so it
-/// is announced as a `float4` is: only a load is proven. Every blended extended-range output of the
-/// function is checked: a lane is a load where its value, followed back through single-use moves
-/// from the returned field, is a `load`.
+/// used once, "over" and one-and-one), but not in every shape, so it is announced as a `float4` is:
+/// only a load is proven. Every blended extended-range output of the function is checked: a lane is
+/// a load where its value, followed back through single-use moves from the returned field, is a
+/// `load`.
 ///
 /// A `float4` of whole-vector arithmetic over loads and constants ([`whole_vector_arithmetic`]) is
 /// rounded as a load, so it records none, but under a blend one of whose lane classes takes a key
@@ -535,9 +533,8 @@ pub fn note_extended_range_sources(cx: &mut SelectCx<'_>, m: &mut Meter) -> Resu
 /// and constants: a product, sum, difference or quotient carrying every fast-math flag, or a fused
 /// multiply-add, of four `float` lanes, each used once, over such operations, `float4` loads (of
 /// any address space) and `float4` constants, reading a load at least (the class Metal's compiler
-/// rounds as a load, but under the keys of `extended_range::computed`: EVs XRB-pf4p-fast-m4 and
-/// XRB-pf4q-fast-m4, twelve such shapes byte for byte alike on 21 blends, and XRB-sw1a-m4,
-/// XRB-sw2a-m4 and XRB-xrtc-m4, a product of two loads under every blend of the sweeps and the
+/// rounds as a load, but under the keys of `extended_range::computed`: twelve such shapes byte for
+/// byte alike on 21 blends, and a product of two loads under every blend of the sweeps and the
 /// lane table). A lane moved alone (`insertelement`, `shufflevector`), a texture read, any other
 /// call or operation, and a `half4` are outside it.
 fn whole_vector_arithmetic(

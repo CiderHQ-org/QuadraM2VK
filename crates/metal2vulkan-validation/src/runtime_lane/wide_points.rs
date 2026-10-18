@@ -1,14 +1,13 @@
 //! A point against its viewport on the device the cfg selects, under the validation layer.
 //!
-//! Metal probes (EVs `RRS-probe-9-m3`, `-9b-m3`, `-9c-m3` on an M3 Max and `RRS-probe-9-m4`,
-//! `-9b-m4`, `-9c-m4` on an M4; alike, each plain and under Metal's API validation, 2,810 draws
-//! each) drew one point a draw, of sizes 1 to 8, through viewports with fractional, whole, mirrored
-//! and flipped edges, its center inside, at and past the viewport's edges, into an 8x8 target.
-//! Every stored pixel is one rule's ([`metal_pixels`]): Metal keeps a point while its center lies
-//! within 1.5 `w` of the viewport's center on each axis (`|x|` and `|y|` at most `1.5 w`; 1.5 drew,
-//! the next `float` above culled) and `0 <= z <= w`, and draws the pixels whose centers its square
-//! covers, `[c - s/2, c + s/2)` on each axis, inside the pixels its viewport overlaps (`floor` to
-//! `ceil` of its edges).
+//! Metal probes (on an M3 Max and an M4; alike, each plain and under Metal's API validation, 2,810
+//! draws each) drew one point a draw, of sizes 1 to 8, through viewports with fractional, whole,
+//! mirrored and flipped edges, its center inside, at and past the viewport's edges, into an 8x8
+//! target. Every stored pixel is one rule's ([`metal_pixels`]): Metal keeps a point while its
+//! center lies within 1.5 `w` of the viewport's center on each axis (`|x|` and `|y|` at most
+//! `1.5 w`; 1.5 drew, the next `float` above culled) and `0 <= z <= w`, and draws the pixels whose
+//! centers its square covers, `[c - s/2, c + s/2)` on each axis, inside the pixels its viewport
+//! overlaps (`floor` to `ceil` of its edges).
 //!
 //! Vulkan culls a point whose center leaves the clip volume (`|x| > w`), and clips a wide one at
 //! fractional viewport edges by the device's own rule. The runtime draws a point through Vulkan

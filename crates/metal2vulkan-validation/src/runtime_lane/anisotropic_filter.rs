@@ -7,11 +7,11 @@
 //! footprint the normalized coordinate and both gradients), sampled through a runtime sampler of
 //! linear or nearest filters, no, nearest or linear mip filter, `maxAnisotropy` 2, 3, 8 or 16 and
 //! clamp-to-zero or clamp-to-edge addressing, from a random `rgba8Unorm` texture of seven levels
-//! ([`texture_bytes`], seed `0x5108`). The answers ([`METAL`]) are the M4's (EVs ANI-p8-m4,
-//! ANI-p9-m4 and SIZ-m1, macOS 27.0.1; round 9 repeated round 8's nearest sampler bit for bit, and
-//! round 10 its linear one under a nearest mip filter at 8; the footprints are interior, so clamp
-//! to edge answered as clamp to zero, bit for bit), each channel stored as `round(v · 255 · 256)`,
-//! within `0.002` of a 256th of a code of the `float` Metal wrote.
+//! ([`texture_bytes`], seed `0x5108`). The answers ([`METAL`]) are the M4's (macOS 27.0.1; round 9
+//! repeated round 8's nearest sampler bit for bit, and round 10 its linear one under a nearest mip
+//! filter at 8; the footprints are interior, so clamp to edge answered as clamp to zero, bit for
+//! bit), each channel stored as `round(v · 255 · 256)`, within `0.002` of a 256th of a code of the
+//! `float` Metal wrote.
 //!
 //! On a device without Metal's own sampler each sample takes the product's emulation of Metal's
 //! filter (the module `lower::sampler::anisotropic`), and the device announces
@@ -49,8 +49,7 @@ const GEOMETRY: &[u8] = include_bytes!("../../fixtures/public/anisotropic/geomet
 /// `round(v · 65280)`.
 const METAL: &[u8] = include_bytes!("../../fixtures/public/anisotropic/metal_m4.bin");
 
-/// SHA-256 of the probe's geometry, texture and the packed answers (EVs ANI-p8-m4, ANI-p9-m4 and
-/// SIZ-m1).
+/// SHA-256 of the probe's geometry, texture and the packed answers.
 const GEOMETRY_SHA: &str = "670ff56cdf6392a2441a03e01d52d1e7501d2d5f9267c2f765abaded9627b1b2";
 const TEXTURE_SHA: &str = "e84ababf5d020816ed6b9e2c827ca356070ad337176036ab8321ca34675e9a1a";
 const METAL_SHA: &str = "aff7c6eecefbae4cb56b40f06c0e29aee5d9f4329e5b8a8f94b872f81407b153";
@@ -82,7 +81,7 @@ const LINEAR: Bound = Bound::Linear {
 /// spacing's residue of a texel edge. That is the model's residue, the same channels on every
 /// device: lavapipe, ANV and RADV answered 4 of 5,072 channels a code or more off at
 /// `maxAnisotropy` 8, and 37 and 47 at 16 (nearest and linear mip filters), whose sixteen taps
-/// carry the fitted spacing's largest residue (EVs ANI-l3-lvp, -anv and -radv).
+/// carry the fitted spacing's largest residue.
 const NEAREST: Bound = Bound::Nearest {
     mean: 0.1,
     share: 0.015,
@@ -432,7 +431,7 @@ fn differences(got: &[f32], want: &[f64]) -> Differences {
 }
 
 /// The inputs are the probe's: the geometry, the regenerated texture and the packed answers hash
-/// to what EVs ANI-p8-m4, ANI-p9-m4 and SIZ-m1 sampled and wrote.
+/// to what our probes sampled and wrote.
 #[test]
 fn the_inputs_are_the_probes() {
     assert_eq!(GEOMETRY.len(), FOOTPRINTS * 32);

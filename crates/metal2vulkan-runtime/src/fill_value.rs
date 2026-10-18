@@ -3,16 +3,15 @@
 //! their own, not as a render pass's `Clear` converts it (`clear_value.rs`).
 //!
 //! **Metal's answer**, measured on an Apple M4 under macOS 27.0.1 with our own probe `fil.m` (no
-//! guest data), every texel read back through a blit: EV FRT-fil1-m4 filled 4,096 colors
-//! (specials, NaNs of either kind and sign, random values) a texel each into a private texture of
-//! each of 74 formats, and packed 256 colors of 12 pairs in another format; EV FRT-fil2-m4
-//! bisected over the doubles the least color storing each code of each channel (every code of a
-//! field of at most 12 bits, sampled pairs of the wider ones: 172,707 thresholds); EV FRT-fil3-m4
-//! filled NaNs of 24 payloads and signs and 26 doubles at rounding edges into each format; EV
-//! FRT-fil4-m4 packed 128 colors in each format into textures of 18 others, which hold the packed
-//! texel repeated, as an Apple M3 Max under macOS 26.7 does too, a fill at a time and 2,249 fills
-//! in one encoder alike (our probe `fil5.m`). This module reproduces every texel and every
-//! threshold.
+//! guest data), every texel read back through a blit: our probe filled 4,096 colors (specials, NaNs
+//! of either kind and sign, random values) a texel each into a private texture of each of 74
+//! formats, and packed 256 colors of 12 pairs in another format; our probe bisected over the
+//! doubles the least color storing each code of each channel (every code of a field of at most 12
+//! bits, sampled pairs of the wider ones: 172,707 thresholds); our probe filled NaNs of 24 payloads
+//! and signs and 26 doubles at rounding edges into each format; our probe packed 128 colors in each
+//! format into textures of 18 others, which hold the packed texel repeated, as an Apple M3 Max
+//! under macOS 26.7 does too, a fill at a time and 2,249 fills in one encoder alike (our probe
+//! `fil5.m`). This module reproduces every texel and every threshold.
 //!
 //! Each channel converts its double; every rule but the integers' takes the double's `float`
 //! first (rounded to nearest even, an overflow the infinity):
@@ -57,10 +56,10 @@
 //! blue in bits 0 to 9, green, then red, the top two bits zero; `RGB9E5Float`'s exponent is last.
 //!
 //! A format whose filled bytes do not follow the color has no packing here: compressed, 4:2:2,
-//! depth, stencil and two-plane formats (EVs XRR2-fill1-m4 and XRR2-fill3-m4: one constant for
-//! every color of a process), and the padded 10-bit formats (`R10Unorm_X6`, `RG10Unorm_X12` and
-//! their `_sRGB` twins: one texel for every color, EV FRT-fil1-m4, of bytes that differ between
-//! machines and runs). Neither has a format whose fills the probes did not cover.
+//! depth, stencil and two-plane formats (one constant for every color of a process), and the padded
+//! 10-bit formats (`R10Unorm_X6`, `RG10Unorm_X12` and their `_sRGB` twins: one texel for every
+//! color, of bytes that differ between machines and runs). Neither has a format whose fills the
+//! probes did not cover.
 
 use metal2vulkan::metal::PixelFormat;
 
@@ -519,7 +518,7 @@ fn first_at_most(first: &[u32], x: f64, nan: u64) -> u64 {
 }
 
 /// The least `float` (its bits) a color fill of an 8-bit sRGB channel stores as each code from 1
-/// to 255: entry `k` stores code `k + 1` (EV FRT-fil2-m4, every code of `R8Unorm_sRGB`, the same
+/// to 255: entry `k` stores code `k + 1` (every code of `R8Unorm_sRGB`, the same
 /// in each channel of `RG8Unorm_sRGB`, `RGBA8Unorm_sRGB`, `BGRA8Unorm_sRGB` and
 /// `RGBX8Unorm_sRGB`). Each lies within a `float` step of the midpoint between the two codes'
 /// decoded values: a fill stores the code whose decoded value is nearest the color.
@@ -559,8 +558,8 @@ const SRGB_FIRST: [u32; 255] = [
 ];
 
 /// The least `float` (its bits) a color fill of an extended-range `_sRGB` color channel stores as
-/// each code from 1 to 1023: entry `k` stores code `k + 1`, ascending from negative values (EV
-/// FRT-fil2-m4, every code of each color channel of `BGR10_XR_sRGB` and `BGRA10_XR_sRGB`, the
+/// each code from 1 to 1023: entry `k` stores code `k + 1`, ascending from negative values (every
+/// code of each color channel of `BGR10_XR_sRGB` and `BGRA10_XR_sRGB`, the
 /// same in each).
 const XR_SRGB_FIRST: [u32; 1023] = [
     0xbf068c95, 0xbf05c40e, 0xbf04fc37, 0xbf04350e, 0xbf036e93, 0xbf02a8c6, 0xbf01e3a7, 0xbf011f37,

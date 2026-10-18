@@ -1,8 +1,8 @@
 //! How the translation reads `f32` denormals in `mix`, two chained `fma`s, `atan2`, `sinpi`,
 //! `cospi`, `tanpi` and `fast::fmod`, precise and fast, against Metal's words on an Apple M3 Max
-//! under macOS 27.0.1 (EVs DNR-dn2-m3 and DNR-fm1-m3, `metal_denormals_m3.txt`). Metal reads every
-//! denormal operand of these as the zero of its sign and answers no denormal; `mix(a, b, c)` is
-//! `fma(c, b, fma(-c, a, a))` with each `fma` flushing its operands and its result.
+//! under macOS 27.0.1 (`metal_denormals_m3.txt`). Metal reads every denormal operand of these as
+//! the zero of its sign and answers no denormal; `mix(a, b, c)` is `fma(c, b, fma(-c, a, a))` with
+//! each `fma` flushing its operands and its result.
 //!
 //! Each kernel loops over its rows (three operand words a row in `[[buffer(0)]]`) and stores one
 //! answer word a row in `[[buffer(1)]]`. The CPU SPIR-V interpreter keeps denormals, as a device
@@ -24,7 +24,7 @@ use crate::spirv::interp::{run, Buffer, Config, Resources};
 use crate::spirv::testing::committed_profiles_with;
 use std::collections::BTreeSet;
 
-/// Metal's words (EV DNR-dn2-m3).
+/// Metal's words.
 const WORDS: &str = include_str!("metal_denormals_m3.txt");
 
 /// A function of the probe.

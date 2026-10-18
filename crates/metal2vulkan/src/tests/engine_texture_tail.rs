@@ -1231,13 +1231,12 @@ declare { <4 x float>, i8 } @air.read_texture_2d.v4f32(ptr addrspace(1), ptr add
 "#;
 
 /// Metal drops every write a function makes to a sparse texture, its mapped tiles' included, and
-/// the writing thread's read after a fence returns the texel as it was (SPR-probe8-m4,
-/// SPR-probe8-m3). On every committed profile that compiles the kernel, it states
-/// `SparseTextureWrites` and the slot's residency arm (the tile map on every profile), and on the
-/// interpreter over a 2x2 texture: not sparse, each thread reads its own write back and the texture
-/// holds it; sparse with texel 3 unmapped (its image's texel garbage, as a sparse image's block
-/// that holds no mapped tile reads), each mapped texel reads its old value resident, texel 3 reads
-/// zero not resident, and the texture is unchanged.
+/// the writing thread's read after a fence returns the texel as it was. On every committed profile
+/// that compiles the kernel, it states `SparseTextureWrites` and the slot's residency arm (the tile
+/// map on every profile), and on the interpreter over a 2x2 texture: not sparse, each thread reads
+/// its own write back and the texture holds it; sparse with texel 3 unmapped (its image's texel
+/// garbage, as a sparse image's block that holds no mapped tile reads), each mapped texel reads its
+/// old value resident, texel 3 reads zero not resident, and the texture is unchanged.
 #[test]
 fn a_functions_writes_to_a_sparse_texture_are_dropped() {
     use crate::pipeline::facts::RuntimeFact;

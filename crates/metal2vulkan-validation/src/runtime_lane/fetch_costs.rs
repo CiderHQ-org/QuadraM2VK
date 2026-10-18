@@ -28,8 +28,7 @@
 //! medians and the fastest runs, and the notices the case announced (each kind once per device,
 //! so at its first case).
 //!
-//! Ignored by default: a measurement, not a check. Run it by name with `--run-ignored all` (EVs
-//! CON-fc*).
+//! Ignored by default: a measurement, not a check. Run it by name with `--run-ignored all`.
 
 use super::degrade_notices::counts;
 use super::{buffer_with, validated_device_with, Messages, ScratchCache, WAIT};

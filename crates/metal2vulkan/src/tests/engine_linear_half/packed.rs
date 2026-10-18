@@ -1,20 +1,20 @@
 //! Metal's linear filter of the packed formats, on the CPU interpreter against Metal's own samples,
 //! bit for bit.
 //!
-//! `packed_samples.tsv` holds 384 of the linear samples EVs TXN-pkprobe-m3 and TXN-pkprobe-m4
-//! took (an Apple M3 Max on macOS 26.7 and an Apple M4 on macOS 27.0.1, byte-identical; random
-//! finite texel words, clamp to edge, exact 1/256 fractions): 8 per format, dimension (1D, 2D,
-//! 3D), and result (`float`, `half`), chosen to tell the rule from its simpler neighbours (the sum
-//! without the terms' truncation, every channel on the 8-bit grid, the exact value rounded once;
-//! for a small float the sum rounded to `f32`). Then 48 of EV TXN-pknf-m3's (the Apple M3 Max):
-//! `RG11B10Float` words with infinities and NaNs among their channels, 8 per dimension and
-//! result: a NaN tap of nonzero weight gives Metal's NaN (`0x7fc00000`, `half` `0x7e00`), else an
-//! infinity gives `+inf`, a tap of zero weight neither, and in 3D a tap whose product weight
-//! rounds to zero is not of zero weight. The small floats' 3D rows are among those the half-float
-//! rule answers (it misses about 0.3% of their 3D channels, the residue). Each row is a sample
-//! through a constexpr sampler and through a runtime one, on every device value a packed channel's
-//! code reads as: exact, lavapipe's product by the reciprocal, and ANV's and NVIDIA's 5- and 6-bit
-//! codes replicated to 8 bits (a small float's value is exact, its NaN's payload kept).
+//! `packed_samples.tsv` holds 384 of the linear samples our probes took (an Apple M3 Max on macOS
+//! 26.7 and an Apple M4 on macOS 27.0.1, byte-identical; random finite texel words, clamp to edge,
+//! exact 1/256 fractions): 8 per format, dimension (1D, 2D, 3D), and result (`float`, `half`),
+//! chosen to tell the rule from its simpler neighbours (the sum without the terms' truncation,
+//! every channel on the 8-bit grid, the exact value rounded once; for a small float the sum rounded
+//! to `f32`). Then 48 of our probe's (the Apple M3 Max): `RG11B10Float` words with infinities and
+//! NaNs among their channels, 8 per dimension and result: a NaN tap of nonzero weight gives Metal's
+//! NaN (`0x7fc00000`, `half` `0x7e00`), else an infinity gives `+inf`, a tap of zero weight
+//! neither, and in 3D a tap whose product weight rounds to zero is not of zero weight. The small
+//! floats' 3D rows are among those the half-float rule answers (it misses about 0.3% of their 3D
+//! channels, the residue). Each row is a sample through a constexpr sampler and through a runtime
+//! one, on every device value a packed channel's code reads as: exact, lavapipe's product by the
+//! reciprocal, and ANV's and NVIDIA's 5- and 6-bit codes replicated to 8 bits (a small float's
+//! value is exact, its NaN's payload kept).
 
 use super::*;
 
@@ -259,8 +259,8 @@ fn packed_linear_samples_are_metals_bytes() {
 }
 
 /// Metal's 2D samples with one axis's two taps clamped onto one texel: `edge_samples.tsv`, 94 of
-/// the linear samples EVs TXN-edgeprobe-m3 and TXN-edgeprobe-m4 took (an Apple M3 Max on macOS 26.7
-/// and an Apple M4 on macOS 27.0.1, byte-identical; random finite texels of 64 x 64 textures past
+/// the linear samples our probes took (an Apple M3 Max on macOS 26.7 and an Apple M4 on macOS
+/// 27.0.1, byte-identical; random finite texels of 64 x 64 textures past
 /// either edge, clamp to edge, exact 1/256 fractions): per format (`RGBA16Float`, `RGBA32Float`,
 /// `RG11B10Float`, `RGB9E5Float`), result, and clamped axis, the rows whose answer the unmerged
 /// fractions change, and `RGBA32Float`'s `half` results that are a negative zero. One per line: the
@@ -538,11 +538,10 @@ fn slot_images(m: &TypedModule, extent: [u32; 3], texels: &[[u32; 4]]) -> Vec<Im
 /// the function converts the unswizzled texel by the format's whole class and swizzles it
 /// (`Zero` 0, `One` 1). The reference is the unswizzled module's answer for exact codes, which is
 /// Metal's (`packed_linear_samples_are_metals_bytes` and the device lanes). Previously a swizzled
-/// view's class dropped the packed field, and the device's replicated codes showed (EV
-/// FRT3-scout2-nv3090). A nearest sample's and a gather's modules (four gathers, the one the
-/// swizzle names taken) validate, and every module's words stay within the selection's estimate;
-/// the interpreter models no device sample or gather, so their answers are the device lane's
-/// (`runtime_lane::extended_swizzles`).
+/// view's class dropped the packed field, and the device's replicated codes showed. A nearest
+/// sample's and a gather's modules (four gathers, the one the swizzle names taken) validate, and
+/// every module's words stay within the selection's estimate; the interpreter models no device
+/// sample or gather, so their answers are the device lane's (`runtime_lane::extended_swizzles`).
 #[test]
 fn swizzled_packed_texels_are_the_unswizzled_swizzled() {
     use crate::lower::select::LowerInputs;

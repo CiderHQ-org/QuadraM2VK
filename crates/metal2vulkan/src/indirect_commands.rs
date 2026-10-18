@@ -219,13 +219,12 @@ pub(crate) struct Policy {
 /// records hold a draw of a kind its types allow, or of a kind whose record a kind it allows
 /// holds. Draws of primitives fit every render buffer's records but those of mesh draws alone,
 /// indexed draws an indexed or a patch buffer's, and patch and indexed patch draws a patch or an
-/// indexed patch buffer's (EVs ICBV-kinds-m3 and ICBV-kinds-m4: a kernel's draw on a buffer of
-/// such a kind runs as on its own on the M3 Max and the M4; on a buffer of a smaller kind the GPU
-/// faults, or on the M4 a patch draw on an indexed buffer draws nothing). Mesh draws of either
-/// kind fit a buffer of either mesh kind's records, and no other's (a Metal probe, the M3 Max and
-/// an M4: a kernel's mesh draw of either kind on a buffer of either mesh kind runs as on its own,
-/// and on a buffer of draws of primitives the GPU faults). Dispatches of either kind fit every
-/// compute buffer's records.
+/// indexed patch buffer's (a kernel's draw on a buffer of such a kind runs as on its own on the M3
+/// Max and the M4; on a buffer of a smaller kind the GPU faults, or on the M4 a patch draw on an
+/// indexed buffer draws nothing). Mesh draws of either kind fit a buffer of either mesh kind's
+/// records, and no other's (a Metal probe, the M3 Max and an M4: a kernel's mesh draw of either
+/// kind on a buffer of either mesh kind runs as on its own, and on a buffer of draws of primitives
+/// the GPU faults). Dispatches of either kind fit every compute buffer's records.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum DrawKind {
     Primitives,
@@ -511,8 +510,8 @@ pub enum Action {
         /// The factors' stride from one instance to the next, in bytes.
         factor_instance_stride: u32,
         /// The `f32` bits of the scale the factors are multiplied by: a kernel's `draw_patches`
-        /// gives one, which Metal applies whatever the pipeline (probe `RT7-icb-probe8-m4`); the
-        /// CPU's setter takes none, so 1.0.
+        /// gives one, which Metal applies whatever the pipeline; the CPU's setter takes none, so
+        /// 1.0.
         factor_scale: u32,
     },
     /// `drawIndexedPatches:patchStart:patchCount:patchIndexBuffer:patchIndexBufferOffset:
@@ -586,7 +585,7 @@ impl Bindings {
     /// The buffer slots of `stage`: each one a setter set, none where no setter did or a reset
     /// cleared it. A record holds none as an address and a stride of 0 and a set slot's stride
     /// form as all ones (the pipeline's) or the stride, the answers of Metal's getters on a buffer
-    /// of dynamic attribute strides (EVs API-icbget1-m4, API-icbget2-m4).
+    /// of dynamic attribute strides.
     pub fn buffers(&self, stage: BufferStage) -> &[Option<BufferBinding>; BINDING_COUNT] {
         &self.buffers[stage.index()]
     }

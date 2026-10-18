@@ -10,7 +10,7 @@
 //!   render pass over a map that is not the identity draws by regions whose lines are the tiles'
 //!   exact lines, a near-equivalent of Apple's fixed-point ones, so the map's creation announces
 //!   the `rasterization-rate-map` degradation.
-//! - **What Metal's API validation stops**, measured by probes RT11-metal-probe-7 and -8 on an M3
+//! - **What Metal's API validation stops**, measured by our probes on an M3
 //!   Max and an M4 alike, is refused at creation, `Invalid` with [`RateMapProblem`]: a screen width
 //!   or height of 0 or past 32768, and a layer count past 2. The count is Metal's `layerCount`:
 //!   the layers from index 0 up to the first without samples on an axis, which Metal's descriptor
@@ -30,7 +30,7 @@
 //!   layers is the layers' shared vertical extent on Metal too, but its width Metal reads past
 //!   its own layer table (probe 9: 0 just past a map of one layer, else a screen side, the
 //!   vertical extent or a small number, by index; a map of no layers answers 0 by 16 at layers 0
-//!   and 1 and 16 by 16 at layer 2, EV RRS3-rmprobe2): the runtime answers width 0 there, and
+//!   and 1 and 16 by 16 at layer 2): the runtime answers width 0 there, and
 //!   its vertical extent. A map of no layers' coordinate maps end the process on Metal (all 12
 //!   probed queries); the runtime answers the decode of its bytes, 0 across.
 //! - **A map of no layers made after a released one**. The device notes when it releases a map of
@@ -59,8 +59,7 @@ use std::sync::Arc;
 const MAX_SCREEN_EXTENT: u32 = 32768;
 
 /// What a rasterization-rate map's descriptor did wrong (`Problem::RateMap`): what Metal's API
-/// validation stops at `newRasterizationRateMapWithDescriptor:` (probes RT11-metal-probe-7 and
-/// -8, an M3 Max and an M4).
+/// validation stops at `newRasterizationRateMapWithDescriptor:` (an M3 Max and an M4).
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RateMapProblem {

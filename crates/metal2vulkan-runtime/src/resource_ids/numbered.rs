@@ -1,8 +1,8 @@
 //! Numbered samplers (the consumer's ask of 2026-10-08): the plain sampler IDs Metal's pipeline
 //! creation takes for a pipeline's samplers, and what holds them.
 //!
-//! Measured on an Apple M4 (macOS 27.0.1), plain Metal, EVs TTG-sid5-m4 to TTG-sid7-m4 (an M3
-//! Max on macOS 26.7 answered their 108 rows the same) and SID-sid8-m4 to SID-sid11-m4:
+//! Measured on an Apple M4 (macOS 27.0.1), plain Metal, in two sets of probes (an M3 Max on macOS
+//! 26.7 answered the first set's 108 rows the same):
 //!
 //! - **Keys.** A pipeline state, as it is made, numbers each of its functions' samplers (the
 //!   compile layer's [`NumberedSampler`]s: the constexpr samplers by state, `Read` and `Write`)

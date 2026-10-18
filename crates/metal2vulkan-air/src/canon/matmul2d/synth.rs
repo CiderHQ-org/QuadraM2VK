@@ -703,10 +703,9 @@ enum Right {
 
 /// `run`: every destination element the thread holds is, for `k` ascending below the
 /// descriptor's `k`, `acc = fma(a, b, acc)` over floats (one rounding per step, the order
-/// Metal's sums were measured to take, TNS-metal2, with or without relaxed precision, TNS-dev1)
-/// and `acc += a * b` over integers (wrapping), from `acc = C` in `multiply_accumulate` mode and
-/// from zero in `multiply` mode (`+0` over floats, TNS-dev1), where `a` and `b` read zero past
-/// their tensors' extents.
+/// Metal's sums were measured to take, with or without relaxed precision) and `acc += a * b` over
+/// integers (wrapping), from `acc = C` in `multiply_accumulate` mode and from zero in `multiply`
+/// mode (`+0` over floats), where `a` and `b` read zero past their tensors' extents.
 fn run(
     out: &mut Out<'_>,
     r: &Run,
@@ -754,7 +753,7 @@ fn run(
             out.load(acc_ty, slot, 4, m)?
         } else if float {
             // Metal's float `multiply` starts from `+0`, so a sum of `-0` products is `+0`
-            // (TNS-dev1, `matmul2d-edge-float-multiply-mode`).
+            // (`matmul2d-edge-float-multiply-mode`).
             out.f32k(0.0, m)?
         } else {
             out.k32(0, m)?

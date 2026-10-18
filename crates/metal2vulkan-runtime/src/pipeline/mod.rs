@@ -657,8 +657,7 @@ impl ComputePipelineState {
 /// AIR, name or constant values), in that order. Metal's API validation stops every repeat ("All
 /// linked functions must have unique names. Function 'add_one' is a duplicate symbol in
 /// binaryFunctions, symbol first found in functions"), but plain Metal takes one function listed
-/// in both lists, with one handle (a probe `RT7-ftable-probe2`
-/// `number_same_function_in_both_lists`, an M3 and an M4), as the compile layer links it once.
+/// in both lists, with one handle (a probe, an M3 and an M4), as the compile layer links it once.
 /// Whether validation also counts `private_functions` and `groups` was not measured, so they are
 /// left to it.
 pub(super) fn duplicate_linked_name(linked: &LinkedFunctions) -> Option<String> {
@@ -921,8 +920,8 @@ impl ComputePipelineState {
     }
 
     /// `resourceIndex`, Apple's private property: [`gpu_resource_id`](Self::gpu_resource_id)'s
-    /// value, 0 for a state made without `supportIndirectCommandBuffers`, as Metal answers (EV
-    /// APX2-spi1-m4: equal to `gpuResourceID` for compute and render states made with and
+    /// value, 0 for a state made without `supportIndirectCommandBuffers`, as Metal answers (equal
+    /// to `gpuResourceID` for compute and render states made with and
     /// without it).
     pub fn resource_index(&self) -> u64 {
         self.gpu_resource_id().0
@@ -957,7 +956,7 @@ impl ComputePipelineState {
 
     /// `label`: the label of the descriptor the state was made with
     /// (`PipelineOptions::label`), `None` for nil; a state made with additional binary functions
-    /// keeps its original's, as Metal's does (EV CFR-probe5-m4).
+    /// keeps its original's, as Metal's does.
     pub fn label(&self) -> Option<&str> {
         self.0.label.as_deref()
     }
@@ -1403,7 +1402,7 @@ impl Variant {
 /// The devices whose Metal refuses the render pipeline of a fragment function reading a global
 /// `thread_index_in_quadgroup` ("Encountered unlowered function call to
 /// air.get_thread_index_in_quadgroup.i32", the M4 adding "Verify device or GPU architecture
-/// supports this feature"; EVs `GSM-gb2-m4` and `GSM-gb-m3`).
+/// supports this feature").
 const GLOBAL_BUILTIN_IN_FRAGMENT_REFUSED_ON: &[&str] =
     &["Apple M3 Max, macOS 26.7", "Apple M4, macOS 27.0.1"];
 

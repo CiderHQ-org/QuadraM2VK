@@ -960,7 +960,7 @@ fn run_strided(bc: &[u8], d: &StageInputDescriptor, strides: &[(u32, u32)], s1: 
 }
 
 /// A layout of a fixed stride fetches at it whatever stride the encoder binds its buffer with, as
-/// an M4 reads one (a fixed 16 read at 16 under a bound 8, EV REF-stride-probe-4): such a kernel
+/// an M4 reads one (a fixed 16 read at 16 under a bound 8): such a kernel
 /// records no `RuntimeFact::StageInStride` and pushes no stride.
 #[test]
 fn a_fixed_layout_reads_its_own_stride_whatever_the_bind() {
@@ -984,7 +984,7 @@ fn a_fixed_layout_reads_its_own_stride_whatever_the_bind() {
 }
 
 /// A layout of `MTLBufferLayoutStrideDynamic` fetches at the stride the encoder binds its buffer
-/// with, as an M4 reads it (EV REF-stride-probe-4: element `e` at `e · stride` from the bind offset
+/// with, as an M4 reads it (element `e` at `e · stride` from the bind offset
 /// for strides 0, 2, 4, 6, 8, 12, 16 and 256, unaligned ones byte-exact); a buffer bound without
 /// one reads at stride 0, as Metal does without its validation layer (which reads every element
 /// past the first as zeros instead). The kernel records `RuntimeFact::StageInStride` for each
@@ -1243,7 +1243,7 @@ fn descriptor_refusals_are_typed() {
         ));
     }
     // A constant step at a step rate other than 0 stops Metal's pipeline creation at an
-    // assertion, with and without API validation (EV SWP-stepfn-m4).
+    // assertion, with and without API validation.
     let mut d = valid.clone();
     d.layouts.get_mut(&3).expect("layout 3").step_rate = 1;
     assert!(matches!(
@@ -1260,8 +1260,8 @@ fn descriptor_refusals_are_typed() {
         fetch(Some(&grid((StepFunction::ThreadPositionInGridXIndexed, 2)))),
         Feature::KernelStageIn,
     );
-    // A vertex stage's step function stops Metal's compute pipeline creation at an assertion
-    // (EV SWP-stepfn-m4), the default per-vertex step of a fresh layout among them.
+    // A vertex stage's step function stops Metal's compute pipeline creation at an assertion, the
+    // default per-vertex step of a fresh layout among them.
     for step in [
         StepFunction::PerVertex,
         StepFunction::PerInstance,

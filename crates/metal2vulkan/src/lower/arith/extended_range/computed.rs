@@ -5,14 +5,14 @@
 //! Metal's compiler folds the blend into the function, so how it rounds a computed source follows
 //! the computation; for a whole-vector product, sum, difference, quotient or fused multiply-add
 //! over vector loads and constants it rounds the source as it rounds a loaded one in every lane
-//! class but those of [`COLOR_DIFFERS`] and [`ALPHA_DIFFERS`] (EVs XRB-sw1a-m4 and XRB-sw2a-m4,
-//! plain Metal on an Apple M4 under macOS 27.0.1: the factor sweeps' `float4` configurations of the
-//! source times a loaded vector of ones, byte for byte against XRB-sw1-m4's and XRB-sw2-m4's loaded
-//! source; every color and alpha key of `Add`, `Subtract` and `ReverseSubtract` but the second
-//! source's, and 343 of `Min` and `Max`, whose factors Metal ignores). A key of either table
-//! differs from the loaded source's on some configuration (a third of the color keys whose source
-//! factor is the source alpha read the source unrounded beside it, among others), so a blend whose
-//! color or alpha lane class takes one stays announced.
+//! class but those of [`COLOR_DIFFERS`] and [`ALPHA_DIFFERS`] (plain Metal on an Apple M4 under
+//! macOS 27.0.1: the factor sweeps' `float4` configurations of the source times a loaded vector of
+//! ones, byte for byte against our probes' plain and loaded sources; every color and alpha
+//! key of `Add`, `Subtract` and `ReverseSubtract` but the second source's, and 343 of `Min` and
+//! `Max`, whose factors Metal ignores). A key of either table differs from the loaded source's on
+//! some configuration (a third of the color keys whose source factor is the source alpha read the
+//! source unrounded beside it, among others), so a blend whose color or alpha lane class takes one
+//! stays announced.
 
 use crate::metal::format::ExtendedRange;
 use crate::metal::{BlendFactor as F, BlendOperation as O};

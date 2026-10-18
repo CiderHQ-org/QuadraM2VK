@@ -4,7 +4,7 @@
 //! - A tile pipeline's state answers Metal's `maxTotalThreadsPerThreadgroup`, 1024, where the
 //!   device runs a threadgroup of 1024 threads, else the device's lower limit, and the
 //!   descriptor's limit lowers it to the largest threadgroup of even sides within it (Metal
-//!   probes TTG-probe1-m4 and TTG-probe2, an M4 under macOS 27 and an M3 Max under macOS 26.7).
+//!   probes, an M4 under macOS 27 and an M3 Max under macOS 26.7).
 //! - `k10ts_tile_order` run by a 32x32 threadgroup in a 32x32 tile: each thread records its
 //!   position, lane, simdgroup and its simdgroup's first lane's position at its thread index,
 //!   as Metal places them (the probe: two 16-wide columns of 8x4 simdgroup blocks, each block's
@@ -17,7 +17,7 @@
 //!   simdgroups in its 32 KiB of shared memory: 960 threads), a 32x32 dispatch, within Metal's
 //!   1024, is refused typed as the device's gap, and the blur runs 32 by the most simdgroups its
 //!   state's limit takes, a power of two.
-//! - Under `threadgroupSizeMatchesTileSize` (EV TTG-tat5, an M3 Max under macOS 26.7 and an M4
+//! - Under `threadgroupSizeMatchesTileSize` (an M3 Max under macOS 26.7 and an M4
 //!   under macOS 27.0.1): `k10ts_tile_grid` dispatched 8x8 per 16x16 tile over a 40x24 pass answers
 //!   the tile as its threadgroup (threads per threadgroup 16x16, its position in the grid
 //!   `threadgroup · 16 + position`, threads per grid 48x32) and still stages every cell; and
@@ -116,7 +116,7 @@ fn state(device: &Device, stem: &str, formats: &[PixelFormat]) -> RenderPipeline
 }
 
 /// Metal's place of the thread of lane `lane` of simdgroup `simdgroup` in a 32x32 tile
-/// threadgroup (TTG-probe1-m4): the threadgroup is two columns 16 wide, simdgroups 0 to 15 the left
+/// threadgroup: the threadgroup is two columns 16 wide, simdgroups 0 to 15 the left
 /// one's and 16 to 31 the right one's; a column's simdgroup `s` is its 8x4 block `(s mod 2, s /
 /// 2)`, and lane `l` thread `l mod 4` of the block's quad `l / 4`, four quads a row, each quad's
 /// threads in rows.
@@ -153,7 +153,7 @@ fn a_tile_state_answers_metals_thread_limit() {
             .new_tile_render_pipeline_state(&d, &PipelineOptions::default())
             .unwrap();
         assert_eq!(limited.max_total_threads_per_threadgroup(), max.min(512));
-        // Metal answers the largest threadgroup of even sides within the limit (TTG-probe2).
+        // Metal answers the largest threadgroup of even sides within the limit.
         if max == 1024 {
             d.max_total_threads_per_threadgroup = Some(1000);
             let rounded = device
@@ -164,8 +164,8 @@ fn a_tile_state_answers_metals_thread_limit() {
     });
 }
 
-/// Threads per tile past the state's limit run nothing, as plain Metal runs them (TTG-probe1-m4:
-/// a state of 256 threads dispatched 32x32 per tile left every pixel and record as they were):
+/// Threads per tile past the state's limit run nothing, as plain Metal runs them (a state of 256
+/// threads dispatched 32x32 per tile left every pixel and record as they were):
 /// `k10ts_tile_order` limited to 256, dispatched 32x32 and then 16x16 in one pass, writes the
 /// 16x16 dispatch's records and cells alone.
 #[test]
@@ -301,7 +301,7 @@ const SCALE: f32 = 0.5;
 /// of each pixel's four channels in row order. Lane `l` of simdgroup `g` in tile `(tx, ty)` is the
 /// cell `(l, g)` (or `(g, l)`), its texel `(32 tx, simdgroups ty)` past the origin and the cell;
 /// tap `i` takes lane `l + i`'s texel where that is a lane, else the texel 32 past lane
-/// `l + i - 32`'s along the simdgroup (`simd_shuffle_and_fill_down`, measured by TTG-probe1-m4 on
+/// `l + i - 32`'s along the simdgroup (`simd_shuffle_and_fill_down`, measured by our probe on
 /// every pixel of 32 simdgroups). A cell no thread owns keeps the target's 9.
 fn blurred(transpose: bool, simdgroups: u64) -> Vec<u16> {
     let size = 2 * SIDE;
@@ -452,7 +452,7 @@ fn cell_tag(tg: [u64; 2], c: [u64; 2]) -> u32 {
 }
 
 /// `k10ts_tile_grid` under `threadgroupSizeMatchesTileSize`, dispatched 8x8 per 16x16 tile over a
-/// 40x24 pass (the shape of EV TTG-tat5, where Metal's validation, which stops it, was off):
+/// 40x24 pass (the shape of our probe, where Metal's validation, which stops it, was off):
 /// each record answers the tile as the threadgroup, as plain Metal does on an M3 Max and an M4
 /// (threads per threadgroup 16x16, the position in the grid `threadgroup · 16 + position`,
 /// threads per grid the 3x2 tiles times the tile), its thread index the 8x8 threadgroup's, and
@@ -582,7 +582,7 @@ fn a_tile_sized_threadgroup_answers_the_tile() {
 
 /// `k10ts_tile_order` under `threadgroupSizeMatchesTileSize`, dispatched 16x16 in a 32x32 tile:
 /// each thread keeps its measured place, lane and simdgroup, and its thread index is
-/// `simdgroup · 32 + lane` (EV TTG-tat5), not the quad order across the 16-wide threadgroup.
+/// `simdgroup · 32 + lane`, not the quad order across the 16-wide threadgroup.
 #[test]
 fn a_tile_sized_threadgroup_numbers_its_threads_by_simdgroup() {
     on_device(|device| {

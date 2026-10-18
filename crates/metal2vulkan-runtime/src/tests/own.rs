@@ -161,8 +161,8 @@ fn a_wait_closing_a_cycle_of_waits_is_found() {
 
 /// A make on a full queue: off the handler threads it waits; from another queue's context it
 /// blocks, counted (Metal's returns once a slot comes back); in the queue's own context, where no
-/// committed command buffer can complete first, it is refused (Metal's never returns,
-/// RT10-qlprobe3) unless an uncommitted one may still be dropped.
+/// committed command buffer can complete first, it is refused (Metal's never returns) unless an
+/// uncommitted one may still be dropped.
 #[test]
 fn a_make_on_a_full_queue_answers_by_where_its_slots_can_come_back() {
     let own = context(DEVICE, QUEUE);

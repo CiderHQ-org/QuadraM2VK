@@ -67,8 +67,7 @@ impl Device {
     pub fn new_shared_texture(&self, descriptor: &TextureDescriptor) -> Result<Texture, Error> {
         const CALL: &str = "new_shared_texture";
         // Plain Metal makes a shareable texture without `framebufferOnly`, whatever the
-        // descriptor says, so a rotated one asserts as one without it does (EV
-        // ZCI2-rotprobe3-m4's `shared`).
+        // descriptor says, so a rotated one asserts as one without it does.
         let descriptor = &TextureDescriptor {
             framebuffer_only: false,
             ..self.take_texture_options(CALL, descriptor)
@@ -87,7 +86,7 @@ impl Device {
         // descriptor it stops (a width of 0, a side past the largest, too many levels, a swizzle
         // with writes, one sample in a multisample type: nil in `Shared`, `Managed` and
         // `Memoryless` storage, a stop in `Private`; an M3 Max under macOS 26.7 and an M4 under
-        // 27.0.1, EVs GSM2-nil-m3 and GSM2-nil-m4).
+        // 27.0.1).
         if storage != StorageMode::Private {
             return Err(nil(CALL, Problem::StorageMode));
         }

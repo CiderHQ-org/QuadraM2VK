@@ -138,16 +138,15 @@ impl NanTest {
 
 /// The answer Metal gives for a NaN result of float function `op` (as selected: the `fast_`
 /// refinement applied, `fast` whether its symbol is the `fast_` variant) called with every
-/// fast-math flag if `flagged` (`arith::every_flag`), on lanes of format `fmt`. Measured (EVs
-/// HRD-nan-metal, HRD-nan-fn-metal) in two states: the precise functions without flags and the
-/// `fast_` ones with every flag, as Metal's compiler emits them without and with fast math
-/// (`measured`). A precise symbol called with every flag (MSL's `precise::` functions in a
-/// fast-math compile) answers as it does without them where that state is measured
-/// ([`flagged_precise`]). A call in another state (a `fast_` symbol without every flag, another
-/// precise one with them) has the answer only where both states of the function agree, the
-/// precise one and its `fast_` variant: Metal's `fast_fract` answers the canonical NaN in both
-/// states (A1 case aed3faaa, without flags), but where the variants differ a call in the other
-/// state is not measured. `None` there, and where `measured` has none. On `half` lanes the
+/// fast-math flag if `flagged` (`arith::every_flag`), on lanes of format `fmt`. Measured in two
+/// states: the precise functions without flags and the `fast_` ones with every flag, as Metal's
+/// compiler emits them without and with fast math (`measured`). A precise symbol called with every
+/// flag (MSL's `precise::` functions in a fast-math compile) answers as it does without them where
+/// that state is measured ([`flagged_precise`]). A call in another state (a `fast_` symbol without
+/// every flag, another precise one with them) has the answer only where both states of the function
+/// agree, the precise one and its `fast_` variant: Metal's `fast_fract` answers the canonical NaN
+/// in both states (A1 case aed3faaa, without flags), but where the variants differ a call in the
+/// other state is not measured. `None` there, and where `measured` has none. On `half` lanes the
 /// answers are `half_function_answer`'s; `bfloat` and `double` have none.
 pub fn function_answer(op: FloatFn, fast: bool, flagged: bool, fmt: FloatFmt) -> Option<NanAnswer> {
     match fmt {
@@ -219,8 +218,8 @@ fn precise_of(op: FloatFn) -> FloatFn {
 /// its operands' NaN bits ([`drops_payload`]). `None` where Metal answers a number for a NaN
 /// operand (`sign`, `saturate`, `fast::sin`, `fast::cos`), where the result is an operand
 /// (`fmin`, `fmax`, `median3`, `copysign`, `fabs`, and precise `pow`, whose `pow(x, 1)` is `x`).
-/// `sinpi`, `cospi`, and `tanpi` answer the canonical NaN in both modes for an infinity or a NaN
-/// (EV MBB-pi1-m3). The math-library branch's refinements of `fast_tan`, `fast_asin`, `fast_acos`,
+/// `sinpi`, `cospi`, and `tanpi` answer the canonical NaN in both modes for an infinity or a NaN.
+/// The math-library branch's refinements of `fast_tan`, `fast_asin`, `fast_acos`,
 /// `fast_atan`, and `fast_rsqrt` answer as those calls were measured: a `fast_` symbol's state
 /// either way.
 fn measured(op: FloatFn, fast: bool) -> Option<NanAnswer> {
@@ -301,7 +300,7 @@ fn measured(op: FloatFn, fast: bool) -> Option<NanAnswer> {
 /// signaling one kept. Metal has no `fast_` `half` function, so none is answered. `None` for the
 /// functions that answer a number or an operand for a NaN (`fract`, `sign`, `saturate`, `fmin` and
 /// its family, `median3`, `copysign`). `sinpi`, `cospi`, and `tanpi` answer the canonical `half`
-/// NaN for an infinity or a NaN (EV MBB-half1-m3).
+/// NaN for an infinity or a NaN.
 fn half_function_answer(op: FloatFn, fast: bool) -> Option<NanAnswer> {
     use FloatFn as F;
     use NanAnswer as A;

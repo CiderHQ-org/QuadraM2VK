@@ -1,11 +1,11 @@
 //! Metal's refusal of a pipeline state whose `rasterSampleCount` an Apple GPU does not take.
 //!
-//! - **What Metal answers** (EVs RCH-msaa-m4 and RCH-msaa2-m4, an Apple M4 under macOS 27.0.1,
-//!   plain and under API validation alike). `newRenderPipelineStateWithDescriptor:` answers nil
-//!   with an `NSError` for a `rasterSampleCount` other than 1, 2 and 4 (0, 3, 8, 16 and 32
-//!   measured, with a color attachment, a depth attachment alone, no attachment, and
-//!   rasterization disabled alike), and `newRenderPipelineStateWithMeshDescriptor:` alike (0, 3,
-//!   8 and 16): code 2, `localizedDescription` "rasterSampleCount (8) is not supported by
+//! - **What Metal answers** (an Apple M4 under macOS 27.0.1, plain and under API validation alike).
+//!   `newRenderPipelineStateWithDescriptor:` answers nil with an `NSError` for a
+//!   `rasterSampleCount` other than 1, 2 and 4 (0, 3, 8, 16 and 32 measured, with a color
+//!   attachment, a depth attachment alone, no attachment, and rasterization disabled alike), and
+//!   `newRenderPipelineStateWithMeshDescriptor:` alike (0, 3, 8 and 16): code 2,
+//!   `localizedDescription` "rasterSampleCount (8) is not supported by
 //!   device.", the domain the GPU driver's class. `newRenderPipelineStateWithTileDescriptor:`
 //!   answers so for 0 alone, and makes a tile state of 3, 8, 16, 32 and 64 samples (which the
 //!   compile layer refuses above 1 on every device, `Unsupported(TileShading)`).
@@ -58,7 +58,7 @@ mod tests {
     use super::*;
 
     /// Metal's error for every count but 1, 2 and 4 of a render or mesh state, and for 0 alone of
-    /// a tile state (EVs RCH-msaa-m4 and RCH-msaa2-m4).
+    /// a tile state.
     #[test]
     fn metal_refuses_a_raster_sample_count_an_apple_gpu_lacks() {
         let refused = |call: &'static str, count: u32| {

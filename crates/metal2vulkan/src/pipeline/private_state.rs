@@ -3,26 +3,25 @@
 //! rest.
 //!
 //! Measured on an Apple M4 (macOS 27.0.1; owned Objective-C and MSL probes setting each property
-//! by key-value coding, EVs PRS-intro1-m4 and PRS-ff1-m4):
+//! by key-value coding):
 //!
 //! - `sampleMask` ANDs the coverage of a pipeline with a fragment function, the bits past the
-//!   pipeline's sample count ignored, after the function runs (EVs PRS-sm1-m4, PRS-sm2-m4): the
-//!   function runs for every rasterized sample, masked or not, its `[[sample_mask]]` reads the
-//!   rasterized coverage, and the color, depth and stencil writes and the visibility count then
-//!   keep only the mask's samples (ANDed with the function's own `[[sample_mask]]` output and
-//!   alpha to coverage); under `[[early_fragment_tests]]` only the colors (EV PRS-sm3-m4). A
-//!   pipeline without a fragment function ignores the mask: its depth and stencil writes and its
-//!   visibility count keep every sample. Vulkan's `pSampleMask` ([`GraphicsState::sample_mask`])
-//!   masks before the function runs, so it is Metal's only where the function cannot tell;
-//!   elsewhere the function applies the mask itself in its `SampleMask` output
-//!   (`LoweringInputs::sample_mask`, [`shader_sample_mask`]), which Vulkan applies after it runs,
-//!   and after early tests to the colors alone ([`sample_mask`]).
+//!   pipeline's sample count ignored, after the function runs: the function runs for every
+//!   rasterized sample, masked or not, its `[[sample_mask]]` reads the rasterized coverage, and the
+//!   color, depth and stencil writes and the visibility count then keep only the mask's samples
+//!   (ANDed with the function's own `[[sample_mask]]` output and alpha to coverage); under
+//!   `[[early_fragment_tests]]` only the colors. A pipeline without a fragment function ignores the
+//!   mask: its depth and stencil writes and its visibility count keep every sample. Vulkan's
+//!   `pSampleMask` ([`GraphicsState::sample_mask`]) masks before the function runs, so it is
+//!   Metal's only where the function cannot tell; elsewhere the function applies the mask itself in
+//!   its `SampleMask` output (`LoweringInputs::sample_mask`, [`shader_sample_mask`]), which Vulkan
+//!   applies after it runs, and after early tests to the colors alone ([`sample_mask`]).
 //! - `clipDistanceEnableMask`, `pointCoordLowerLeft`, `pointSizeOutputVS`, `twoSideEnabled`,
 //!   `vertexDepthCompareClampMask`, `depthStencilWriteDisabled`, `sampleCoverageInvert` and
 //!   `needsCustomBorderColorSamplers` (render and compute) change nothing Metal draws, at any
 //!   value tried: they are kept and read by nothing. A sampler's private custom border color
 //!   (`borderColorSPI` 3 with its four values) samples transparent black, the values ignored,
-//!   with the flag or without (EV PRS-bc1-m4): the raw border color 3 the runtime already
+//!   with the flag or without: the raw border color 3 the runtime already
 //!   samples so (`sampler_border_color`).
 //! - `sampleCoverage`, `alphaTestEnabled`, `logicOperationEnabled`, `pointSmoothEnabled` and
 //!   `fragmentDepthCompareClampMask` change what Metal draws; until the translation builds one,
@@ -86,10 +85,10 @@ pub(crate) fn applied_sample_mask(d: &RenderPipelineDescriptor) -> Option<u32> {
 }
 
 /// Whether the fragment function `a` could tell Vulkan's sample mask, applied before it runs,
-/// from Metal's, applied after (EVs PRS-sm1-m4, PRS-sm3-m4): it writes memory (Metal runs it for
-/// the masked samples too), reads `[[sample_mask]]` (Metal's is the rasterized coverage), or
-/// declares `[[early_fragment_tests]]` (Metal's mask then keeps every sample's depth, stencil and
-/// visibility count, and only the colors' masked samples unwritten).
+/// from Metal's, applied after: it writes memory (Metal runs it for the masked samples too), reads
+/// `[[sample_mask]]` (Metal's is the rasterized coverage), or declares `[[early_fragment_tests]]`
+/// (Metal's mask then keeps every sample's depth, stencil and visibility count, and only the
+/// colors' masked samples unwritten).
 fn observes_sample_mask(a: &FunctionArtifact) -> bool {
     let io = &a.interface.io;
     a.interface.writes_memory

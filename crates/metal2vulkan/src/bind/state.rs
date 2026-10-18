@@ -1102,7 +1102,7 @@ impl TextureFacts {
     /// array length only changes the view's subresource range, which is every layer.
     ///
     /// The level count is stated whatever the usage: plain Metal writes a texture made without
-    /// `ShaderWrite` at every level, through every write form, as one made with it (EV XRR2-usw1).
+    /// `ShaderWrite` at every level, through every write form, as one made with it.
     /// A plan is keyed by [`BindShape::for_plan`], which keeps it only at the slots whose levels
     /// the pipeline reads, so textures a function only samples do not split plans by their level
     /// counts.
@@ -1247,7 +1247,7 @@ pub enum BoundBuffer {
         /// `setVertexBytes:length:attributeStride:atIndex:` (and a compute encoder's
         /// `setBytes:length:attributeStride:atIndex:`): the stride a layout of
         /// `MTLBufferLayoutStrideDynamic` reads the bytes at; `None` for the plain setters, which
-        /// such a layout reads at stride 0, as plain Metal reads them (EV `RFL-vbytes-m4`).
+        /// such a layout reads at stride 0, as plain Metal reads them.
         /// `MTLAttributeStrideStatic` is `Some(u32::MAX)`, its low 32 bits: an M4 read element 0
         /// of inline bytes bound so and zeros past it, where a buffer bound so reads stride 0;
         /// the binder refuses a layout that reads inline bytes at that stride
@@ -2076,7 +2076,7 @@ pub struct SamplerShape {
     /// through separate descriptors.
     pub linear: bool,
     /// The min or the mag filter is `Cubic`: Metal samples through the sampler with its bicubic
-    /// filter whatever the level (EV GSM2-bcs2-m4), which a function emulates under its plan's
+    /// filter whatever the level, which a function emulates under its plan's
     /// cubic-sampler variant (`VariantKey::cubic_samplers`).
     #[cfg_attr(feature = "serde", serde(default))]
     pub cubic: bool,

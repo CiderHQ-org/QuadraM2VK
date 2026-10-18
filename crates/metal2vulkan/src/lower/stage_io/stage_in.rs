@@ -24,7 +24,7 @@
 //!
 //! **The stride** of a layout is its descriptor's, compiled in, whatever stride the encoder binds
 //! the buffer with: Metal reads a bound stride only for a layout of
-//! `MTLBufferLayoutStrideDynamic` (an M4 read a fixed 16 under a bound 8, EV REF-stride-probe-4).
+//! `MTLBufferLayoutStrideDynamic` (an M4 read a fixed 16 under a bound 8).
 //! Such a layout (`StageInputLayoutDescriptor::stride` `None`) reads the bound one from
 //! `PushField::StageInStride`, which the binder writes, as 0 for a buffer bound without one.
 //!

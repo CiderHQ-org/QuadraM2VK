@@ -3,11 +3,11 @@
 //!
 //! - On the CPU interpreter, 192 linear 2D samples Metal took, 16 per format and result type, are
 //!   Metal's bytes, through a constexpr sampler and through a runtime one: 128 of the one-plane
-//!   formats (EV TXN-xrprobe4-m3, an Apple M3 Max on macOS 26.7, byte-identical to the Apple
-//!   M4's TXN-xrprobe4-m4), whose device lane `runtime_lane::extended_range_samples` compares the
-//!   same samples on each venue, and 64 of the two-plane formats (EV XRR-tx1-m4, an Apple M4 on
-//!   macOS 27.0.1: footprints inside the texture of its linear clamp-to-edge samples), whose
-//!   device lane `runtime_lane::two_plane_samples` replays every sample of that probe.
+//!   formats (an Apple M3 Max on macOS 26.7, byte-identical to the Apple M4's probe),
+//!   whose device lane `runtime_lane::extended_range_samples` compares the same samples on each
+//!   venue, and 64 of the two-plane formats (an Apple M4 on macOS 27.0.1: footprints inside the
+//!   texture of its linear clamp-to-edge samples), whose device lane
+//!   `runtime_lane::two_plane_samples` replays every sample of that probe.
 //! - Under every address mode, each border color, a constant offset, and pixel coordinates,
 //!   through constexpr and runtime samplers (a runtime sampler's `MirrorClampToEdge` too, each
 //!   tap mirrored once and clamped), nearest samples are the decoded texel at Metal's position and
@@ -17,7 +17,7 @@
 //!   form's gather, a linear mip filter of a two-plane form, and mixed constexpr filters), and by
 //!   the binder (a runtime sampler whose word states mixed filters).
 //! - A swizzled texture's samples and gathers are the unswizzled texture's, swizzled, as plain
-//!   Metal answers (EV FPV-sw1-m4).
+//!   Metal answers.
 //! - The binder joins a sampled slot bound in such a format to the variant, whose plan views the
 //!   slot's own image in the raw format and binds no sampler.
 
@@ -27,13 +27,12 @@ use crate::error::Unsupported;
 use crate::metal::sampler::SamplerWord;
 use crate::metal::{SamplerAddressMode, SamplerBorderColor, SamplerMinMagFilter};
 
-/// Metal's linear samples, the files `xr_samples.tsv` (EV TXN-xrprobe4-m3) and
-/// `xr_plane_samples.tsv` (EV XRR-tx1-m4) beside the owned fixture `xr_samples.metal`, one per
-/// line: the raw format (550 `RGB10A8_2P_XR10`, 551 its `_sRGB` twin, 552 `BGRA10_XR`, 553 its
-/// twin, 554 `BGR10_XR`, 555 its twin), the result (`f` `float`, `h` `half`), the fractions `kx`
-/// and `ky` in 1/256 steps, the codes (red, green, blue, alpha; a two-plane texel's alpha its
-/// byte) of the taps `(i, j)`, `(i + 1, j)`, `(i, j + 1)`, and `(i + 1, j + 1)`, and the result's
-/// lanes as bits.
+/// Metal's linear samples, the files `xr_samples.tsv` and `xr_plane_samples.tsv` beside the owned
+/// fixture `xr_samples.metal`, one per line: the raw format (550 `RGB10A8_2P_XR10`, 551 its `_sRGB`
+/// twin, 552 `BGRA10_XR`, 553 its twin, 554 `BGR10_XR`, 555 its twin), the result (`f` `float`, `h`
+/// `half`), the fractions `kx` and `ky` in 1/256 steps, the codes (red, green, blue, alpha; a
+/// two-plane texel's alpha its byte) of the taps `(i, j)`, `(i + 1, j)`, `(i, j + 1)`, and `(i + 1,
+/// j + 1)`, and the result's lanes as bits.
 fn metal_linear() -> String {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../metal2vulkan-validation/fixtures/public/engine");
@@ -412,7 +411,7 @@ fn address(mode: Mode, j: i64, n: i64) -> Option<i64> {
             let m = if j < 0 { -1 - j } else { j } % (2 * n);
             Some(if m >= n { 2 * n - 1 - m } else { m })
         }
-        // Mirrored once about the level's start, then clamped (RRP-probe5-m4).
+        // Mirrored once about the level's start, then clamped.
         Mode::MirrorClamp => Some(if j < 0 { -1 - j } else { j }.min(n - 1)),
         Mode::Border => (0..n).contains(&j).then_some(j),
     }
@@ -834,7 +833,7 @@ fn unbuilt_samples_are_refused() {
 /// `half` that rounded toward zero, saturating at 65504; a gather reads the red of the linear
 /// footprint's four taps in Vulkan's order `(x0, y1)`, `(x1, y1)`, `(x1, y0)`, `(x0, y0)`, its
 /// `half` rounded to nearest even; a tap outside a border axis reads the border color through
-/// the format's channels (EVs FPV-pf5-m4 and FPV-pf8-m4).
+/// the format's channels.
 #[test]
 fn bfloat_samples_read_the_nearest_texel() {
     use SamplerAddressMode as A;
@@ -958,7 +957,7 @@ fn bfloat_samples_read_the_nearest_texel() {
             },
         }
     };
-    // A gather's `half` rounds to nearest even, a sample's toward zero (EV FPV-pf8-m4).
+    // A gather's `half` rounds to nearest even, a sample's toward zero.
     let bits = |v: u32, half: bool, gather: bool| {
         let x = f32::from_bits(v);
         match (half, gather || x.is_nan()) {
@@ -1037,7 +1036,7 @@ fn bfloat_samples_read_the_nearest_texel() {
 }
 
 /// A swizzled texture's samples and gathers are the unswizzled texture's, swizzled, as plain
-/// Metal answers (EV FPV-sw1-m4): nearest and linear samples (`float` and `half`, through a
+/// Metal answers: nearest and linear samples (`float` and `half`, through a
 /// constexpr sampler and a runtime one) and `float` gathers of each component, of a 4 x 4
 /// texture of each one-plane extended-range, padded and bfloat form (a two-plane form's samples
 /// alone), clamped to an opaque-white border, at 32 positions around and past the edges, on one
@@ -1217,7 +1216,7 @@ fn padded_words(ch: usize) -> Vec<u16> {
         .collect()
 }
 
-/// Each of Metal's samples in `padded_samples.tsv` (EVs XRR2-x6e and XRR2-x6h, an Apple M4 under
+/// Each of Metal's samples in `padded_samples.tsv` (an Apple M4 under
 /// macOS 27.0.1, byte-identical on an Apple M3 Max under macOS 26.7) is Metal's bytes, through a
 /// runtime sampler of the row's state and, where a constexpr sampler can state it, through one:
 /// `R10Unorm_X6` and `RG10Unorm_X12` under every address mode and border color, nearest and
@@ -1228,8 +1227,8 @@ fn padded_samples_are_metals_bytes() {
     replay_padded_samples("padded_samples.tsv");
 }
 
-/// Each of Metal's samples in `padded_srgb_samples.tsv` (EVs XRR2-x6es and XRR2-x6hs, an Apple M4
-/// under macOS 27.0.1, byte-identical on an Apple M3 Max under macOS 26.7) is Metal's bytes, as
+/// Each of Metal's samples in `padded_srgb_samples.tsv` (an Apple M4 under macOS 27.0.1,
+/// byte-identical on an Apple M3 Max under macOS 26.7) is Metal's bytes, as
 /// [`padded_samples_are_metals_bytes`] replays them: `R10Unorm_X6_sRGB` (its taps its decode
 /// steps, its linear filter a YCbCr field's on the grid `8192`) and `RG10Unorm_X12_sRGB` (its
 /// reads and filter `RG10Unorm_X12`'s) under every address mode and border color, nearest and

@@ -5,7 +5,7 @@
 //!
 //! Before, each such command made a `VkDescriptorPool` of its own, which its command buffer
 //! released as it completed: on RADV, ANV and NVIDIA a pool is device memory of its own, so a
-//! pool per command cost more than the rest of its encoding (EV PERF-bench0: 2000 dispatches in
+//! pool per command cost more than the rest of its encoding (2000 dispatches in
 //! one command buffer took 14.5 to 17.8 us each to encode on a Radeon 780M).
 //!
 //! - **Sizing.** A pool holds [`FIRST`] sets of the needs (descriptor counts by type, and pool

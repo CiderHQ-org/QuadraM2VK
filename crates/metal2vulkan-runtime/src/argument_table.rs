@@ -24,7 +24,7 @@
 //! draw retains nothing of its own: it looks its slot up among what the last retain held.
 //!
 //! A compute encoder's table differs in two answers, as plain Metal's compute encoder gave them
-//! on an M4 (EV `SWP-misuse1-m4`) where its API validation asserts: it holds a buffer bound past
+//! on an M4 where its API validation asserts: it holds a buffer bound past
 //! its length, which a dispatch refuses only where the kernel reads the slot (a read there is past
 //! the buffer: memory decides it), and it takes an offset set at an index with no buffer as no
 //! change. A render stage's table refuses both at the call, as Metal's validation does; plain
@@ -287,8 +287,7 @@ pub(super) fn check_range(
 /// The per-bind stride `stride` names: none for `MTLAttributeStrideStatic`, else its low 32
 /// bits. Plain Metal reads a stride past 32 bits so, and its validation takes it (an M4 under macOS
 /// 27.0.1 and an M3 Max under 26.7, compute stage-in and vertex fetch, both binding forms: `2^32 +
-/// 8` and `2^63 + 8` read at 8, `2^33 + 4` at 4, `2^32` at 0; EVs RRP-probe1-m4, RRP-probe1-m3,
-/// RRP-probe2-m4).
+/// 8` and `2^63 + 8` read at 8, `2^33 + 4` at 4, `2^32` at 0).
 fn attribute_stride(stride: u64) -> Option<u32> {
     // Truncation is the measured answer.
     (stride != ATTRIBUTE_STRIDE_STATIC).then_some(stride as u32)
@@ -537,19 +536,19 @@ impl ArgumentTable {
     }
 
     /// `setBufferOffset:atIndex:`: the stride form with `MTLAttributeStrideStatic`, so it clears
-    /// the index's stride, as the plain buffer setters do. Measured for the vertex form on an M4
-    /// (EV `CFIT-metal-probe-3`): after a stride form, Metal's validation stops the draw for
-    /// "providing `MTLAttributeStrideStatic` to `attributeStride` when stride at buffer-layout
-    /// index 0 is dynamic", and Metal without it reads the buffer at stride 0. Every stage's form
-    /// sets this one table. At an index holding a visible-function table, plain Metal then reads
-    /// the null table there, of size 0 and every entry null, at any offset, 0 included, until a
-    /// table or buffer is bound again (an M4 under macOS 27.0.1: the compute form at offsets 0 to
-    /// 4096, the vertex form at 4 to 24; a second offset keeps it null; EVs RRP-probe1-m4,
-    /// RRP-probe2-m4; Metal's debug layer raises an exception there), and so does the runtime. At
-    /// an index holding inline bytes, they read as zeros at any offset until the index is bound
-    /// again, as plain Metal reads them (an M4, EV `APX-bytes1-m4`). Refused: an index past the
-    /// table, no buffer bound at the index in a render stage's table (a compute table's index with
-    /// none keeps no offset), and in a render stage's table an offset past the buffer's length.
+    /// the index's stride, as the plain buffer setters do. Measured for the vertex form on an M4:
+    /// after a stride form, Metal's validation stops the draw for "providing
+    /// `MTLAttributeStrideStatic` to `attributeStride` when stride at buffer-layout index 0 is
+    /// dynamic", and Metal without it reads the buffer at stride 0. Every stage's form sets this
+    /// one table. At an index holding a visible-function table, plain Metal then reads the null
+    /// table there, of size 0 and every entry null, at any offset, 0 included, until a table or
+    /// buffer is bound again (an M4 under macOS 27.0.1: the compute form at offsets 0 to 4096, the
+    /// vertex form at 4 to 24; a second offset keeps it null; Metal's debug layer raises an
+    /// exception there), and so does the runtime. At an index holding inline bytes, they read as
+    /// zeros at any offset until the index is bound again, as plain Metal reads them (an M4).
+    /// Refused: an index past the table, no buffer bound at the index in a render stage's table (a
+    /// compute table's index with none keeps no offset), and in a render stage's table an offset
+    /// past the buffer's length.
     pub(super) fn set_buffer_offset(
         &mut self,
         core: &mut EncoderCore,
@@ -577,8 +576,8 @@ impl ArgumentTable {
         if let Some(len) = self.bytes.get(&index).map(|bytes| bytes.len) {
             // Inline bytes then read as zeros, at any offset, until the index is bound again:
             // plain Metal on an M4 read 64 zero bytes after `setBytes` of 64 then an offset of
-            // 0, 16 or 128, in the compute, vertex and fragment forms (EV `APX-bytes1-m4`,
-            // twice each; its debug layer asserts "index(0) must have an existing buffer").
+            // 0, 16 or 128, in the compute, vertex and fragment forms (twice each; its debug layer
+            // asserts "index(0) must have an existing buffer").
             let zeros = [0u8; INLINE_BYTES_LIMIT as usize];
             let padded = u64::from(len).next_multiple_of(16).max(16);
             let region = core.command_buffer().state().uploads.upload(
@@ -866,6 +865,7 @@ impl ArgumentTable {
     /// The table as `stage`'s function of `interface` reads it: `stage_table`, but a buffer bound
     /// where the function reads a visible-function table is left out, so the slot reads its
     /// neutral, a null table of size 0, as plain Metal reads such a buffer where its validation
+    /// stops the command (an M3 Max and an M4), and so is a table bound where it reads a buffer,
     /// whose slot then reads zeros, as plain Metal's read (an M4). Its slots that tell the device's
     /// view base alignment apart are those of `views`, the state's, as
     /// [`at_bind_views`](Self::at_bind_views) leaves them.
@@ -916,8 +916,7 @@ impl ArgumentTable {
     /// ([`stage_table_reading`](Self::stage_table_reading)): a buffer is bound there and the
     /// function reads a visible-function table, or a table is bound there and the function reads a
     /// buffer it does not write, which plain Metal read as zeros, where its validation stops the
-    /// command (EV RFC-probe1-m4 `ft_table_at_buffer_compute`, `ft_table_at_buffer_vertex`, EV
-    /// RFC-probe2-m4 `ft_table_at_buffer_wide`).
+    /// command.
     fn reads_unbound(&self, (stage, interface): (Stage, &PipelineInterface), index: u32) -> bool {
         let slot = SlotRef {
             stage,

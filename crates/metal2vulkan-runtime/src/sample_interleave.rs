@@ -5,7 +5,7 @@
 //! Vulkan copies no multisampled image to or from a buffer. Metal copies such a blit per sample,
 //! the pixel's samples consecutive in the buffer: texel `(x, y)` sample `s` of an `n`-sample
 //! texture lies at `offset + y * bytesPerRow + (x * n + s) * bpp` (measured on an Apple M4 under
-//! macOS 27.0.1, EV ZIN2-bm1-m4). The runtime moves the samples the only way Vulkan can, through
+//! macOS 27.0.1). The runtime moves the samples the only way Vulkan can, through
 //! two images in the unsigned-integer copy format of the texel size ([`PlanesCopy`]), so a
 //! texel's bits cross unchanged:
 //!

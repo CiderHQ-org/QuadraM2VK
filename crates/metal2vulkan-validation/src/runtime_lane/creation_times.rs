@@ -1,7 +1,7 @@
 //! Pipeline state creation times, four ways: cold (an empty shader cache), from the device's memo
 //! (the same device again), from the shader cache on disk (a new device over the first one's
 //! directory), and from a binary archive (a new device over an empty directory, the archive
-//! loaded). Ignored: the timing EV runs it in release mode on each venue, with the drivers' own
+//! loaded). Ignored: a timing run takes it in release mode on each venue, with the drivers' own
 //! disk caches off, and records the lines it prints.
 //!
 //! The pipelines are the committed public kernel cases the runtime runs and the public render
@@ -171,7 +171,7 @@ fn lookups(s: &ShaderCacheStatistics) -> (u64, u64, u64) {
 }
 
 #[test]
-#[ignore = "a release-mode measurement: the timing EV runs it per venue"]
+#[ignore = "a release-mode measurement: a timing run takes it per venue"]
 fn creation_times_cold_from_the_memo_the_disk_and_an_archive() {
     let (listing, cache, empty) = (
         ScratchCache::new().unwrap(),
@@ -261,7 +261,7 @@ fn creation_times_cold_from_the_memo_the_disk_and_an_archive() {
 /// their threadgroup's width, the same threads: another size's first run and its second
 /// (`SECOND-SIZE` lines), a measurement only, whatever it computes.
 #[test]
-#[ignore = "a release-mode measurement: the timing EV runs it per venue"]
+#[ignore = "a release-mode measurement: a timing run takes it per venue"]
 fn first_dispatch_times() {
     let (listing, cache) = (ScratchCache::new().unwrap(), ScratchCache::new().unwrap());
     let listed = timing_device(listing.path());

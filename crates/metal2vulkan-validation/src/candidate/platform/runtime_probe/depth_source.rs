@@ -25,7 +25,7 @@
 //! and the depth bias's constant, slope and clamp factors, recorded as the product records them
 //! (`metal::state::depth_bias`: Metal's factors, in the device's unit for a float depth format).
 //!
-//! The cases are EV XRR2-dz1b-m4's (`dzprobe.swift`), whose Metal answers were recorded: flat,
+//! The cases are our probe's (`dzprobe.swift`), whose Metal answers were recorded: flat,
 //! sloped, steep and perspective triangles; constant, negative, slope-scaled, clamped and
 //! perspective bias; depth clamp with depth beyond both planes, and clipped; narrowed, reversed
 //! and narrowed-with-clamp viewport ranges. Each form's report counts, over the samples the plain
@@ -33,10 +33,9 @@
 //! whose raw `FragCoord.z` does, the largest distance in units in the last place, and the first
 //! differences; and whether the form covered the same samples.
 //!
-//! The clamp the reports apply is Metal's (EVs DSX-ds2-m4 and DSX-ds3-m4): to `[0, 1]` in clip
-//! mode, to the viewport's range in clamp mode. A device that enabled
-//! `VK_EXT_depth_range_unrestricted` stores a depth that a bias takes past `[0, 1]` in clip mode
-//! unclamped (RADV and NVIDIA, EVs DSX-dz2-radv and DSX-dz2-nv5080), so where the device enabled
+//! The clamp the reports apply is Metal's: to `[0, 1]` in clip mode, to the viewport's range in
+//! clamp mode. A device that enabled `VK_EXT_depth_range_unrestricted` stores a depth that a bias
+//! takes past `[0, 1]` in clip mode unclamped (RADV and NVIDIA), so where the device enabled
 //! `depthClamp`, `VK_EXT_depth_clip_enable`'s `depthClipEnable` and `VK_EXT_depth_clamp_control`'s
 //! `depthClampControl`, every case runs a second time with the ordinary draw's candidate fix
 //! (`ordinary_clamp`): in clip mode, depth clamp on with the user-defined range `[0, 1]` and
@@ -50,7 +49,7 @@
 //! the depth the device stores at each sample (the computed per-sample depth).
 //!
 //! Then [`stored`] reads the stored depth of four cases at one sample three ways (the readback's
-//! fetch, a copy, and a draw's own `EQUAL` test), three times each (EV DSX-dz6).
+//! fetch, a copy, and a draw's own `EQUAL` test), three times each.
 
 use super::super::pipeline::create_shader_module;
 use super::{result_name, Object, Owned, VulkanContext};
@@ -139,7 +138,7 @@ const fn ranged(
     }
 }
 
-/// EV XRR2-dz1b-m4's cases but its two returned-depth ones, which test no `FragCoord.z`.
+/// Our probe's cases but its two returned-depth ones, which test no `FragCoord.z`.
 const CASES: &[Case] = &[
     case("flat", FULL),
     case("sloped", SLOPED),
@@ -236,7 +235,7 @@ pub(super) struct DepthSource {
     /// Per form and sample count: whether every case's clamped `FragCoord.z` equals the stored
     /// depth at every sample, with the same coverage.
     verdicts: Vec<Verdict>,
-    /// The stored depth of four cases read three ways, three times each (EV DSX-dz6).
+    /// The stored depth of four cases read three ways, three times each.
     stored_reads: Vec<stored::StoredRead>,
     /// What stopped the step.
     error: Option<String>,

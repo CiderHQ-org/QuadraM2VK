@@ -4,10 +4,10 @@ use crate::indirect_command_buffer::metal_allocated_size;
 use crate::IndirectCommandBufferDescriptor;
 use metal2vulkan::metal::IndirectCommandType;
 
-/// A fresh descriptor answers as Metal's (probe `RT7-icb-probe3`, an M3 Max and an M4): no
-/// command types, neither the pipeline state nor the buffers inherited, no buffers, 31
-/// threadgroup lengths, no dynamic strides; and as the macOS 26 SDK states: every render state
-/// inherited, no object threadgroup lengths, no color attachment mapping.
+/// A fresh descriptor answers as Metal's (an M3 Max and an M4): no command types, neither the
+/// pipeline state nor the buffers inherited, no buffers, 31 threadgroup lengths, no dynamic
+/// strides; and as the macOS 26 SDK states: every render state inherited, no object threadgroup
+/// lengths, no color attachment mapping.
 #[test]
 fn a_descriptor_has_metal_s_defaults() {
     let descriptor = IndirectCommandBufferDescriptor::new();
@@ -33,8 +33,8 @@ fn a_descriptor_has_metal_s_defaults() {
         [0, 0, 0, 31]
     );
     assert!(!descriptor.support_dynamic_attribute_stride);
-    // Apple's private properties, as a fresh descriptor answers on an M4 (EV APX2-spi1-m4,
-    // plain and validated alike).
+    // Apple's private properties, as a fresh descriptor answers on an M4 (plain and validated
+    // alike).
     assert!(
         descriptor.inherit_stencil_reference_values
             && descriptor.inherit_depth_test_bounds
@@ -52,11 +52,10 @@ fn a_descriptor_has_metal_s_defaults() {
     );
 }
 
-/// `allocatedSize` is Metal's: rows measured on an M4 (EVs MESH-icb2-m4, MESH-icb5-m4,
-/// MESH-icb9-m4 and MESH-icb10-m4), at a page's last count and the next where it turns. Each row: the command
-/// types, whether the pipeline and the buffers are inherited, dynamic strides, the vertex,
-/// fragment, kernel, object and mesh buffer counts, the count of commands, and Metal's answer.
-/// Every kind answers one page for no commands.
+/// `allocatedSize` is Metal's: rows measured on an M4, at a page's last count and the next where it
+/// turns. Each row: the command types, whether the pipeline and the buffers are inherited, dynamic
+/// strides, the vertex, fragment, kernel, object and mesh buffer counts, the count of commands, and
+/// Metal's answer. Every kind answers one page for no commands.
 #[test]
 fn a_buffer_answers_metal_s_allocated_size() {
     type Row = (u32, bool, bool, bool, [u32; 5], u32, u64);
@@ -90,7 +89,7 @@ fn a_buffer_answers_metal_s_allocated_size() {
         (128, false, false, true, [5, 0, 0, 0, 0], 10, 32768),
         (128, false, false, true, [5, 0, 0, 0, 0], 1000, 1687552),
         // A mesh type's odd count with dynamic strides and its own buffers: 4 bytes more,
-        // past a page where the even count ends on one (EVs MESH-icb9-m4, MESH-icb10-m4).
+        // past a page where the even count ends on one.
         (128, false, false, true, [0, 0, 0, 0, 0], 354, 589824),
         (128, false, false, true, [0, 0, 0, 0, 0], 355, 606208),
         (129, false, false, true, [2, 3, 0, 0, 0], 434, 917504),

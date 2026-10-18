@@ -48,12 +48,11 @@ fn a_validated_imageblock_size_is_powers_of_two_of_at_most_1024_cells() {
     }
 }
 
-/// Plain Metal's answers where its API validation asserts, measured by RT11-metal-probe-6 (an M3
-/// Max and an M4 alike) and SWP-misuse5-m4 (an M4), each the size the kernel's `get_width` and
-/// `get_height` read. A side of 0 reads 1 by 1, a side that is not a power of two reads the power
-/// above, and more than 1024 cells in one row or column read one cell. More than 1024 cells over
-/// more rows and columns read 1024 by 1 with every cell 0, and a side past 65536 is unmeasured:
-/// both stay refused.
+/// Plain Metal's answers where its API validation asserts, measured on an M3 Max and an M4 alike,
+/// and on an M4, each the size the kernel's `get_width` and `get_height` read. A side of 0 reads 1
+/// by 1, a side that is not a power of two reads the power above, and more than 1024 cells in one
+/// row or column read one cell. More than 1024 cells over more rows and columns read 1024 by 1 with
+/// every cell 0, and a side past 65536 is unmeasured: both stay refused.
 #[test]
 fn an_imageblock_size_is_what_plain_metal_sets() {
     for ((width, height), read) in [

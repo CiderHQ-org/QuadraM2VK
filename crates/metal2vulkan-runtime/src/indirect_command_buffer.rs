@@ -13,42 +13,40 @@
 //!   answers the mode asked for, and the CPU encodes and reads back a `Private` buffer's commands
 //!   as a `Shared` one's, as plain Metal does.
 //! - **CPU encoding.** [`IndirectCommandBuffer::indirect_compute_command_at`] gives a compute
-//!   command's setters, which write its record as Metal's do (probes `RT7-icb-probe1` to `4`, an M3
-//!   Max on macOS 26.7 and an M4 on 27.0.1): a buffer's address plus its offset's low 32 bits as
-//!   one address (EV STL-off1-m4); threadgroup lengths as set; sizes and stage-in regions to their
-//!   low 32 bits. [`IndirectCommandBuffer::indirect_render_command_at`] gives a render command's
-//!   (probe `RT7-icb-probe6`): its render pipeline state, vertex and fragment buffers, and a draw
-//!   of primitives, each value's low 32 bits; and (probe `RT7-icb-probe7-m4`) an indexed
-//!   draw, its index buffer as one address, and a patch draw, its patch index and tessellation
-//!   factor buffers so; and (probes) an indexed patch draw, its control-point index buffer so too;
-//!   and (a Metal probe) its object and mesh buffers, a mesh draw of threadgroups or threads, and
-//!   its barrier. What Metal's validation stops, or ends the process for, is refused `Invalid`
-//!   ([`Problem::IndirectCommandBuffer`]). A command keeps the pipeline state set on it alive while
-//!   its record names it.
-//! - **Render states a command does not inherit** (EVs IRX-inh1-m4 and IRX-inh2-m4, an M4 with
-//!   macOS 27.0.1, each case plain and under Metal's validation). macOS 26 lets a descriptor leave
-//!   a render command's depth/stencil state, depth bias, depth clip mode, cull mode, front-facing
-//!   winding and triangle fill mode to the command (`inherit_depth_stencil_state` and the rest,
-//!   `false`), which its setters then set. On the M4 none of it is supported: Metal's validation
-//!   stops the creation of such a buffer but for the winding ("must be inherited on this device"),
-//!   plain Metal makes it and its commands draw with the encoder's states as an inheriting buffer's
-//!   do, and every setter raises `APINotSupported`, ending the process, whatever the buffer
-//!   inherits (its validation stops the setter first on a buffer that inherits the state). Its
-//!   Apple10 family alone lists the feature ("Indirect command buffer support for raster and
-//!   depth/stencil state"). So on a device that does not claim Apple10 the runtime makes such a
-//!   buffer, whose commands draw with the encoder's states, and refuses each setter (`Invalid`,
-//!   [`IndirectCommandBufferProblem::RenderState`]); on one that claims it, whose commands would
-//!   draw with their own, both are `NotImplemented(IndirectRenderCommands)`. A buffer that supports
-//!   color attachment mapping executes as any other in an encoder that maps none, the runtime's
-//!   every encoder, as Metal's does. An object threadgroup length a render command sets is taken at
-//!   any index, as plain Metal takes one past the descriptor's count, and kept by none: an executed
-//!   command whose mesh draw's object function reads one is
-//!   `NotImplemented(IndirectRenderCommands)`. Apple's private properties (EV APX2-spi1-m4, the
-//!   same M4): stencil reference values, depth test bounds, scissor rectangles, viewports and the
-//!   blend color left to the command are taken as the render states above (validation stops each
-//!   "must be inherited on this device"; plain Metal draws with the encoder's viewport, scissor,
-//!   cull mode and winding); the scissor rectangle and viewport counts and
-//!   `allowOverrideRenderStates` are kept, and change nothing a command draws.
+//!   command's setters, which write its record as Metal's do (an M3 Max on macOS 26.7 and an M4 on
+//!   27.0.1): a buffer's address plus its offset's low 32 bits as one address; threadgroup lengths
+//!   as set; sizes and stage-in regions to their low 32 bits.
+//!   [`IndirectCommandBuffer::indirect_render_command_at`] gives a render command's: its render
+//!   pipeline state, vertex and fragment buffers, and a draw of primitives, each value's low 32
+//!   bits; and an indexed draw, its index buffer as one address, and a patch draw, its patch index
+//!   and tessellation factor buffers so; and (probes) an indexed patch draw, its control-point
+//!   index buffer so too; and (a Metal probe) its object and mesh buffers, a mesh draw of
+//!   threadgroups or threads, and its barrier. What Metal's validation stops, or ends the process
+//!   for, is refused `Invalid` ([`Problem::IndirectCommandBuffer`]). A command keeps the pipeline
+//!   state set on it alive while its record names it.
+//! - **Render states a command does not inherit** (an M4 with macOS 27.0.1, each case plain and
+//!   under Metal's validation). macOS 26 lets a descriptor leave a render command's depth/stencil
+//!   state, depth bias, depth clip mode, cull mode, front-facing winding and triangle fill mode to
+//!   the command (`inherit_depth_stencil_state` and the rest, `false`), which its setters then set.
+//!   On the M4 none of it is supported: Metal's validation stops the creation of such a buffer but
+//!   for the winding ("must be inherited on this device"), plain Metal makes it and its commands
+//!   draw with the encoder's states as an inheriting buffer's do, and every setter raises
+//!   `APINotSupported`, ending the process, whatever the buffer inherits (its validation stops the
+//!   setter first on a buffer that inherits the state). Its Apple10 family alone lists the feature
+//!   ("Indirect command buffer support for raster and depth/stencil state"). So on a device that
+//!   does not claim Apple10 the runtime makes such a buffer, whose commands draw with the encoder's
+//!   states, and refuses each setter (`Invalid`, [`IndirectCommandBufferProblem::RenderState`]); on
+//!   one that claims it, whose commands would draw with their own, both are
+//!   `NotImplemented(IndirectRenderCommands)`. A buffer that supports color attachment mapping
+//!   executes as any other in an encoder that maps none, the runtime's every encoder, as Metal's
+//!   does. An object threadgroup length a render command sets is taken at any index, as plain Metal
+//!   takes one past the descriptor's count, and kept by none: an executed command whose mesh draw's
+//!   object function reads one is `NotImplemented(IndirectRenderCommands)`. Apple's private
+//!   properties (the same M4): stencil reference values, depth test bounds, scissor rectangles,
+//!   viewports and the blend color left to the command are taken as the render states above
+//!   (validation stops each "must be inherited on this device"; plain Metal draws with the
+//!   encoder's viewport, scissor, cull mode and winding); the scissor rectangle and viewport counts
+//!   and `allowOverrideRenderStates` are kept, and change nothing a command draws.
 //! - **Read-back.** [`IndirectCommandBuffer::commands`] decodes a range of records into typed
 //!   commands, a runtime extension standing for Metal's private getters.
 //! - **Execution.** A compute encoder's `execute_commands_in_buffer` runs a range of the records
@@ -101,11 +99,10 @@ use std::sync::{Arc, Mutex, Weak};
 const DEFAULT_THREADGROUP_LENGTHS: u32 = 31;
 
 /// The most kernel, vertex or fragment buffers, or threadgroup lengths, a descriptor may bind.
-/// Metal's validation stops more than 31 (probes `RT7-icb-probe1`, `RT7-icb-probe6`), but plain
-/// Metal makes a buffer of more, whose commands keep a buffer set at any index below the count
-/// and whose functions bind none past 30 (EV RFC-probe1-m4: 32, 33 and 64 kernel buffers, 32
-/// threadgroup lengths, 32 and 33 vertex and 33 fragment buffers, each set at its last index and
-/// run). Its storage grew with the count to 65536 kernel buffers (EV RFC-probe2-m4; 1024 vertex
+/// Metal's validation stops more than 31, but plain Metal makes a buffer of more, whose commands
+/// keep a buffer set at any index below the count and whose functions bind none past 30 (32, 33 and
+/// 64 kernel buffers, 32 threadgroup lengths, 32 and 33 vertex and 33 fragment buffers, each set at
+/// its last index and run). Its storage grew with the count to 65536 kernel buffers (1024 vertex
 /// and fragment buffers and threadgroup lengths, as kernel buffers grow), but a buffer of 2^31
 /// was made as small as one of few, and 2^32 - 1 ended its process: past 65536 its storage is not
 /// defined.
@@ -142,7 +139,7 @@ const COMPUTE_TYPES: IndirectCommandType = IndirectCommandType::CONCURRENT_DISPA
 /// and an M4), and macOS 26's render states inherited, without color attachment mapping (the
 /// SDK's defaults); Apple's private render states inherited, one scissor rectangle and one
 /// viewport, and no render state overrides (a fresh descriptor's answers on an M4 under macOS
-/// 27.0.1, plain and validated alike: EV APX2-spi1-m4).
+/// 27.0.1, plain and validated alike).
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct IndirectCommandBufferDescriptor {
@@ -171,8 +168,8 @@ pub struct IndirectCommandBufferDescriptor {
     pub support_dynamic_attribute_stride: bool,
     /// `inheritDepthStencilState`: commands draw with the executing encoder's depth/stencil
     /// state. `false` changes nothing a command draws on a device that does not claim Apple10:
-    /// its commands draw with the encoder's state still, as plain Metal's do on an M4 (EV
-    /// IRX-inh1-m4), where Metal's validation stops the buffer's creation ("must be inherited on
+    /// its commands draw with the encoder's state still, as plain Metal's do on an M4, where
+    /// Metal's validation stops the buffer's creation ("must be inherited on
     /// this device"). A device that claims Apple10 refuses it (the module docs).
     pub inherit_depth_stencil_state: bool,
     /// `inheritDepthBias`: as `inherit_depth_stencil_state`, for the depth bias.
@@ -189,14 +186,13 @@ pub struct IndirectCommandBufferDescriptor {
     /// `supportColorAttachmentMapping`: whether the buffer may execute in an encoder that maps
     /// its color attachments. The runtime's encoders map none
     /// (`RuntimeGap::ColorAttachmentMapping`), and a buffer that supports it executes in one that
-    /// maps none as any other does, as Metal's does on an M4 with and without its validation (EV
-    /// IRX-inh1-m4).
+    /// maps none as any other does, as Metal's does on an M4 with and without its validation.
     pub support_color_attachment_mapping: bool,
     /// `inheritStencilReferenceValues`, Apple's private property: as
     /// `inherit_depth_stencil_state`, for the stencil reference values. On an M4 plain Metal
     /// makes a buffer that does not inherit them, whose commands draw with the encoder's states,
-    /// and its validation stops the creation ("must be inherited on this device"; EV
-    /// APX2-spi1-m4), as for the four below.
+    /// and its validation stops the creation ("must be inherited on this device"), as for the four
+    /// below.
     pub inherit_stencil_reference_values: bool,
     /// `inheritDepthTestBounds`, private: as `inherit_stencil_reference_values`, for the depth
     /// test bounds.
@@ -209,7 +205,7 @@ pub struct IndirectCommandBufferDescriptor {
     /// `inheritBlendColor`, private: as `inherit_stencil_reference_values`, for the blend color.
     pub inherit_blend_color: bool,
     /// `maxScissorRectCount`, private: kept. A buffer made with another count draws with the
-    /// encoder's scissor rectangles, plain and validated (EV APX2-spi1-m4).
+    /// encoder's scissor rectangles, plain and validated.
     pub max_scissor_rect_count: u64,
     /// `maxViewportCount`, private: as `max_scissor_rect_count`, for the viewports.
     pub max_viewport_count: u64,
@@ -289,8 +285,7 @@ impl IndirectCommandBufferDescriptor {
         // calls refuse them, `check_command_types`).
         // Draws of any kind beside dispatches make a buffer of compute commands, as plain
         // Metal's: its compute commands encode and run, and its process ends at a render
-        // command's first setter (EVs RFC-probe1-m4 `icb_mixed_compute`, `icb_mixed_render`,
-        // RFC-probe3-m4 `mixed_indexed`, `mixed_patches`, `mixed_mesh`, `mixed_threads_draw`).
+        // command's first setter.
         let mixed = types.intersects(RENDER_TYPES) && types.intersects(COMPUTE_TYPES);
         let source = |inherited| {
             if inherited {
@@ -384,8 +379,7 @@ impl IndirectCommandBufferDescriptor {
 }
 
 /// What an indirect command buffer call did wrong (`Problem::IndirectCommandBuffer`): each is
-/// what Metal's API validation stops, or what ends Metal's process (probes `RT7-icb-probe1` to
-/// `4`).
+/// what Metal's API validation stops, or what ends Metal's process.
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IndirectCommandBufferProblem {
@@ -397,7 +391,7 @@ pub enum IndirectCommandBufferProblem {
     NoCommandTypes,
     /// A descriptor with more kernel, vertex, fragment, object or mesh buffers, or kernel
     /// threadgroup lengths, than 65536, past which plain Metal's storage is not defined (a buffer of 2^31 kernel
-    /// buffers was made as small as one of few, 2^32 - 1 ended its process; EV RFC-probe2-m4).
+    /// buffers was made as small as one of few, 2^32 - 1 ended its process).
     /// Metal's validation stops more than 31, but plain Metal makes a buffer of up to 65536, as
     /// the runtime does.
     BindCount {
@@ -433,17 +427,17 @@ pub enum IndirectCommandBufferProblem {
     /// A draw of a kind (`DRAW_INDEXED`, `DRAW_PATCHES` or `DRAW_INDEXED_PATCHES`, a probe) whose
     /// record the buffer's records cannot hold: an indexed draw on a buffer of draws of primitives
     /// alone (plain Metal's GPU faults), a patch draw of either kind on one of neither patch kind
-    /// (plain Metal ends its process; EVs ICBV-hostkinds-m3 and -m4), a draw of primitives or an
-    /// indexed one on a buffer of mesh draws alone (Metal's process ends, with and without its
-    /// validation; EV IRX-mesh2-m4), a mesh draw on one of no mesh kind (a kernel's faults Metal's
-    /// GPU on a buffer of draws of primitives, a Metal probe). Metal's validation stops any kind
-    /// the command types lack ("drawIndexedPrimitives is not enabled on this indirect command
-    /// buffer"), but plain Metal runs one their records hold, as the runtime does.
+    /// (plain Metal ends its process), a draw of primitives or an indexed one on a buffer of mesh
+    /// draws alone (Metal's process ends, with and without its validation), a mesh draw on one of
+    /// no mesh kind (a kernel's faults Metal's GPU on a buffer of draws of primitives, a Metal
+    /// probe). Metal's validation stops any kind the command types lack ("drawIndexedPrimitives is
+    /// not enabled on this indirect command buffer"), but plain Metal runs one their records hold,
+    /// as the runtime does.
     CommandType(IndirectCommandType),
     /// An execution range read from a buffer (`execute_commands_in_buffer_indirect`) at an
     /// `offset` that is not a multiple of 4 bytes, or whose 8 bytes run past the buffer's
     /// `length`. Metal's validation stops neither, but what it reads is not defined: its GPU
-    /// faulted the command buffer at an offset of 2 (probe `RT7-icb-probe5`).
+    /// faulted the command buffer at an offset of 2.
     RangeBuffer {
         /// The range's offset in the buffer.
         offset: u64,
@@ -458,8 +452,7 @@ pub enum IndirectCommandBufferProblem {
     /// `set_kernel_buffer`), where its pipeline state's layout of `MTLBufferLayoutStrideDynamic`
     /// reads the stride. Metal reads such a buffer at stride 2^32 - 1, with no bounds check, so
     /// past element 0 the fetch reads whatever memory lies 4 GiB on (measured on an M3 Max and an
-    /// M4, with and without the debug layer, which stops neither; EVs `ICBV-plainstride2-m3`,
-    /// `-m4`, `ICBV-plainstride3-m3`, `-m4`).
+    /// M4, with and without the debug layer, which stops neither).
     UnstridedBuffer {
         /// The buffer's index.
         index: u32,
@@ -469,19 +462,17 @@ pub enum IndirectCommandBufferProblem {
     /// `set_triangle_fill_mode`) on a device that does not claim Apple10. Plain Metal raises
     /// `APINotSupported` at each, ending its process, on an M4 (macOS 27.0.1), whether the
     /// buffer inherits the state or not; its validation stops the setter on a buffer that
-    /// inherits the state, and the creation of one that does not (EVs IRX-inh1-m4,
-    /// IRX-inh2-m4).
+    /// inherits the state, and the creation of one that does not.
     RenderState,
     /// An object threadgroup length set on a render command of a buffer whose command types
     /// hold no mesh draw (`set_object_threadgroup_memory_length`): Metal's process ends, with and
-    /// without its validation, on an M4 (EV IRX-inh2-m4).
+    /// without its validation, on an M4.
     ObjectThreadgroupMemory,
     /// A render pipeline state set on a command of a buffer whose command types hold no draw of
     /// its kind (`set_render_pipeline_state`): one of a vertex function on a buffer of mesh draws
     /// alone, a mesh one on a buffer of no mesh draw. Metal's process ends in the setter, with
-    /// and without its validation, on an M4 (EVs IRX-mesh1-m4: buffers of either mesh kind and
-    /// of both, Metal's driver faulting; IRX-mesh3-m4: buffers of draws of primitives, of indexed
-    /// draws and of patch draws).
+    /// and without its validation, on an M4 (buffers of either mesh kind and of both, Metal's
+    /// driver faulting: buffers of draws of primitives, of indexed draws and of patch draws).
     PipelineKind,
 }
 
@@ -605,7 +596,7 @@ impl Device {
 /// no reference: the program's last release of the state gives its ID back while the command
 /// still names it (the consumer's G323). It holds what the state runs, its program: while the
 /// record names the ID the command runs that program, whoever holds the ID since, as Metal's
-/// command the CPU encoded runs the released state's (EV RRS2-icbprobe1-m4).
+/// command the CPU encoded runs the released state's.
 #[derive(Clone)]
 enum CommandState {
     Compute(WeakComputePipelineState, ComputeProgram, IdStamp),
@@ -1121,11 +1112,11 @@ impl IndirectCommandBuffer {
 
     /// `range` as commands, refused unless it starts below the size and ends at or before it, as
     /// Metal's validation requires of `resetWithRange:`, or is the empty one at the size, which
-    /// plain Metal takes and which resets nothing (EV RFC-probe1-m4 `icb_reset_empty_at_size`).
-    /// Plain Metal's process ended at a range far past the size, its GPU faulted executing a buffer
-    /// reset from past its size, and a range across the end reset the commands inside it but left
-    /// the buffer running nothing (`icb_reset_far_past`, `icb_reset_start_past`,
-    /// `icb_reset_cross_end`), so those stay refused.
+    /// plain Metal takes and which resets nothing. Plain Metal's process ended at a range far past
+    /// the size, its GPU faulted executing a buffer reset from past its size, and a range across
+    /// the end reset the commands inside it but left the buffer running nothing
+    /// (`icb_reset_far_past`, `icb_reset_start_past`, `icb_reset_cross_end`), so those stay
+    /// refused.
     fn inside(&self, range: &Range<u64>) -> Result<Range<u32>, Error> {
         let size = u64::from(self.0.size);
         let at_size = range.start == size && range.end == size;
@@ -1169,13 +1160,12 @@ impl IndirectCommandBuffer {
     }
 
     /// `uniqueIdentifier`, Apple's private property: 2^36 plus the buffer's place in Metal's
-    /// range for indirect command buffers, as Metal answers it (ICR-icbspace3-m4,
-    /// ICR-icbspace4-m4 and ICR-icbspace4-m3): the lowest gap from `0x18000` that holds its
-    /// [`allocated_size`](Self::allocated_size) and one 16-KiB page more, at a multiple of 32
-    /// KiB, free again once the buffer is gone. Metal's own encoders take ranges there too, which
-    /// the runtime does not, so after a blit encoder that copies, resets or fills, or a render
-    /// encoder, Metal's answer lies above the runtime's: a buffer made after its device opened any
-    /// command encoder announces
+    /// range for indirect command buffers, as Metal answers it: the lowest gap from `0x18000` that
+    /// holds its [`allocated_size`](Self::allocated_size) and one 16-KiB page more, at a multiple
+    /// of 32 KiB, free again once the buffer is gone. Metal's own encoders take ranges there too,
+    /// which the runtime does not, so after a blit encoder that copies, resets or fills, or a
+    /// render encoder, Metal's answer lies above the runtime's: a buffer made after its device
+    /// opened any command encoder announces
     /// [`Degradation::UnmeasuredUniqueIdentifier`](crate::Degradation::UnmeasuredUniqueIdentifier)
     /// once a device where this answers.
     pub fn unique_identifier(&self) -> u64 {
@@ -1194,8 +1184,7 @@ impl IndirectCommandBuffer {
     /// at or past the size, as Metal's validation stops it; a buffer of render command types
     /// (`CommandKind`), which ends Metal's process. A `Private` buffer's commands are encoded
     /// here too, as plain Metal encodes, reads back and runs them where its validation stops the
-    /// call (probe `RT7-icb-probe3` `encode_private`, `execute_private_cpu_encoded`, an M3 Max
-    /// and an M4).
+    /// call (an M3 Max and an M4).
     pub fn indirect_compute_command_at(&self, index: u64) -> Result<IndirectComputeCommand, Error> {
         const CALL: &str = "indirect_compute_command_at";
         let index = self.command_at(CALL, index, false)?;
@@ -1208,8 +1197,7 @@ impl IndirectCommandBuffer {
     /// `indirectRenderCommandAtIndex:`: command `index`'s setters. Refused (`Invalid`) as
     /// [`indirect_compute_command_at`](Self::indirect_compute_command_at) is, and for a buffer of
     /// dispatches beside draws (`CommandKind`), which ends Metal's process at the command's
-    /// first setter or breaks its other commands (EVs RFC-probe1-m4 `icb_mixed_render`,
-    /// RFC-probe2-m4 `mixed_render_draw_only`). A buffer of dispatches alone gives one, as plain
+    /// first setter or breaks its other commands. A buffer of dispatches alone gives one, as plain
     /// Metal does where its validation stops the call, whose setters do what Metal's do there.
     pub fn indirect_render_command_at(&self, index: u64) -> Result<IndirectRenderCommand, Error> {
         const CALL: &str = "indirect_render_command_at";
@@ -1264,10 +1252,8 @@ impl IndirectCommandBuffer {
 
     /// Refuse, for `call`, a buffer of no command types (`Invalid`,
     /// `IndirectCommandBufferProblem::NoCommandTypes`): plain Metal makes one, and executes,
-    /// resets, optimizes and copies it as nothing (EV RFC-probe3-m4 `t0_*`), but its process
-    /// ends at a command's first setter and at its CPU reset (EVs RFC-probe1-m4
-    /// `icb_types0_compute`, `icb_types0_render`, RFC-probe2-m4 `t0_reset`); what else it does
-    /// with one was not measured.
+    /// resets, optimizes and copies it as nothing, but its process ends at a command's first setter
+    /// and at its CPU reset; what else it does with one was not measured.
     pub(super) fn check_command_types(&self, call: &'static str) -> Result<(), Error> {
         if self.has_no_command_types() {
             return Err(problem(call, IndirectCommandBufferProblem::NoCommandTypes));
@@ -1276,9 +1262,8 @@ impl IndirectCommandBuffer {
     }
 
     /// Whether a render pass's execution of the buffer runs nothing, as plain Metal's runs a
-    /// buffer of no command types, or of dispatches beside draws of primitives (EV RFC-probe2-m4
-    /// `t0_exec_render`, `mixed_exec_render`). One of dispatches beside other draws was not
-    /// measured in a pass.
+    /// buffer of no command types, or of dispatches beside draws of primitives. One of dispatches
+    /// beside other draws was not measured in a pass.
     pub(super) fn runs_nothing_in_a_pass(&self) -> bool {
         let types = self.0.descriptor.command_types;
         types.is_empty()
@@ -1318,13 +1303,11 @@ impl IndirectCommandBuffer {
     /// at 2^40 + 16 or 2^32 + 32, plainly or with an attribute stride, read and answered 16 or 32
     /// past the buffer's address, and so did a fragment buffer's getter; one set at 2^32 + 16 in a
     /// buffer past 4 GiB read at 16, where a compute encoder's own buffer reads at the whole offset
-    /// (EV STL-off1-m4, with and without API validation; the consumer measured the getters so on an
-    /// M3 Max), and so did object and mesh buffers' getters and reads (EV STL-off2-m4). Refused
-    /// (`Invalid`): a slot at or past the set's limit, a buffer of another device. On a buffer that
-    /// inherits its buffers the record keeps it and reads it back, and an execution binds the
-    /// encoder's buffers alone, none where the encoder's slot is unbound, as plain Metal's (EVs
-    /// RFC-probe1-m4 `icb_inherit_buffers_compute`, `icb_inherit_buffers_render`, RFC-probe2-m4
-    /// `inh_compute_unbound`, `inh_render_unbound`), where its validation stops the call.
+    /// (with and without API validation; the consumer measured the getters so on an M3 Max), and so
+    /// did object and mesh buffers' getters and reads. Refused (`Invalid`): a slot at or past the
+    /// set's limit, a buffer of another device. On a buffer that inherits its buffers the record
+    /// keeps it and reads it back, and an execution binds the encoder's buffers alone, none where
+    /// the encoder's slot is unbound, as plain Metal's, where its validation stops the call.
     fn set_buffer(&self, index: u32, call: &'static str, set: BufferSet<'_>) -> Result<(), Error> {
         let BufferSet {
             stage,
@@ -1346,9 +1329,8 @@ impl IndirectCommandBuffer {
             }
         }
         // Metal keeps the offset's low 32 bits: its getters answer them and the GPU reads
-        // there, inside a buffer past 4 GiB too (EV STL-off1-m4).
-        // A nil buffer keeps them too, as its address: Metal's getters answer them and its
-        // function sees them as the buffer's address (EVs API-icbget1-m4, API-icbget2-m4).
+        // there, inside a buffer past 4 GiB too. A nil buffer keeps them too, as its address:
+        // Metal's getters answer them and its function sees them as the buffer's address.
         let base = buffer.map_or(0, |buffer| buffer.gpu_address().0);
         let binding = BufferBinding {
             address: base + u64::from(offset as u32),
@@ -1975,8 +1957,7 @@ impl IndirectCommandBuffer {
     }
 
     /// The state of kind `of` command `index`'s record runs for `reader`, where it names
-    /// pipeline state ID `named` and the CPU set `set` on the command, as Metal's runs it (EV
-    /// RRS2-icbprobe1-m4):
+    /// pipeline state ID `named` and the CPU set `set` on the command, as Metal's runs it:
     ///
     /// - Where `set` had the ID: the state while it lives; once the program released it, its
     ///   program (as a state of no ID), whoever holds the ID since, as Metal's command the CPU
@@ -2388,7 +2369,7 @@ fn address_at(buffers: &[Option<IndirectBufferBinding>], count: u32, index: u64)
 /// What Metal's attribute stride getter of a stage answers at `index` of `buffers`, as
 /// [`address_at`] reads them: all ones on a buffer without dynamic attribute strides
 /// (`dynamic` false); else the stride set, all ones for the pipeline's own, and 0 where none
-/// is set (EVs API-icbget1-m4, API-icbget2-m4).
+/// is set.
 fn stride_at(
     buffers: &[Option<IndirectBufferBinding>],
     (count, dynamic): (u32, bool),
@@ -2405,7 +2386,7 @@ fn stride_at(
 }
 
 /// `getCommandType`'s answer for a record of `action`: the command type of its dispatch or draw,
-/// none for an empty record (EV API-icbget1-m4 on an M4: `0x20` and `0x40` for the dispatches, 1
+/// none for an empty record (on an M4: `0x20` and `0x40` for the dispatches, 1
 /// and 2 for draws and indexed draws, 0 fresh and after a reset).
 fn command_type(action: &Action) -> IndirectCommandType {
     match action {
@@ -2513,9 +2494,9 @@ impl IndirectComputeCommand {
     /// [`set_kernel_buffer`](Self::set_kernel_buffer), at attribute stride `stride` (all ones is
     /// the pipeline's own, as Metal reads it back). Where the descriptor does not support dynamic
     /// attribute strides the stride is dropped and the buffer set as `set_kernel_buffer` sets it,
-    /// as plain Metal keeps it (its stride reads back all ones, the pipeline's own; probe
-    /// `RT7-icb-probe1b` `set_stride_unsupported`, an M3 Max and an M4; Metal's API validation
-    /// stops the call). `None` sets a nil buffer at the stride, which the stride getter answers.
+    /// as plain Metal keeps it (its stride reads back all ones, the pipeline's own; an M3 Max and
+    /// an M4; Metal's API validation stops the call). `None` sets a nil buffer at the stride, which
+    /// the stride getter answers.
     pub fn set_kernel_buffer_with_stride(
         &self,
         buffer: Option<&Buffer>,
@@ -2552,8 +2533,7 @@ impl IndirectComputeCommand {
     /// `threadgroups` of `threads_per_threadgroup`, each axis's low 32 bits, as Metal keeps them.
     /// Every compute buffer's records hold it: on a buffer of dispatches of threads it runs as
     /// on its own, as plain Metal runs it, where Metal's validation stops the call
-    /// ("MTLIndirectCommandTypeConcurrentDispatch is not enabled"; EVs ICBV-hostkinds-m3 and
-    /// -m4).
+    /// ("MTLIndirectCommandTypeConcurrentDispatch is not enabled").
     pub fn concurrent_dispatch_threadgroups(
         &self,
         threadgroups: Size,
@@ -2568,8 +2548,7 @@ impl IndirectComputeCommand {
     /// `concurrentDispatchThreads:threadsPerThreadgroup:`: the command dispatches `threads` in
     /// groups of `threads_per_threadgroup`, each axis's low 32 bits, as Metal keeps them. Every
     /// compute buffer's records hold it: on a buffer of dispatches of threadgroups it runs as on
-    /// its own, as plain Metal runs it, where Metal's validation stops the call (EVs
-    /// ICBV-hostkinds-m3 and -m4).
+    /// its own, as plain Metal runs it, where Metal's validation stops the call.
     pub fn concurrent_dispatch_threads(
         &self,
         threads: Size,
@@ -2706,7 +2685,7 @@ pub struct EncodedComputeCommand {
     pub dispatch: Option<IndirectDispatch>,
     /// `getCommandType`, Apple's private getter: the type of the dispatch the record holds
     /// (`CONCURRENT_DISPATCH` or `CONCURRENT_DISPATCH_THREADS`), none for a fresh or reset
-    /// command, as Metal answers (EV API-icbget1-m4).
+    /// command, as Metal answers.
     pub command_type: IndirectCommandType,
     /// `setBarrier`.
     pub barrier: bool,
@@ -2746,18 +2725,17 @@ pub struct EncodedComputeCommand {
 impl EncodedComputeCommand {
     /// `getKernelBufferAddressAtIndex:`, Apple's private getter: the address of the buffer set
     /// at `index` plus the offset's low 32 bits, the offset's low 32 bits alone for a nil
-    /// buffer, 0 where none is set, as Metal answers (EVs API-icbget1-m4, API-icbget2-m4), past
-    /// the 32 slots a record holds too. None at or past the descriptor's
-    /// `max_kernel_buffer_bind_count`, where Metal's answer was not measured.
+    /// buffer, 0 where none is set, as Metal answers, past the 32 slots a record holds too. None at
+    /// or past the descriptor's `max_kernel_buffer_bind_count`, where Metal's answer was not
+    /// measured.
     pub fn kernel_buffer_address(&self, index: u64) -> Option<u64> {
         address_at(&self.kernel_buffers, self.getters.kernel, index)
     }
 
     /// `getKernelAttributeStrideAtIndex:`, Apple's private getter: all ones on a buffer without
     /// dynamic attribute strides; with them, the stride the stride form set, all ones after the
-    /// plain form, a nil buffer's too, and 0 where none is set, as Metal answers (EVs
-    /// API-icbget1-m4, API-icbget2-m4). Past the count, as
-    /// [`kernel_buffer_address`](Self::kernel_buffer_address).
+    /// plain form, a nil buffer's too, and 0 where none is set, as Metal answers. Past the count,
+    /// as [`kernel_buffer_address`](Self::kernel_buffer_address).
     pub fn kernel_attribute_stride(&self, index: u64) -> Option<u64> {
         let of = (self.getters.kernel, self.getters.dynamic_strides);
         stride_at(&self.kernel_buffers, of, index)
@@ -2847,9 +2825,9 @@ impl IndirectRenderCommand {
     /// Whether it is a command of a buffer of dispatches, which plain Metal gives where its
     /// validation stops `indirectRenderCommandAtIndex:`: the setters it ignores there do nothing
     /// (`draw_primitives`, `set_vertex_buffer`, `set_fragment_buffer`, `set_barrier`,
-    /// `clear_barrier`; the buffer's commands read back and run as before, EVs RFC-probe1-m4,
-    /// RFC-probe2-m4), and the others are refused (`CommandKind`): `set_render_pipeline_state`,
-    /// `draw_indexed_primitives` and `reset` end its process, and the rest were not measured.
+    /// `clear_barrier`; the buffer's commands read back and run as before), and the others are
+    /// refused (`CommandKind`): `set_render_pipeline_state`, `draw_indexed_primitives` and `reset`
+    /// end its process, and the rest were not measured.
     fn of_compute(&self) -> bool {
         !self.icb.is_render()
     }
@@ -2871,8 +2849,7 @@ impl IndirectRenderCommand {
     /// state, a state made without `supportIndirectCommandBuffers` (a tile pipeline's among
     /// them), a state of another device, and a state whose kind of draw the buffer's command
     /// types lack (`PipelineKind`: a vertex function's on a buffer of mesh draws alone, a mesh
-    /// one's on a buffer of no mesh draw), where Metal's process ends (EVs IRX-mesh1-m4 and
-    /// IRX-mesh3-m4).
+    /// one's on a buffer of no mesh draw), where Metal's process ends.
     pub fn set_render_pipeline_state(&self, state: &RenderPipelineState) -> Result<(), Error> {
         const CALL: &str = "set_render_pipeline_state";
         if !state.device().same(self.icb.device()) {
@@ -2953,9 +2930,9 @@ impl IndirectRenderCommand {
     /// [`set_vertex_buffer`](Self::set_vertex_buffer), at attribute stride `stride` (all ones is
     /// the pipeline's own). On a buffer that does not support dynamic attribute strides the
     /// stride is dropped and the buffer set, as plain Metal sets it where its validation stops
-    /// the call: the stride reads back all ones and the draw reads the buffer at its offset
-    /// (EV RFC-probe1-m4 `icb_vertex_stride_unsupported`), as a kernel buffer's is. `None` sets a
-    /// nil buffer at the stride, as [`IndirectComputeCommand::set_kernel_buffer_with_stride`] does.
+    /// the call: the stride reads back all ones and the draw reads the buffer at its offset, as a
+    /// kernel buffer's is. `None` sets a nil buffer at the stride, as
+    /// [`IndirectComputeCommand::set_kernel_buffer_with_stride`] does.
     pub fn set_vertex_buffer_with_stride(
         &self,
         buffer: Option<&Buffer>,
@@ -3025,8 +3002,7 @@ impl IndirectRenderCommand {
     /// validation stops a draw of any kind the command types lack ("drawPrimitives is not
     /// enabled on this indirect command buffer"), but plain Metal runs one whose record a kind
     /// they allow holds as on a buffer of its own kind, and faults the GPU or ends the process
-    /// for the others (EVs ICBV-hostkinds-m3 and -m4, the M3 Max and the M4 alike), as it runs a
-    /// kernel's.
+    /// for the others (the M3 Max and the M4 alike), as it runs a kernel's.
     fn check_draw(
         &self,
         call: &'static str,
@@ -3050,14 +3026,12 @@ impl IndirectRenderCommand {
     /// from `base_instance`, each value's low 32 bits, which the record holds (Metal takes larger
     /// values; what it keeps of them is not measured: its getter answers an object). A draw of no
     /// vertices or no instances runs nothing, as plain Metal runs it where its validation stops
-    /// the call ("instanceCount(0) must be non-zero"; probe `RT7-icb-probe7-m4`). The records of
-    /// every render buffer but one of mesh draws alone hold it: on a buffer whose command types
-    /// lack `DRAW` it runs as on its own, as plain Metal runs it, where Metal's validation stops
-    /// the call ("drawPrimitives is not enabled on this indirect command buffer"; EVs
-    /// ICBV-hostkinds-m3 and -m4). Refused (`Invalid`): a buffer of mesh draws alone
-    /// (`CommandType`), where Metal's process ends, with and without its validation (EV
-    /// IRX-mesh2-m4, an M4: buffers of either mesh kind and of both, the encoder's pipeline
-    /// inherited).
+    /// the call ("instanceCount(0) must be non-zero"). The records of every render buffer but one
+    /// of mesh draws alone hold it: on a buffer whose command types lack `DRAW` it runs as on its
+    /// own, as plain Metal runs it, where Metal's validation stops the call ("drawPrimitives is not
+    /// enabled on this indirect command buffer"). Refused (`Invalid`): a buffer of mesh draws alone
+    /// (`CommandType`), where Metal's process ends, with and without its validation (an M4: buffers
+    /// of either mesh kind and of both, the encoder's pipeline inherited).
     pub fn draw_primitives(
         &self,
         primitive_type: PrimitiveType,
@@ -3088,19 +3062,18 @@ impl IndirectRenderCommand {
     /// baseVertex:baseInstance:`: the command draws `index_count` indices of `index_type` from
     /// `index_buffer_offset` of `index_buffer`, `instance_count` times from `base_instance`, each
     /// index plus `base_vertex`. The record holds the buffer as one address (its `gpu_address`
-    /// plus the offset's low 32 bits, as Metal keeps it, EV STL-off2-m4; its validation checks the
-    /// whole offset, as the refusal below does), which an execution resolves against the encoder's
-    /// resident resources (`render/executions.rs`), and each value's low 32 bits, `base_vertex` as
-    /// a signed one: Metal keeps a base vertex's so (probe `RT7-icb-probe7-m4`; a count past 32
-    /// bits always runs past the buffer, which is refused). It runs as on its own on a buffer of
-    /// patch draws, whose records hold it, as plain Metal runs it (EVs ICBV-hostkinds-m3 and -m4),
-    /// where Metal's validation stops a buffer whose command types lack `DRAW_INDEXED`. A draw of
-    /// no indices or no instances runs nothing, and the indices are read from the offset rounded
-    /// down to a multiple of the index size, as plain Metal runs them where its validation stops
-    /// the call (probe `RT7-icb-probe7-m4`: `idx_count_zero`, `idx_instances_zero`; 32-bit indices
-    /// at offset 2 and 16-bit ones at 1 drew those at 0). Refused (`Invalid`): a buffer of draws of
+    /// plus the offset's low 32 bits, as Metal keeps it; its validation checks the whole offset, as
+    /// the refusal below does), which an execution resolves against the encoder's resident
+    /// resources (`render/executions.rs`), and each value's low 32 bits, `base_vertex` as a signed
+    /// one: Metal keeps a base vertex's so (a count past 32 bits always runs past the buffer, which
+    /// is refused). It runs as on its own on a buffer of patch draws, whose records hold it, as
+    /// plain Metal runs it, where Metal's validation stops a buffer whose command types lack
+    /// `DRAW_INDEXED`. A draw of no indices or no instances runs nothing, and the indices are read
+    /// from the offset rounded down to a multiple of the index size, as plain Metal runs them where
+    /// its validation stops the call (`idx_count_zero`, `idx_instances_zero`; 32-bit indices at
+    /// offset 2 and 16-bit ones at 1 drew those at 0). Refused (`Invalid`): a buffer of draws of
     /// primitives alone, whose records cannot hold it (`CommandType`; plain Metal's GPU faults), or
-    /// of mesh draws alone (`CommandType`; Metal's process ends, EV IRX-mesh2-m4), and, as Metal's
+    /// of mesh draws alone (`CommandType`; Metal's process ends), and, as Metal's
     /// validation stops it, indices past the buffer's length from that offset (`IndexBufferRange`,
     /// of the whole count; plain Metal draws from whatever memory follows), and an index buffer of
     /// another device.
@@ -3157,30 +3130,29 @@ impl IndirectRenderCommand {
     /// `patch_start` (each patch's index from `patch_index_buffer` where it has one),
     /// `instance_count` times from `base_instance`, their factors read from
     /// `tessellation_factor_buffer` at the offset and the instance stride. The record holds each
-    /// buffer as one address, at its offset's low 32 bits as Metal keeps it (EV STL-off2-m4, the
-    /// patch index and factor buffers), which an execution resolves against the encoder's resident
-    /// resources, and each value's low 32 bits (probe `RT7-icb-probe7-m4`: Metal keeps a patch
-    /// count's so). The control points are kept, though Metal's execution draws with its pipeline's
-    /// (measured: 3 and 0 drew as a quad pipeline's 4), as the execution does, more than 32
-    /// included (a Metal probe `icb_cp33` drew as 3 do, where Metal's validation stops the call); a
-    /// draw of no patches or no instances runs nothing, and the patch indices are read from the
-    /// offset rounded down to a multiple of 4, as plain Metal runs them where its validation stops
-    /// the call (probe `RT7-icb-probe7-m4`: `patch_instances_zero`; indices 9 and 3 at offset 2
-    /// drew patches 9 and 3). A factor offset and instance stride that are not multiples of 4,
-    /// which Metal's validation stops for the encoder's, are read as plain Metal reads them, as the
-    /// encoder's are: the factors from the offset rounded down to a multiple of 2, each instance's
-    /// at the stride rounded down to a multiple of 4 (Metal probes `icb_factor_offset2`, 4 and 5:
-    /// strides 2 and 14 drew what 0 and 12 draw, 6 and 10 what 4 and 8 draw). It runs as on its own
-    /// on a buffer of indexed patch draws, whose records hold it, as plain Metal runs it (EVs
-    /// ICBV-hostkinds-m3 and -m4), where Metal's validation stops a buffer whose command types lack
+    /// buffer as one address, at its offset's low 32 bits as Metal keeps it (the patch index and
+    /// factor buffers), which an execution resolves against the encoder's resident resources, and
+    /// each value's low 32 bits (Metal keeps a patch count's so). The control points are kept,
+    /// though Metal's execution draws with its pipeline's (measured: 3 and 0 drew as a quad
+    /// pipeline's 4), as the execution does, more than 32 included (a Metal probe `icb_cp33` drew
+    /// as 3 do, where Metal's validation stops the call); a draw of no patches or no instances runs
+    /// nothing, and the patch indices are read from the offset rounded down to a multiple of 4, as
+    /// plain Metal runs them where its validation stops the call (`patch_instances_zero`; indices 9
+    /// and 3 at offset 2 drew patches 9 and 3). A factor offset and instance stride that are not
+    /// multiples of 4, which Metal's validation stops for the encoder's, are read as plain Metal
+    /// reads them, as the encoder's are: the factors from the offset rounded down to a multiple of
+    /// 2, each instance's at the stride rounded down to a multiple of 4 (Metal probes
+    /// `icb_factor_offset2`, 4 and 5: strides 2 and 14 drew what 0 and 12 draw, 6 and 10 what 4 and
+    /// 8 draw). It runs as on its own on a buffer of indexed patch draws, whose records hold it, as
+    /// plain Metal runs it, where Metal's validation stops a buffer whose command types lack
     /// `DRAW_PATCHES`. Refused (`Invalid`): a buffer of neither patch kind, whose records cannot
     /// hold it (`CommandType`; plain Metal ends its process), and, as Metal's validation stops
     /// each, buffers of another device. Refused as the encoder's draw refuses them, which Metal's
     /// validation of a command was not measured to: patch indices past the patch index buffer
-    /// (`PatchIndexBufferRange`; plain Metal read 0 past it, the buffer's page padding, EV
-    /// IRX-pat1-m4, which stays undefined). An odd factor offset is read from the byte below, and
-    /// an odd instance stride rounded down to a multiple of 4, as plain Metal reads a command's and
-    /// the encoder's alike, with and without its validation (EVs IRX-pat2-m4, IRX-pat3-m4).
+    /// (`PatchIndexBufferRange`; plain Metal read 0 past it, the buffer's page padding, which stays
+    /// undefined). An odd factor offset is read from the byte below, and an odd instance stride
+    /// rounded down to a multiple of 4, as plain Metal reads a command's and the encoder's alike,
+    /// with and without its validation.
     pub fn draw_patches(
         &self,
         number_of_patch_control_points: u64,
@@ -3233,23 +3205,22 @@ impl IndirectRenderCommand {
     /// `p · N + k` of `control_point_index_buffer` from its offset, `N` its pipeline's control
     /// points, whatever the command names, as the encoder's `draw_indexed_patches` reads them
     /// (a probe, an M4: the command's 0, 1 and 4 drew as the pipeline's 3). The record holds each
-    /// buffer as one address, at its offset's low 32 bits (EV STL-off2-m4: the control-point index
-    /// buffer's too), and each value's low 32 bits (probe 9b: Metal keeps a patch start's so; its
-    /// getters answer each count's). `None` for the control-point index buffer, which Metal takes,
-    /// makes the command a plain patch draw of the same values, as Metal records it: its
-    /// `getCommandType` answers `DrawPatches` on an M4 (probe 9b, a buffer of indexed patch draws
-    /// alone) and on the consumer's M3 Max, and it draws as a plain patch draw on that pipeline
-    /// draws, every control-point index 0 on a pipeline with an index type (probe 9b: the same
-    /// marks as its plain patch draw on the same pipeline). It runs as on its own on a buffer of
-    /// patch draws, whose records hold it, as plain Metal runs it (EVs ICBV-ipatch-m4,
-    /// ICBV-hostkinds-m3 and -m4), where Metal's validation stops a buffer whose command types lack
-    /// `DRAW_INDEXED_PATCHES` ("drawIndexedPatches is not enabled on this indirect command
-    /// buffer"). Refused (`Invalid`) as `draw_patches` is, for a buffer of neither patch kind
-    /// (`CommandType`), and for a control-point index buffer of another device. Metal's validation
-    /// does not stop a factor offset or instance stride that is not a multiple of 4 here (probe 9),
-    /// which the runtime reads as `draw_patches` does; nor does it check the control-point index
-    /// buffer, whose index size the pipeline set at execution states (an execution runs what
-    /// Metal's does, `render/executions.rs`).
+    /// buffer as one address, at its offset's low 32 bits (the control-point index buffer's too),
+    /// and each value's low 32 bits (probe 9b: Metal keeps a patch start's so; its getters answer
+    /// each count's). `None` for the control-point index buffer, which Metal takes, makes the
+    /// command a plain patch draw of the same values, as Metal records it: its `getCommandType`
+    /// answers `DrawPatches` on an M4 (probe 9b, a buffer of indexed patch draws alone) and on the
+    /// consumer's M3 Max, and it draws as a plain patch draw on that pipeline draws, every
+    /// control-point index 0 on a pipeline with an index type (probe 9b: the same marks as its
+    /// plain patch draw on the same pipeline). It runs as on its own on a buffer of patch draws,
+    /// whose records hold it, as plain Metal runs it, where Metal's validation stops a buffer whose
+    /// command types lack `DRAW_INDEXED_PATCHES` ("drawIndexedPatches is not enabled on this
+    /// indirect command buffer"). Refused (`Invalid`) as `draw_patches` is, for a buffer of neither
+    /// patch kind (`CommandType`), and for a control-point index buffer of another device. Metal's
+    /// validation does not stop a factor offset or instance stride that is not a multiple of 4 here
+    /// (probe 9), which the runtime reads as `draw_patches` does; nor does it check the
+    /// control-point index buffer, whose index size the pipeline set at execution states (an
+    /// execution runs what Metal's does, `render/executions.rs`).
     pub fn draw_indexed_patches(
         &self,
         number_of_patch_control_points: u64,
@@ -3266,7 +3237,7 @@ impl IndirectRenderCommand {
         tessellation_factor_buffer_instance_stride: u64,
     ) -> Result<(), Error> {
         const CALL: &str = "draw_indexed_patches";
-        // Each buffer at its offset's low 32 bits, as Metal keeps it (EV STL-off2-m4).
+        // Each buffer at its offset's low 32 bits, as Metal keeps it.
         let patch_index = patch_index_buffer.map_or(0, |buffer| {
             buffer.gpu_address().0 + u64::from(patch_index_buffer_offset as u32)
         });
@@ -3353,7 +3324,7 @@ impl IndirectRenderCommand {
     }
 
     /// `setObjectBuffer:offset:atIndex:`: object buffer `index` at `buffer`'s address plus
-    /// `offset`'s low 32 bits, as Metal keeps it (EV STL-off2-m4); `None` sets a nil buffer at the
+    /// `offset`'s low 32 bits, as Metal keeps it; `None` sets a nil buffer at the
     /// offset's low 32 bits, as [`IndirectComputeCommand::set_kernel_buffer`] does. Refused
     /// (`Invalid`): an index at or past the descriptor's `max_object_buffer_bind_count`, a buffer
     /// of another device, a command of a buffer of dispatches (`CommandKind`).
@@ -3444,8 +3415,7 @@ impl IndirectRenderCommand {
     /// probe, the M3 Max and an M4: a reader's object function reads a writer's mesh function's
     /// words) and plain Metal on a buffer without mesh draws, where Metal's validation stops the
     /// call ("setBarrier is not enabled on this indirect command buffer (requires
-    /// DrawMeshThreadgroups or DrawMeshThreads)"; EVs RFC-probe1-m4 `icb_render_barrier`,
-    /// RFC-probe3-m4 `bar_icb_set`, `bar2_icb_set`, an M4). An execution draws such a command in a
+    /// DrawMeshThreadgroups or DrawMeshThreads)"; an M4). An execution draws such a command in a
     /// render pass instance of its own (`render/executions.rs`), a memoryless attachment kept
     /// across it; a barrier set after the encoder that executes the command ended refuses the
     /// commit (`NotImplemented(IndirectRenderCommands)`). A command of a buffer of dispatches does
@@ -3463,8 +3433,8 @@ impl IndirectRenderCommand {
     }
 
     /// `clearBarrier`: the command keeps no barrier, as plain Metal's reads back where its
-    /// validation stops the call on a buffer without mesh draws (EV RFC-probe1-m4
-    /// `icb_render_barrier`). A command of a buffer of dispatches does nothing, as plain Metal's.
+    /// validation stops the call on a buffer without mesh draws. A command of a buffer of
+    /// dispatches does nothing, as plain Metal's.
     pub fn clear_barrier(&self) -> Result<(), Error> {
         if self.of_compute() {
             return Ok(());
@@ -3542,7 +3512,7 @@ impl IndirectRenderCommand {
 
     /// `setObjectThreadgroupMemoryLength:atIndex:`: taken at any index, as plain Metal takes one
     /// at or past the descriptor's `max_object_threadgroup_memory_bind_count`, where its
-    /// validation stops it, and runs the command as before (EV IRX-inh2-m4, an M4). The command
+    /// validation stops it, and runs the command as before (an M4). The command
     /// keeps none: an executed command whose mesh draw's object function has threadgroup memory
     /// arguments is `NotImplemented(IndirectRenderCommands)`. Refused (`Invalid`): a command
     /// of a buffer whose command types hold no mesh draw (`ObjectThreadgroupMemory`), where
@@ -3575,7 +3545,7 @@ pub struct EncodedRenderCommand {
     /// `getCommandType`, Apple's private getter: the type of the draw the record holds (`DRAW`,
     /// `DRAW_INDEXED`, `DRAW_PATCHES`, `DRAW_INDEXED_PATCHES`, `DRAW_MESH_THREADGROUPS` or
     /// `DRAW_MESH_THREADS`; an indexed patch draw without a control-point index buffer is a
-    /// patch draw), none for a fresh or reset command, as Metal answers (EV API-icbget1-m4).
+    /// patch draw), none for a fresh or reset command, as Metal answers.
     pub command_type: IndirectCommandType,
     /// `setBarrier`.
     pub barrier: bool,

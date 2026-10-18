@@ -10,7 +10,7 @@
 //! reads lane `(l - d) mod 32`. The products run over full simdgroups, a partial one (40
 //! threads), and the non-contiguous active lanes of divergent control flow; rotate up over full
 //! simdgroups, as its cases do. The committed cases' Metal rows were qualified on the M3 Max and
-//! the M4 (EVs GSM2-pr-m4, GSM2-pr-m3). No GPU is used.
+//! the M4. No GPU is used.
 //!
 //! `llvm-as` assembles the fixture; a missing tool skips visibly.
 

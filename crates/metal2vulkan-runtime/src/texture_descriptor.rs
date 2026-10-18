@@ -9,9 +9,8 @@
 //! a 3D texture has a depth other than 1, only an array type has an array length other than 1 (at
 //! most 2048), multisample, 1D and 1D array textures have one level (the 1D types
 //! measured: plain Metal asserts "the texture type MTLTextureType1D requires that
-//! mipmapLevelCount is 1", EVs SPCrp-probe3-m4 `mip_u8_1d`, SPCrp-probe6-m4 `d_1d_*`,
-//! `d_1darr_l2_rgba8`), only multisample types have more than one sample, a cube is square, and a
-//! texture has no more levels than its full chain. Every extent is at least 1. More are measured
+//! mipmapLevelCount is 1"), only multisample types have more than one sample, a cube is square, and
+//! a texture has no more levels than its full chain. Every extent is at least 1. More are measured
 //! (an Apple M3 Max on macOS 26.7 and an M4 on 27.0.1, the same on both):
 //!
 //! - A swizzled texture is not written by shaders or rendered to (Metal stops `ShaderWrite` or
@@ -19,36 +18,34 @@
 //!   off), but for one of Apple's private `writeSwizzleEnabled`
 //!   ([`TextureDescriptor::write_swizzle_enabled`]), which Metal makes from the device's, a
 //!   heap's and a buffer's creators, and whose writes go through the swizzle; the shared creator
-//!   still stops it (EVs GSM2-nil-m4, GSM2-nil-m3 and GSM2-nil2-m4). The runtime does not build one
-//!   yet (`NotImplemented(WriteSwizzle)`); the heap size query answers for it.
+//!   still stops it. The runtime does not build one yet (`NotImplemented(WriteSwizzle)`); the heap
+//!   size query answers for it.
 //! - The texture types a pixel format takes (probe 5, every format in each 1D, 1D array, 2D, 2D
 //!   array, cube, cube array and 3D texture): a depth or stencil format no 1D or 3D type; a
 //!   compressed format no 1D type, and an ETC2, EAC or PVRTC one no 3D type either; a 4:2:2
-//!   format (`GBGR422`, `BGRG422`) only 2D, of one level (EV RRP-probe11-m4, plain too); and no
-//!   texture is made in an `X24_Stencil8` format, which only views a texture (API validation). A
-//!   depth or stencil format takes no texture buffer either (plain Metal stops it, `Depth32Float`,
-//!   EVs TTG-nil1-m4 and TTG-nil2-m3); a `Depth32Float` 2D multisample texture is made (EV
-//!   TTG-nil1-m4), and the other multisample textures of these formats are not measured, and not
-//!   refused here.
-//! - A side past the type's largest is stopped, whatever the format (EVs TTG-nil3-m4 and
-//!   TTG-nil6-m4, an M4): 16384 for every type but a 3D texture (2048 on each axis) and a texture
-//!   buffer, 2^28 texels wide (EVs GSM2-nil-m3 and GSM2-nil-m4).
+//!   format (`GBGR422`, `BGRG422`) only 2D, of one level (plain too); and no texture is made in an
+//!   `X24_Stencil8` format, which only views a texture (API validation). A depth or stencil format
+//!   takes no texture buffer either (plain Metal stops it, `Depth32Float`); a `Depth32Float` 2D
+//!   multisample texture is made, and the other multisample textures of these formats are not
+//!   measured, and not refused here.
+//! - A side past the type's largest is stopped, whatever the format (an M4): 16384 for every type
+//!   but a 3D texture (2048 on each axis) and a texture buffer, 2^28 texels wide.
 //! - A multisample texture has more than one sample, at a count the device takes
 //!   (`supportsTextureSampleCount:`) or an Apple GPU's does (2 and 4); Metal stops another (3,
-//!   8 and 16 on an M3 Max and an M4; the same EVs). A count only an Apple GPU takes is the
+//!   8 and 16 on an M3 Max and an M4; the same probes). A count only an Apple GPU takes is the
 //!   device's gap, refused as its image is planned (`Unsupported`, `TextureSampleCount`).
 //! - A texture buffer takes as many levels as its width's full chain: Metal's device, heap and
 //!   shared creators make one of separate levels, with no buffer behind it, and a buffer's
-//!   creator stops it ("Linear texture: cannot be mipmapped"; the same EVs). The runtime does not
-//!   build one yet (`NotImplemented(TextureBufferLevels)`); the heap size query answers Metal's,
-//!   the size of its first level.
+//!   creator stops it ("Linear texture: cannot be mipmapped"; the same probes). The runtime does
+//!   not build one yet (`NotImplemented(TextureBufferLevels)`); the heap size query answers
+//!   Metal's, the size of its first level.
 //! - A texture made in `X32_Stencil8` is a stencil texture as a `Stencil8` one is, in the same
 //!   types: plain Metal makes it, its allocation and heap size those of `Stencil8`, in every usage
-//!   and storage mode (an M4 under macOS 27.0.1, EV SPCrp-probe4-m4 `x_mk_*`, `x_ty_*`, `x_alloc`;
-//!   an M3 Max under 26.7, the consumer's report), though Metal's API validation stops it ("Cannot
-//!   use an Xn format when creating a new texture", but for a heap's texture). The runtime holds it
-//!   as it holds the `X32_Stencil8` view of a `Depth32Float_Stencil8` texture, through the stencil
-//!   of a `Depth32Float_Stencil8` image, which a pipeline of that stencil format renders to.
+//!   and storage mode (an M4 under macOS 27.0.1; an M3 Max under 26.7, the consumer's report),
+//!   though Metal's API validation stops it ("Cannot use an Xn format when creating a new texture",
+//!   but for a heap's texture). The runtime holds it as it holds the `X32_Stencil8` view of a
+//!   `Depth32Float_Stencil8` texture, through the stencil of a `Depth32Float_Stencil8` image, which
+//!   a pipeline of that stencil format renders to.
 //! - The extents a pixel format takes (probe 6, every format in 2D textures from 1x1 to 16x8,
 //!   in 2D array, cube and cube array textures of 8x8, 6x6 and 7x5, and in 3D textures of 4x4x4,
 //!   7x5x3 and 8x8x2): a PVRTC texture is square with a power-of-two side, and a 4:2:2 one has
@@ -72,7 +69,7 @@ pub use metal2vulkan::metal::TextureSwizzleChannels;
 use metal2vulkan::metal::{PixelFormat, TextureType, TextureUsage};
 use metal2vulkan::vk::SampleCountFlags;
 
-/// Metal's largest texture rotation: 4, which stores as 1 does (EV ZCI2-rotprobe3-m4).
+/// Metal's largest texture rotation: 4, which stores as 1 does.
 pub(super) const MAX_ROTATION: u64 = 4;
 
 /// Metal's largest array length (`MTLTextureDescriptor.arrayLength`: "less than 2048", which Metal
@@ -80,9 +77,9 @@ pub(super) const MAX_ROTATION: u64 = 4;
 pub(super) const MAX_ARRAY_LENGTH: u64 = 2048;
 
 /// Metal's largest cube array length: 341 cubes, whose 2046 faces are the most within
-/// [`MAX_ARRAY_LENGTH`] layers. Metal stops 342 and more, plain too, for every format (EVs
-/// XRR2-tcb1-m3, an M3 Max under macOS 26.7, and XRR2-tcb1-m4, an M4 under 27.0.1: `RGBA8Unorm`,
-/// `BGRA10_XR`, both two-plane extended-range formats and a two-plane YCbCr one).
+/// [`MAX_ARRAY_LENGTH`] layers. Metal stops 342 and more, plain too, for every format (an M3 Max
+/// under macOS 26.7, and an M4 under 27.0.1: `RGBA8Unorm`, `BGRA10_XR`, both two-plane
+/// extended-range formats and a two-plane YCbCr one).
 pub(super) const MAX_CUBE_ARRAY_LENGTH: u64 = MAX_ARRAY_LENGTH / 6;
 
 /// The creator a descriptor is checked for ([`TextureDescriptor::check_made`]): the rules are the
@@ -181,9 +178,8 @@ pub struct TextureDescriptor {
     /// reads do (a `BGRA` swizzle's write of `(0.25, 0.5, 0.75, 1)` to an `RGBA8Unorm` texture
     /// stores `(0.75, 0.5, 0.25, 1)`). Plain Metal makes such a texture from the device's, a
     /// heap's and a buffer's creators, and its validation stops it from
-    /// `newSharedTextureWithDescriptor:` (an M4 under macOS 27.0.1 and an M3 Max under 26.7, EVs
-    /// GSM2-nil-m4, GSM2-nil-m3 and GSM2-nil2-m4). The runtime does not build it yet: those
-    /// creators refuse it `NotImplemented(WriteSwizzle)`, and
+    /// `newSharedTextureWithDescriptor:` (an M4 under macOS 27.0.1 and an M3 Max under 26.7). The
+    /// runtime does not build it yet: those creators refuse it `NotImplemented(WriteSwizzle)`, and
     /// [`Device::heap_texture_size_and_align`](crate::Device::heap_texture_size_and_align)
     /// answers its size. Without a swizzle, or without writes, it changes nothing.
     pub write_swizzle_enabled: bool,
@@ -323,7 +319,7 @@ impl TextureDescriptor {
     /// usage, which its views are checked against, stays the descriptor's.
     ///
     /// A descriptor of `write_swizzle_enabled` keeps its usage, swizzled or not, as Metal's
-    /// texture reports it (`ShaderRead | ShaderWrite` of a `BGRA` swizzle, EV GSM2-nil-m4): the
+    /// texture reports it (`ShaderRead | ShaderWrite` of a `BGRA` swizzle): the
     /// heap size query sizes it so.
     pub(super) fn image_usage(&self) -> TextureUsage {
         let usage = self.own_image_usage();
@@ -371,7 +367,7 @@ impl TextureDescriptor {
     /// rule it breaks: as [`check`](Self::check), but a format of which Metal makes no texture
     /// alone answers nil before the sample count's rule, where the device's creator stops a
     /// count it does not take (`RGBA16Float_XR` at 8 samples: nil from the shared creator, a stop
-    /// from the device's; EVs GSM2-nil-m4, GSM2-nil-m3 and GSM2-nil2-m4).
+    /// from the device's).
     pub(super) fn check_shared(&self, rules: TextureRules) -> Result<TextureLayout, Refused> {
         self.check_made(Creator::Shared, rules)
     }
@@ -383,11 +379,10 @@ impl TextureDescriptor {
     /// Every rule Metal's validation stops comes before the formats of which plain Metal makes no
     /// texture and answers nil (`NoTextureOfFormat`, `Unspecialized`): Metal ends the process at
     /// each of them for those formats too, from every creator and the heap size query (an M4
-    /// under macOS 27.0.1 and an M3 Max under 26.7 alike, EVs TTG-nil1-m4, TTG-nil2-m3,
-    /// TTG-nil3-m4, TTG-nil4-m4: an extent of 0 or past the largest side, a 1D height or a
-    /// non-3D depth other than 1, a cube not square, an array length the type lacks, a level
-    /// count past the chain or other than 1 on 1D, a sample count on a type that is not
-    /// multisample, a swizzle with writes, a rotation past 4 or without `framebufferOnly`, and
+    /// under macOS 27.0.1 and an M3 Max under 26.7 alike: an extent of 0 or past the largest side,
+    /// a 1D height or a non-3D depth other than 1, a cube not square, an array length the type
+    /// lacks, a level count past the chain or other than 1 on 1D, a sample count on a type that is
+    /// not multisample, a swizzle with writes, a rotation past 4 or without `framebufferOnly`, and
     /// `ShaderAtomic` usage).
     pub(super) fn check_made(
         &self,
@@ -400,25 +395,24 @@ impl TextureDescriptor {
         let multisample = matches!(ty, T::Type2DMultisample | T::Type2DMultisampleArray);
         let pf = self.pixel_format;
         // Metal's validation stops a texture of a format its release describes none of as it
-        // stops `Invalid` ("has invalid pixelFormat"; EVs XRR2-pf576b-m4 and XRR2-pfi1-m3, the
-        // device's creator), before any other rule.
+        // stops `Invalid` ("has invalid pixelFormat"; the device's creator), before any other rule.
         if !rules.level.describes(pf) {
             return Err(TextureProblem::NotAFormat.into());
         }
         // Metal stops a two-plane YCbCr multisample texture, plain too ("does not support
-        // multisample textures"; EV XRR2-ycf3p1b-m4, every one of the 69, an Apple M4 under
-        // macOS 27.0.1; a 2D multisample array too, EVs TTG-nil1-m4 and TTG-nil2-m3).
+        // multisample textures"; every one of the 69, an Apple M4 under macOS 27.0.1; a 2D
+        // multisample array too).
         if ycbcr_multisample(pf, ty) {
             return Err(TextureProblem::TypeForFormat.into());
         }
         // Plain Metal stops a multisample `Unspecialized` texture ("does not support multisample
         // textures") and, plain too, one of `ShaderAtomic` usage ("not a valid format to be used
-        // with texture atomics"; an M4 under macOS 27.0.1, EV `APX2-un1-m4`).
+        // with texture atomics"; an M4 under macOS 27.0.1).
         if pf == PixelFormat::Unspecialized && multisample {
             return Err(TextureProblem::TypeForFormat.into());
         }
         // No format of which Metal makes no texture alone takes `ShaderAtomic` usage: plain
-        // Metal stops it (EVs TTG-nil1-m4, TTG-nil2-m3).
+        // Metal stops it.
         if (no_texture_alone(pf) || pf == PixelFormat::Unspecialized)
             && self.usage.contains(TextureUsage::SHADER_ATOMIC)
         {
@@ -431,9 +425,8 @@ impl TextureDescriptor {
             Err(stops) => return Err(stops),
         };
         // Plain Metal makes a memoryless two-plane extended-range cube and cube array, where it
-        // answers nil for one of another storage mode (EVs XRR2-tcb1-m3, XRR2-tcb1-m4; its
-        // validation stops a memoryless cube of every format). The device's creation refuses it
-        // (`Device::new_texture`).
+        // answers nil for one of another storage mode (its validation stops a memoryless cube of
+        // every format). The device's creation refuses it (`Device::new_texture`).
         let memoryless = self.resource_options.storage_mode().ok() == Some(StorageMode::Memoryless);
         let type_nil = type_nil.filter(|_| !(memoryless_two_plane_cube(pf, ty) && memoryless));
         if two_planes(pf) && self.usage.contains(TextureUsage::SHADER_ATOMIC) {
@@ -442,7 +435,7 @@ impl TextureDescriptor {
         // Plain Metal stops a depth or stencil texture of `ShaderAtomic` usage ("is not a valid
         // format to be used with texture atomics": the size query of `Depth16Unorm`,
         // `Depth32Float`, `Stencil8`, `Depth32Float_Stencil8` and `X32_Stencil8` at every usage
-        // set with it, EV API-hsa1-m4; `newTextureWithDescriptor:` of a `Private` one, the
+        // set with it; `newTextureWithDescriptor:` of a `Private` one, the
         // consumer's M3 Max under 26.7), on every device alike.
         if is_depth_stencil(pf) && self.usage.contains(TextureUsage::SHADER_ATOMIC) {
             return Err(TextureProblem::UsageForFormat.into());
@@ -477,10 +470,9 @@ impl TextureDescriptor {
             return Err(TextureProblem::ArrayLength.into());
         }
         // Metal refuses a mipmapped 4:2:2 texture, plain too ("the MTLPixelFormat422 pixel
-        // format does not support mipmaps", EV RRP-probe11-m4).
-        // Plain Metal makes a texture buffer of as many levels as its width's full chain (7 of
-        // a 64-texel one) from the device's, a heap's and the shared creator, and stops one more
-        // (EVs GSM2-nil-m4 and GSM2-nil-m3); a buffer's creator stops more than one
+        // format does not support mipmaps"). Plain Metal makes a texture buffer of as many levels
+        // as its width's full chain (7 of a 64-texel one) from the device's, a heap's and the
+        // shared creator, and stops one more; a buffer's creator stops more than one
         // (`linear_plan`).
         let single_level = multisample
             || matches!(ty, T::Type1D | T::Type1DArray)
@@ -501,10 +493,10 @@ impl TextureDescriptor {
         // multisample textures") and of a count the device does not take ("sampleCount (8) is
         // not supported by device": 3, 8 and 16 on an Apple M3 Max under macOS 26.7 and an M4
         // under 27.0.1, `RGBA8Unorm`, `RGBA16Float` and `RGBA16Float_XR` alike, from every
-        // creator and the heap size query; EVs GSM2-nil-m3, GSM2-nil-m4, GSM2-nil2-m4). The
-        // shared creator answers nil first for a format of which Metal makes no texture alone.
-        // A count an Apple GPU takes and the device does not is the device's gap, which its
-        // image's plan refuses (`Unsupported`, `TextureSampleCount`), not a stop.
+        // creator and the heap size query). The shared creator answers nil first for a format of
+        // which Metal makes no texture alone. A count an Apple GPU takes and the device does not is
+        // the device's gap, which its image's plan refuses (`Unsupported`, `TextureSampleCount`),
+        // not a stop.
         let counts = rules.sample_counts | APPLE_SAMPLE_COUNTS;
         if multisample && (samples == 1 || !sample_count_supported(counts, samples)) {
             if creator == Creator::Shared && no_texture_alone(pf) {
@@ -513,7 +505,7 @@ impl TextureDescriptor {
             return Err(TextureProblem::SampleCount.into());
         }
         // Metal makes a swizzle with writes under `writeSwizzleEnabled`, but from the shared
-        // creator, which stops it as without (EVs GSM2-nil-m4 and GSM2-nil-m3).
+        // creator, which stops it as without.
         let writes = TextureUsage::SHADER_WRITE | TextureUsage::RENDER_TARGET;
         let swizzled = !self.swizzle.is_default();
         let write_swizzle_taken = self.write_swizzle_enabled && creator != Creator::Shared;
@@ -521,8 +513,7 @@ impl TextureDescriptor {
             return Err(TextureProblem::SwizzleWithWrites.into());
         }
         // Metal's descriptor validation, plain too: "rotation is not a valid MTLTextureRotation"
-        // past 4, and "a non-zero rotation set but is not marked as framebufferOnly" (EVs
-        // ZCI2-rotprobe-m4, ZCI2-rotprobe3-m4).
+        // past 4, and "a non-zero rotation set but is not marked as framebufferOnly".
         if self.rotation > MAX_ROTATION {
             return Err(TextureProblem::Rotation.into());
         }
@@ -580,7 +571,7 @@ impl TextureDescriptor {
 ///
 /// A usage holding only bits Metal's texture drops (`TextureUsage::DROPPED`: 0x8) is not `Unknown`:
 /// Metal's texture of 0x8 alone answers no usage (0), and Metal keeps it compressed as one of a
-/// usage (EV API-usage8-m4). The runtime keeps the bit in a texture's usage, so its compression,
+/// usage. The runtime keeps the bit in a texture's usage, so its compression,
 /// its image and its views follow the descriptor's bits, and
 /// [`Texture::usage`](crate::Texture::usage) answers without it.
 pub(super) fn effective_usage(usage: TextureUsage) -> TextureUsage {
@@ -678,7 +669,7 @@ pub enum TextureProblem {
     /// A usage the pixel format does not take: `ShaderAtomic` of `RGB10A8_2P_XR10`, its sRGB
     /// twin or `Unspecialized` (measured on an Apple M4, macOS 27.0.1: Metal's descriptor
     /// validation asserts, plain too for `Unspecialized`), or of a format of which Metal makes
-    /// no texture alone (plain Metal asserts, EVs TTG-nil1-m4 and TTG-nil2-m3).
+    /// no texture alone (plain Metal asserts).
     UsageForFormat,
     /// `Unspecialized`, of which Metal makes no texture, an [`Error::Nil`](crate::Error::Nil):
     /// plain Metal answers nil for the texture, a heap's and a buffer's, in every storage mode
@@ -702,10 +693,9 @@ pub enum TextureProblem {
     /// formats (`metal::format::ycbcr_format`, which it makes over an IOSurface's planes,
     /// [`Buffer::new_texture_with_iosurface_plane`]), `RGBA16Float_XR`, `AnyDepth` and
     /// `AnyStencil`, an [`Error::Nil`](crate::Error::Nil). Plain Metal answers nil (an Apple M4
-    /// under macOS 27.0.1, EVs XRR2-ycf3p1b-m4, XRR2-ycc1-m4; with an M3 Max under 26.7, EVs
-    /// TTG-nil1-m4, TTG-nil2-m3): from the device, a heap and a buffer (the linear SPI's too), for
-    /// every texture type the format takes (a two-plane YCbCr format no multisample one, `AnyDepth`
-    /// and `AnyStencil` a 2D, 2D array, cube and cube array one, which
+    /// under macOS 27.0.1; with an M3 Max under 26.7): from the device, a heap and a buffer (the
+    /// linear SPI's too), for every texture type the format takes (a two-plane YCbCr format no
+    /// multisample one, `AnyDepth` and `AnyStencil` a 2D, 2D array, cube and cube array one, which
     /// [`TypeForFormat`](TextureProblem::TypeForFormat) stops; `RGBA16Float_XR` every type, 2
     /// and 4 samples too), once every rule Metal stops passed, and before a heap's or a buffer's
     /// own rules (storage mode, offset, row pitch, bytes past the buffer).
@@ -797,14 +787,13 @@ fn type_for_format(pf: PixelFormat, ty: TextureType) -> Result<(), Refused> {
     // A depth or stencil format takes no texture buffer either, and `AnyDepth` and `AnyStencil`
     // no multisample type: plain Metal stops each ("depth/stencil pixel formats require texture
     // type of MTLTextureType2D[Array] or MTLTextureTypeCube[Array]", "does not support
-    // multisample textures"; `Depth32Float`, `AnyDepth` and `AnyStencil`, EVs TTG-nil1-m4 and
-    // TTG-nil2-m3).
+    // multisample textures"; `Depth32Float`, `AnyDepth` and `AnyStencil`).
     let any_depth = matches!(pf, P::AnyDepth | P::AnyStencil);
     let refused = if is_depth_stencil(pf) || any_depth {
         one_dimensional || ty == T::Type3D || ty == T::TextureBuffer || (any_depth && multisample)
     } else if two_planes(pf) {
         // Measured on an Apple M4 (macOS 27.0.1): Metal answers nil for a cube and a cube array
-        // (plain and validated alike, EV `APX2-xr1-m4`) and its validation asserts on a multisample
+        // (plain and validated alike) and its validation asserts on a multisample
         // texture; it makes 1D, 2D, 2D array and 3D ones, mipmapped too.
         if matches!(ty, T::Cube | T::CubeArray) {
             return Err(Refused::Nil(TextureProblem::TypeForFormat));
@@ -817,7 +806,7 @@ fn type_for_format(pf: PixelFormat, ty: TextureType) -> Result<(), Refused> {
     // census of every format, an Apple M3 Max under macOS 26.7), and their flags list neither
     // MSAA nor resolve.
     // Metal's texture descriptor validation asserts on one of 4 samples (`R16Bfloat`,
-    // `RG16Bfloat`, `RGBA16Bfloat`; EV FPV-pf1-m4, an Apple M4 under macOS 27.0.1).
+    // `RG16Bfloat`, `RGBA16Bfloat`; an Apple M4 under macOS 27.0.1).
     } else if metal2vulkan::metal::format::padded_only_over_memory(pf)
         || ExtendedRange::of(pf).is_some_and(ExtendedRange::bfloat)
     {
@@ -856,8 +845,7 @@ pub(super) struct TextureRules {
 }
 
 /// The sample counts an Apple GPU's textures take: 1, 2 and 4 (an M3 Max under macOS 26.7 and an
-/// M4 under 27.0.1 make 2 and 4 samples and stop 3, 8 and 16; EVs GSM2-nil-m3, GSM2-nil-m4 and
-/// GSM2-nil2-m4).
+/// M4 under 27.0.1 make 2 and 4 samples and stop 3, 8 and 16).
 pub(super) const APPLE_SAMPLE_COUNTS: SampleCountFlags = SampleCountFlags::from_raw(0b111);
 
 /// The widest texture buffer Metal makes: 2^28 texels ([`largest_side`]).
@@ -866,9 +854,9 @@ const MAX_TEXTURE_BUFFER_WIDTH: u64 = 1 << 28;
 /// The largest width, height and depth Metal makes a texture of type `ty` with: 16384 for every
 /// type but a 3D texture and a texture buffer, 2048 for a 3D one (Metal's validation stops a
 /// larger one, "greater than the maximum allowed size", whatever the format; an M4 under macOS
-/// 27.0.1, EVs TTG-nil3-m4 and TTG-nil6-m4), and 2^28 for a texture buffer's width (268, 435, 456
-/// made, one more stopped, `R8Unorm` and `RGBA8Unorm`, from every creator and the heap size query;
-/// an M3 Max under 26.7 and an M4 under 27.0.1, EVs GSM2-nil-m3, GSM2-nil-m4 and GSM2-nil2-m4).
+/// 27.0.1), and 2^28 for a texture buffer's width (268, 435, 456 made, one more stopped, `R8Unorm`
+/// and `RGBA8Unorm`, from every creator and the heap size query; an M3 Max under 26.7 and an M4
+/// under 27.0.1).
 pub(super) fn largest_side(ty: TextureType) -> Option<u64> {
     use TextureType as T;
     match ty {

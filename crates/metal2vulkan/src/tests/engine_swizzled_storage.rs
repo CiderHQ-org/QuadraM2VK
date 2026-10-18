@@ -1,8 +1,7 @@
 //! Swizzled textures at storage slots: under a slot's `swizzled_storage` variant the function
 //! applies the bound texture's swizzle to the texels it reads and undoes it on those it writes, as
-//! plain Metal does through a storage binding of a swizzled view (EVs RRP-probe1-m4 and
-//! RRP-probe9-m4, an M4 under macOS 27.0.1; misuse, which Metal's validation stops: the view's
-//! usage is stripped of `ShaderWrite`).
+//! plain Metal does through a storage binding of a swizzled view (an M4 under macOS 27.0.1; misuse,
+//! which Metal's validation stops: the view's usage is stripped of `ShaderWrite`).
 //!
 //! - The reference rules reproduce the probes' answers ([`the_rules_are_the_probes_answers`]).
 //! - On the CPU interpreter, a `read_write` read of each swizzle in [`swizzles`] is the converted
@@ -114,11 +113,10 @@ fn write_rule(s: C, v: [u32; 4]) -> [u32; 4] {
     })
 }
 
-/// The probes' answers (EV RRP-probe1-m4 for reads and writes of `RGBA8Unorm`, `RG8Unorm`,
-/// `R32Float` and `R32Uint` views, EV RRP-probe9-m4 for reads outside the texture), which the
-/// rules reproduce: a write of `(10, 20, 30, 40)` and a read of the texel `(10, 20, 30, 40)` in
-/// bytes; `RG8Unorm`'s two channels; `R32Uint`'s texel `(1000, 0, 0, 1)` and its zero texel
-/// `(0, 0, 0, 1)`.
+/// The probes' answers (for reads and writes of `RGBA8Unorm`, `RG8Unorm`, `R32Float` and `R32Uint`
+/// views, for reads outside the texture), which the rules reproduce: a write of `(10, 20, 30, 40)`
+/// and a read of the texel `(10, 20, 30, 40)` in bytes; `RG8Unorm`'s two channels; `R32Uint`'s
+/// texel `(1000, 0, 0, 1)` and its zero texel `(0, 0, 0, 1)`.
 #[test]
 fn the_rules_are_the_probes_answers() {
     let by = |name: &str| {
@@ -612,7 +610,7 @@ fn a_storage_write_undoes_the_bound_swizzle() {
     assert!(ran > 0);
 }
 
-/// An atomic ignores the swizzle (EV RRP-probe1-m4: `atomic_fetch_add` through a swizzled
+/// An atomic ignores the swizzle (`atomic_fetch_add` through a swizzled
 /// `R32Uint` view adds to red and returns the texel unswizzled): `rrp_sw_atomic_u` under the
 /// variant states no `TextureSwizzle` and compiles to the same words as without it (the
 /// interpreter does not model image atomics).
@@ -1121,7 +1119,7 @@ fn a_combined_sampler_of_a_swizzled_packed_texture_swizzles_in_its_function() {
 
 /// A swizzled texture's shape states its level count, which a storage slot reading its levels
 /// needs, though Metal strips its usage of `ShaderWrite`; an unswizzled texture without
-/// `ShaderWrite` states it too, as plain Metal writes one at every level (EV XRR2-usw1).
+/// `ShaderWrite` states it too, as plain Metal writes one at every level.
 #[test]
 fn a_swizzled_texture_s_shape_states_its_levels() {
     let gbar = C::new(S::Green, S::Blue, S::Alpha, S::Red);

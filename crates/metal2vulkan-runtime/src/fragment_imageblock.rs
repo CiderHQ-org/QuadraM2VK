@@ -13,7 +13,7 @@
 //!   `WriteSource::Imageblock`.
 //! - **Its contents.** Metal's are undefined as the pass begins (MSL); an M4 read zero there,
 //!   through a fragment function's view and a tile function's, in a pass after one that wrote
-//!   every cell (EV `CFIT-m4-probe4c`). The storage is cleared to zero before the pass's first
+//!   every cell. The storage is cleared to zero before the pass's first
 //!   render pass instance, between barriers from everything before and to everything after: the
 //!   answer measured, the one chosen where Metal states none, and no function reads what the
 //!   memory held before. It lives across the instances a pass splits into (a barrier from
@@ -45,7 +45,7 @@
 //!   beside it, and not aliased onto one) is the same storage: its dispatch stages each cell of
 //!   each tile it runs from the storage into its threadgroup cells before the function runs, and
 //!   back after it where the function may write them (`lower::access::tile`), a tile's cells past
-//!   the render area included, which no draw reaches. Measured on an M4 (EV `CFIT-m4-probe4c`, a
+//!   the render area included, which no draw reaches. Measured on an M4 (a
 //!   pass of 48x40 pixels in 16x16 tiles): a draw's fragment imageblock and a tile dispatch's are
 //!   each pixel's same bytes, so a tile function reads the words a draw wrote and a draw the words
 //!   a dispatch wrote, in the order the encoder recorded them; a dispatch reads what the dispatch

@@ -2,7 +2,7 @@
 // sampler at slot 0 beside the same sample through a constexpr bicubic sampler of each
 // address mode, border color, and coordinate kind. Metal samples through a runtime sampler whose
 // min or mag filter is `MTLSamplerMinMagFilterCubic` (raw value 2) as through a constexpr bicubic
-// sampler of the same state (EV GSM2-bcs2-m4), so the runtime lane binds the slot to cubic
+// sampler of the same state, so the runtime lane binds the slot to cubic
 // samplers of each state and requires every lane of the two samples to be the same bits.
 #include <metal_stdlib>
 using namespace metal;

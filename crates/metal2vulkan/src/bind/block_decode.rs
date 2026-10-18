@@ -1,6 +1,6 @@
 //! A BC1 to BC5 texture's texels as Metal decodes them, from its blocks (a fitted decode).
 //!
-//! **Metal's decode** (an Apple M4 under macOS 27.0.1, EV SID2-bcd2-m4: every texel of random
+//! **Metal's decode** (an Apple M4 under macOS 27.0.1: every texel of random
 //! blocks of every BC format read, which MoltenVK's equal; checked again by
 //! `runtime_lane::compressed_decode` on the venues). Each 565 endpoint is widened to 8 bits by
 //! replicating its bits; an index's weight `w` of 64 is BC7's: 21 and 43 for a four-color

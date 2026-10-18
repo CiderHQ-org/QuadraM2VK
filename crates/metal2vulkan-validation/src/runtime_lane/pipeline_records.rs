@@ -12,8 +12,7 @@
 //!   runtime counts them; MoltenVK 1.4.1 says it for each stage alone), and each draw's target
 //!   byte for byte the first device's. A making from a record writes it again exactly where the driver's data after the
 //!   making is no longer the record's bytes (RADV's after its first hit from a compile's record is
-//!   not, and settles: EVs PRDP-hl3-radv, PRDP-hl4-radv), and counts every other read unchanged
-//!   (`driver_data_unchanged`).
+//!   not, and settles), and counts every other read unchanged (`driver_data_unchanged`).
 //! - **Overwrite.** A record holding another pipeline's data (a dispatch's compute pipeline's
 //!   record copied over each of a render state's) is loaded: the driver's miss, and where the
 //!   driver's data holds its pipelines the making adds its own, so the record is written again,
@@ -466,7 +465,7 @@ impl DriverData {
     /// Each of `records` holds this driver's data for a making: where it holds its pipelines,
     /// data other than an empty cache's (two makings' may be alike: a driver that keeps shader
     /// binaries keeps one for two pipelines whose state changes no shader, as the RTX 3090's and
-    /// ANV's do for `RGBA8Unorm` and `BGRA8Unorm` targets, EVs LTF-pr1-*); where it holds none, a
+    /// ANV's do for `RGBA8Unorm` and `BGRA8Unorm` targets); where it holds none, a
     /// making's data, which every making's is.
     fn assert_records(&self, records: &[&[u8]]) {
         for record in records {

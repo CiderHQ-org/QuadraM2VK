@@ -8,7 +8,7 @@
 //! fragment runs. Each pass is one command buffer, timed by its GPU start and end over 20 passes
 //! after 3 warm ones (`VERTEX-COST`: the median and the fastest, and the median per vertex), and
 //! by the host's time from its commit to its completion (MoltenVK's GPU times of a render pass
-//! measured as about 11 us for these passes on an Apple M4, EV RCH-inv2-m4: not the pass's).
+//! measured as about 11 us for these passes on an Apple M4: not the pass's).
 //! Measures; asserts only that each pass completes.
 
 use super::{buffer_with, validated_device_with, Messages, ScratchCache, WAIT};

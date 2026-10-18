@@ -50,7 +50,7 @@
 //!   (`LoweringInputs::read_only_tests`), and any other is refused. A function that writes other
 //!   memory, or returns depth, stencil, or a sample mask, stores before the tests too, and states
 //!   the fact without that variant: Metal runs its memory writes for the fragments its tests then
-//!   drop and tests what it returns (EV XRR2-fx1-m4), which early tests would not, so only a draw
+//!   drop and tests what it returns, which early tests would not, so only a draw
 //!   whose tests drop no fragment runs it, and any other is refused at the depth (or stencil)
 //!   attachment;
 //! - a direct format, declared without a format where the device grants the format's storage
@@ -75,7 +75,7 @@
 //!   (`StorageView::uint_view`), whose bytes the function converts by Metal's measured conversions
 //!   itself: a read decodes each color byte to its twelve-bit step over 4095 and alpha's to its
 //!   byte over 255, a write encodes by Metal's thresholds (`math::unpack` and `math::pack` of
-//!   `unorm4x8_srgb`; EV XRR2-srgb1-m4 on the M4: every byte read, a texel an earlier draw of the
+//!   `unorm4x8_srgb`; on the M4: every byte read, a texel an earlier draw of the
 //!   pass wrote read as the decode of its stored byte, every encode threshold, 4, 194, 304 floats
 //!   and every half written). The one- and two-channel sRGB formats are not measured, and stay
 //!   refused; a packed 16-bit format the device samples but does not render
@@ -130,7 +130,7 @@
 //! the lanes whose bits the draw's `PushField::StorageKeptChannels` sets
 //! ([`StorageView::kept_at_draw`]), which the binder writes from the pipeline's
 //! `StorageAttachmentUse::kept`, so the masks of a class share one module and one fragment key
-//! (Metal's own backend compiles each new mask, EV SUB-mwm-m4). An extended-range attachment's kept
+//! (Metal's own backend compiles each new mask). An extended-range attachment's kept
 //! channels feed its blend and encode, and an sRGB one merges its bytes, so those compile each mask
 //! (no draw word).
 //!
@@ -138,7 +138,7 @@
 //! texels in the raw unsigned format, so the storage image is declared of that format's
 //! `uint` texels ([`StorageView::extended`]), and a read decodes the texel into Metal's tile value
 //! (`extended_range::tile_value`: each code as the tile holds it, rounded to `half`, a `float` read
-//! alike; EVs XRR-rtp1-m3 and -m4). Such an attachment the function writes under blending takes
+//! alike). Such an attachment the function writes under blending takes
 //! this form whether or not the function reads it, since no device blends the raw texels: the write
 //! reads the texel's tile value, blends the output over it as Metal does, and stores the kernel
 //! write's encode of the result ([`StorageView::blend`]), the channels a write mask keeps as Metal
@@ -161,7 +161,7 @@
 //! range, alpha to `[0, 1]`, a NaN to the low end, `BGR10_XR`'s alpha 1), a blend reads its
 //! destination so, and every write stores the value it computed, unclamped, the blend's result or
 //! the unblended output's `half`, in the shadow and its encode in the codes, both inside the
-//! interlock (EV XSH-pxs-m4: the tile holds a write past the range and stores its encode, and every
+//! interlock (the tile holds a write past the range and stores its encode, and every
 //! read clamps); channels a write mask keeps stay as the shadow and the codes held them. Every
 //! value the shadow holds is a `half`, so the device's conversions both ways are exact, and the
 //! codes always hold the encode of the last `half` written to each channel. A shadowed attachment
@@ -182,34 +182,33 @@
 //! the color channels' factors read the source alpha (`SourceAlpha`, `OneMinusSourceAlpha`): that
 //! alpha is undefined to Metal's compiler, which stores `+0` in each color channel under fast math
 //! and its NaN (`0x7e00`) without, whatever the operands (`SourceAlphaSaturated` is its minimum
-//! with one minus the destination alpha, 0 in such a format). EV FBL-nw1-m3: plain Metal on the M3
-//! Max under macOS 27.0.1, our own MSL, `half` and `float` outputs of one, two and three lanes into
-//! `R16Float` and `RG16Float` (each width the format takes), the 677 and 1,350 states of EV
-//! FBL-sw1-m3 below, and the 677 under `RG16Float`'s partial write masks, fast and safe math: every
+//! with one minus the destination alpha, 0 in such a format). Our probe: plain Metal on the M3 Max
+//! under macOS 27.0.1, our own MSL, `half` and `float` outputs of one, two and three lanes into
+//! `R16Float` and `RG16Float` (each width the format takes), the 677 and 1,350 states of our probe
+//! below, and the 677 under `RG16Float`'s partial write masks, fast and safe math: every
 //! channel the model's rounded, fitted or constant forms name holds Metal's value (some zero signs
 //! differ, a known gap of `docs/FAST-PATHS.md`). Without fast math every product and sum rounds on
 //! its own (the rounded forms); under fast math Metal's passes fuse and regroup it (the fast
 //! forms). Measured on plain Metal on the M3 Max under macOS 27.0.1, our own MSL, a function
-//! reading `[[color(0)]]` beside an unwritten second attachment, 16,384 random pixels a draw (EV
-//! FBL-sw1-m3: `RGBA16Float`, 677 blend states of one key for color and alpha and 1,350 of a key
-//! beside one minus the source alpha; EV FBL-sw2-m3: the same states into `R16Float` and
-//! `RG16Float`, and the 677 under four write masks that keep some channels): without fast math the
-//! rounded forms store Metal's value in every channel of every state, for loaded `half4` and
-//! `float4` outputs; under fast math every class whose form is no term, one term, one fused
-//! multiply-add, a minimum or maximum, or a blend constant's difference (`BlendColor` with
-//! `OneMinusBlendColor`, `BlendAlpha` with `OneMinusBlendAlpha`, subtracted: the minuend's product
-//! fused, the subtrahend's rounded first) does (`extended_range::Blend::fitted`), the One over
-//! OneMinusSourceAlpha blend included, with the infinities, NaNs, signed zeros and values past
-//! `half`'s range. Metal's compiler folds the output's own fast-math arithmetic into the blend (EV
-//! FBL-fold1-m3: a returned product fused into the blend's one minus the source alpha; a sum that
-//! reads the fetched color regrouped by a common factor), so the blend is Metal's exactly where its
-//! forms are fitted, the module states its math, and every lane of the output is opaque to it
-//! ([`folds_into_blend`]). Elsewhere it is a near-equivalent, and the function records
-//! `PrecisionNote::HalfOutputFastMathBlend` (`HalfOutputPrecision` for a module that names no math
-//! mode): measured within 2 `half` units in the last place at the operands' magnitude, 16 at the
-//! output's under cancellation (below one at the function's own largest term). The texel stores a
-//! `half` in every channel, so no conversion of the device's bears on it, but for a NaN: the blend
-//! gives every NaN as `0x7fc00000` (Metal stores each as `0x7e00`, EV FBL-zf1-m3), which the
+//! reading `[[color(0)]]` beside an unwritten second attachment, 16,384 random pixels a draw
+//! (`RGBA16Float`, 677 blend states of one key for color and alpha and 1,350 of a key beside one
+//! minus the source alpha: the same states into `R16Float` and `RG16Float`, and the 677 under four
+//! write masks that keep some channels): without fast math the rounded forms store Metal's value in
+//! every channel of every state, for loaded `half4` and `float4` outputs; under fast math every
+//! class whose form is no term, one term, one fused multiply-add, a minimum or maximum, or a blend
+//! constant's difference (`BlendColor` with `OneMinusBlendColor`, `BlendAlpha` with
+//! `OneMinusBlendAlpha`, subtracted: the minuend's product fused, the subtrahend's rounded first)
+//! does (`extended_range::Blend::fitted`), the One over OneMinusSourceAlpha blend included, with
+//! the infinities, NaNs, signed zeros and values past `half`'s range. Metal's compiler folds the
+//! output's own fast-math arithmetic into the blend (a returned product fused into the blend's one
+//! minus the source alpha; a sum that reads the fetched color regrouped by a common factor), so the
+//! blend is Metal's exactly where its forms are fitted, the module states its math, and every lane
+//! of the output is opaque to it ([`folds_into_blend`]). Elsewhere it is a near-equivalent, and the
+//! function records `PrecisionNote::HalfOutputFastMathBlend` (`HalfOutputPrecision` for a module
+//! that names no math mode): measured within 2 `half` units in the last place at the operands'
+//! magnitude, 16 at the output's under cancellation (below one at the function's own largest term).
+//! The texel stores a `half` in every channel, so no conversion of the device's bears on it, but
+//! for a NaN: the blend gives every NaN as `0x7fc00000` (Metal stores each as `0x7e00`), which the
 //! storage image's store converts, Metal's where the profile takes
 //! `DriverDeviation::MetalFloatStorageNans` and the device's elsewhere, noted
 //! `PrecisionNote::DeviceNanEncoding` (`stage_io::color_write`; ANV stores `0xfe00`). An
@@ -227,19 +226,18 @@
 //! output's type in the forms Metal's compiler builds (`extended_range::Blend::unorm8`: fused and
 //! regrouped under fast math, each step rounded without), stores the result's code by Metal's unorm
 //! write (`extended_range::blend::blend_unorm8`), and keeps the codes of the channels its write
-//! mask leaves out. EVs, plain Metal on the M3 Max under macOS 27.0.1: FB8-sw1-m3 (premultiplied
-//! source-over, every `half` alpha in `[0, 1]` against every code of each channel, `half4` and
-//! `float4`, fast and safe math, each of the four formats: Metal's code in every channel);
-//! FB8-sw2-m3 and FB8-rnd1-m3 (every factor and operation pair for color beside source-over alpha
-//! and the reverse, the same pair for both, and random pairs, over every destination code times
-//! every source alpha code); FB8-mk1-m3, FB8-sc1-m3 and FB8-ao1-m3 (write masks, one color
-//! channel and alpha alone among them); FB8-bc1-m3 (blend colors past both ends). The clamp keeps
-//! the output's own arithmetic out of the blend (EV FB8-fold1-m3: products, sums and a regroup
-//! over the fetched color, each the model's over the function's value), so the blend is Metal's
-//! wherever the module states its math (`HalfOutputPrecision` for one naming none). A factor of the
-//! second source, a format without alpha's fast-math lerp, common factor or contracted pair
-//! (EV FB8-r8-m3: Metal sums those in forms of their own), an output of fewer lanes, and a second
-//! (index 1) output are not built.
+//! mask leaves out. Measured with plain Metal on the M3 Max under macOS 27.0.1: our probe
+//! (premultiplied source-over, every `half` alpha in `[0, 1]` against every code of each channel,
+//! `half4` and `float4`, fast and safe math, each of the four formats: Metal's code in every
+//! channel); our probes (every factor and operation pair for color beside source-over alpha and the
+//! reverse, the same pair for both, and random pairs, over every destination code times every
+//! source alpha code); our probes (write masks, one color channel and alpha alone among them); our
+//! probe (blend colors past both ends). The clamp keeps the output's own arithmetic out of the
+//! blend (products, sums and a regroup over the fetched color, each the model's over the function's
+//! value), so the blend is Metal's wherever the module states its math (`HalfOutputPrecision` for
+//! one naming none). A factor of the second source, a format without alpha's fast-math lerp, common
+//! factor or contracted pair (Metal sums those in forms of their own), an output of fewer lanes,
+//! and a second (index 1) output are not built.
 //!
 //! A blocked attachment is refused with the blocker's reason (what the device lacks, or
 //! `NotImplemented`): no ordered path exists there. The storage form
@@ -420,7 +418,7 @@ pub(crate) fn blended_output(
 /// output the function computes by a floating-point operation carrying a fast-math flag (an
 /// addition, subtraction, multiply, division or remainder, an `llvm.fmuladd`), a constant, a
 /// select or phi of one, or the attachment's own color input, is contracted, regrouped or folded
-/// with the blend's arithmetic (EV FBL-fold1-m3, plain Metal on the M3 Max under macOS 27.0.1: a
+/// with the blend's arithmetic (plain Metal on the M3 Max under macOS 27.0.1: a
 /// returned product fused into the blend's one minus the source alpha, `D·k + D·A` regrouped as
 /// `D·(k + A)`). A lane of a load, a call, a conversion, a parameter or an operation without
 /// fast-math flags is opaque to it: the blend reads the value the function computes. Each lane
@@ -895,7 +893,7 @@ pub(crate) fn storage_form(
         .block()
         .is_some_and(|b| b.color == Some(vk::NumericFormat::Srgb));
     // An 8-bit four-channel sRGB attachment is viewed in `R32_UINT`, whose bytes the function
-    // decodes and encodes by Metal's measured conversions (EV XRR2-srgb1-m4: a fetch reads Metal's
+    // decodes and encodes by Metal's measured conversions (a fetch reads Metal's
     // twelve-bit decode of the stored byte, `math::unpack`'s, even after an earlier draw of the
     // pass wrote it, and a write stores `math::pack`'s encode). The one- and two-channel sRGB
     // formats are not measured, nor is a blend into one.
@@ -932,7 +930,7 @@ pub(crate) fn storage_form(
     // stencil tests) bears on it; and a blend of one and zero, added, for color and alpha stores
     // the source as blending disabled does, a signed normalized NaN aside, and a 16-bit float
     // attachment's blend without fast math, which keeps the destination's product by zero (a NaN
-    // of an infinite or NaN texel, the sum's zero sign; EV FBL-zf1-m3).
+    // of an infinite or NaN texel, the sum's zero sign).
     let stores = writes && kept != ColorWriteMask::ALL;
     // The blend of an extended-range attachment the write stores, which the shader computes
     // where Metal's measured model holds it (`extended_range::Blend`), its gap refused by name.
@@ -1531,7 +1529,7 @@ pub(super) fn plan(cx: &mut SelectCx<'_>) -> Result<(), Error> {
                         // Metal's constant ([`half_blended`]), whatever the output.
                         let constant = lanes < 4 && b.color_reads_source_alpha();
                         // Metal clamps the output before an 8-bit unorm blend, so none of the
-                        // output's arithmetic folds into it (EV FB8-fold1-m3): the blend is
+                        // output's arithmetic folds into it: the blend is
                         // Metal's wherever the module states its math.
                         sixteen_exact = stated
                             && (unorm8
@@ -1694,7 +1692,7 @@ pub(super) fn plan(cx: &mut SelectCx<'_>) -> Result<(), Error> {
         }
     }
     // A per-sample function's returned mask gates its storage writes. At one sample too, on the
-    // mask's bit 0 (measured: Metal stores no color there without it, EV DSX-mask1-m4).
+    // mask's bit 0 (measured: Metal stores no color there without it).
     let written = cx.families.fragment.fetch.values().any(|sc| sc.writes);
     if written {
         cx.families.fragment.fetch_mask = outputs
@@ -2510,9 +2508,9 @@ type Write = (SValue, SValue, SValue, ImageOperands);
 /// (`extended_range::blend::blend_half_float`; the blend color from `PushField::HalfBlendColor`
 /// where the blend reads it), a `float` result converted to `half` as Metal's blended write
 /// converts it: toward zero, the largest finite `half` past it, or to nearest even under
-/// `TextureWriteRoundingMode::NearestEven` (`color_writes::HALF`, `HALF_NEAREST`; EV FBL-sw1-m3 for
-/// the former). An output of fewer than four lanes blends as four whose missing lanes are zero,
-/// alpha among them (EV FBL-nw1-m3), and the result keeps the output's lanes. The channels a write
+/// `TextureWriteRoundingMode::NearestEven` (`color_writes::HALF`, `HALF_NEAREST`; for the former).
+/// An output of fewer than four lanes blends as four whose missing lanes are zero, alpha among
+/// them, and the result keeps the output's lanes. The channels a write
 /// mask keeps are [`merge`]'s to take back from the texel.
 fn half_blended(
     cx: &mut EmitCx<'_>,
@@ -2534,7 +2532,7 @@ fn half_blended(
     };
     // The lanes an output of fewer than four lacks are undefined to Metal's compiler, which folds
     // color channels whose blend reads the source alpha as a factor to `+0` under fast math and
-    // stores its NaN without (EV FBL-nw1-m3); such an output's format has no alpha channel.
+    // stores its NaN without; such an output's format has no alpha channel.
     if form.lanes < 4 && b.color_reads_source_alpha() {
         let bits = match math {
             extended_range::blend::BlendMath::Fast => 0,
@@ -2557,7 +2555,7 @@ fn half_blended(
     if arith == extended_range::blend::BlendArith::Half {
         // Every NaN as `0x7fc00000`, which the storage image's store converts (a NaN the
         // device's arithmetic gave keeps its own sign and payload there; a `float` result's is
-        // rounded to it below): Metal stores every NaN of the blend as `0x7e00` (EV FBL-zf1-m3).
+        // rounded to it below): Metal stores every NaN of the blend as `0x7e00`.
         let f32_form = form.with(Held::Float(FloatFmt::F32));
         let nan = fb.unary(UnOp::IsNan, v)?;
         let quiet = ops::splat(fb, f32_form, 0x7FC0_0000)?;
@@ -2581,8 +2579,7 @@ fn half_blended(
 /// (`extended_range::blend::blend_unorm8`), and the result's code by Metal's 8-bit unorm rule
 /// (`arith::color_write`'s `ChannelWrite::Unorm`: a NaN 0, clamped, the exact product with 255
 /// rounded to nearest), written as the `f32` the device stores as that code; a channel the write
-/// mask keeps takes the texel's after (EVs FB8-sw1-m3 and FB8-sw2-m3: Metal's code in every
-/// channel, the module docs).
+/// mask keeps takes the texel's after (Metal's code in every channel, the module docs).
 fn unorm8_blended(
     cx: &mut EmitCx<'_>,
     fb: &mut FunctionBuilder<'_>,
@@ -2882,8 +2879,8 @@ fn rgba_order(fb: &mut FunctionBuilder<'_>, format: vk::Format, word: SValue) ->
 
 /// The `vec4` a fetch reads from the sRGB texel `word` of `format`: Metal's decode
 /// (`math::unpack` of `unorm4x8_srgb` through the module's table `table`): each color channel's
-/// twelve-bit step over 4095 and the alpha byte over 255, correctly rounded (EV XRR2-srgb1-m4:
-/// every byte, and every texel an earlier draw of the pass wrote).
+/// twelve-bit step over 4095 and the alpha byte over 255, correctly rounded (every byte, and every
+/// texel an earlier draw of the pass wrote).
 fn srgb_decode(
     fb: &mut FunctionBuilder<'_>,
     format: vk::Format,
@@ -2902,7 +2899,7 @@ fn srgb_decode(
 /// (four `float` or `half` lanes of `form`) to the sRGB attachment `color` stores: Metal's encode
 /// (`math::pack` of `unorm4x8_srgb` through the module's table; a NaN 0, the value clamped to `[0,
 /// 1]`, the exact product with 4095 rounded to nearest even through Metal's thresholds, alpha's
-/// with 255; EV XRR2-srgb1-m4 checked every threshold, 4, 194, 304 floats and every half), its
+/// with 255; our probe checked every threshold, 4, 194, 304 floats and every half), its
 /// bytes in `format`'s order; a write that keeps channels takes their bytes from the texel read
 /// first at the invocation's pixel (and sample), inside the interlock, so they stay as they were,
 /// bit for bit.
@@ -3119,8 +3116,7 @@ pub(super) fn written(kept: vk::ColorComponentFlags) -> ColorWriteMask {
 /// Whether returned value `x`'s `[[sample_mask]]` output, in field `field`, sets the bit of the
 /// invocation's own sample: `((mask >> SampleId) & 1) != 0`. Under sample shading an invocation
 /// shades its one sample, and Metal keeps its write exactly when the mask sets that sample's bit.
-/// At one sample, where no `SampleId` is planned, bit 0 (Metal stores no color without it, EV
-/// DSX-mask1-m4).
+/// At one sample, where no `SampleId` is planned, bit 0 (Metal stores no color without it).
 fn sample_bit(
     cx: &mut EmitCx<'_>,
     fb: &mut FunctionBuilder<'_>,

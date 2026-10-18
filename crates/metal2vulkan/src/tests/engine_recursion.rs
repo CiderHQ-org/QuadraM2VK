@@ -1,7 +1,7 @@
 //! Recursion through visible functions on an explicit call stack.
 //!
 //! The owned synthetic module [`MODULE`] holds, in the form Apple's compiler emits for the MSL its
-//! comments quote (the UNI-fpprobe kernels), a visible function that calls itself through its
+//! comments quote (the probe kernels), a visible function that calls itself through its
 //! visible-function reference (`drec`), three that recurse through entries of a
 //! `visible_function_table` held in an argument buffer (`rec_sum`; `rec_even` and `rec_odd`, each
 //! calling the other), and one whose 64-word private array lives across its recursive call
@@ -12,12 +12,12 @@
 //! the same module.
 //!
 //! - A kernel compiles under its pipeline's `maxCallStackDepth` `k`: direct recursion's stack
-//!   holds `k` activations, the kernel's call and `k - 1` recursive calls, as plain Metal's does
-//!   (UNI-fpprobe5 and 6, FPC-fx3); recursion through a table of three 16-byte functions holds
-//!   `3k` (UNI-fpprobe B1/B2 and the byte model). On the CPU interpreter every depth within them
-//!   answers what Metal does, at `k` 1, 2, 8, and 256. A call past the stack is not made and yields
-//!   zero, so a deeper sum stops early and a deeper parity is zero (the recorded near-equivalent;
-//!   Metal's own answer there is not a defined one).
+//!   holds `k` activations, the kernel's call and `k - 1` recursive calls, as plain Metal's does;
+//!   recursion through a table of three 16-byte functions holds `3k` (our probes and the
+//!   byte model). On the CPU interpreter every depth within them answers what Metal does, at `k` 1,
+//!   2, 8, and 256. A call past the stack is not made and yields zero, so a deeper sum stops early
+//!   and a deeper parity is zero (the recorded near-equivalent; Metal's own answer there is not a
+//!   defined one).
 //! - A depth whose stack passes Metal's (261728 bytes a thread) is
 //!   `LimitExceeded(CallStackBytes)`, where Metal says "Compute pipeline exceeds available stack
 //!   space"; stacks past the Function storage the device holds correctly (measured, or the floor
@@ -27,8 +27,8 @@
 //!   device was not measured that they rest on the floor.
 //! - Recursion through a pointer passed as a value calls the function the pointer holds in every
 //!   activation, on the same stack: `apply` folds into `prec`, so `prec` at depth `k`
-//!   makes `k - 1` recursive calls and is refused past 16358, as plain Metal does (UNI-fpprobe5 and
-//!   6), linked in `functions` or `private_functions` alike.
+//!   makes `k - 1` recursive calls and is refused past 16358, as plain Metal does, linked in
+//!   `functions` or `private_functions` alike.
 //! - A render pipeline's vertex and fragment functions, and a tile pipeline's tile function,
 //!   compile under the pipeline's `maxVertexCallStackDepth`, `maxFragmentCallStackDepth`, and
 //!   `maxCallStackDepth` as a kernel does under its own; a `Compiled` stage serves only a pipeline
@@ -720,13 +720,13 @@ fn depths(frames: u32) -> Vec<u32> {
 }
 
 /// The activations Metal holds through a table of three 16-byte functions at the depths the tests
-/// use, `3k` (UNI-fpprobe B1 and B2 on an M3 Max and an M4: correct to 3 frames at `k` 1;
-/// UNI-fpprobe4 to 6's byte model): the stack the lowering holds.
+/// use, `3k` (our probes on an M3 Max and an M4: correct to 3 frames at `k` 1; their byte model):
+/// the stack the lowering holds.
 const TABLE_FRAMES: [(u32, u32); 4] = [(1, 3), (2, 6), (8, 24), (256, 768)];
 
-/// Direct recursion makes `k - 1` recursive calls, as plain Metal does (UNI-fpprobe5 and 6,
-/// FPC-fx3): its stack holds `k` activations, the kernel's call among them, so every depth below
-/// `k` answers Metal's sum, and depth `k` too, its last call's zero being the zero a call past the
+/// Direct recursion makes `k - 1` recursive calls, as plain Metal does: its stack holds `k`
+/// activations, the kernel's call among them, so every depth below `k` answers Metal's sum, and
+/// depth `k` too, its last call's zero being the zero a call past the
 /// stack yields; a deeper one stops early. At `k` 1 the kernel's call runs and makes none.
 #[test]
 fn direct_recursion_makes_one_call_fewer_than_its_depth() {
@@ -831,12 +831,11 @@ fn recursive_kernels_validate_and_agree_on_every_profile() {
 
 /// A depth whose stack passes Metal's 261728 bytes a thread is refused as Metal refuses it:
 /// Metal's stack is `k` times the linked functions' frames, each rounded up to 16 bytes. The
-/// probes' refusals (UNI-fpprobe2, -fpprobe4 and -fpprobe6, an M4 under macOS 27.0.1): `drec`
-/// alone (16 bytes) at 16359; `rec_big` alone (272) at 963; `rec_big` with `rec_sum` (288) at
-/// 909; the chain `chain_a`, `chain_b` (16 each) and the leaf `chain_c` (0) at 8180; `prec`
-/// recursing through `apply`, which folds into it (16), at 16359. The sums (48) are refused at
-/// 5453, and a non-recursive call through a visible-function reference to a leaf
-/// (`leaf_caller`, 16) at 16359. One depth less is not.
+/// probes' refusals (an M4 under macOS 27.0.1): `drec` alone (16 bytes) at 16359; `rec_big` alone
+/// (272) at 963; `rec_big` with `rec_sum` (288) at 909; the chain `chain_a`, `chain_b` (16 each)
+/// and the leaf `chain_c` (0) at 8180; `prec` recursing through `apply`, which folds into it (16),
+/// at 16359. The sums (48) are refused at 5453, and a non-recursive call through a visible-function
+/// reference to a leaf (`leaf_caller`, 16) at 16359. One depth less is not.
 #[test]
 fn a_stack_past_metals_is_refused() {
     let Some(bitcode) = module() else {
@@ -1076,7 +1075,7 @@ fn a_tile_function_recurses_under_its_pipeline_s_depth() {
 /// address to `apply`, which calls through it, and the kernel calls `apply` with `prec`'s address
 /// too. The pointer is that constant at every call, so each `apply` calls `prec` itself on the
 /// explicit call stack. `apply`, which no pipeline links, folds into `prec`, so at depth
-/// `k` `prec` makes `k - 1` recursive calls, as plain Metal does (UNI-fpprobe5 and 6) and as direct
+/// `k` `prec` makes `k - 1` recursive calls, as plain Metal does and as direct
 /// recursion does, whether the pipeline links `prec` in `functions`, where a table can hold it, or
 /// in `private_functions`, where none can. A call past them yields zero.
 #[test]

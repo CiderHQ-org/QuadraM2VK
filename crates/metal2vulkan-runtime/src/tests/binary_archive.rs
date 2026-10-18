@@ -939,7 +939,7 @@ fn a_compute_lookup_names_the_kernel() {
 }
 
 /// The tile key holds binary-function support, the required threadgroup size (the table), an
-/// all-zero size as none, and the buffers set mutable (EVs RTL-816e-m3 and -m4).
+/// all-zero size as none, and the buffers set mutable.
 #[test]
 fn the_tile_key_holds_binary_function_support_and_the_required_size() {
     let base = TileRenderPipelineDescriptor::new(StageSource::Function(kernel()));

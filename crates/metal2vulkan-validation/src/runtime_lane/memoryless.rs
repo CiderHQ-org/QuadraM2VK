@@ -157,10 +157,10 @@ struct Attached {
 }
 
 /// A memoryless texture of `t` is made and attached beside a stored color, as plain Metal makes
-/// and renders through one (an M4 under macOS 27.0.1, EV RRP-probe1-m4 `mu_memoryless_*`: a pass
-/// of the memoryless texture's slice or depth plane beside a stored color; Metal's validation
-/// stops the descriptors of all but 2D, 2D array and multisample types): the pass draws its
-/// stored color white. Each shape is its own test, so a driver that fails one fails it alone.
+/// and renders through one (an M4 under macOS 27.0.1: a pass of the memoryless texture's slice or
+/// depth plane beside a stored color; Metal's validation stops the descriptors of all but 2D, 2D
+/// array and multisample types): the pass draws its stored color white. Each shape is its own test,
+/// so a driver that fails one fails it alone.
 fn renders_through(t: Attached) {
     let (messages, _cache, lane) = lane();
     let rgba8 = PixelFormat::RGBA8Unorm;
@@ -227,7 +227,7 @@ fn a_memoryless_1d_array_slice_renders() {
 
 /// A memoryless 3D texture's depth plane: on MoltenVK, whose 2D view of a 3D image in lazily
 /// allocated memory crashed this test's process (`SIGSEGV` in `MVKImageViewPlane::newMTLTexture`,
-/// 1.4.1 on an M4, EV RRP-mless1-mvk4), its image takes device-local memory
+/// 1.4.1 on an M4), its image takes device-local memory
 /// (`RuntimeDriverDefect::LazilyAllocatedVolumePlaneViews`).
 #[test]
 fn a_memoryless_3d_depth_plane_renders() {

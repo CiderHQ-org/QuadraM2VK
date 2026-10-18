@@ -1,6 +1,6 @@
 //! The index rewrite pass: its modules valid on every committed profile (L3, `G-val`), and, on
 //! the CPU interpreter, the list it writes is the strip's pieces between the restart index as
-//! Metal draws them (EV RFX-probe5-m4): each piece's triangles in Vulkan's strip order with the
+//! Metal draws them: each piece's triangles in Vulkan's strip order with the
 //! parity counted from the piece's start, or its segments, in order; positions past the
 //! buffer's whole indices read 0, restart included; the draw's arguments carry Metal's
 //! instances and bases; a pooled draw reserves whole words from the pool's counter, and a draw

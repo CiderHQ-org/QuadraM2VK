@@ -155,7 +155,7 @@ fn run_queue_wait() -> Option<Duration> {
 /// compiles its modules: Mesa's, which its Vulkan drivers read (ANV, RADV, lavapipe), NVIDIA's, and
 /// Metal's, through which MoltenVK builds every pipeline (`MTL_SHADER_CACHE_SIZE=0`: on an M4,
 /// every run with it compiled cold, a median 41 times a warm run's creation, where without it a
-/// second run's hit Metal's cache; EV UNV-mvk-cold2). A creation that hits such a cache measures a
+/// second run's hit Metal's cache). A creation that hits such a cache measures a
 /// lookup, and nothing in the timing tells the two apart.
 pub const DRIVER_SHADER_CACHES_OFF: [(&str, &str); 3] = [
     ("MESA_SHADER_CACHE_DISABLE", "true"),

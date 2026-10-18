@@ -11,10 +11,9 @@
 //!   its storage form at that pass's own commit, once, announced once (`fetched-target-storage`);
 //!   elsewhere never. Its pipeline is made first, by a pass over an untracked target: a pass whose
 //!   draw's `VkPipeline` the device's pool is still making is recorded by a host step, and its
-//!   command buffer takes no switch (EVs CON2-ffl4-mvk4 and CON2-ffl5-anv: the first pass's own
-//!   commit took none once the pool made the pipelines). A `SIDE`² array of two slices and two
-//!   levels, its other slice and level cleared to their own values, keeps them through its
-//!   switch.
+//!   command buffer takes no switch (the first pass's own commit took none once the pool made the
+//!   pipelines). A `SIDE`² array of two slices and two levels, its other slice and level cleared to
+//!   their own values, keeps them through its switch.
 //! - **Another command buffer holds it off.** A command buffer of another queue, made before the
 //!   first fetch, holds the switch off: uncommitted, then committed and held by the scheduler for
 //!   a shared event. The target's passes give the same answers through the scratch; once the
@@ -30,17 +29,16 @@
 //!   commit (an event cannot hold it: a command buffer waiting for an event is held by the
 //!   scheduler, which holds the switch off). The spin is bounded by construction: its cap is the
 //!   loads of about a second at the rate the test measures first, well under any driver's timeout
-//!   for one submission (amdgpu resets its ring after 10 s, EV DSX-msd1-radv). On the M4 a running
-//!   kernel never saw a host store made after it started (EV TTG-sf2-mvk4), nor a release by
-//!   another queue's kernel (EV TTG-sf3-mvk4, where whether that kernel ran beside it is not told
-//!   apart), so there the cap ends the hold. Hazard tracking makes the switch's copy wait for the
-//!   held copy, the old image goes only once the switch's command buffer completed, and every
-//!   frame's copy holds its frame's value. The untracked target never switches: its scratch
-//!   stays. No encoding call waits for another queue's GPU work, as none of Metal's does (a pass's
-//!   scratch image was moved to `GENERAL` by an internal submission waited for on the host, so on
-//!   MoltenVK, whose one `VkQueue` the held copy is on, the tracked pass's draw waited the whole
-//!   hold, EV DSX-sfb3-mvk4): the held copy is still in flight as the switch's commit begins, which
-//!   the test asserts, naming each encoding call's time where it is not.
+//!   for one submission (amdgpu resets its ring after 10 s). On the M4 a running kernel never saw a
+//!   host store made after it started, nor a release by another queue's kernel (where whether that
+//!   kernel ran beside it is not told apart), so there the cap ends the hold. Hazard tracking makes
+//!   the switch's copy wait for the held copy, the old image goes only once the switch's command
+//!   buffer completed, and every frame's copy holds its frame's value. The untracked target never
+//!   switches: its scratch stays. No encoding call waits for another queue's GPU work, as none of
+//!   Metal's does (a pass's scratch image was moved to `GENERAL` by an internal submission waited
+//!   for on the host, so on MoltenVK, whose one `VkQueue` the held copy is on, the tracked pass's
+//!   draw waited the whole hold): the held copy is still in flight as the switch's commit begins,
+//!   which the test asserts, naming each encoding call's time where it is not.
 //! - **Through its resource ID** (the orchestrator's condition 2): the target's ID, in the
 //!   argument buffer of the public case `sample-an-argument-buffer-texture-through-a-bound-sampler`
 //!   (thread g samples `texture2d<float>` at (0.25g, 0.25g), nearest), read by a compute pass
@@ -416,8 +414,8 @@ const FRAMES: usize = 12;
 const OPEN: usize = 6;
 
 /// The most GPU time the held copy's kernel spins for its flag before it gives up: about a
-/// second, well under any driver's timeout for one submission (amdgpu resets its ring after 10 s,
-/// EV DSX-msd1-radv), and far longer than the host takes between the held copy's commit and the
+/// second, well under any driver's timeout for one submission (amdgpu resets its ring after 10 s),
+/// and far longer than the host takes between the held copy's commit and the
 /// switch's.
 const HOLD: Duration = Duration::from_secs(1);
 
@@ -553,8 +551,8 @@ impl Gate {
 
     /// Raise the flag once `command_buffer`'s commit took its place: its status past
     /// `NotEnqueued`, which the commit sets after it decides on a switch and before it submits.
-    /// A commit may wait in the driver for the work its batch waits for (MoltenVK on the M4,
-    /// EV CON2-ffl4-mvk4), so the flag goes up beside it, never after it returns.
+    /// A commit may wait in the driver for the work its batch waits for (MoltenVK on the M4), so
+    /// the flag goes up beside it, never after it returns.
     fn release_once_committed(&self, command_buffer: &CommandBuffer) {
         let deadline = Instant::now() + WAIT;
         while matches!(
@@ -673,7 +671,7 @@ fn a_steady_stream_takes_the_storage_form_at_its_first_lone_commit() {
     // Where the switch landed: the frame, the queue, and, as its commit began, the command
     // buffers in flight, whether the held copy was among them, and how long after the held copy's
     // commit. Taken as the commit begins: a driver may hold the commit until the work that the
-    // switch's copy waits for completes (MoltenVK on the M4, EV CON2-ffl4-mvk4).
+    // switch's copy waits for completes (MoltenVK on the M4).
     let mut switched: Option<(usize, char, usize, bool, Duration)> = None;
     // The host's steps between the held copy's commit and the switch's: to frame `OPEN`'s start,
     // its wait for frame `OPEN - 2`, and the encoding of its passes, each call's time.

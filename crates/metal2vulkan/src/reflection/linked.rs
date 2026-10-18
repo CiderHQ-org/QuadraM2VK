@@ -10,16 +10,14 @@
 //!   pipeline's linking keeps reads it: what reaches a side effect, a depth, stencil or sample mask
 //!   output, or a color output its attachment writes ([`fragment_output`]), whether or not the
 //!   pipeline rasterizes. A color output to an attachment the pipeline lacks or under a write mask
-//!   of no channel is dropped, as Metal drops it (EVs RRS3-icbtex11 and -icbtex12 on an M4 under
-//!   macOS 27.0.1).
+//!   of no channel is dropped, as Metal drops it (on an M4 under macOS 27.0.1).
 //! - **A vertex or mesh function** uses one where an instruction its pipeline's linking keeps
 //!   reads it (`live.rs`, the measured rule): what reaches the position and the other built-in
 //!   outputs, a varying the fragment function reads, a side effect, or a branch, switch or loop
 //!   any of those depend on. A varying no fragment input reads (one the fragment function
 //!   declares and never reads, one it does not declare, or any where the pipeline has no fragment
 //!   function or does not rasterize) is dropped with everything only it needs, though Metal's
-//!   reflection still lists its texture as used (EVs RRS3-icbtex7, -icbtex8, -icbtex9 and
-//!   -icbtex10 on an M4 under macOS 27.0.1).
+//!   reflection still lists its texture as used (on an M4 under macOS 27.0.1).
 //! - **What a fragment function reads** is a varying a kept instruction of its own reads, under
 //!   the fragment function's own rule.
 //! - **Proven or not** (a use only an unmeasured rule keeps must not read as Metal's refusal). The
@@ -80,7 +78,7 @@ pub enum LinkedUseGap {
     /// so what it reads: under a write mask of some of the format's channels but not all, or
     /// [`ColorWriteMask::UNSPECIALIZED`](crate::metal::ColorWriteMask::UNSPECIALIZED), into a
     /// format of fewer than four channels, or a dual-source second color under blending that
-    /// reads no second source. Metal keeps a color channel by channel (EV RRS3-icbtex12: a texel
+    /// reads no second source. Metal keeps a color channel by channel (a texel
     /// that reaches only a channel the mask leaves out is dropped); the analysis does not.
     UnmeasuredColorWrite,
 }
@@ -134,11 +132,11 @@ fn function(source: &StageSource) -> Result<&FunctionDescriptor, Error> {
 /// attachments `attachments`: `Some` as measured on Metal, `None` where unmeasured (kept only
 /// under `UnmeasuredColorWrite`). A color output to an attachment the pipeline lacks (none, or of
 /// no format) is dropped, as is one under a write mask of no channel the attachment's format
-/// holds, or a dual-source second color without blending (EVs RRS3-icbtex11 and -icbtex12 on an
-/// M4 under macOS 27.0.1; the consumer's `R8Unorm` under a mask of alpha alone); one
-/// whose attachment writes every channel of four is kept, a second color too where blending reads
-/// a second source. A depth, stencil or sample mask output is kept, the stencil one without a
-/// stencil attachment too (EV RRS3-icbtex12), and any other output.
+/// holds, or a dual-source second color without blending (on an M4 under macOS 27.0.1; the
+/// consumer's `R8Unorm` under a mask of alpha alone); one whose attachment writes every channel of
+/// four is kept, a second color too where blending reads a second source. A depth, stencil or
+/// sample mask output is kept, the stencil one without a stencil attachment too, and any other
+/// output.
 fn fragment_output(
     role: &OutputRole,
     attachments: &[Option<ColorAttachmentDescriptor>; 8],
@@ -614,8 +612,8 @@ impl RenderPipelineDescriptor {
 impl RenderPipelineDescriptor {
     /// Whether the vertex function returns a value (its return type is not `void`), which
     /// `newRenderPipelineStateWithDescriptor:` refuses with rasterization disabled, with or
-    /// without `supportIndirectCommandBuffers` (EVs RRS3-icbtex7 and -icbtex10 on an M4 under
-    /// macOS 27.0.1). It decodes the vertex function's AIR under `budget`.
+    /// without `supportIndirectCommandBuffers` (on an M4 under macOS 27.0.1). It decodes the vertex
+    /// function's AIR under `budget`.
     ///
     /// Refused where the vertex function is one the compile layer already compiled
     /// (`StageSource::Compiled`, which kept no AIR: `Unsupported` with `Feature::Reflection`), and
@@ -667,10 +665,9 @@ impl RenderPipelineDescriptor {
     /// The fragment function's stage inputs its linking keeps (a varying a kept instruction of
     /// its own reads, under its rule: its effects, its depth, stencil and sample mask outputs and
     /// the colors its attachments write) whose user key the vertex function writes no output of,
-    /// whether or not the pipeline rasterizes (Metal links the fragment function either way, EVs
-    /// RRS3-icbtex11 and -icbtex13 on an M4 under macOS 27.0.1); `None` where there are none or no
-    /// fragment function. It decodes and specializes the functions' AIR under `budget`, where
-    /// `entries` holds no entry of them.
+    /// whether or not the pipeline rasterizes (Metal links the fragment function either way, on an
+    /// M4 under macOS 27.0.1); `None` where there are none or no fragment function. It decodes and
+    /// specializes the functions' AIR under `budget`, where `entries` holds no entry of them.
     ///
     /// Refused where a stage is one the compile layer already compiled (`StageSource::Compiled`,
     /// which kept no AIR): `Unsupported` with `Feature::Reflection`, and as their decode refuses.
@@ -714,10 +711,9 @@ impl RenderPipelineDescriptor {
     /// Whether the fragment function writes depth (a `[[depth(...)]]` output) where the pipeline
     /// has no depth attachment, which `newRenderPipelineStateWithDescriptor:` refuses
     /// ("depthAttachmentPixelFormat is not valid and shader writes to depth"), with or without
-    /// `supportIndirectCommandBuffers` and before that refusal (EVs RRS3-icbtex12 and -icbtex14 on
-    /// an M4 under macOS 27.0.1). It decodes and specializes the fragment function's AIR under
-    /// `budget`, only where the pipeline has no depth attachment and `entries` holds no entry of
-    /// it.
+    /// `supportIndirectCommandBuffers` and before that refusal (on an M4 under macOS 27.0.1). It
+    /// decodes and specializes the fragment function's AIR under `budget`, only where the pipeline
+    /// has no depth attachment and `entries` holds no entry of it.
     ///
     /// Refused where the fragment function is one the compile layer already compiled, as
     /// [`vertex_returns_value`](Self::vertex_returns_value) refuses.
@@ -764,7 +760,7 @@ impl MeshPipelineDescriptor {
     /// has no depth attachment, which `newRenderPipelineStateWithMeshDescriptor:` refuses
     /// ("depthAttachmentPixelFormat is not valid and shader writes to depth"), with or without a
     /// color attachment or `supportIndirectCommandBuffers` and before that refusal, as a render
-    /// pipeline's (EV RRS3-icbtex17 on an M4 under macOS 27.0.1). Its calls nest Metal's default
+    /// pipeline's (on an M4 under macOS 27.0.1). Its calls nest Metal's default
     /// depth of 1. It decodes and specializes the fragment function's AIR under `budget`, only
     /// where the pipeline has no depth attachment and `entries` holds no entry of it.
     ///
@@ -861,8 +857,8 @@ impl MeshPipelineDescriptor {
     /// writes no per-vertex or per-primitive data of, as
     /// [`RenderPipelineDescriptor::unwritten_fragment_inputs`] answers them for a vertex
     /// function: what `newRenderPipelineStateWithMeshDescriptor:` refuses ("Fragment input(s)
-    /// `color` mismatching mesh shader output type(s) or not written by mesh shader", EV
-    /// RRS3-icbtex16 on an M4 under macOS 27.0.1); `None` where there are none or no fragment
+    /// `color` mismatching mesh shader output type(s) or not written by mesh shader", on an M4
+    /// under macOS 27.0.1); `None` where there are none or no fragment
     /// function. Each stage's calls nest Metal's default depth of 1, and each is specialized only
     /// where `entries` holds no entry of it. Refused as that refuses.
     pub fn unwritten_fragment_inputs(

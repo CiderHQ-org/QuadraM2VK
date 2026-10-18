@@ -2,8 +2,8 @@
 //!
 //! - **Metal's answers** (this module). The tile a sparse texture maps in
 //!   ([`Device::sparse_tile_size`]), its bytes, a texture's `firstMipmapInTail` and
-//!   `tailSizeInBytes`, and the region conversions are Metal's rules as an M4 answered them
-//!   (SPR-probe1-m4, SPR-probe2-m4), on every device: they make nothing.
+//!   `tailSizeInBytes`, and the region conversions are Metal's rules as an M4 answered them, on
+//!   every device: they make nothing.
 //! - **The device** (`device.rs`). What the device has of sparse binding and residency, enabled
 //!   as the runtime's own need, or what it lacks, which a sparse heap or texture is refused
 //!   naming (`Feature::SparseTextures`) where a function may read the image's residency.
@@ -317,7 +317,7 @@ pub(super) fn pixel_region_tiles(
 
 /// `convertSparsePixelRegions:...` of each of `pixels` into the region of `tiles` at its place,
 /// by [`pixel_region_tiles`]; a `tile` with an axis of 0 writes nothing, as plain Metal writes
-/// nothing (an M4 and an M3 Max, EVs RRP-probe1-m4 and RRP-probe1-m3 `sp_tilesize0`).
+/// nothing (an M4 and an M3 Max).
 pub(super) fn convert_pixel_regions(
     pixels: &[Region],
     tiles: &mut [Region],
@@ -374,8 +374,7 @@ impl Device {
     ///
     /// A tile size with an axis of 0 writes nothing, as plain Metal writes nothing, and its
     /// validation takes it (an M4 under macOS 27.0.1 and an M3 Max under 26.7, each axis and all
-    /// three at 0, both alignment modes: the caller's regions keep what they held; EVs
-    /// RRP-probe1-m4, RRP-probe1-m3).
+    /// three at 0, both alignment modes: the caller's regions keep what they held).
     ///
     /// Refused (`Invalid(LengthMismatch)`): slices of different lengths, which Metal's one count
     /// cannot state; a refusal writes nothing.

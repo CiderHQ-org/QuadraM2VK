@@ -648,9 +648,9 @@ fn an_amplified_draw_renders_each_view_as_metal() {
 
 /// Each draw of [`an_amplified_draw_renders_each_view_as_metal`]'s passes as the render command
 /// of an indirect command buffer executed in its place stores the same texels, as Metal's did
-/// (EVs RFL-inst-m3 and -m4: an amplified command rendered each view as the encoder's draw):
-/// the execution's commands that render views of their own run in render pass instances of
-/// those views, runs of the execution (`render/executions.rs`).
+/// (an amplified command rendered each view as the encoder's draw): the execution's commands that
+/// render views of their own run in render pass instances of those views, runs of the execution
+/// (`render/executions.rs`).
 #[test]
 fn amplified_indirect_render_commands_render_each_view_as_metal() {
     let cases: Vec<(Case, Stored)> = as_views()

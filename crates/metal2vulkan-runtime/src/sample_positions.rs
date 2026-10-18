@@ -9,7 +9,7 @@
 //!   coordinate outside `[0, 1)` (each an assertion of `setSamplePositions:count:`, or of the
 //!   encoder's creation). The positions' count must be the pass's samples for Metal's validation;
 //!   plain Metal takes fewer and puts the samples past them at the pixel's corner, (0, 0), and so
-//!   does the runtime (EV RRS-probe-4-m4, an M4 with macOS 27.0.1: 2 positions in a pass of 4
+//!   does the runtime (an M4 with macOS 27.0.1: 2 positions in a pass of 4
 //!   samples, each sample's position read through a varying at it). Plain Metal stops at a count of
 //!   1 or 3 (`setSamplePositions:count:`), and the runtime keeps refusing more positions than
 //!   samples (a Metal probe on an M4: Metal ends the process).

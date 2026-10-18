@@ -294,10 +294,10 @@ pub fn f16_binary_words(f: Form) -> u32 {
 /// decorated `NoContraction` (SPIRV-Cross writes its `[[clang::optnone]]` `spvFAdd` or `spvFSub`),
 /// a product as `Fma(a, b, -0.0)` decorated `NoContraction`, the product's value whether the
 /// device fuses it or not. Undecorated, Metal's fast and relaxed compiles fold the narrowings and
-/// the widening away and answer the `float` sum, difference or product of the widened operands
-/// (EV `CRT2-ha2-m4`); a `NoContraction` `OpFMul`, which SPIRV-Cross writes as `fma(l, r, 0)`,
-/// answers `+0` for a `-0` product (EVs `CRT-ha-m3`, `CRT-ha-m4`). Keeping each operation apart is
-/// one of the values the flags allow, the one the widened lowering gives.
+/// the widening away and answer the `float` sum, difference or product of the widened operands; a
+/// `NoContraction` `OpFMul`, which SPIRV-Cross writes as `fma(l, r, 0)`, answers `+0` for a `-0`
+/// product. Keeping each operation apart is one of the values the flags allow, the one the widened
+/// lowering gives.
 pub fn f16_binary(
     fb: &mut FunctionBuilder<'_>,
     op: AirBin,

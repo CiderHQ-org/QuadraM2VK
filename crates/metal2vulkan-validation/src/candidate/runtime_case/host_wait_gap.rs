@@ -16,8 +16,8 @@
 //!
 //! A standalone program shows it with no runtime code: two queues, three fills of one buffer,
 //! each command buffer ending with the barrier to the host the runtime's batches end with, the
-//! host waiting for the middle one (EVs `RT10-vvlgap` and `RT10-vvlgap2`, the RTX 5080 and the
-//! RTX 3090). Its control, the same chain without the host wait, gets no message.
+//! host waiting for the middle one (the RTX 5080 and the RTX 3090). Its control, the same chain
+//! without the host wait, gets no message.
 //!
 //! The runtime's queue waiters read the timelines while its scheduler submits, so on a
 //! device with several `VkQueue`s a lane test hits it at random: on the RTX 5080,
@@ -136,7 +136,7 @@ pub(super) fn layer_version(loader: Option<&std::path::Path>) -> Option<u32> {
 mod tests {
     use super::*;
 
-    /// The message the RTX 5080 reported (`runtime_lane::exits`, EV `RT10-exdbg-nv5k`, run 18).
+    /// The message the RTX 5080 reported (`runtime_lane::exits`, run 18).
     const SEEN: &str = "vkQueueSubmit(): WRITE_AFTER_WRITE hazard detected. vkCmdFillBuffer (from \
         VkCommandBuffer 0x7faa33f276b0 submitted on the current VkQueue 0x7faa30e9aab0) writes to \
         VkBuffer 0x1c000000001c, which was previously written by another vkCmdFillBuffer command \

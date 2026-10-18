@@ -1,4 +1,4 @@
-//! The store-buffering litmus kernel, the AIR twin of EV SDX-p1-m3's MSL probe, which the product's
+//! The store-buffering litmus kernel, the AIR twin of our MSL probe, which the product's
 //! unit test compiles and validation's lane runs on devices.
 //!
 //! Kernel `sb(device atomic_uint *x [[buffer(0)]], device atomic_uint *y [[buffer(1)]], device

@@ -864,7 +864,7 @@ fn draws_bind_vertex_buffers_at_aligned_offsets_with_their_windows() {
 }
 
 /// Inline vertex bytes at a per-bind layout read at their bind's stride, 0 without one, as plain
-/// Metal reads them (EV `RFL-vbytes-m4`: `setVertexBytes:length:atIndex:` read vertex 0 for every
+/// Metal reads them (`setVertexBytes:length:atIndex:` read vertex 0 for every
 /// vertex, the stride form at 0, 4 and 8 its stride); at `MTLAttributeStrideStatic`
 /// (`u32::MAX`), which an M4 read as element 0 and zeros past it, they are refused
 /// `MissingVertexStride`; and a stride fixed function cannot fetch is the plan's pulled variant.
@@ -1429,7 +1429,7 @@ fn patch_draws_push_and_bind_their_factors() {
         );
     }
     // Every positive `half` is pushed as rounded, subnormal ones included, and an infinite one as
-    // 2^32, which takes every positive factor past the maximum level (EVs ICBV-scale-m3, -m4).
+    // 2^32, which takes every positive factor past the maximum level.
     for (scale, pushed) in [
         (2f32.powi(-24), 2f32.powi(-24)),
         (1.5 * 2f32.powi(-25), 2f32.powi(-24)),

@@ -1,7 +1,6 @@
 //! Primitive restart at a chosen index: Apple's `setPrimitiveRestartEnabled:index:`.
 //!
-//! Measured on an M4 with macOS 27.0.1, with and without API validation (EVs RFX-probe5-m4 and
-//! RFX-probe6-m4), for a call with index `k`:
+//! Measured on an M4 with macOS 27.0.1, with and without API validation, for a call with index `k`:
 //!
 //! - An indexed line or triangle strip drawn after the call restarts at `k'` alone, and the index
 //!   type's all-ones index draws as a vertex unless it is `k'`. `enabled` changes nothing.
@@ -52,10 +51,9 @@ impl RenderCommandEncoder {
     /// 2^32` for 32-bit indices, the lesser of that and `0xffff` for 16-bit ones), and only
     /// there: the all-ones index then draws as a vertex unless it is that index. `_enabled`
     /// changes nothing, as on Metal. Lists, points, draws without indices and executions of
-    /// indirect render commands are as before; the last call wins until the encoder ends (EVs
-    /// RFX-probe5-m4 and RFX-probe6-m4, an M4). A strip restarting elsewhere than at the
-    /// all-ones index is drawn as a list a GPU pass writes before the pass; a draw it cannot
-    /// draw so is refused (`NotImplemented(RestartedStrip)`).
+    /// indirect render commands are as before; the last call wins until the encoder ends (an M4). A
+    /// strip restarting elsewhere than at the all-ones index is drawn as a list a GPU pass writes
+    /// before the pass; a draw it cannot draw so is refused (`NotImplemented(RestartedStrip)`).
     pub fn set_primitive_restart_enabled(&mut self, _enabled: bool, index: u64) {
         self.log(|_| RenderCall::PrimitiveRestartEnabled(_enabled, index));
         self.restart = Some(index);
@@ -106,8 +104,7 @@ mod tests {
 
     #[test]
     fn the_restart_index_is_metal_s_measured_one() {
-        // EV RFX-probe5-m4 and RFX-probe6-m4: 32-bit indices take `k mod 2^32`, 16-bit ones the
-        // lesser of that and 0xffff.
+        // 32-bit indices take `k mod 2^32`, 16-bit ones the lesser of that and 0xffff.
         let wide = [
             (3, 3),
             (0xffff, 0xffff),

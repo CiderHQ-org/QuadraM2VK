@@ -552,7 +552,7 @@ impl Primer<'_> {
     /// The command buffer `vkAllocateCommandBuffers` allocates of `info`, the device's loader
     /// word put back first: the loader serves the call and reads the word, which MoltenVK 1.4.1
     /// overwrites whenever it names the device in a message, as this priming's own submission makes
-    /// it do where its performance tracking logs each activity at once (EV API-dc1-mvk4: a
+    /// it do where its performance tracking logs each activity at once (a
     /// `SIGSEGV` at `0x1cdc0de` in the loader's `vkAllocateCommandBuffers`).
     ///
     /// # Safety

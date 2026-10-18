@@ -923,8 +923,7 @@ pub(super) const NARROW_ROWS: [Degradation; 1] = [Degradation::NarrowSurfaceRows
 
 /// The IOSurface stand-in (`Buffer::new_texture_with_iosurface_plane`) over an ordinary and a
 /// no-copy 16-KiB buffer standing for the surface, at plain Metal's answers on the M3 Max and an
-/// M4 (EVs `SPH-iosurf3-m3`, `SPH-iosurf3-m4`, `IOS-iosurf4-m4`, `IOS-iosurf4-m3`): the
-/// consumer's 4x4 `R8Unorm` plane at 4 bytes a row and `RG8Unorm` plane at 8, an `RG8Unorm`
+/// M4: the consumer's 4x4 `R8Unorm` plane at 4 bytes a row and `RG8Unorm` plane at 8, an `RG8Unorm`
 /// plane at 9 (not a multiple of its texel), an `R8Unorm` plane at offset 4, an `RGBA8Unorm`
 /// plane at 16 and at 20, an `R8Unorm` plane at 40 (each through [`iosurface_plane`]); the
 /// consumer's three-plane '420v' backing ([`iosurface_420v`]); and the refusals of a surface
@@ -1153,9 +1152,8 @@ fn a_planar_surface_s_depth_or_stencil_texture_reads_and_stores_the_plane() {
 
 /// Where Metal's pass puts element `(x, y)` of a `w`x`h` depth or stencil texture of `unit`-byte
 /// elements over a plane of a surface with planes, from the plane's offset rounded down to 128
-/// (EVs SID-pdl1-m4 to SID-pdl7-m4, an M4 under macOS 27.0.1): tiles of Metal's largest sides
-/// for the unit, or a side's power of two where it is smaller, a row of them after another,
-/// Morton order inside, x's bit lowest.
+/// (an M4 under macOS 27.0.1): tiles of Metal's largest sides for the unit, or a side's power of
+/// two where it is smaller, a row of them after another, Morton order inside, x's bit lowest.
 fn tiled_at(unit: u64, [w, h]: [u64; 2], x: u64, y: u64) -> u64 {
     let [lw, lh] = match unit {
         1 => [128, 128],
@@ -1180,14 +1178,14 @@ fn tiled_at(unit: u64, [w, h]: [u64; 2], x: u64, y: u64) -> u64 {
 }
 
 /// A pass on a depth or stencil texture over a plane of a surface with planes writes the bytes
-/// of Metal's tiles alone, as Metal's does (EVs SID-pdl6-m4 and SID-pdl7-m4: no byte outside
-/// the elements changed): extents of partial tiles, one tile and several, whose elements leave
-/// the bytes between them as they were; a view of the texture in its own format renders into the
-/// same bytes; and the stencil of `Depth32Float_Stencil8`, which is not in the plane, loads as 0
-/// whatever a pass stored, through the texture and its `X32_Stencil8` view alike (a draw testing
-/// it equal to 0 draws every texel, equal to the stored value none), the depth loaded and stored
-/// again unchanged and no byte changed by the view's pass. A shadow of such a texture is zeroed as
-/// it is made for `Depth32Float_Stencil8` (`WorkCounts::shadows_zeroed`), and never for
+/// of Metal's tiles alone, as Metal's does (no byte outside the elements changed): extents of
+/// partial tiles, one tile and several, whose elements leave the bytes between them as they were; a
+/// view of the texture in its own format renders into the same bytes; and the stencil of
+/// `Depth32Float_Stencil8`, which is not in the plane, loads as 0 whatever a pass stored, through
+/// the texture and its `X32_Stencil8` view alike (a draw testing it equal to 0 draws every texel,
+/// equal to the stored value none), the depth loaded and stored again unchanged and no byte changed
+/// by the view's pass. A shadow of such a texture is zeroed as it is made for
+/// `Depth32Float_Stencil8` (`WorkCounts::shadows_zeroed`), and never for
 /// `Depth16Unorm` or `Depth32Float`, whose making starts no image on the host
 /// (`images_started_on_the_host`).
 #[test]
@@ -1313,7 +1311,7 @@ fn a_planar_surface_s_depth_or_stencil_texture_s_passes_write_metal_s_elements_a
                         continue;
                     }
                     // The stencil loads as 0, through the texture and through its
-                    // `X32_Stencil8` view (EV SID-pdl7-m4): drawn where it equals 0, not where it
+                    // `X32_Stencil8` view: drawn where it equals 0, not where it
                     // equals the stored 0x33; the depth loads and stores unchanged, and the view's
                     // store reaches no byte.
                     let x32 = t.new_texture_view(PixelFormat::X32Stencil8).unwrap();
@@ -1542,7 +1540,7 @@ fn iosurface_plane(
 
 /// A 4:2:2 texture over a surface's plane, as over a CoreVideo `2vuy` or `yuvs` surface (no
 /// planes, 16 x 4 texels, 64 bytes a row), in either format, over an ordinary and a no-copy
-/// buffer: made, as plain Metal makes it (EV APX2-xv1-m4, an M4: plain and validated alike), and
+/// buffer: made, as plain Metal makes it (an M4: plain and validated alike), and
 /// its `get_bytes`, `replace_region` and blits into and out of a buffer move the surface's rows
 /// unchanged, 2 bytes a texel, the bytes between rows untouched, as Metal's do.
 #[test]
@@ -1632,7 +1630,7 @@ fn four_two_two_iosurface_planes_move_the_surface_s_rows() {
 
 /// The consumer's '420v' backing over a new buffer of `kind` ([`iosurface_planes_lie_where_metal_puts_them`]):
 /// three planes, a 4x4 `R8Unorm` one at 0 and two 2x2 `RG8Unorm` ones at 256 and 512, each 16 bytes
-/// a row (IOSurfaceGetPlaneCount 3; IOS-iosurf4: Metal's GPU and CPU find each plane where the
+/// a row (IOSurfaceGetPlaneCount 3: Metal's GPU and CPU find each plane where the
 /// surface lays it out). A blit writes each plane, and each lands in its own rows alone.
 fn iosurface_420v(device: &Device, kind: Kind) {
     let mut held = Held::new(device, kind).unwrap();
@@ -1682,7 +1680,7 @@ fn iosurface_420v(device: &Device, kind: Kind) {
 }
 
 /// An IOSurface plane takes and reports its descriptor's resource options whatever the buffer
-/// standing for the surface has, as plain Metal's on an M4 does (EV `IOS-modes2-m4`, flat and
+/// standing for the surface has, as plain Metal's on an M4 does (flat and
 /// planar surfaces, plain and under API validation): `Shared`, `Managed` (the guest
 /// WindowServer's, over a no-copy buffer of default options) and `Private`, each CPU cache mode
 /// and each hazard tracking mode, the default resolving to tracked. Each texture's CPU and GPU

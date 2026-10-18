@@ -381,11 +381,11 @@ fn view_aspects_and_the_default_storage_choice() {
     assert_eq!(storage_class(Some(&bgra)), StorageFormatClass::Unknown);
 }
 
-/// Metal reads a depth texel through a colour texture type as `(d, d, d, 1)` (EV SPN2-dc1-m4, Apple
-/// M4: `Depth16Unorm`, `Depth32Float` and `Depth32Float_Stencil8` through `texture2d<float>` and
+/// Metal reads a depth texel through a colour texture type as `(d, d, d, 1)` (Apple M4:
+/// `Depth16Unorm`, `Depth32Float` and `Depth32Float_Stencil8` through `texture2d<float>` and
 /// `texture2d<half>`, read, sampled, gathered and sampled with gradients, in a kernel and a
-/// fragment function), and a stencil texel through `texture2d<uint>` as `(s, 0, 0, 1)` (EV
-/// SPN2-dc2-m4), which Vulkan's identity reads too. So every depth format's sampled view that no
+/// fragment function), and a stencil texel through `texture2d<uint>` as `(s, 0, 0, 1)`, which
+/// Vulkan's identity reads too. So every depth format's sampled view that no
 /// comparison reads replicates the depth with alpha one, on every committed profile where the
 /// format is sampled; a comparison's view and every stencil view keep the identity, and the
 /// border check reads the depth through the same mapping.

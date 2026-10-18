@@ -21,7 +21,7 @@
 //!   pixel's index in a buffer of [`SENTINEL`] words.
 //!
 //! Metal's answer is that: a discarded fragment's stores, atomics, texture writes and copies do
-//! not land (an M4, EV REF-discard-probe), and a helper invocation's never do. Every value is a
+//! not land (an M4), and a helper invocation's never do. Every value is a
 //! dyadic fraction an `f32` holds exactly. A predicated discard (MoltenVK on an Apple GPU defers
 //! each of these past the stores; a device without demote predicates them all) runs a discarded
 //! fragment on to its end as a live invocation, so a side effect it did not guard would land as an

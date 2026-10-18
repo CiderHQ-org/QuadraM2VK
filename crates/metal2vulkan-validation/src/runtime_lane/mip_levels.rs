@@ -5,8 +5,7 @@
 //! Metal rounds the level `x` to `half` (a NaN reads 0), clamps it into the sampler's level clamp
 //! and the texture's levels, and with `L = floor(x)` and `q = floor(64 (x - L)) / 64` reads level
 //! `L + 1` under a nearest mip filter where `q > 1/2`, else `L`, blends `L` and `L + 1` with
-//! weight `q` under a linear one, and magnifies where `L + q` is 0 (MSFZ-m4-mipc1 and
-//! MSFZ-m4-mipc2, Apple M4 on macOS 27.0.1).
+//! weight `q` under a linear one, and magnifies where `L + q` is 0 (Apple M4 on macOS 27.0.1).
 //!
 //! The kernels are `msf_mip_levels`'s (`validation/fixtures/public/engine`), over `r32Float`
 //! textures of five levels whose level `L` holds `L` in every texel (a 2D array's slice 1 holds

@@ -13,13 +13,12 @@
 //! size.
 //!
 //! Every answer is Metal's, which the M3 Max (macOS 26.7) and an M4 (macOS 27.0.1) measured
-//! alike, with and without API validation (EVs `MESH-mp4` and `MESH-mp4-m3`): [`GRID_ANSWERS`]
-//! and [`OBJECT_ANSWERS`] hold the probe's lines, which the drawn pixels are printed as and
-//! compared with. Among them: `drawMeshThreads` without an object function launches the whole
-//! threadgroups its threads fill, whose threads are the grid the builtins report (10 by 3
-//! threads in threadgroups of 4 by 2: 2 by 1 threadgroups of an 8 by 2 grid); a grid with a zero
-//! axis draws nothing, and so do threads that fill no threadgroup; an object threadgroup that
-//! sets no grid launches nothing.
+//! alike, with and without API validation: [`GRID_ANSWERS`] and [`OBJECT_ANSWERS`] hold the probe's
+//! lines, which the drawn pixels are printed as and compared with. Among them: `drawMeshThreads`
+//! without an object function launches the whole threadgroups its threads fill, whose threads are
+//! the grid the builtins report (10 by 3 threads in threadgroups of 4 by 2: 2 by 1 threadgroups of
+//! an 8 by 2 grid); a grid with a zero axis draws nothing, and so do threads that fill no
+//! threadgroup; an object threadgroup that sets no grid launches nothing.
 //!
 //! On a device with `VK_EXT_mesh_shader` an indirect draw is refused
 //! (`NotImplemented(IndirectDrawArguments)`) until a GPU pass bounds its counts by the device's

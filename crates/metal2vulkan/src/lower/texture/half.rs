@@ -56,9 +56,9 @@
 //! (`ratio_to_half`), and a small float's value rounds to nearest even (it is a `half` value
 //! already, so exactly). A two-plane YCbCr format's one texel (`TexelLanes::Texel`: a read or a
 //! sample of one texel; `PackedTexels::ycbcr`) and a 2D gather's lanes (`Gathered`) round its
-//! value, a step of `1/2048` or `1/8192`, with ties away from zero (EVs TXN2-ycr1-m4, every channel
-//! of five formats on the grid `8192`, and TXN2-ycg1-m4, the gathers; a step of `1/2048` is a
-//! `half`). A value that may be filtered (`TexelLanes::Filtered`: a sample the device filters, or a
+//! value, a step of `1/2048` or `1/8192`, with ties away from zero (every channel of five formats
+//! on the grid `8192`, and the gathers; a step of `1/2048` is a `half`). A value that may be
+//! filtered (`TexelLanes::Filtered`: a sample the device filters, or a
 //! cube gather's lanes, each one channel's) keeps the `OTHER` arm, even under a packed normalized
 //! class's `EXACT` family (`TexelFormat::packed_exact`), whose grids are per channel; a small
 //! float's takes the half-float family's. The emulated linear filter of these formats

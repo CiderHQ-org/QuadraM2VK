@@ -1,6 +1,6 @@
 //! Where a NaN clear keeps a `half` NaN's sign (`nan_clear::keeps_nan_sign`): only in a pass
 //! without a draw call, at a level of 16 texels or more a side of a texture Metal keeps
-//! compressed (EVs ZIN-zms4-m4, ZIN-zms6-m4 and ZIN-zms8-m4, an M4 under macOS 27.0.1).
+//! compressed (an M4 under macOS 27.0.1).
 //!
 //! A device test: compiled only under the validation crate's GPU safety cfgs (`m2v_gpu`,
 //! `m2v_cpu_icd`), on the kind of device the cfg selects. It makes textures and records nothing.

@@ -1,8 +1,8 @@
 //! The stage-in region a kernel's `[[stage_in]]` fetch clamps to, on the device the cfg selects,
 //! under the validation layer, through the runtime as a consumer reaches it (`set_stage_in_region`,
 //! `set_stage_in_region_indirect`, `dispatch_threads`). The owned fixture `stage_in_regions` runs
-//! each case EVs `SWP-stagein-m3` (the M3 Max, macOS 26.7) and `SWP-stagein-m4` (an M4, macOS
-//! 27.0.1) ran, with the same descriptor, buffers, region, grid and threadgroup, and must write the
+//! each case our probes ran (the M3 Max, macOS 26.7, and an M4, macOS 27.0.1), with the same
+//! descriptor, buffers, region, grid and threadgroup, and must write the
 //! words Metal wrote on both chips, plain and under Metal's validation layer alike:
 //!
 //! - a step by thread position at rate `r` reads the region's origin plus `min(position / r,
@@ -55,8 +55,8 @@ struct Case {
     metal: &'static [u32],
 }
 
-/// Each case EVs SWP-stagein-m3 and SWP-stagein-m4 measured: its kernel, steps, region, grid,
-/// threadgroup, how the region is set, and the words Metal wrote, row by row.
+/// Each case our probes measured: its kernel, steps, region, grid, threadgroup, how the region is
+/// set, and the words Metal wrote, row by row.
 const CASES: &[Case] = &[
     Case {
         name: "x_r8_g8",

@@ -1,6 +1,6 @@
-//! A point's square, measured (EVs RRS3-reach11 and -reach12 on an Apple M4 under macOS 27.0.1,
-//! RCH-reach13 and -reach14 likewise; each case in a process of its own, two rounds alike): a
-//! 2048 by 64 single-sampled frame (64 by 2 tiles), a `DontCare`-loaded, stored color attachment
+//! A point's square, measured (on an Apple M4 under macOS 27.0.1, our probes
+//! likewise; each case in a process of its own, two rounds alike): a 2048 by 64 single-sampled
+//! frame (64 by 2 tiles), a `DontCare`-loaded, stored color attachment
 //! prefilled with 0x11 bytes, one point a case, its centre and size as the probe computed them
 //! (in `f64`, rounded to `f32`), and the tile columns of each tile row it reached. Our own probes;
 //! their cases: the right, left, top and bottom edges against a tile's at sizes about 1.3 pixels,

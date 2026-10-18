@@ -482,8 +482,8 @@ fn view_format(plan: &crate::bind::BindingPlan) -> Option<crate::vk::Format> {
 /// too, whose raw codes its float reads decode: its gather views the raw format, as a `float`
 /// slot's gather of the texture does, on a device that does not sample through Metal's own
 /// sampler, whose gather is the table's decode (Metal's uint gather of an `RGBA8Unorm_sRGB` texture
-/// is its float gather's bits, the table's decode, 240 of 240 on an M4 and an M3, EVs FPV-xc1-m4
-/// and FPV-xc1-m3). On every committed profile.
+/// is its float gather's bits, the table's decode, 240 of 240 on an M4 and an M3). On every
+/// committed profile.
 #[test]
 fn a_texture_of_another_class_joins_the_variant() {
     use SampledType as S;
@@ -842,7 +842,7 @@ declare void @air.write_texture_2d.{suffix}(ptr addrspace(1), <2 x i32>, {vec4},
     )
 }
 
-/// The 32-bit words a write's lanes take (the probe's, EV XCR-p1-m3): each channel's edges and
+/// The 32-bit words a write's lanes take (the probe's): each channel's edges and
 /// past them, both signs, and float bits.
 const WORDS: [u32; 32] = [
     0x0000_0000,
@@ -879,7 +879,7 @@ const WORDS: [u32; 32] = [
     0x1234_5678,
 ];
 
-/// The 16-bit lanes a write takes (the probe's, EV XCR-p2-m3).
+/// The 16-bit lanes a write takes (the probe's).
 const HALVES: [u16; 24] = [
     0x0000, 0x3800, 0x3C00, 0xBC00, 0x5BF8, 0x7C00, 0x7E00, 0x0001, 0x00FF, 0x0100, 0x012C, 0x7FFF,
     0x8000, 0xFFFF, 0x3400, 0xFC00, 0x03FF, 0x0080, 0xFF80, 0x4000, 0x57F8, 0x1234, 0xABCD, 0x7BFF,
@@ -887,8 +887,8 @@ const HALVES: [u16; 24] = [
 
 /// What plain Metal stores in a channel of `bits` bits of an integer format (`signed`) from a
 /// lane `lane` (a 32-bit word, or a 16-bit lane where `sixteen`): the lane extended by the
-/// format's signedness, saturated to the channel's range, as the format's signedness reads it
-/// (EVs XCR-p1-m3 and XCR-p2-m3). The 32-bit word the image holds.
+/// format's signedness, saturated to the channel's range, as the format's signedness reads it. The
+/// 32-bit word the image holds.
 fn metal_store(lane: u32, sixteen: bool, bits: u32, signed: bool) -> u32 {
     let v: i64 = match (sixteen, signed) {
         (true, true) => i64::from(lane as u16 as i16),

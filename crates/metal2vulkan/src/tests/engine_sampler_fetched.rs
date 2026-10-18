@@ -3,7 +3,7 @@
 //! `PrecisionNote::DeviceTexelDenormals` where the device reads them.
 //!
 //! A device's sample or gather may read a denormal 32-bit float texel as zero (RADV, NVIDIA and
-//! ANV, EVs MSFZ-dnp-*); its `OpImageFetch` keeps it. The selection tests pin which samples and
+//! ANV); its `OpImageFetch` keeps it. The selection tests pin which samples and
 //! gathers fetch on every committed profile, and which record the note. The interpreter runs the
 //! fetches of an `R32Float` texture whose texels include denormals and signed zeros: every lane
 //! is the texel Metal reads, bit for bit. (The interpreter models no device sample or gather, so

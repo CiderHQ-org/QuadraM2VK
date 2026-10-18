@@ -18,7 +18,7 @@
 //! store action where that is known (one that resolves needs a target, and a target one that
 //! resolves); a late store action that resolves needs the target set when it is, and one that does
 //! not drops the attachment's resolve, as plain Metal leaves a resolve texture under such an action
-//! untouched (EV RFX-probe2-m4). Each refusal is the descriptor's, typed, and leaves the target set
+//! untouched. Each refusal is the descriptor's, typed, and leaves the target set
 //! before.
 //!
 //! **The mechanism.** The encoder begins the pass at `end_encoding` (the deferred pass begin,

@@ -9,8 +9,8 @@
 //! (`TexelFormat`) from a push field, as theirs do. A draw binds every slot to one texture of a
 //! variant's format ([`VARIANTS`], four format classes); the four share one `VkPipeline`, where
 //! each was its own when the class was specialized. Every run's functions take a fresh constant
-//! (`nonce`), so no translation, Mesa or Metal cache answers for another run; the EV also turns
-//! Metal's and Mesa's disk caches off. Printed as `PPC-CREATE` lines:
+//! (`nonce`), so no translation, Mesa or Metal cache answers for another run; a timing run also
+//! turns Metal's and Mesa's disk caches off. Printed as `PPC-CREATE` lines:
 //!
 //! - **serial**: one thread makes the state, then one command buffer of one pass draws the four
 //!   variants: each draw call's time, `end_encoding`, `commit`, the wait for completion, and each
@@ -736,7 +736,7 @@ fn state_makings_scale_with_the_threads() {
     }
 }
 
-/// A nonce of this test binary: a hash of its path (which names an EV job's target directory)
+/// A nonce of this test binary: a hash of its path (which names a run's target directory)
 /// and its modification time, so two processes of one build make the same functions and no other
 /// build's.
 fn build_nonce() -> u32 {

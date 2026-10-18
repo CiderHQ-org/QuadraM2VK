@@ -6,9 +6,9 @@
 //! texture through a runtime sampler fetches its texel (`fetched`). Written at every site, that
 //! code made the consumer's CoreAnimation fragment `Xgc` 246,000 instructions from 15,800 AIR
 //! instructions, about 574 instructions a sample site and 78% of the module; NVIDIA's driver
-//! compiled every copy, 13 to 26 s a pipeline on the RTX 5080 (EV SHB-c3). The same emulation as
-//! one routine that 256 sites call, declared `DontInline`, made in 0.39 s on the RTX 3090 where the
-//! 256 inlined copies took 10.2 s (EV SHB-g1).
+//! compiled every copy, 13 to 26 s a pipeline on the RTX 5080. The same emulation as one routine
+//! that 256 sites call, declared `DontInline`, made in 0.39 s on the RTX 3090 where the 256 inlined
+//! copies took 10.2 s.
 //!
 //! **What a routine holds.** One per shape ([`Shape`]):
 //! - [`Emulation`]: a linear sample's emulated arm (`linear::emit`): Metal's position of the

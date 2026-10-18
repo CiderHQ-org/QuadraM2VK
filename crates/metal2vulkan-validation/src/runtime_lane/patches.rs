@@ -374,13 +374,13 @@ pub(super) const TWOS: &[u32] = &[0, 32, 64, 1386, 2080, 2112, 4160];
 /// The cells of a patch of factors 3.
 const THREES: &[u32] = &[0, 21, 43, 64, 924, 946, 1365, 1408, 2354, 2795, 2816, 4160];
 
-/// The `digest` of a patch of the maximum factor, 64, as Metal marked it (EVs ICBV-scale-m3 and
-/// -m4, and ICBV-scale2-m3 and -m4 for the host's scale: their probe's grid is the fixture's, its
-/// digests of factors 1, 2 and 3 those of `CORNERS`, `TWOS` and `THREES`).
+/// The `digest` of a patch of the maximum factor, 64, as Metal marked it (for the host's scale:
+/// their probe's grid is the fixture's, its digests of factors 1, 2 and 3 those of `CORNERS`,
+/// `TWOS` and `THREES`).
 pub(super) const MAXIMUM: (usize, u32) = (1815, 0xb267_fce1);
 
 /// The count of `cells` (each a cell's index, ascending) and the FNV-1a hash of their indices'
-/// little-endian bytes, as the probe of EVs ICBV-scale-m3 and -m4 printed them.
+/// little-endian bytes, as our probes printed them.
 pub(super) fn digest(cells: &[u32]) -> (usize, u32) {
     let hash = cells
         .iter()
@@ -498,8 +498,8 @@ fn cases() -> Vec<(Case, &'static [u32])> {
             },
             CORNERS,
         ),
-        // The scale rounded to `half` (EVs ICBV-scale2-m3 and -m4): 1.3 and 2.0005 are 2-ish
-        // `half`s, 10^-6 and 2^-24 subnormal ones, and 2^-30 is 0.
+        // The scale rounded to `half`: 1.3 and 2.0005 are 2-ish `half`s, 10^-6 and 2^-24 subnormal
+        // ones, and 2^-30 is 0.
         (
             Case {
                 scale_enabled: true,
@@ -590,10 +590,10 @@ fn cases() -> Vec<(Case, &'static [u32])> {
             },
             CORNERS,
         ),
-        // Factors at the edges of Metal's rules (EVs ICBV-scale2-m3/-m4, ICBV-scale3-m3/-m4): a
-        // subnormal edge factor draws, unscaled or scaled; a product below `half`'s least
-        // subnormal does not cull; an inside factor that is NaN or 0 takes the lower end, which
-        // beside edges of 2 Vulkan's and Metal's tessellators both draw as 2.
+        // Factors at the edges of Metal's rules: a subnormal edge factor draws, unscaled or scaled;
+        // a product below `half`'s least subnormal does not cull; an inside factor that is NaN or 0
+        // takes the lower end, which beside edges of 2 Vulkan's and Metal's tessellators both draw
+        // as 2.
         (
             Case {
                 scale_enabled: true,
@@ -667,7 +667,7 @@ fn cases() -> Vec<(Case, &'static [u32])> {
             TWOS,
         ),
         // Factors 0x47f3 by the `half` 0x3007: 1.000445 in `float`, two segments, where the
-        // product rounded to `half` would be 1.0, one (EVs ICBV-scale3-m3 and -m4): Metal does not
+        // product rounded to `half` would be 1.0, one: Metal does not
         // round it.
         (
             Case {
@@ -835,12 +835,11 @@ fn cases() -> Vec<(Case, &'static [u32])> {
             },
             &[],
         ),
-        // Odd factor offsets, read from the byte below as plain Metal reads them (EV IRX-pat2-m4,
-        // the encoder's and a command's alike: 1 culled on the `half` of 0 at byte 0, 3 drew from
-        // byte 2), and odd strides, stepped by the multiple of 4 below (EV IRX-pat3-m4: 13 and 15
-        // culled where 12 does, 17 and 19 where 16 does): a read at 3 itself would straddle two
-        // `half`s; one at stride 7 itself, or at 6, would reach the zeros past the `half`s, and
-        // one at 15 or 14 the `half`s past the 0.
+        // Odd factor offsets, read from the byte below as plain Metal reads them (the encoder's and
+        // a command's alike: 1 culled on the `half` of 0 at byte 0, 3 drew from byte 2), and odd
+        // strides, stepped by the multiple of 4 below (13 and 15 culled where 12 does, 17 and 19
+        // where 16 does): a read at 3 itself would straddle two `half`s; one at stride 7 itself, or
+        // at 6, would reach the zeros past the `half`s, and one at 15 or 14 the `half`s past the 0.
         (
             Case {
                 halves: Some(&[0, TWO, TWO, TWO, TWO]),
@@ -917,10 +916,10 @@ fn read_their_factors_as_metal(path: Path) {
 }
 
 /// A scale that is infinite as a `half` (70000, as the largest `half`, 65504, and 64 do) takes
-/// the factors to the maximum, 64, as Metal's did (EVs ICBV-scale2-m3 and -m4: the digest
-/// `MAXIMUM`), and so does the `float` `+∞`, which Metal's validation stops at the setter and
-/// plain Metal takes (a probe `ts_inf_enabled`: the maximum factor's vertices). A device that
-/// cannot make the fixture's pipeline refuses it, reported as its refusal.
+/// the factors to the maximum, 64, as Metal's did (the digest `MAXIMUM`), and so does the `float`
+/// `+∞`, which Metal's validation stops at the setter and plain Metal takes (a probe
+/// `ts_inf_enabled`: the maximum factor's vertices). A device that cannot make the fixture's
+/// pipeline refuses it, reported as its refusal.
 #[test]
 fn a_scale_infinite_as_a_half_draws_the_maximum_factor() {
     scale_infinite_draws_the_maximum(Path::Native);
@@ -954,9 +953,9 @@ fn scale_infinite_draws_the_maximum(path: Path) {
     });
 }
 
-/// An inside factor of `+∞` beside edge factors of 1 takes the maximum, 64, as Metal's did (EVs
-/// ICBV-scale3-m3 and -m4: 1689 cells, their indices' hash 0x540dbf35). A device that cannot make
-/// the fixture's pipeline refuses it, reported as its refusal.
+/// An inside factor of `+∞` beside edge factors of 1 takes the maximum, 64, as Metal's did (1689
+/// cells, their indices' hash 0x540dbf35). A device that cannot make the fixture's pipeline refuses
+/// it, reported as its refusal.
 #[test]
 fn an_infinite_inside_factor_draws_the_maximum_inside() {
     infinite_inside_draws_the_maximum(Path::Native);

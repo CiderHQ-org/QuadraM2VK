@@ -5,16 +5,15 @@
 //! `InverseSqrt` (a recorded near-equivalent within Apple's bound, as the fast division keeps its
 //! `RN(1 / b)`), so a small shader does not grow by the routine.
 //!
-//! Read off Metal's words (EVs MBB-hyp2-m3 and MBB-rsq1-m3 on the M3 Max, MBB-rsq1-m4 on the M4,
-//! the same at every operand): `fast::rsqrt` of every `float` of `[1, 4)` and of every 256th
-//! positive `float`. Metal's root of `y = m 4^k`, `m` in `[1, 4)`, is its root of `m` scaled by
-//! `2^-k`, and its root of `m` is the exact `1 / sqrt(m)` plus a smooth error per 32nd of each
-//! binade of `m` (up to about a third of a unit), rounded to nearest: it differs from the correctly
-//! rounded root at 725,821 of the 16,777,216 `float` values of `[1, 4)`. [`TABLE`] fits the smooth
-//! part, a quartic per 32nd by its five `f32` coefficients (in units of `2^-24`), so the routine is
-//! `RN(1 / sqrt(m) + eps(m))`: Metal's word at 16,746,537 `float` values of `[1, 4)` (99.817 %) and
-//! 99.805 % of the sampled normal `float` values, one unit off at the rest (an open
-//! near-equivalent).
+//! Read off Metal's words (on the M3 Max, on the M4, the same at every operand): `fast::rsqrt` of
+//! every `float` of `[1, 4)` and of every 256th positive `float`. Metal's root of `y = m 4^k`, `m`
+//! in `[1, 4)`, is its root of `m` scaled by `2^-k`, and its root of `m` is the exact `1 / sqrt(m)`
+//! plus a smooth error per 32nd of each binade of `m` (up to about a third of a unit), rounded to
+//! nearest: it differs from the correctly rounded root at 725,821 of the 16,777,216 `float` values
+//! of `[1, 4)`. [`TABLE`] fits the smooth part, a quartic per 32nd by its five `f32` coefficients
+//! (in units of `2^-24`), so the routine is `RN(1 / sqrt(m) + eps(m))`: Metal's word at 16,746,537
+//! `float` values of `[1, 4)` (99.817 %) and 99.805 % of the sampled normal `float` values, one
+//! unit off at the rest (an open near-equivalent).
 
 use crate::lower::arith::libm::E;
 use crate::spirv::builder::ModuleBuilder;
@@ -494,7 +493,7 @@ pub(crate) fn declare(mb: &mut ModuleBuilder) -> BResult<GlobalId> {
 /// 2^-24))` of `hi = RN(1 / sqrt(m))` (the module's correctly rounded `rsqrt`, [`E::rsqrt`]) and
 /// `lo = RN(RN(hi d) / 2)` of `d = 1 - m hi^2` (formed from exact products, so `hi + lo` is the
 /// exact root to a few units of `2^-48 hi`), then `r`'s exponent field moved by `-k`. Metal's
-/// words at its special operands (EV MBB-rsq1-m3): a zero or denormal `y` gives `+inf`, `+inf`
+/// words at its special operands: a zero or denormal `y` gives `+inf`, `+inf`
 /// gives `+0`, and a NaN gives a NaN (`y`; Metal's is `0x7fc00000`, its callers' NaN). Its
 /// callers pass no negative operand, whose answer is its magnitude's.
 pub(crate) fn metal_rsqrt(e: &mut E<'_, '_>, y: Value) -> BResult<Value> {

@@ -1,11 +1,10 @@
-# Metal's f32 answers at and around denormal operands, on an Apple M3 Max under macOS 27.0.1
-# (EV DNR-dn2-m3): our own kernel, built from source twice, without fast math and precise
-# functions, then with fast math and fast functions. A line is the function, its operands and
-# Metal's answers in those two builds, as bits. `mix` lines take every triple of 12 of the
-# patterns; on every triple of all 28, `mix(a, b, c)` answered `fma(c, b, fma(-c, a, a))` word
-# for word in both builds. `atan2` lines take every pair of the 28 patterns, and `sinpi`,
-# `cospi` and `tanpi` lines each of them. `fmod` lines are `fast::fmod` of every pair of the 28
-# patterns, built the same two ways (EV DNR-fm1-m3).
+# Metal's f32 answers at and around denormal operands, on an Apple M3 Max under macOS 27.0.1: our
+# own kernel, built from source twice, without fast math and precise functions, then with fast math
+# and fast functions. A line is the function, its operands and Metal's answers in those two builds,
+# as bits. `mix` lines take every triple of 12 of the patterns; on every triple of all 28,
+# `mix(a, b, c)` answered `fma(c, b, fma(-c, a, a))` word for word in both builds. `atan2` lines
+# take every pair of the 28 patterns, and `sinpi`, `cospi` and `tanpi` lines each of them. `fmod`
+# lines are `fast::fmod` of every pair of the 28 patterns, built the same two ways.
 mix 00000000 00000000 00000000 00000000 00000000
 mix 00000000 00000000 80000000 00000000 00000000
 mix 00000000 00000000 00000001 00000000 00000000

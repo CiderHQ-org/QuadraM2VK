@@ -23,7 +23,7 @@
 //! filter's GPU time has beyond their sum is its dispatches'.
 //!
 //! Ignored by default: a measurement, not a check, and slow on a CPU device. Run it by name with
-//! `--run-ignored all` (EVs CPM-cost*).
+//! `--run-ignored all`.
 
 use super::degrade_notices::counts;
 use super::{validated_device_with, Messages, ScratchCache, WAIT};

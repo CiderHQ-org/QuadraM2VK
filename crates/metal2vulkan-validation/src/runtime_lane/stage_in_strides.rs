@@ -3,8 +3,7 @@
 //! reports, per thread of a 5 by 3 grid, the attributes it fetched: a `float3` at offset 4 and a
 //! `half2` at offset 16 of layout 1 (stepping by the thread's x), a `ushort4` of layout 2 (by its
 //! y), and a constant `char` of layout 3. The compute encoder binds the source buffers with
-//! `set_buffer_with_stride` and its forms. Metal's answer, as an M4 reads it (EV
-//! REF-stride-probe-4):
+//! `set_buffer_with_stride` and its forms. Metal's answer, as an M4 reads it:
 //!
 //! - a dynamic layout reads element `e` at `e * stride` from the bind offset, byte-exact at any
 //!   alignment, for the stride the buffer was last bound with by the stride form, the range form
@@ -260,8 +259,8 @@ fn a_dynamic_layout_reads_the_bound_stride_as_metal() {
 }
 
 /// A stride past 32 bits reads at its low 32 bits, by each of the three forms, as plain Metal
-/// reads it (an M4 and an M3 Max, EVs RRP-probe1-m4 and RRP-probe1-m3: `2^32 + 8` at 8,
-/// `2^33 + 4` at 4, `2^32` at 0; Metal's validation takes them).
+/// reads it (an M4 and an M3 Max: `2^32 + 8` at 8, `2^33 + 4` at 4, `2^32` at 0; Metal's validation
+/// takes them).
 #[test]
 fn a_stride_past_32_bits_reads_at_its_low_32_bits() {
     on_device(|device| {

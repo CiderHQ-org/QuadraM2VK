@@ -4,12 +4,12 @@ using namespace metal;
 // On Metal (case 3fe49200), where this kernel reads the resource the pipeline does not provide,
 // `dest` keeps its initial zero, and its write to that resource goes nowhere. The read's value is
 // undefined, not zero: Metal's compiler drops a store of such a value, and its validation layer
-// reads zero instead (SPC-metal2). So the engine refuses the observed read
-// (`FunctionConstantArgument`), and the case's Metal rows stay as the record. `provide_absent` is
-// false in the variant this fixture describes, so `absent_source` and `absent_sink` are exactly
-// that resource -- and `present` and `dest` are the module's only other 2D read and only other 2D
-// write, which is the shape under which a translator that stands "the module's only same-shaped
-// texture" in for a lost handle reads and writes a texture the shader never named.
+// reads zero instead. So the engine refuses the observed read (`FunctionConstantArgument`), and the
+// case's Metal rows stay as the record. `provide_absent` is false in the variant this fixture
+// describes, so `absent_source` and `absent_sink` are exactly that resource -- and `present` and
+// `dest` are the module's only other 2D read and only other 2D write, which is the shape under
+// which a translator that stands "the module's only same-shaped texture" in for a lost handle reads
+// and writes a texture the shader never named.
 constant bool provide_absent [[function_constant(0)]];
 
 kernel void absent_texture_reads_zero(

@@ -1019,9 +1019,8 @@ impl ComputeCommandEncoder {
     /// empty, no pipeline state set where `icb` inherits it. A buffer of render command types is
     /// `NotImplemented(IndirectRenderCommands)`: Metal's validation lets it through, and what its
     /// commands do in a compute encoder is not measured. An empty range runs nothing, whatever
-    /// the encoder's pipeline state (EV CFR-probe2-m4 `fixed_empty_nopipeline`), and so does a
-    /// buffer of no command types, as plain Metal's. What a command's dispatch would be refused
-    /// refuses the commit ([`CommandBuffer::commit`]).
+    /// the encoder's pipeline state, and so does a buffer of no command types, as plain Metal's.
+    /// What a command's dispatch would be refused refuses the commit ([`CommandBuffer::commit`]).
     pub fn execute_commands_in_buffer(
         &mut self,
         icb: &IndirectCommandBuffer,
@@ -1035,13 +1034,12 @@ impl ComputeCommandEncoder {
         }
         let range = icb.command_range(CALL, range)?;
         // An empty range runs nothing before the inherited pipeline state is looked at, as plain
-        // Metal's with none set (EV CFR-probe2-m4 `fixed_empty_nopipeline`).
+        // Metal's with none set.
         if range.is_empty() {
             return Ok(());
         }
         let pipeline = self.inherited_pipeline(CALL, icb)?;
-        // A buffer of no command types runs nothing, as plain Metal's (EV RFC-probe2-m4
-        // `t0_exec_compute`).
+        // A buffer of no command types runs nothing, as plain Metal's.
         if icb.has_no_command_types() {
             return Ok(());
         }
@@ -1085,8 +1083,7 @@ impl ComputeCommandEncoder {
         }
         indirect_execute::check_range_buffer(CALL, range_buffer.length(), offset)?;
         let pipeline = self.inherited_pipeline(CALL, icb)?;
-        // A buffer of no command types runs nothing, as plain Metal's (EV RFC-probe3-m4
-        // `t0_exec_indirect`); its range is not read.
+        // A buffer of no command types runs nothing, as plain Metal's; its range is not read.
         if icb.has_no_command_types() {
             return Ok(());
         }
@@ -1229,7 +1226,7 @@ impl ComputeCommandEncoder {
     /// where the size passes (`2^62 + 1` by 4 ran 4 threads), and nothing where those axes hold
     /// other threads than the size counts (an M4 under macOS 27.0.1, both dispatch forms: `2^64 -
     /// 1` by `2^64 - 1`, `2^64 - 2` by `2^64 - 2`, and `2^64 - 1` by 1 by `2^64 - 1`, of sizes 1, 4
-    /// and 1; EV RRP-probe1-m4). The two counts agree modulo `2^32`, so such axes hold at least
+    /// and 1). The two counts agree modulo `2^32`, so such axes hold at least
     /// `2^32` threads, past any state's limit: a threadgroup the GPU cannot run.
     ///
     /// Refused: no pipeline state set (plain Metal faults).

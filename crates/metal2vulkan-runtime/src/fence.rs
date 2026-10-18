@@ -49,12 +49,12 @@
 //!   of them. The runtime orders what each barrier names, as a Mac2 GPU does.
 //! - **Barriers after the fragment stage.** On an Apple GPU Metal's validation stops one
 //!   ("afterStages (0x2) can not contain MTLRenderStageTile or MTLRenderStageFragment on this
-//!   device", M4, EV `CFIT-metal-probe-3`), and Metal without it did not order a fragment's
-//!   buffer write before the next draw's vertex read. Its message names the device, and a Mac2
-//!   GPU is not measured. The runtime honours each barrier, ordering what it names: a program
-//!   for an Apple GPU never records one. A later draw's vertex, object and mesh stages still read
-//!   the buffers of their tables a fragment stage of the pass wrote as Metal's do, from a copy
-//!   taken before the pass (`render/pass_start_reads.rs`).
+//!   device", M4), and Metal without it did not order a fragment's buffer write before the next
+//!   draw's vertex read. Its message names the device, and a Mac2 GPU is not measured. The runtime
+//!   honours each barrier, ordering what it names: a program for an Apple GPU never records one. A
+//!   later draw's vertex, object and mesh stages still read the buffers of their tables a fragment
+//!   stage of the pass wrote as Metal's do, from a copy taken before the pass
+//!   (`render/pass_start_reads.rs`).
 
 use super::blit::BlitCommandEncoder;
 use super::compute::ComputeCommandEncoder;

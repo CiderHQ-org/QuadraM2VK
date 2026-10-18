@@ -12,7 +12,7 @@
 //!   bound ([`Mappings`]), and each blit that writes the texture is followed by the zeroing of the
 //!   unmapped Metal units it wrote there (its scrub, `Deferred::SparseScrub`), so a read of an
 //!   unmapped texel reads what Metal's reads, zero, and a blit's write to one is dropped as Metal
-//!   drops it (SPR-probe1-m4: a blit into unmapped tiles leaves them reading zero). A sparse
+//!   drops it (a blit into unmapped tiles leaves them reading zero). A sparse
 //!   image's device unit that holds no mapped tile reads the device's value, and a write into one
 //!   is the device's. A function's writes to a sparse texture never land (the module drops them, as
 //!   Metal does), and a render pass into an ordinary image is refused.
@@ -273,7 +273,7 @@ impl Written {
 }
 
 /// A blit's or a render pass's writes of a sparse texture a copy writes: Metal drops a blit's write
-/// to an unmapped tile (SPR-probe1-m4) and a pass's store (a Metal sparse probe on the M3 Max and
+/// to an unmapped tile and a pass's store (a Metal sparse probe on the M3 Max and
 /// an M4), so where the command wrote an unmapped tile inside memory the texture holds the runtime
 /// zeroes it again right after, recorded as the batch is submitted, with the mappings the batch
 /// applied (`Deferred::SparseScrub`). A write into a device unit that holds no memory is the

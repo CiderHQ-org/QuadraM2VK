@@ -26,8 +26,7 @@
 //! the cases compare the test's cost; within one run, the fragment layers' ratio to one layer,
 //! beside the control's, shows whether the device still hides the hidden layers.
 //!
-//! Ignored by default: a measurement, not a check. Run it by name with `--run-ignored all` (EVs
-//! GSM2-crc*).
+//! Ignored by default: a measurement, not a check. Run it by name with `--run-ignored all`.
 
 use super::{buffer_with, validated_device_with, Messages, ScratchCache, WAIT};
 use crate::air_library::AirLibrary;

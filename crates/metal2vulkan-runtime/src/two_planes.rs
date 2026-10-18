@@ -1,6 +1,6 @@
 //! Copies of Apple's two-plane extended-range textures, `RGB10A8_2P_XR10` and its `_sRGB` twin.
 //!
-//! **Metal's answers** (EV XRR-tx1-m4, an Apple M4 under macOS 27.0.1; a 48 x 20 texture of
+//! **Metal's answers** (an Apple M4 under macOS 27.0.1; a 48 x 20 texture of
 //! random texels, plane 0's words with bits 30 and 31 set at random and random alpha bytes, each
 //! case in its own process, plain and under Metal's validation layer, which stops none of them
 //! but a copy between the two formats):
@@ -13,12 +13,11 @@
 //!   written, and no byte between the rows is touched.
 //! - A blit between two such textures moves both planes' bytes as if their rows were
 //!   `⌊4 w / 16⌋ · 16` bytes apart, where plane 0's rows lie `align(4 w, 16)` and the alpha
-//!   plane's `align(w, 16)` bytes apart (EVs XRR2-pitch4-m4, -pitch5-m4 and -pitch6-m4, an Apple
-//!   M4 under macOS 27.0.1, every width from 1 to 21 and 23 to 257 sampled; `bind::plane_copy`
-//!   states the model): at widths that are a multiple of 4 plane 0 copies exactly and the alpha
-//!   bytes scatter over other rows; at other widths plane 0's texels are lost or moved too. It is
-//!   Metal's defect, which depends on the planes' layout in memory. A copy into the other format
-//!   of the pair copies the same way.
+//!   plane's `align(w, 16)` bytes apart (an Apple M4 under macOS 27.0.1, every width from 1 to 21
+//!   and 23 to 257 sampled; `bind::plane_copy` states the model): at widths that are a multiple of
+//!   4 plane 0 copies exactly and the alpha bytes scatter over other rows; at other widths plane
+//!   0's texels are lost or moved too. It is Metal's defect, which depends on the planes' layout in
+//!   memory. A copy into the other format of the pair copies the same way.
 //! - At widths that are not a multiple of 4, blits between a buffer and the texture address its
 //!   rows the same way, so they move texels between rows too (into the texture, overlapping rows
 //!   in an order that varies); `getBytes` and `replaceRegion` move the texels at every width.
@@ -760,10 +759,10 @@ fn blit_rows(texture: &Texture, level: [u32; 2]) -> u64 {
 /// Why Metal's own answer for `copy` between textures whose blit rows are `blits` (source,
 /// destination) is not the model's bytes, or `None` where it is:
 /// below a width of 4 a texture of its own memory's blit addresses every row at the first row's
-/// bytes and reads alpha bytes from outside the planes (EV XRR2-pitch4-m4: other bytes than 0 in
-/// some runs), and where the copy's rows overlap in the destination with other bytes than each
-/// other's, Metal's blit writes them in an order that varies with the width (and with the run,
-/// out of a surface's planes: EV XRR2-xrs2-m4).
+/// bytes and reads alpha bytes from outside the planes (other bytes than 0 in some runs), and where
+/// the copy's rows overlap in the destination with other bytes than each other's, Metal's blit
+/// writes them in an order that varies with the width (and with the run, out of a surface's
+/// planes).
 fn residue(blits: [u64; 2], copy: &ImageCopyRegion) -> Option<&'static str> {
     let [s, d] = blits;
     if blits.contains(&0) {
@@ -791,7 +790,7 @@ fn residue(blits: [u64; 2], copy: &ImageCopyRegion) -> Option<&'static str> {
 /// Whether a copy of `size` texels at `origin` in a level of `level` texels (width, height)
 /// reaches, at Metal's blit rows, bytes outside the level's texels: a row's padding or the bytes
 /// past a plane. Metal's blit keeps the bytes it writes there and reads them back in a later
-/// blit (EV XRR2-pitch6-m4: padding and the bytes past the alpha plane, chained copies between
+/// blit (padding and the bytes past the alpha plane, chained copies between
 /// private and between shared textures); the kernel holds the planes' texels alone.
 fn outside_texels(level: [u32; 2], origin: [u32; 2], size: [u32; 2]) -> bool {
     let rows = PlaneRows::of(level[0]);
@@ -880,7 +879,7 @@ mod tests {
         }
     }
 
-    /// The layouts measured on Metal (EV XRR-tx1-m4) are taken, and the rest refused.
+    /// The layouts measured on Metal are taken, and the rest refused.
     #[test]
     fn only_measured_layouts_are_taken() {
         // r4, r5, r8, r4i and sub: 48 x 20, and 17 x 9 at offset 256 with rows of 80 bytes.

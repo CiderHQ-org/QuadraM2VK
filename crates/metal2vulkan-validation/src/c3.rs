@@ -874,21 +874,21 @@ fn near_equivalent_bound(note: PrecisionNote) -> &'static str {
             "a half-float color channel under textureWriteRoundingMode 2 blended with factors \
              other than one and zero stores the device's rounding of the blend's result, where \
              Metal rounds it to nearest even (MoltenVK's toward zero; under a constant factor \
-             Metal's result is neither rule's on 2,376 of 580,508 RGBA16Float channels, EV \
-             TXN2-twr-m4); exact path: the blend in the function under the pixel interlock"
+             Metal's result is neither rule's on 2,376 of 580,508 RGBA16Float channels); \
+             exact path: the blend in the function under the pixel interlock"
         }
         PrecisionNote::RotatedBlendRounding => {
             "an ARGB8Unorm attachment blended in none of the measured forms may store a channel \
              one code apart from Metal's: Apple's blend computes a factor pair apart in its color \
              and alpha arithmetic, and the rotation moves Metal's blue into the image's alpha \
              and Metal's alpha into its red (up to 1,767 of 65,536 tie-heavy texels over 440 \
-             swept states, EV GSM2-f84e-m4); exact path: a measured form for the state"
+             swept states); exact path: a measured form for the state"
         }
         PrecisionNote::ComputedSampleDepth => {
             "a fragment function that runs its draw's depth test itself at more than one sample \
              computes each sample's depth from its vertex function's window depth; under \
              perspective, a slope-scaled bias or another depth range it may be up to 2 ulp from \
-             the depth the device stores (EV DSX-dz5-mvk4), so a close test may decide \
+             the depth the device stores, so a close test may decide \
              otherwise; exact path: the sample's own depth read exactly"
         }
         _ => "unbounded",

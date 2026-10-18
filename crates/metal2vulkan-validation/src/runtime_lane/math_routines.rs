@@ -4,11 +4,10 @@
 //! creation; the compile layer replaces each call by the routine's answer in plain AIR. The owned
 //! fixture `kernel_frexp_ilogb` has a kernel for `float` and one for `half`: each thread reads one
 //! input and writes eight words, the scalar forms and lanes of the 4-lane forms beside other
-//! lanes' constants. Metal's answer, as an M4 gives it from the fixture's own AIR (EV
-//! REF-fx-fixture-2) and as `tests::engine_metal_routines` holds it over a wider table (EVs
-//! REF-fx-probe-2 and -3): with `u` the `float` bits (a `half` widened exactly first) and `E` the
-//! biased exponent, a zero or `float` denormal answers `(+0, 0)` and `INT_MIN`; an infinity
-//! `(x, 0)` and `INT_MAX`; a NaN `(x, 0)` and `INT_MIN`; anything else
+//! lanes' constants. Metal's answer, as an M4 gives it from the fixture's own AIR and as
+//! `tests::engine_metal_routines` holds it over a wider table: with `u` the `float` bits (a `half`
+//! widened exactly first) and `E` the biased exponent, a zero or `float` denormal answers `(+0, 0)`
+//! and `INT_MIN`; an infinity `(x, 0)` and `INT_MAX`; a NaN `(x, 0)` and `INT_MIN`; anything else
 //! `((u & 0x807fffff) | 0x3f000000, E - 126)` and `E - 127`.
 
 use super::{buffer_with, read_buffer, validated_device, Messages, ScratchCache, WAIT};

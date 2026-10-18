@@ -12,15 +12,15 @@
 //! so a buffer holds Metal's bytes whichever side wrote them, and every answer is Metal's
 //! arithmetic over them.
 //!
-//! **Measured** (EVs RRS3-rmbytes1-m4, RRS3-rmgpu1-m4 and RRS3-rmprobe2-m4, Apple M4, macOS 27.0.1;
-//! 54 maps of 1 to 16384 pixels a side, zero to two layers, uniform, two-sample, many-sample and
-//! two-layer qualities, nine of them with offsets at or near a half step; every byte of each map's
-//! data; 610,387 CPU answers and 609,587 GPU answers under fast and as many under safe math, along
-//! each axis and at signed zeros, denormals, `NaN`s, infinities and far values; 225,672 more of a
-//! shader's, layers 0 to 5 over the data followed by a pattern): this module's encoder writes each
-//! map's 24,624 bytes, and its decoders give every answer, bit for bit, the sign of a zero
-//! included, but a shader's read past the buffer (Metal reads what follows it). An M3 Max on
-//! macOS 26.7 gave the first two EVs' maps the same bytes and every answer alike.
+//! **Measured** (Apple M4, macOS 27.0.1; 54 maps of 1 to 16384 pixels a side, zero to two layers,
+//! uniform, two-sample, many-sample and two-layer qualities, nine of them with offsets at or near a
+//! half step; every byte of each map's data; 610,387 CPU answers and 609,587 GPU answers under fast
+//! and as many under safe math, along each axis and at signed zeros, denormals, `NaN`s, infinities
+//! and far values; 225,672 more of a shader's, layers 0 to 5 over the data followed by a pattern):
+//! this module's encoder writes each map's 24,624 bytes, and its decoders give every answer, bit
+//! for bit, the sign of a zero included, but a shader's read past the buffer (Metal reads what
+//! follows it). An M3 Max on macOS 26.7 gave the first two probes' maps the same bytes and every
+//! answer alike.
 //!
 //! **The map.** Per layer and axis the screen extent `[0, W)` is cut into tiles. Tile `k` covers
 //! screen `[S_k, S_k + s_k)` and physical `[P_k, P_k + p_k)`, every tile but the last

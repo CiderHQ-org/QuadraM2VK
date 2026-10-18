@@ -2,7 +2,7 @@
 //! the device's own `RGBA8Unorm` targets.
 //!
 //! Metal stores, masks and blends `ARGB8Unorm` as `RGBA8Unorm` with the bytes rotated, alpha
-//! first (EV GSM2-a8r-m4: 16 colors, every write mask, eleven blend states, byte for byte). The
+//! first (16 colors, every write mask, eleven blend states, byte for byte). The
 //! runtime holds it in an `R8G8B8A8_UNORM` image of those bytes: the fragment function writes its
 //! output rotated, and a blend whose color factors read Metal's source alpha reads it from a
 //! second output of copies of it (`pipeline::rotated_blend`); under straight alpha on Apple's

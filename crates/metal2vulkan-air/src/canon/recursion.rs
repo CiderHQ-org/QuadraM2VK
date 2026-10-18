@@ -2,9 +2,9 @@
 //!
 //! SPIR-V has no recursion. Metal runs a kernel whose visible functions call each other
 //! recursively, through visible-function references or through visible-function tables, up to a
-//! reach set by the compute pipeline's `maxCallStackDepth` `k` (measured on an M3 Max and an M4,
-//! UNI-fpprobe and UNI-fpprobe2). Each recursive part of the entry's call graph becomes a loop
-//! over an explicit stack of frames in the thread's memory, in three steps:
+//! reach set by the compute pipeline's `maxCallStackDepth` `k` (measured on an M3 Max and an M4).
+//! Each recursive part of the entry's call graph becomes a loop over an explicit stack of frames in
+//! the thread's memory, in three steps:
 //!
 //! 1. **Preparation** ([`prepare`], before inlining). The call graph of the defined functions
 //!    the entry reaches has an edge for each direct call, each call through a function's constant
@@ -55,28 +55,27 @@
 //!      from one, or from a value defined outside the copy, by `getelementptr`, `bitcast`, or
 //!      `addrspacecast` is computed again at each use, so neither is stored.
 //!
-//! **Capacity** (Metal's model, measured on an M4 under macOS 27.0.1 with the probes' shapes,
-//! UNI-fpprobe4 to 6: a 16-byte frame is refused at 16359, a 272-byte one at 963, a 288-byte pair
-//! at 909, a 32-byte non-recursive chain at 8180). Metal reserves `k` times the frames of the
-//! pipeline's linked functions, each rounded up to 16 bytes ([`reserved`]), and a recursion
-//! holds as many activations as those bytes hold of its own frames: one function's holds `k`, its
-//! root's and `k - 1` calls, whatever its frame, whether it recurses directly, through a table, or
-//! through a pointer passed to a helper, and whether the kernel calls it or the helper
-//! (UNI-fpprobe5 and 6; FPC-fx3, a function whose depth 0 answers a nonzero word answers depth `k -
-//! 1` at `k`, depth 0 at `k` 1, so the root's activation is one of the `k`); three 16-byte
-//! functions' hold `3k` (UNI-fpprobe B1 and B2: correct to 3 frames at `k` 1). The *linked frames*
-//! `L` are each member's frame (its call site's number and its copy's slots, as Metal's: a call's
-//! return and what it keeps across the call, packed largest alignment first) and, for each other
-//! linked function, 16 bytes when it calls a visible function or through a pointer and 0 for a
-//! leaf. A component's stack has `N = ceil(k L / s)` frames ([`frames`]), `s` the smallest of its
-//! members' reserved frames: a lone function's `k`, and at least `k` always, so at `k` 1 a lone
-//! function's root runs and calls nothing. Past `N` a call is not made and yields zero, where
-//! Metal's answer is not a defined one (a recorded near-equivalent, API.md §10). `k` 0 is taken
-//! as 1. Plain Metal and its API validation answer a lone function's depths below `k`, which the
-//! lowering does, and depth `k` too where the deepest call answers zero, which a call past the
-//! stack yields; Metal's shader validation reaches depth `k` and refuses past 908 for the 16-byte
-//! frame. Metal's backend keeps less in some frames than AIR keeps across the call, so a component
-//! of unequal frames reaches further than Metal's, never less, on the shapes measured.
+//! **Capacity** (Metal's model, measured on an M4 under macOS 27.0.1 with the probes' shapes: a
+//! 16-byte frame is refused at 16359, a 272-byte one at 963, a 288-byte pair at 909, a 32-byte
+//! non-recursive chain at 8180). Metal reserves `k` times the frames of the pipeline's linked
+//! functions, each rounded up to 16 bytes ([`reserved`]), and a recursion holds as many activations
+//! as those bytes hold of its own frames: one function's holds `k`, its root's and `k - 1` calls,
+//! whatever its frame, whether it recurses directly, through a table, or through a pointer passed
+//! to a helper, and whether the kernel calls it or the helper (a function whose depth 0 answers a
+//! nonzero word answers depth `k - 1` at `k`, depth 0 at `k` 1, so the root's activation is one of
+//! the `k`); three 16-byte functions' hold `3k` (correct to 3 frames at `k`
+//! 1). The *linked frames* `L` are each member's frame (its call site's number and its copy's
+//! slots, as Metal's: a call's return and what it keeps across the call, packed largest alignment
+//! first) and, for each other linked function, 16 bytes when it calls a visible function or through
+//! a pointer and 0 for a leaf. A component's stack has `N = ceil(k L / s)` frames ([`frames`]), `s`
+//! the smallest of its members' reserved frames: a lone function's `k`, and at least `k` always, so
+//! at `k` 1 a lone function's root runs and calls nothing. Past `N` a call is not made and yields
+//! zero, where Metal's answer is not a defined one (a recorded near-equivalent, API.md §10). `k` 0
+//! is taken as 1. Plain Metal and its API validation answer a lone function's depths below `k`,
+//! which the lowering does, and depth `k` too where the deepest call answers zero, which a call
+//! past the stack yields; Metal's shader validation reaches depth `k` and refuses past 908 for the
+//! 16-byte frame. Metal's backend keeps less in some frames than AIR keeps across the call, so a
+//! component of unequal frames reaches further than Metal's, never less, on the shapes measured.
 //!
 //! **Creation.** Metal refuses a pipeline whose reserved stack, `k L`, passes [`CALL_STACK_BYTES`]
 //! ("Compute pipeline exceeds available stack space"): the refusal is
@@ -1640,8 +1639,8 @@ fn zero_of(parts: &mut ModuleParts, ty: TypeId, m: &mut Meter) -> Result<Value, 
 
 /// The bytes of a frame of a call site's number (an `i32`) and the slots `slots`, packed as
 /// Metal's frame is: the largest alignment first, so that only the end is padded, to the largest
-/// alignment. A `[3 x [2 x <4 x i32>]]` array kept beside a word is 112 bytes, as Metal reserves it
-/// (FPC-frames1), where a struct of the slots in their order is 128.
+/// alignment. A `[3 x [2 x <4 x i32>]]` array kept beside a word is 112 bytes, as Metal reserves
+/// it, where a struct of the slots in their order is 128.
 fn frame_bytes(parts: &ModuleParts, slots: &[TypeId], m: &mut Meter) -> Result<u64, Error> {
     let before = m.ledger();
     let layouts = TypeLayouts::new(&parts.data_layout, &parts.types, m);

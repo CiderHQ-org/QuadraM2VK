@@ -8,16 +8,16 @@
 //! zero, else `src[i]`): `*_loaded` a `half4`, `*_loaded_float` a `float4`; or `*_product` the
 //! loaded `half4` times the fetched color. One draw of the fullscreen triangle.
 //!
-//! Metal's answer (EV FB8-sw1-m3: plain Metal on the M3 Max under macOS 27.0.1, our own MSL of
-//! this shape, every `half` alpha in `[0, 1]` against every destination code of each channel, four
-//! source draws per pair, each format, `half4` and `float4` outputs, fast and safe math, every
-//! channel; EV FB8-fold1-m3: products and sums of the output, the fetched color among them, fold
-//! nothing into the blend): the output clamped to `[0, 1]`, a NaN to 0; the destination's code `c`
-//! read as `h(c / 255)` (`f(c / 255)` for a `float4` output); `h(fma(d, h(1 - a), s))` under fast
-//! math and `h(s + h(d · h(1 - a)))` without (in `float` for a `float4` output, likewise); the
-//! result's code by Metal's unorm write, the exact product with 255 rounded to nearest. The texels
-//! are codes covering every value in each channel, a zero alpha at times; the sources random `half`s
-//! or `float`s, mostly in `[0, 1]`, some out of range, infinite or NaN.
+//! Metal's answer (plain Metal on the M3 Max under macOS 27.0.1, our own MSL of this shape, every
+//! `half` alpha in `[0, 1]` against every destination code of each channel, four source draws per
+//! pair, each format, `half4` and `float4` outputs, fast and safe math, every channel: products and
+//! sums of the output, the fetched color among them, fold nothing into the blend): the output
+//! clamped to `[0, 1]`, a NaN to 0; the destination's code `c` read as `h(c / 255)` (`f(c / 255)`
+//! for a `float4` output); `h(fma(d, h(1 - a), s))` under fast math and `h(s + h(d · h(1 - a)))`
+//! without (in `float` for a `float4` output, likewise); the result's code by Metal's unorm write,
+//! the exact product with 255 rounded to nearest. The texels are codes covering every value in each
+//! channel, a zero alpha at times; the sources random `half`s or `float`s, mostly in `[0, 1]`, some
+//! out of range, infinite or NaN.
 //!
 //! Where the draw announces no `half-output-fast-math-blend`, `half-output-precision` or
 //! `device-color-conversion`, every channel is Metal's. On a device that fetches through the pixel
@@ -30,8 +30,8 @@
 //! Other blends, write masks and the blend color, into `BGRA8Unorm` through each fixture's
 //! loaded `half4` and `float4`: source alpha over, the blend color's lerps with one channel of the
 //! encoder's color past each end, blue alone stored, and alpha alone stored, against the
-//! arithmetic `Blend::unorm8` names for each (EVs FB8-sw2-m3, FB8-bc1-m3, FB8-sc1-m3 and
-//! FB8-ao1-m3), each channel the mask leaves out its code; checked as above.
+//! arithmetic `Blend::unorm8` names for each, each channel the mask leaves out its code; checked as
+//! above.
 
 use super::{form, library, through_inputs};
 use crate::runtime_lane::degrade_notices::counts;
@@ -530,11 +530,11 @@ type State = (
     Option<Form>,
 );
 
-/// Other blends, write masks and the blend color, into `BGRA8Unorm`: Metal's arithmetic (EVs
-/// FB8-sw2-m3, FB8-bc1-m3, FB8-sc1-m3 and FB8-ao1-m3, plain Metal on the M3 Max under macOS
-/// 27.0.1) is each color lane's and alpha's form `Blend::unorm8` names; a channel the mask leaves
-/// out keeps its code. Each draw's channels are Metal's where it announces none of [`NOTES`], and
-/// on a device that fetches through the pixel interlock it announces none.
+/// Other blends, write masks and the blend color, into `BGRA8Unorm`: Metal's arithmetic (plain
+/// Metal on the M3 Max under macOS 27.0.1) is each color lane's and alpha's form `Blend::unorm8`
+/// names; a channel the mask leaves out keeps its code. Each draw's channels are Metal's where it
+/// announces none of [`NOTES`], and on a device that fetches through the pixel interlock it
+/// announces none.
 #[test]
 fn other_blends_masks_and_the_blend_color_store_metals_blend() {
     use BlendFactor as F;

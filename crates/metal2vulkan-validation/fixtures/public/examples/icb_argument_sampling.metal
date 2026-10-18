@@ -1,6 +1,6 @@
 // Owned fixture: a render state that supports indirect command
 // buffers and samples a texture through a constexpr sampler. Metal refuses such a state whose
-// functions use a direct texture or sampler argument (EV RRS3-icbtex3-m4), so the fragment
+// functions use a direct texture or sampler argument, so the fragment
 // function reaches its texture through an argument buffer, as Metal allows. Written from scratch
 // for the runtime lane; `scripts/regen-air-fixtures/regen-air-fixtures.sh --dir examples
 // icb_argument_sampling` compiles it. No translator sweep reads this directory.

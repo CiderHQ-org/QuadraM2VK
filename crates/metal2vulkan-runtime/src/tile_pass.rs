@@ -2,8 +2,7 @@
 //! `imageblockSampleLength` and `threadgroupMemoryLength`): the checks Metal makes of them when the
 //! encoder opens, and the tile size a tile dispatch runs over.
 //!
-//! Measured by probes RT11-metal-probe-10 and -11 (an M3 Max and an M4, which agree) and -12 (an
-//! M4):
+//! Measured by our probes (an M3 Max and an M4, which agree, and an M4 alone):
 //!
 //! - **Tile sizes.** A pass's tile is 16x16, 32x16 or 32x32 pixels, or unset (both 0); any other
 //!   pair is refused ("Invalid tile dimensions (8, 8)"), a pair with one side 0 included. Unset,
@@ -203,7 +202,7 @@ mod tests {
         let memory = |bytes| refused(RenderPassProblem::TileMemory { bytes });
         let threadgroup = |length| refused(RenderPassProblem::ThreadgroupMemoryLength { length });
         let per_sample = |bytes| refused(RenderPassProblem::PerSampleStorage { bytes });
-        // Probes RT11-metal-probe-11 and -12's passes: tile, sample length, threadgroup memory
+        // The measured passes: tile, sample length, threadgroup memory
         // length, samples.
         for (tile, sample_length, tg, samples, answer) in [
             ([32, 32], 32, 0, 1, Ok(Some([32, 32]))),

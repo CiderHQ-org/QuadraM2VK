@@ -17,7 +17,7 @@
 //!
 //! Metal orders two textures over one IOSurface wherever it orders one resource's accesses: every
 //! placement but the unordered queues read fresh texels in each of 16 rounds, plain and under API
-//! validation (EV `IOS-alias3-m4`, an M4, macOS 27.0.1: a render pass's, a kernel's and a blit's
+//! validation (an M4, macOS 27.0.1: a render pass's, a kernel's and a blit's
 //! writes, read by a blit, a kernel and a render pass). The runtime joins two no-copy buffers over
 //! the same memory, and lays the second in the first's import (`host_aliases.rs`), so its reads are
 //! fresh there too.

@@ -3,8 +3,8 @@
 //!
 //! Metal flushes most `float` operands whose exponent field is zero to a zero of their sign, but
 //! not every operation does, and the measured exceptions are per operation and per math mode:
-//! precise `asin` answers a denormal operand itself, where `fast::asin` answers `+0` for it (EV
-//! TRN-probe-mac, cases 087758cb and cc234732). A lowering that computes an operation itself,
+//! precise `asin` answers a denormal operand itself, where `fast::asin` answers `+0` for it (cases
+//! 087758cb and cc234732). A lowering that computes an operation itself,
 //! rather than leaving it to a device that is Metal's own (`FloatFunctions::Metal`), reads the
 //! operand as this table says, before its own special values. The table is decided on the exponent
 //! field, so the answer is the same whatever the device's own denormal mode. Only `float` operands
@@ -46,7 +46,7 @@ pub enum Operand {
 /// | `atan2`, `fast::atan2` | flushed | as a zero operand |
 /// | `sin`, `cos`, `tan` | kept | `sin` and `tan`: the operand itself; `cos`: 1 |
 /// | `fast::sin`, `fast::cos`, `fast::tan` | kept | as `sin`, `cos`, and `tan` (case cc234732, where RADV, ANV, and NVIDIA flush it) |
-/// | `sinpi`, `cospi`, `tanpi`, and their `fast::` forms | flushed | `sinpi` and `tanpi`: `+0`, whatever its sign; `cospi`: 1 (EV MBB-pi1-m3, both modes) |
+/// | `sinpi`, `cospi`, `tanpi`, and their `fast::` forms | flushed | `sinpi` and `tanpi`: `+0`, whatever its sign; `cospi`: 1 (both modes) |
 pub fn operand(op: FloatFn) -> Option<Operand> {
     use FloatFn as F;
     Some(match op {
@@ -145,10 +145,10 @@ impl Reading {
 /// fused multiply-adds as well.
 ///
 /// `fast::atan2(y, x)` reads a denormal `y` or `x` as the zero of its sign and answers no denormal
-/// (EV DNR-dn1-m3 and DNR-dn2-m3, an Apple M3 Max under macOS 27.0.1: every pair of 28 patterns,
-/// in entries with and without fast math); its quotient is the device's multiply or division, whose operands are those two, and a denormal
-/// quotient reaches the fast `atan`, which reads it as a zero. Where native device maths answers
-/// it, its denormals are the device's (the caller flushes nothing there).
+/// (an Apple M3 Max under macOS 27.0.1: every pair of 28 patterns, in entries with and without fast
+/// math); its quotient is the device's multiply or division, whose operands are those two, and a
+/// denormal quotient reaches the fast `atan`, which reads it as a zero. Where native device maths
+/// answers it, its denormals are the device's (the caller flushes nothing there).
 ///
 /// `trunc` and `rint` (`Trunc`, `RoundEven`) of a denormal answer the zero of its sign on every
 /// venue measured, as Metal does (the probes' words, both modes, all seven venues), but Vulkan

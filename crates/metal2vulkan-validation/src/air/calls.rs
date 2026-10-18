@@ -460,7 +460,7 @@ mod tests {
     }
 
     /// An indexed patch draw's overload names its patch index, control-point index and factor
-    /// buffers' spaces, in that order (EV ICBV-air-ipatch-m4); any other overload is an encoding
+    /// buffers' spaces, in that order; any other overload is an encoding
     /// no executor implements.
     #[test]
     fn indexed_patch_draws_decode_their_buffers_from_the_overload() {

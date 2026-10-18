@@ -1,4 +1,4 @@
-//! Metal's NaN of a `half` texel under the NaN switch: plain Metal (EV NAN-hrn1-m3, an Apple M3 Max
+//! Metal's NaN of a `half` texel under the NaN switch: plain Metal (an Apple M3 Max
 //! under macOS 26.7) hands back a 16-bit float texel's own bits, its sign, payload and signalling
 //! bit kept, for a read, a nearest sample or a gather, and `0x7e00` for every other NaN: a 32-bit
 //! float texel's, and every linear sample's.
@@ -207,7 +207,7 @@ fn is_nan(h: u16) -> bool {
 }
 
 /// The texels of the uniform texture, four channels each: quiet and signalling NaNs of both
-/// signs and payload edges, among finite values and infinities (EV NAN-hrn1-m3's halves).
+/// signs and payload edges, among finite values and infinities (the probe's halves).
 const TEXELS: [[u16; 4]; 4] = [
     [0x7e00, 0x7c01, 0x3c00, 0xfe00],
     [0xfc01, 0x7dff, 0x7fff, 0x0001],

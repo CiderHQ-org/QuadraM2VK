@@ -6,8 +6,7 @@
 //! the sample mask (`y`) its buffer holds. Each case is a pass of one draw of the fullscreen
 //! triangle (back-facing) at depth 0.5 over a fresh 4² `R32Float` target cleared to 0.75, beside
 //! the attachment cleared to depth 1 and stencil 0x10, under depth `Less` with writes and the
-//! case's stencil face, the encoder's reference 0x20. Metal's answer, measured on an M4 (EVs
-//! DSX-mask1-m4 and DSX-mask2-m4):
+//! case's stencil face, the encoder's reference 0x20. Metal's answer, measured on an M4:
 //!
 //! - the returned stencil's low 8 bits are the reference of both faces, in place of the
 //!   encoder's;

@@ -417,10 +417,10 @@ fn commands_a_kernel_writes_run_after_it() {
 }
 
 /// The kernel writes the buffer whose ID its argument buffer holds now, as Metal's kernel does
-/// (EVs ICR-icbid-m3 and ICR-icbid-m4, `kernel_cpu_reused`): a buffer made and gone leaves ID 1
-/// free, the setup's buffer takes it again, and the commands the kernel writes through ID 1, which
-/// the CPU wrote into its argument buffer, run from it, while a buffer made before it, ID 2,
-/// resident for writing too, keeps fresh commands.
+/// (`kernel_cpu_reused`): a buffer made and gone leaves ID 1 free, the setup's buffer takes it
+/// again, and the commands the kernel writes through ID 1, which the CPU wrote into its argument
+/// buffer, run from it, while a buffer made before it, ID 2, resident for writing too, keeps fresh
+/// commands.
 #[test]
 fn a_kernel_writes_the_buffer_that_holds_the_id_now() {
     on_device(|device| {
@@ -453,7 +453,7 @@ fn a_kernel_writes_the_buffer_that_holds_the_id_now() {
 }
 
 /// A kernel encoding through an ID reaches the buffer made last with it, placed or not, as
-/// Metal's does (EV MESH-icb1-m4, `r_*`): a buffer placed at the setup's buffer's ID takes it,
+/// Metal's does (`r_*`): a buffer placed at the setup's buffer's ID takes it,
 /// so the kernel writes the placed buffer's commands and the setup's buffer keeps fresh ones,
 /// which run nothing. Once the placed buffer is gone the ID reaches no buffer, though the setup's
 /// still lives: the kernel's writes miss, which the execution report counts, and its commands
@@ -649,12 +649,11 @@ fn an_encoding_fault_runs_no_command_and_is_reported() {
 }
 
 /// An execution reads its range from a buffer as it runs (`execute_commands_in_buffer_indirect`)
-/// and runs what Metal runs (probes `RT7-icb-probe2` and `RT7-icb-probe5`): the commands the
-/// CPU wrote from the location, clamped at the size; nothing from a location at the size or a
-/// length of 0; and, for a location past the size or a range past `2^32 - 1`, nothing, the
-/// execution report stating `RANGE`. A range a blit of the same command buffer wrote before the
-/// execution names the commands a kernel wrote. An offset that is not a multiple of 4, and a
-/// range past its buffer, are refused at the call.
+/// and runs what Metal runs: the commands the CPU wrote from the location, clamped at the size;
+/// nothing from a location at the size or a length of 0; and, for a location past the size or a
+/// range past `2^32 - 1`, nothing, the execution report stating `RANGE`. A range a blit of the same
+/// command buffer wrote before the execution names the commands a kernel wrote. An offset that is
+/// not a multiple of 4, and a range past its buffer, are refused at the call.
 #[test]
 fn an_execution_reads_its_range_as_it_runs() {
     on_device(|device| {
@@ -736,7 +735,7 @@ fn an_execution_reads_its_range_as_it_runs() {
 }
 
 /// The blit encoder's copy, reset and optimize act on the commands as Metal's do, as the command
-/// buffer runs (probe `RT7-icb-probe2`): commands 1 and 2 of CPU-written commands copied to the
+/// buffer runs: commands 1 and 2 of CPU-written commands copied to the
 /// same places of a fresh buffer run there, and its other commands nothing; all four copied, then
 /// commands 1 and 2 reset by a blit, run 0 and 3; an optimize changes nothing. The copied
 /// buffer's commands read back with the template's state, by its ID. A range past either
@@ -838,8 +837,7 @@ fn blits_copy_reset_and_optimize_commands_as_they_run() {
             past(3, 2)
         );
         // A buffer of no command types is reset, optimized and copied to another as nothing, as
-        // plain Metal's (EV RFC-probe3-m4 `t0_blit_*`); a copy beside a buffer of command types was
-        // not measured.
+        // plain Metal's; a copy beside a buffer of command types was not measured.
         let none = || {
             device
                 .new_indirect_command_buffer(

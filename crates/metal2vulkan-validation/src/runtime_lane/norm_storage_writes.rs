@@ -7,7 +7,7 @@
 //! tie up; a snorm channel likewise on `[-1, 1]`, a tie away from zero. A packed 16-bit format's
 //! channel (`B5G6R5Unorm`, `A1BGR5Unorm`, `ABGR4Unorm`, `BGR5A1Unorm`) takes the same exact
 //! product, not the `half` a color attachment rounds through first, and its 1-bit channel stores 1
-//! only above 0.5 (EV FRT3-nsw1-m4, an Apple M4 under macOS 27.0.1: every code's value and every
+//! only above 0.5 (an Apple M4 under macOS 27.0.1: every code's value and every
 //! tie between codes with two `f32` steps either side, per channel, of the 8- and 16-bit unorm and
 //! snorm, the 10:10:10:2 and the packed 16-bit formats, both accesses alike).
 //!

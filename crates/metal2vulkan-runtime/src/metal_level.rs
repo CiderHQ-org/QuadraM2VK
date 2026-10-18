@@ -31,14 +31,11 @@ use std::fmt;
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum MetalLevel {
-    /// macOS 26.7 (build 25G229), measured on an Apple M3 Max (EVs XRR2-pfi1-m3 and
-    /// XRR2-pla1-m3).
+    /// macOS 26.7 (build 25G229), measured on an Apple M3 Max.
     MacOS26_7,
-    /// macOS 27.0.1 (build 26A434), measured on an Apple M3 Max (EVs M27-pfi1-m3, M27-lin1-m3,
-    /// M27-heap1-m3, M27-hblk1-m3, M27-cblit1-m3, M27-props1-m3, M27-mips1-m3 to M27-mips4-m3 and
-    /// M27-imp1-m3). An Apple M4's answers differ where both were measured in the formats from 630
-    /// to 645, which it describes, in `gpuCoreCount` and in
-    /// `supportsComputeCompressedTextureWrite`.
+    /// macOS 27.0.1 (build 26A434), measured on an Apple M3 Max. An Apple M4's answers differ where
+    /// both were measured in the formats from 630 to 645, which it describes, in `gpuCoreCount` and
+    /// in `supportsComputeCompressedTextureWrite`.
     MacOS27_0_1,
 }
 
@@ -114,7 +111,7 @@ const MACOS_26_7: Row = Row {
     // The package share-cblit on the consumer's M3 Max (25G229): every line of the predicate,
     // the four rules and the clears identical to the M4's.
     compressed_blits: true,
-    // EVs APX2-un2-m3 and TTG-nil2-m3, plain and validated, every usage and storage mode.
+    // Measured plain and validated, every usage and storage mode.
     no_texture_stack_alignment: 16 << 10,
     mipmaps: MipmapRule::AppleM3MaxPasses,
 };
@@ -128,26 +125,23 @@ const MACOS_27_0_1: Row = Row {
     version: [27, 0, 1],
     unknown: &[],
     // Every BC, ETC2, EAC and ASTC format, every element of every level of 815 textures on an
-    // Apple M4 (EVs TXN3-htl5-m4 and TXN3-bcsw1-m4 to TXN3-bcsw4-m4); the M3 Max answers the 809
-    // of `tests/heap_tiled_blocks.rs` alike, each one's size, alignment, CPU span and GPU span (EV
-    // M27-hblk1-m3).
+    // Apple M4; the M3 Max answers the 809 of `tests/heap_tiled_blocks.rs` alike, each one's size,
+    // alignment, CPU span and GPU span.
     heap_blocks: HeapBlocks {
         bc: Some(BlockPlacement::Narrow),
         etc: Some(BlockPlacement::Narrow),
         astc: Some(BlockPlacement::Halved),
         gpu_rows: GpuRows::AsCpu,
     },
-    // EV M27-cblit1-m3: each rule matched every texel of its formats' blits through a texture
-    // Metal compresses (private, array, heap, texture to texture, a shared texture's blit out),
-    // and every texture Metal keeps uncompressed, every CPU copy and 7 other formats kept their
-    // bytes; an Apple M4 alike (EVs FXR-fxr3-m4, FXR-fxr5-m4 and FXR-cblit-m4).
+    // Each rule matched every texel of its formats' blits through a texture Metal compresses
+    // (private, array, heap, texture to texture, a shared texture's blit out), and every texture
+    // Metal keeps uncompressed, every CPU copy and 7 other formats kept their bytes; an Apple M4
+    // alike.
     compressed_blits: true,
-    // EV M27-heap1-m3 (and an Apple M4 alike, EVs APX2-un1-m4, TTG-nil1-m4 and TTG-nil4-m4):
-    // every type but a texture buffer 128, private and shared storage, `ShaderRead` and
-    // `ShaderWrite` usage.
+    // Measured on the M3 Max (and an Apple M4 alike): every type but a texture buffer 128, private
+    // and shared storage, `ShaderRead` and `ShaderWrite` usage.
     no_texture_stack_alignment: 128,
-    // EVs M27-mips1-m3 to M27-mips4-m3 and M27-imp1-m3: every level the filter of the level
-    // above (`bind::mipmap_filter`'s "By release").
+    // Every level the filter of the level above (`bind::mipmap_filter`'s "By release").
     mipmaps: MipmapRule::Filter,
 };
 
@@ -187,7 +181,7 @@ impl MetalLevel {
     /// `Problem::AttachmentNotAFormat`). An Apple GPU, whose Metal every device answers as,
     /// describes neither `Depth24Unorm_Stencil8` nor `X24_Stencil8` at any level (an M3 Max under
     /// macOS 26.7 and an M4 under 27.0.1 stop a texture, a depth and a stencil attachment of each
-    /// as of no format; EV XRR2-ol4-m4 and the consumer's M3 run), so
+    /// as of no format; our probe and the consumer's M3 run), so
     /// `isDepth24Stencil8PixelFormatSupported` answers no.
     pub fn describes(self, pf: PixelFormat) -> bool {
         self.pixel_format_info(u64::from(pf.as_raw()))

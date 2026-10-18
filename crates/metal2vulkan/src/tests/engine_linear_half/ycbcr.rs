@@ -7,12 +7,12 @@
 //! (`PackedTexels::YCbCrExtended8192`). Metal's 2D linear sample sums the steps on the grid under
 //! the weights `w = wx · wy` in units of `2^-16` (an axis whose two taps address one texel weighs
 //! `(256, 0)`), each term truncated: `T = Σ ⌊k · w / 2^7⌋`, then the step `⌊(T + 2^8) / 2^9⌋`,
-//! and a `half` result the step's value rounded with ties away from zero (EVs TXN2-ycf1-m3 and
-//! -m4, an Apple M3 Max on macOS 26.7 and an Apple M4 on macOS 27.0.1, byte-identical; EV
-//! TXN2-ycf2-m4 over the family; and EV XRR2-ycc2-m4's samples past a texture's edges). The
-//! class is the normalized family with `EXACT` (signed for the signed grid) and the field. On
-//! MoltenVK, whose sampler is Metal's for every other format, the slot's YCbCr variant
-//! (`LoweringInputs::ycbcr_textures`) takes the same emulation.
+//! and a `half` result the step's value rounded with ties away from zero (an Apple M3 Max on macOS
+//! 26.7 and an Apple M4 on macOS 27.0.1, byte-identical; our probe over the family; and our probe's
+//! samples past a texture's edges). The class is the normalized family with `EXACT`
+//! (signed for the signed grid) and the field. On MoltenVK, whose sampler is Metal's for every
+//! other format, the slot's YCbCr variant (`LoweringInputs::ycbcr_textures`) takes the same
+//! emulation.
 
 use super::*;
 use crate::lower::select::LowerInputs;
@@ -117,7 +117,7 @@ fn texel(steps: [i64; 3], d: i64) -> [u32; 4] {
 /// and Metal's `half` result's bits where the probe read it.
 type Row = (i64, i64, [[i64; 3]; 4], [i64; 3], Option<[u16; 3]>);
 
-/// Ten of EVs TXN2-ycf1-m3's and -m4's samples of `YCBCR8_420_2P` away from the edges (64 x 64
+/// Ten of our probes' samples of `YCBCR8_420_2P` away from the edges (64 x 64
 /// textures, clamp to edge, exact 1/256 fractions), chosen so that each of the rule's neighbours
 /// misses some: the exact sum rounded once, and the terms truncated by `2^4`, `2^6`, or `2^8`
 /// (the first two rows all four).
@@ -224,7 +224,7 @@ const INTERIOR: [Row; 10] = [
     ),
 ];
 
-/// Four of EV TXN2-ycf2-m4's interior samples on the grid `8192` (`YCBCR12_420_2P`'s video
+/// Four of our probe's interior samples on the grid `8192` (`YCBCR12_420_2P`'s video
 /// range, two; `YCBCR10_420_2P_sRGB`'s, two), each a `half` tie that rounding to nearest even
 /// misses, and each missed by the terms truncated by `2^6` or by `2^8`.
 const FINE: [Row; 4] = [
@@ -278,7 +278,7 @@ const FINE: [Row; 4] = [
     ),
 ];
 
-/// Six of EV TXN2-ycf2-m4's interior samples on the signed grid `8192` (`YCBCR12_420_2P_XR`'s,
+/// Six of our probe's interior samples on the signed grid `8192` (`YCBCR12_420_2P_XR`'s,
 /// three; `YCBCR10_420_2P_XR`'s, three): negative steps, steps past `8192`, `half` ties, and
 /// each of the rule's neighbours missing some.
 const EXTENDED: [Row; 6] = [
@@ -356,7 +356,7 @@ const EXTENDED: [Row; 6] = [
     ),
 ];
 
-/// Two of EV XRR2-ycc2-m4's samples of `YCBCR8_420_2P` (an Apple M4; a 40 x 24 texture, clamp to
+/// Two of our probe's samples of `YCBCR8_420_2P` (an Apple M4; a 40 x 24 texture, clamp to
 /// edge) whose `y` taps clamp onto one row, at the top and the bottom edge: the unmerged
 /// fraction (8 and 216 here) answers one step low on red chroma. Each row's taps are `(i, j)`
 /// and `(i + 1, j)`.
@@ -480,7 +480,7 @@ fn check_rows(k: &Kernel, half: bool, f: Family, rows: &[Row], name: &str) {
 
 /// Metal's samples (module docs) through a constexpr sampler and a runtime one, with `float` and
 /// `half` results, on lavapipe and on MoltenVK under the variant, are Metal's bytes: on the grid
-/// `2048` (each step exact in `half`; EV TXN2-ycf2-m4's `half` samples of the format are its
+/// `2048` (each step exact in `half`; our probe's `half` samples of the format are its
 /// `float` ones), `8192`, and the signed `8192`; and the rule answers each of them.
 #[test]
 fn ycbcr_linear_samples_are_metals_bytes() {
@@ -768,12 +768,11 @@ fn a_device_takes_the_ycbcr_variant_only_under_the_exact_filter() {
     }
 }
 
-/// A YCbCr texture has one level, which Metal's mip filter leaves as it is (EVs TXN2-ycm1-m4 and
-/// -m3): through a runtime sampler whose word states a nearest or a linear mip filter, the
-/// emulation answers each field's samples as through none, on lavapipe and on MoltenVK under the
-/// variant; and the filter note holds under such a word for a format of another class
-/// (`RGBA8Unorm`, whose textures may have levels) and not for `YCBCR8_420_2P`, the one the binder
-/// binds yet.
+/// A YCbCr texture has one level, which Metal's mip filter leaves as it is: through a runtime
+/// sampler whose word states a nearest or a linear mip filter, the emulation answers each field's
+/// samples as through none, on lavapipe and on MoltenVK under the variant; and the filter note
+/// holds under such a word for a format of another class (`RGBA8Unorm`, whose textures may have
+/// levels) and not for `YCBCR8_420_2P`, the one the binder binds yet.
 #[test]
 fn a_runtime_mip_filter_takes_metals_filter_of_one_level() {
     use crate::bind::SamplerDescriptor;

@@ -1432,8 +1432,8 @@ fn the_exact_block_truncates_each_term() {
 
 /// The accumulated linear 3D routine is Metal's accumulator ([`metal_linear`]) under Metal's 16-bit
 /// weights ([`block_weights`]) on random straining footprints, with Metal's non-finite rule on the
-/// taps of nonzero product weight (every tap but the second of an axis whose fraction is 0, EV
-/// TXN-pknf-m3) and the `half` result's conversion.
+/// taps of nonzero product weight (every tap but the second of an axis whose fraction is 0) and the
+/// `half` result's conversion.
 #[test]
 fn the_float_block_is_metals_accumulator() {
     let ins = block_ins();

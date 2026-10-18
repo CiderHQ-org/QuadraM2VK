@@ -211,7 +211,7 @@ impl Forwarding {
 /// every function to one inlined at each call, the GPU's compiler compiles a routine once per call,
 /// and `DontInline` states that the calls should stay calls. Elsewhere the control is left out:
 /// NVIDIA's driver honours it at a measured cost (a routine-heavy kernel ran 8.1 times as long with
-/// it on the RTX 3090, EV UNM-gt2-nv3090), and Mesa's inline every function whatever it states.
+/// it on the RTX 3090), and Mesa's inline every function whatever it states.
 fn states_dont_inline(p: &DeviceProfile) -> bool {
     p.fields()
         .workarounds

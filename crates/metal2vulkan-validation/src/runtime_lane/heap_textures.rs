@@ -3,9 +3,8 @@
 //!
 //! - **Answers.** `heap_texture_size_and_align` answers each probe shape the same each time, a
 //!   power-of-two alignment and a size that holds the texels; `HEAPTEX` lines print it beside
-//!   Metal's own answer (an M4 on macOS 27.0.1 and an M3 Max on 26.7 answer alike, SPR-heaptex1
-//!   and SPR-heaptex2, RDX-optprobe-m3 and RDX-optprobe-m4). On MoltenVK, whose image
-//!   requirement is Metal's, the two are equal, but for a depth or stencil texture with
+//!   Metal's own answer (an M4 on macOS 27.0.1 and an M3 Max on 26.7 answer alike). On MoltenVK,
+//!   whose image requirement is Metal's, the two are equal, but for a depth or stencil texture with
 //!   `allowGPUOptimizedContents` off. A texture with the property off takes the image of one of
 //!   `PixelFormatView` usage, on every device the answer of that texture (for a depth or stencil
 //!   format, at least that answer: every answer holds Metal's where it is measured, and Metal keeps
@@ -16,11 +15,11 @@
 //! - **Placement.** A texture fits at every multiple of the answered alignment of a placement
 //!   heap, its `heap_offset` that offset; an offset off the alignment, bytes past the heap's end,
 //!   another storage or CPU cache mode and the other heap type's call are refused `Invalid`, as
-//!   Metal's validation stops them (SPR-heaptex1). An automatic heap places first fit, its
+//!   Metal's validation stops them. An automatic heap places first fit, its
 //!   `used_size` the sum of its textures' answered sizes, and takes a range back when its
 //!   texture is made aliasable or goes.
-//! - **Aliasing.** A heap's buffer and texture over the same bytes alias them, as Metal's do
-//!   (SPR-heaptex2): a texture write changes the buffer's bytes, and a write through the buffer
+//! - **Aliasing.** A heap's buffer and texture over the same bytes alias them, as Metal's do: a
+//!   texture write changes the buffer's bytes, and a write through the buffer
 //!   changes every texel the texture reads, ordered by the heap's tracking within one command
 //!   buffer. The bytes' layout is each device's own (Metal's is Apple's tiled or compressed
 //!   layout), so the test asserts the change, not the bytes.
@@ -112,8 +111,7 @@ impl Shape {
 
 const READ: TextureUsage = TextureUsage::SHADER_READ;
 
-/// Metal's answers for the probe shapes (SPR-heaptex1, SPR-heaptex2; the M4 and the M3 Max
-/// alike).
+/// Metal's answers for the probe shapes (the M4 and the M3 Max alike).
 fn shapes() -> Vec<Shape> {
     let plain = |name, pixel_format, side: u64, levels, usage, optimized, metal| Shape {
         name,
@@ -199,7 +197,7 @@ fn shapes() -> Vec<Shape> {
             usage: TextureUsage::RENDER_TARGET,
             ..plain("", rgba, 1, 1, READ, true, (66048, 128))
         },
-        // The property off (RDX-optprobe-m3, RDX-optprobe-m4: an M3 Max and an M4 alike).
+        // The property off (an M3 Max and an M4 alike).
         plain("rgba8-256", rgba, 256, 1, READ, true, (264192, 128)),
         plain(
             "rgba8-256-unoptimized",
@@ -470,7 +468,7 @@ fn heap_textures_answer_and_place_as_metal_s_do() {
 }
 
 /// A placement heap's textures: at every multiple of the alignment, refused off it and past the
-/// end (Metal's nil, EV TTG-nil1-m4), with other options (Metal's stop), and through the
+/// end (Metal's nil), with other options (Metal's stop), and through the
 /// automatic heap's call.
 fn placement_rules(device: &Device) {
     const CALL: &str = "new_texture_at_offset";
@@ -545,8 +543,8 @@ fn placement_rules(device: &Device) {
             })
         ))
     );
-    // A placement heap's textures are aliasable from the start, as Metal's (EVs SPH-alias1-m3,
-    // -m4), and `make_aliasable` changes nothing.
+    // A placement heap's textures are aliasable from the start, as Metal's, and `make_aliasable`
+    // changes nothing.
     assert!(placed[0].is_aliasable() && placed[1].is_aliasable());
     assert_eq!(placed[0].make_aliasable(), Ok(()));
     assert!(placed[0].is_aliasable() && placed[1].is_aliasable());
@@ -651,7 +649,7 @@ fn texels(queue: &CommandQueue, texture: &Texture, side: u64) -> Vec<u8> {
 }
 
 /// The aliasing of a placement heap's texture of `descriptor` (`RGBA8Unorm`, square) at offset 0
-/// and a buffer of its answered size over the same bytes, `what` naming it (SPR-heaptex2): texels
+/// and a buffer of its answered size over the same bytes, `what` naming it: texels
 /// blitted into the texture's first level read back unchanged and change some of the buffer's
 /// bytes, which this asserts; then bytes copied into the buffer, and the first level's texels read
 /// back, in one command buffer ordered by the heap's tracking. Gives how many of those texels
@@ -747,7 +745,7 @@ fn alias_round_trip(
     Some(unchanged)
 }
 
-/// A heap's buffer and texture over the same bytes alias them, as Metal's do (SPR-heaptex2): in
+/// A heap's buffer and texture over the same bytes alias them, as Metal's do: in
 /// a tracked `Shared` and a tracked `Private` placement heap, for `RGBA8Unorm` textures of 16,
 /// 64 and 1024 texels a side of storage, render-target and sampled-only usage, texels blitted into
 /// the texture change the buffer's bytes and read back unchanged; bytes copied into the buffer then
@@ -756,11 +754,10 @@ fn alias_round_trip(
 ///
 /// Where the device's driver may keep a compressed image's texels apart from its memory
 /// (`DriverFact::CompressedImagesHideAliasedWrites`: ANV, whose texture's write changed 234 of
-/// the buffer's 1024 bytes and the buffer's write none of its 256 texels, EVs `CRF-lane4-anv`
-/// and `CRF-lane4-anvs`), the texture takes host-transfer usage or a linear image: the device
-/// announces one of `heap-texture-host-transfer` and `heap-texture-linear` once, never
-/// `heap-texture-hides-aliased-writes`, whose texels would fail the test. Elsewhere none of the
-/// three is announced. `HEAPTEX alias` lines print the counts.
+/// the buffer's 1024 bytes and the buffer's write none of its 256 texels), the texture takes
+/// host-transfer usage or a linear image: the device announces one of `heap-texture-host-transfer`
+/// and `heap-texture-linear` once, never `heap-texture-hides-aliased-writes`, whose texels would
+/// fail the test. Elsewhere none of the three is announced. `HEAPTEX alias` lines print the counts.
 #[test]
 fn a_buffer_write_shows_in_an_overlapping_texture() {
     let messages = Messages::default();
@@ -1181,7 +1178,7 @@ fn tiling_refusal(error: &Error) -> Option<LinearNeed> {
 /// sRGB texture, is checked format by format. `Unspecialized` takes Metal's answers: 0 bytes from
 /// the query, at 128 for a 2D texture and the device's level's alignment for a cube, a 3D texture
 /// or an array (`stacked_nil_alignment`), and no texture from the call
-/// (`TextureProblem::Unspecialized`, Metal's nil; an M4 under macOS 27.0.1, EV APX-fmt1-m4, every
+/// (`TextureProblem::Unspecialized`, Metal's nil; an M4 under macOS 27.0.1, every
 /// usage). A format Metal makes no texture of from a descriptor alone, such as a two-plane YCbCr
 /// one, takes Metal's answers too: 0 bytes from the query, at 16 for a two-plane YCbCr 2D texture
 /// and 128 for another, and nil from the call (`Error::Nil`, `TextureProblem::NoTextureOfFormat`).
@@ -1263,8 +1260,7 @@ fn shared_heap_textures_are_made_or_refused_for_linear_tiling() {
                     )
                 }
                 // Metal's nil for a format it makes no texture of from a descriptor alone, and
-                // its query's 0 bytes at 16 for a two-plane YCbCr one, 128 for another (EVs
-                // XRR2-ycf3p1b-m4, XRR2-ycc1-m4).
+                // its query's 0 bytes at 16 for a two-plane YCbCr one, 128 for another.
                 (Ok(answer), Err(error)) if error == no_texture => {
                     let pf = descriptor.pixel_format;
                     assert!(no_texture_alone(pf), "{what}: {error:?}");
@@ -1349,8 +1345,8 @@ fn shared_heap_textures_are_made_or_refused_for_linear_tiling() {
 }
 
 /// Whether `pf`'s texels are floating point, whose bytes a round trip need not keep: a NaN's
-/// payload is the device's to canonicalize (MoltenVK's `RG11B10Float` in a heap does, EV
-/// SPR-tlane5-mvk at `8b98df40`).
+/// payload is the device's to canonicalize (MoltenVK's `RG11B10Float` in a heap does, at
+/// `8b98df40`).
 fn floating(pf: PixelFormat) -> bool {
     metal2vulkan::metal::format::direct_format(pf)
         .and_then(|format| format.block())
@@ -1586,7 +1582,7 @@ fn a_heap_texture_buffer_is_the_heap_s_bytes() {
 ///
 /// Where the device's driver lays depth and stencil images apart from their memory
 /// (`DriverFact::DepthStencilImagesLieApart`: MoltenVK, which makes such an image's Metal texture
-/// from the device, never from the memory's heap; EV CRF-hlane1-mvk, an M4, MoltenVK 1.4.1, where
+/// from the device, never from the memory's heap; an M4, MoltenVK 1.4.1, where
 /// the fill changed none), each texture's image is a shadow of the heap's bytes: the fill changes
 /// every texel of the first, Metal's answer, and the device announces `shadowed-texture` once,
 /// never `heap-depth-stencil-apart`. Where no memory a `Shared` heap lies in takes the device's

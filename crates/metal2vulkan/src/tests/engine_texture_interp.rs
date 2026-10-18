@@ -230,8 +230,8 @@ fn texel_buffers_double_their_input() {
 
 /// A texture buffer's reads take the bound swizzle: `texel_buffers` states
 /// `RuntimeFact::TextureSwizzle` for the slot it reads and not the one it writes, and under each
-/// swizzle's `TextureSwizzle` specialization writes `2 * src[i]` swizzled as Metal swizzles it
-/// (UNV-metal-probe-3): each channel from the source the swizzle names, 0 or 1 for `Zero` and
+/// swizzle's `TextureSwizzle` specialization writes `2 * src[i]` swizzled as Metal swizzles it:
+/// each channel from the source the swizzle names, 0 or 1 for `Zero` and
 /// `One`. Without the specialization the read is unswizzled.
 #[test]
 fn a_texel_buffer_read_takes_the_bound_swizzle() {
@@ -701,7 +701,7 @@ fn depth_and_multisample_reads_read_their_texel() {
 /// A depth read with a `float` result converts its texel by the bound format's class, the slot's
 /// `TexelFormat` specialization, on a profile without Metal's own sampler: a `Depth16Unorm`
 /// texel the device gives as its code times the reciprocal (lavapipe) reads `c / 65535`
-/// correctly rounded, Metal's (EV SID-d16r1-m4), and a `Depth32Float` texel reads as given. On
+/// correctly rounded, Metal's, and a `Depth32Float` texel reads as given. On
 /// a profile with Metal's own sampler the device's value is Metal's, and the read takes no class.
 #[test]
 fn a_depth_read_converts_by_the_bound_format() {

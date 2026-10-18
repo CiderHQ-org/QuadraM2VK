@@ -7,8 +7,8 @@
 //!   leaves undefined, zeroed in both as the Metal oracle records them), the same execution
 //!   report, and the same compiled variant planned for the same shape.
 //! - Commands run as their records stand at commit; a command Metal runs nothing for (no
-//!   dispatch, an empty or oversized threadgroup) is left out and its neighbours run (probe
-//!   `RT7-icb-probe1`); an inheriting buffer runs the encoder's pipeline state and buffers.
+//!   dispatch, an empty or oversized threadgroup) is left out and its neighbours run; an inheriting
+//!   buffer runs the encoder's pipeline state and buffers.
 //! - A buffer address resolves against what any encoder of the command buffer made resident,
 //!   before the execution or after it; one in no resident resource misses, counted in the execution
 //!   report; the segment runs between the encoder's commands, after what they wrote and before what
@@ -671,9 +671,8 @@ fn clocks(form: &str, waited: Option<DeviceWait>) -> String {
 }
 
 /// The pieces `every_case_of_buffers_alone_runs_from_a_command_as_its_dispatch` is split into. At
-/// 8 a piece took 31-93 s on the M4 under the validation layer (EVs CPF-ktex-base-mvk4 and
-/// CPF-ktex-tip-mvk4), past the Mac lane's 60 s a test; at 32, mostly 9-17 s, but five pieces
-/// took 22-54 s in a whole lane's run on a busy mini (EVs CPF2-shards-mvk4, CPF2-lane3-mvk4). 64
+/// 8 a piece took 31-93 s on the M4 under the validation layer, past the Mac lane's 60 s a test; at
+/// 32, mostly 9-17 s, but five pieces took 22-54 s in a whole lane's run on a busy mini. 64
 /// halves each piece.
 const SHARDS: usize = 64;
 
@@ -747,7 +746,7 @@ census_shards!(
 
 /// A command runs as its record stands when the command buffer is committed: one written after
 /// the execution was encoded and the encoder ended runs, and the reset command beside it runs
-/// nothing (probe `RT7-icb-probe1`, `exec_cpu_written_after_encode`).
+/// nothing (`exec_cpu_written_after_encode`).
 #[test]
 fn commands_run_as_their_records_stand_at_commit() {
     on_device(|device, _| {
@@ -782,7 +781,7 @@ pub(super) const NIL_OFFSETS: [Degradation; 1] = [Degradation::IndirectNilBuffer
 
 /// A command holding a nil buffer set at an offset whose low 32 bits are not 0 runs, binding no
 /// buffer there, and announces `indirect-nil-buffer-offset` once a device: Metal's kernel sees
-/// the bits as the buffer's address (EV API-icbget2-m4), the host execution's sees none. A nil
+/// the bits as the buffer's address, the host execution's sees none. A nil
 /// buffer at offset 0 announces nothing.
 #[test]
 fn a_nil_buffer_at_an_offset_binds_none_and_is_announced() {
@@ -830,8 +829,8 @@ fn a_nil_buffer_at_an_offset_binds_none_and_is_announced() {
 
 /// A `Private` buffer's commands are the CPU's to encode as a `Shared` one's: a command encoded
 /// on it reads back as set and runs as the encoder's own dispatch, as plain Metal encodes, reads
-/// back and runs it where its validation stops the call (probe `RT7-icb-probe3`,
-/// `encode_private` and `execute_private_cpu_encoded`, an M3 Max and an M4).
+/// back and runs it where its validation stops the call (`encode_private` and
+/// `execute_private_cpu_encoded`, an M3 Max and an M4).
 #[test]
 fn a_private_buffer_s_commands_are_encoded_and_run() {
     on_device(|device, _| {
@@ -865,7 +864,7 @@ fn a_private_buffer_s_commands_are_encoded_and_run() {
 
 /// A command's reset keeps the pipeline state it executes with: encoded in full, reset, and its
 /// buffers and dispatch encoded again with no pipeline state set, it runs the state it had, as
-/// Metal's does (probe `ICBV-copyprobe3`, `host_reset_then_dispatch`, on the M3 Max and the M4),
+/// Metal's does (`host_reset_then_dispatch`, on the M3 Max and the M4),
 /// while `commands` reads none, as Metal's getter reports none. A buffer reset with
 /// `reset_with_range` is unmeasured and keeps nothing: the same command there runs nothing.
 #[test]
@@ -908,7 +907,7 @@ fn a_reset_command_keeps_the_pipeline_it_runs() {
 
 /// A command names its state without holding it, as Metal's does, so once the program releases
 /// the state a state made after takes its ID; but the command holds what the state runs, and
-/// runs it, as Metal's command the CPU encoded does (EV RRS2-icbprobe1-m4): whether no state
+/// runs it, as Metal's command the CPU encoded does: whether no state
 /// takes the ID, a compute state of another interface ([`CHAIN`]'s kernel) does, or a render
 /// state does. Nothing is announced, reading the command (`IndirectCommandBuffer::commands`)
 /// included.
@@ -1118,11 +1117,10 @@ fn commands_that_run_nothing_leave_their_neighbours_running() {
 }
 
 /// A buffer that inherits its pipeline state and buffers runs the encoder's, as they are at the
-/// call (probe `RT7-icb-probe1`, `exec_cpu_inherited`), with the command's own threadgroup
-/// lengths. With no pipeline state set, a range that is not empty is refused, and an empty one,
-/// at the start or at the size, runs nothing, as plain Metal's (EV CFR-probe2-m4
-/// `fixed_empty_nopipeline`). Buffers the command sets anyway are kept but not bound, as plain
-/// Metal's (EV RFC-probe1-m4 `icb_inherit_buffers_compute`): theirs stay as they were.
+/// call (`exec_cpu_inherited`), with the command's own threadgroup lengths. With no pipeline state
+/// set, a range that is not empty is refused, and an empty one, at the start or at the size, runs
+/// nothing, as plain Metal's. Buffers the command sets anyway are kept but not bound, as plain
+/// Metal's: theirs stay as they were.
 #[test]
 fn inheriting_commands_run_the_encoder_s_state() {
     on_device(|device, _| {
@@ -1176,8 +1174,7 @@ fn inheriting_commands_run_the_encoder_s_state() {
 
 /// A command's kernel buffer set without a stride, where the pipeline's stage-in layout of
 /// `MTLBufferLayoutStrideDynamic` reads it, refuses the commit (`UnstridedBuffer`): Metal reads it
-/// at stride 2^32 - 1, past element 0 whatever memory lies 4 GiB on (EVs `ICBV-plainstride2-m3`,
-/// `-m4`, `ICBV-plainstride3-m3`, `-m4`).
+/// at stride 2^32 - 1, past element 0 whatever memory lies 4 GiB on.
 #[test]
 fn a_command_s_unstrided_stage_in_buffer_is_refused() {
     on_device(|device, _| {
@@ -1243,7 +1240,7 @@ fn addresses_outside_the_resident_resources_miss() {
     });
 }
 
-/// Residency is the command buffer's (the consumer's report on an M3 Max, and EV RFL-res-m4 on
+/// Residency is the command buffer's (the consumer's report on an M3 Max, and our probe on
 /// an M4, every run): a command's buffers that only an earlier encoder, or a later compute or
 /// render encoder, made resident run as those its own encoder made resident, with no miss; and
 /// so do buffers of their own that no encoder made resident.
@@ -1343,7 +1340,7 @@ fn placed(device: &Device, buffers: &BTreeMap<u32, Buffer>) -> (Heap, BTreeMap<u
 }
 
 /// A command's buffers placed in a heap reach where an encoder of the command buffer used the
-/// heap, earlier or later (EV RFL-res-m4, an M4: reached, every run), and the execution report
+/// heap, earlier or later (an M4: reached, every run), and the execution report
 /// counts no miss.
 #[test]
 fn commands_reach_a_heap_any_encoder_of_their_command_buffer_used() {
@@ -1430,10 +1427,9 @@ fn no_copies(
 }
 
 /// A command's buffers that are no-copy buffers no command used are not reached, as on Metal's
-/// M3 Max and M4 (EVs RFL-reach-m3 and RFL-reach2-m4 `nocopy.icb`, every run; the consumer's
-/// `compute_indirect_command_buffer`): each slot misses, as the execution report counts. Made
-/// resident by the command's encoder they are reached, and from then on though no encoder names
-/// them (EVs RFL-warm-m3 and RFL-reach2-m4 `nocopy.icb.*.warm`).
+/// M3 Max and M4 (every run; the consumer's `compute_indirect_command_buffer`): each slot misses,
+/// as the execution report counts. Made resident by the command's encoder they are reached, and
+/// from then on though no encoder names them.
 #[test]
 fn commands_reach_a_no_copy_buffer_once_a_command_used_it() {
     on_device(|device, _| {
@@ -1590,8 +1586,7 @@ fn commands_reach_a_rebound_no_copy_buffer_once_a_command_used_it_again() {
 
 /// What Metal's validation stops is refused at the call, changing nothing: a range that ends
 /// past the size. An empty range runs nothing, and so does a buffer of no command types, as
-/// plain Metal's, directly or through a range in a buffer (EVs RFC-probe2-m4 `t0_exec_compute`,
-/// RFC-probe3-m4 `t0_exec_indirect`).
+/// plain Metal's, directly or through a range in a buffer.
 #[test]
 fn ranges_past_the_size_are_refused() {
     on_device(|device, _| {

@@ -211,8 +211,8 @@ impl TextureLevelInfo {
 
 /// A block's bytes where Metal answers them by the plane argument rather than by the format's
 /// description (`described`, its first word): measured alike on an Apple M3 Max under macOS 26.7
-/// and an Apple M4 under 27.0.1 (EVs API-tli1 to API-tli4: plane values 0 to 12, 16, 256, 2^31
-/// and all ones; every value `PixelFormat` names by 0 to 7). The combined formats answer their depth plane (a
+/// and an Apple M4 under 27.0.1 (plane values 0 to 12, 16, 256, 2^31 and all ones; every value
+/// `PixelFormat` names by 0 to 7). The combined formats answer their depth plane (a
 /// 32-bit float, 4) for 1 and their stencil plane (1) for 2, and nothing for 0;
 /// `X24_Stencil8` answers its stencil byte for 0 and 2. Every other plane value, and every other
 /// format whatever the value (`X32_Stencil8`, `Depth32Float` and `Stencil8` among them), answers
@@ -234,7 +234,7 @@ impl MetalLevel {
     /// `MTLGetTextureLevelInfoForDeviceWithOptions` as the level's release answers it on its
     /// Apple GPU: computed from the format's description ([`MetalLevel::pixel_format_info`]) by
     /// the rule our probes fit with no exception, alike on an Apple M3 Max under macOS 26.7 and an
-    /// Apple M4 under 27.0.1 (EVs API-tli1 to API-tli4 on each: every described format over 20
+    /// Apple M4 under 27.0.1 (on each: every described format over 20
     /// sizes; 16 formats over levels 0 to 17, 31, 32, 63, 64, 1000 and 2^32 by six plane values,
     /// eight shapes each; every value `PixelFormat` names by plane values 0 to 7 at four shapes;
     /// values no format has; zero sizes; 34, 306 and 34, 626 answers):
@@ -347,11 +347,10 @@ const fn d(
     }
 }
 
-/// Every format the measured levels describe, by raw value (an Apple M3 Max: EV XRR2-pfi1-m3 at
-/// macOS 26.7, build 25G229, and EV M27-pfi1-m3 at 27.0.1, build 26A434, whose answers are
-/// XRR2-pfi1-m4's on an Apple M4 but for the 16 values from 630 to 645), each as
-/// `d(format, words, (flags, castClass) at 26.7, (flags, castClass) at 27.0.1)`. Sorted by raw
-/// value (`pixel_format_info` searches it).
+/// Every format the measured levels describe, by raw value (an Apple M3 Max at macOS 26.7, build
+/// 25G229, and at 27.0.1, build 26A434, whose answers are an Apple M4's but for the 16 values from
+/// 630 to 645), each as `d(format, words, (flags, castClass) at 26.7, (flags, castClass) at
+/// 27.0.1)`. Sorted by raw value (`pixel_format_info` searches it).
 #[rustfmt::skip]
 const DESCRIBED: &[Described] = &[
     d(P::A8Unorm, [1, 257, 1, 1], (0x0403019f, 1), (0x0403019f, 1)),

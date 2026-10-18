@@ -102,14 +102,13 @@ pub(super) struct Cx<'a> {
 ///
 /// A function a table can hold (a [`Candidate`]) has its handle's word, the one a table entry
 /// holding it has, so a table's entry and the function's address compare as Metal compares them
-/// (FPC-probe2: a table's entry holding a function equals that function's address). Every other
-/// function whose address a body the entry reaches takes as a value has a word of the stage's
-/// own, past every handle the pipeline numbers, ascending in function order: one only
-/// `private_functions` links, one the module defines that is not visible, and a visible-function
-/// reference no linked function resolves (whose every surviving use is refused as a call to it
-/// is). Metal's own value of a function pointer is a GPU address that differs between pipelines
-/// of one descriptor (FPC-probe2), so no program can depend on it; only equality, and the
-/// function called, are Metal's answers.
+/// (a table's entry holding a function equals that function's address). Every other function whose
+/// address a body the entry reaches takes as a value has a word of the stage's own, past every
+/// handle the pipeline numbers, ascending in function order: one only `private_functions` links,
+/// one the module defines that is not visible, and a visible-function reference no linked function
+/// resolves (whose every surviving use is refused as a call to it is). Metal's own value of a
+/// function pointer is a GPU address that differs between pipelines of one descriptor, so no
+/// program can depend on it; only equality, and the function called, are Metal's answers.
 #[derive(Debug, Default)]
 pub(super) struct FunctionWords {
     /// Each function's word: a definition's, or a stub declaration's that is not resolved.
@@ -332,7 +331,7 @@ struct Analysis {
 ///
 /// A use of the word of a visible-function reference no linked function resolves is refused
 /// the same way, with the reference's own refusal (`NeedsInput(LinkedFunction)`), as Metal
-/// refuses to make a pipeline whose function takes such an address (FPC-probe2: "unresolved
+/// refuses to make a pipeline whose function takes such an address ("unresolved
 /// visible function reference"), but only where the use survives, as a call to it is.
 #[derive(Default)]
 struct Escapes {
@@ -898,7 +897,7 @@ fn is_fn_ptr(parts: &ModuleParts, ty: TypeId) -> bool {
 }
 
 /// Whether `ptr`, an address, points into memory a function pointer can live in: a thread's or
-/// its threadgroup's. Metal refuses a function pointer as a buffer's pointee (FPC-probe1), so one
+/// its threadgroup's. Metal refuses a function pointer as a buffer's pointee, so one
 /// in device or constant memory has no Metal meaning to keep.
 fn holds_fn_ptrs(body: &Body, parts: &ModuleParts, cx: &Cx<'_>, ptr: Value) -> bool {
     matches!(

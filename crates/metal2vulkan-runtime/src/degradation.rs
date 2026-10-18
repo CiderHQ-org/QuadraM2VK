@@ -708,8 +708,8 @@ degradations! {
         /// samples).
         /// The device also decides what a NaN or infinite sample makes of the average, where
         /// Metal's resolve counts a NaN of a `half` or small-float channel as 0 and an infinite
-        /// `half` as 65536 of its sign, and makes any NaN of a 32-bit float channel `0x7fc00000`
-        /// (EVs ZIN-zms4-m4 and ZIN-zms7-m4); lavapipe's average keeps a `half` NaN.
+        /// `half` as 65536 of its sign, and makes any NaN of a 32-bit float channel `0x7fc00000`;
+        /// lavapipe's average keeps a `half` NaN.
         DeviceRoundedResolve = "device-rounded-resolve", Precision,
             "a resolved channel can differ from Metal's by one code (an sRGB channel by two) \
              where the average lies near a rounding boundary, a float channel in its last bits, \
@@ -1143,10 +1143,10 @@ degradations! {
         /// bytes, a sparse one, or one whose image the device does not copy both ways (a padded
         /// format has none of these). Metal's pass, once it draws, writes each 32 x 32 tile a
         /// draw reaches back with the bits its codes leave unused made canonical, the texels no
-        /// fragment writes and the channels a write mask leaves out too (EVs XRR2-xrb2 and
-        /// XRR2-xrb3 on an Apple M4 and an Apple M3 Max), where such an attachment keeps the
-        /// bytes its draws do not write. Announced at every draw, an indirect command buffer's
-        /// executed commands' too, naming every such attachment of the pass.
+        /// fragment writes and the channels a write mask leaves out too (on an Apple M4 and an
+        /// Apple M3 Max), where such an attachment keeps the bytes its draws do not write.
+        /// Announced at every draw, an indirect command buffer's executed commands' too, naming
+        /// every such attachment of the pass.
         ExtendedRangeBitsKept = "extended-range-bits-kept", Precision,
             "the texels the pass's draws do not write keep their bytes; Metal's pass keeps their \
              codes but rewrites the bits they leave unused in each tile a draw reaches \
@@ -1313,7 +1313,7 @@ degradations! {
         /// their sRGB twins), or under [`metal2vulkan::device::TileStorePolicy::Exact`] of a
         /// signed normalized format or `RGB9E5Float`, stores it and draws, whose load pass
         /// (`render/unused_bits_load.rs`) rewrites every 32 x 32 tile of its render area: Metal's
-        /// pass rewrites only the tiles a draw's primitives reach (EVs XRR2-xrb2 and XRR2-xrb3 on
+        /// pass rewrites only the tiles a draw's primitives reach (on
         /// an Apple M4 and an Apple M3 Max, alike), and every tile only where a color
         /// attachment of the pass is cleared and stored (announced where none is, or where the
         /// pass renders more than one layer). Announced at the pass's end, naming its
@@ -1337,7 +1337,7 @@ degradations! {
         /// A texture made in a heap over host pages (`new_heap_with_bytes_no_copy`) that Metal
         /// keeps losslessly compressed (`allowGPUOptimizedContents`, the shorter side of level
         /// 0 16 texels or more, and a colour format of neither `ShaderWrite` nor
-        /// `PixelFormatView` usage, or a depth or stencil format; EV TXN3-htlm1-m4): its bytes
+        /// `PixelFormatView` usage, or a depth or stencil format): its bytes
         /// on Metal are no layout of its texels, so the runtime lays them out as its own
         /// (`texture/heap_tiled.rs`). A multisample texture so (its sample grid's shorter side
         /// 16 or more) lies in memory of its own, the heap's bytes keeping what they held.
@@ -1396,7 +1396,7 @@ degradations! {
         /// A blit copy between overlapping regions of one texture's texels, other than a region
         /// onto itself (`blit_texture.rs`): Metal's copy reads as `memmove`'s for regions up to a
         /// few hundred texels across, but past that some texels read what another part of the
-        /// copy already wrote, differently from run to run (EV FPV-ov1b-m4). The runtime gives
+        /// copy already wrote, differently from run to run. The runtime gives
         /// `memmove`'s answer every time: the source regions go through a scratch buffer, read
         /// whole before any destination texel is written.
         OverlappingTextureCopyAsMemmove = "overlapping-texture-copy-as-memmove", Precision,
@@ -1427,9 +1427,9 @@ degradations! {
         /// may have written (`render.rs`); an execution of render commands in a pass with such
         /// an attachment, whose commands may blend onto each other. Metal's tile memory holds
         /// such an attachment as `half` through the pass (a clear's, a load's, a write's or a
-        /// blend's value rounded to `half`) and rounds it to its codes once, at the store (EV
-        /// XRB-rplxr3-mvk4 on an Apple M4; the M3 Max's run of the same probes), where the
-        /// runtime stores the codes at each draw, so a later blend or read sees the stored codes.
+        /// blend's value rounded to `half`) and rounds it to its codes once, at the store (on an
+        /// Apple M4; the M3 Max's run of the same probes), where the runtime stores the codes at
+        /// each draw, so a later blend or read sees the stored codes.
         ExtendedRangeBlendsStoredCodes = "extended-range-blends-stored-codes", Precision,
             "a blend into, or a read of, an extended-range color an earlier draw of the pass \
              wrote sees the codes the runtime stored at that draw (each channel rounded to its \
@@ -3306,11 +3306,10 @@ impl Device {
     /// (`SpecClause::tests_bound_formats`, `SpecKey::BoundTexelFormat`) and holds of the classes
     /// of the formats `formats` binds there (`metal::format::bound_texel_format`), a command
     /// whose formats are not known (`None`: an execution of commands the GPU writes) holding. A
-    /// slot bound to nothing reads zero and holds no NaN, so a clause testing it does not hold
-    /// (EV ZIN-mac1-mvk4's `made_at_creation`). Such a clause is announced here alone: no
-    /// pipeline's key tells it. A filter note's (a two-plane YCbCr texture that Metal's own
-    /// sampler filters) is announced as `ycbcr-filter-not-exact`. A kind already announced costs
-    /// one atomic load.
+    /// slot bound to nothing reads zero and holds no NaN, so a clause testing it does not hold.
+    /// Such a clause is announced here alone: no pipeline's key tells it. A filter note's (a
+    /// two-plane YCbCr texture that Metal's own sampler filters) is announced as
+    /// `ycbcr-filter-not-exact`. A kind already announced costs one atomic load.
     pub(crate) fn degrade_bound_formats(
         &self,
         stages: &[StageModule],
@@ -3905,8 +3904,7 @@ pub(super) struct WholePass<'a> {
 /// stores so, as Metal's (`Device::degrade_pass`; a texture over a buffer keeps its bytes there,
 /// `kept_bytes.rs`). But an attachment the pass clears, draws nothing into, and resolves alone:
 /// Metal leaves the clear in it where it compresses the texture and keeps its texels where it
-/// does not (EVs DGC-dcs1-m4, DGC-dcs2-m4), and the driver's image of the texture may be
-/// compressed otherwise.
+/// does not, and the driver's image of the texture may be compressed otherwise.
 pub(super) struct HandedToMetal {
     /// The attachments the pass hands the driver as `DONT_CARE`.
     handed: HandedDontCare,

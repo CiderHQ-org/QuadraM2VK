@@ -1,15 +1,14 @@
 //! Metal's linear filter of a cube texture, emulated by fetches.
 //!
 //! **The filter Metal applies** (Apple M4, macOS 27.0.1, and Apple M3 Max, macOS 26.7,
-//! byte-identical, each run with and without Metal's validation layer; probes WRG-cubelin-probe,
-//! WRG-cubelin2-probe, and WRG-cubelin3-probe, with their M3 twins). A sample through a sampler
-//! with linear minification and magnification and no mip filter reads the face of its direction's
-//! major axis (`face::metal_ties`'s ties) at Metal's position on each face axis, `X = RN(RN(1 +
-//! sc * r) / 2 * n)` (`face::position`), quantized as in 2D: `q = floor(256 X + 1/2) -
-//! 128`, the base texel `i = q >> 8` and the fraction's 1/256 steps `k = q & 255`. The four taps
-//! `(i, j)`, `(i + 1, j)`, `(i, j + 1)`, and `(i + 1, j + 1)` weigh `(256 - k)` and `k` per axis,
-//! each tap `wx · wy` in units of `2^-16`; an axis's two taps are always two texels, so no axis
-//! merges. A tap past one edge of the face reads the adjacent face's texel along that edge
+//! byte-identical, each run with and without Metal's validation layer; with their M3 twins). A
+//! sample through a sampler with linear minification and magnification and no mip filter reads the
+//! face of its direction's major axis (`face::metal_ties`'s ties) at Metal's position on each face
+//! axis, `X = RN(RN(1 + sc * r) / 2 * n)` (`face::position`), quantized as in 2D: `q = floor(256
+//! X + 1/2) - 128`, the base texel `i = q >> 8` and the fraction's 1/256 steps `k = q & 255`. The
+//! four taps `(i, j)`, `(i + 1, j)`, `(i, j + 1)`, and `(i + 1, j + 1)` weigh `(256 - k)` and `k`
+//! per axis, each tap `wx · wy` in units of `2^-16`; an axis's two taps are always two texels, so
+//! no axis merges. A tap past one edge of the face reads the adjacent face's texel along that edge
 //! (`face::define_fold`). A tap past both edges, at the cube's corner, reads a texel that depends
 //! on the format: a 32-bit float or half-float format's is the texel at the corner of the face of
 //! the `x` axis; an 8- or 16-bit normalized or 8-bit sRGB format's is made up from the corner
@@ -17,11 +16,11 @@
 //! sRGB color channel's table steps, a signed format's least code read as the next one;
 //! `bicubic::routines::Cube::corner`). The sum is the 2D sum's: a normalized format's terms
 //! truncated onto its grid, a float format's Metal's linear accumulator. Metal reads the sampler's
-//! address modes and border color as clamping (WRG-cubelin3-probe's `cm` runs: every lane of 4x4
-//! cubes reads this rule under clamp-to-edge, repeat, mirrored repeat, zero, and a white border),
-//! but for `repeat` on a face axis of a size that is not a power of two, which wraps a face
-//! coordinate of exactly 1 to 0 (`face::FaceWrap`; RT13-cg2-probe-m4's linear samples of 3x3, 5x5,
-//! and 6x6 cubes), reads level 0 whatever a `level` or `bias` names (WRG-cubelin2-probe's `clv`
+//! address modes and border color as clamping (the probe's `cm` runs: every lane of 4x4 cubes reads
+//! this rule under clamp-to-edge, repeat, mirrored repeat, zero, and a white border), but for
+//! `repeat` on a face axis of a size that is not a power of two, which wraps a face coordinate of
+//! exactly 1 to 0 (`face::FaceWrap`; our probe's linear samples of 3x3, 5x5, and 6x6
+//! cubes), reads level 0 whatever a `level` or `bias` names (the probe's `clv`
 //! run, a two-level cube), and clamps a cube array's index into the array as an unsigned integer,
 //! so a negative index reads the last cube (its `cla` run).
 //!
@@ -33,38 +32,37 @@
 //! taps under the unmerged fractions.
 //!
 //! **Where it is exact.** Every `float` and `half` sample channel of every lane whose major
-//! magnitude is 1: WRG-cubelin-probe's 21 runs (seven formats, an identity texture among them, on
-//! faces of 2, 5, and 8 texels, 4,096 lanes each), WRG-cubelin2-probe's 27 `cl` runs (nine
-//! formats on faces of 1, 3, and 16 texels, 2,048 such lanes each) and its `clv` and `cla` runs,
-//! and WRG-cubelin3-probe's `cm` runs. Elsewhere Metal's texture unit takes an approximate
-//! reciprocal `r` of the major magnitude, which the emulation takes correctly rounded
-//! (`PrecisionNote::CubeFaceReciprocal`): of the `cl` runs' 6,144 lanes of `rgba32Float`
-//! with a scaled major, 5,957 are the emulation's, and each of the other 187 is its rule under an
-//! `r` one or two ulps from `RN(1 / |m_a|)`, a position within about `n * 2^-23` of a quantization
-//! step reading the next step. A direction with an infinite or NaN component gives an unspecified
-//! footprint, whose fetches stay on the cube.
+//! magnitude is 1: our probe's 21 runs (seven formats, an identity texture among them, on faces of
+//! 2, 5, and 8 texels, 4,096 lanes each), our probe's 27 `cl` runs (nine formats on faces of 1, 3,
+//! and 16 texels, 2,048 such lanes each) and its `clv` and `cla` runs, and our probe's `cm` runs.
+//! Elsewhere Metal's texture unit takes an approximate reciprocal `r` of the major magnitude, which
+//! the emulation takes correctly rounded (`PrecisionNote::CubeFaceReciprocal`): of the `cl` runs'
+//! 6,144 lanes of `rgba32Float` with a scaled major, 5,957 are the emulation's, and each of the
+//! other 187 is its rule under an `r` one or two ulps from `RN(1 / |m_a|)`, a position within about
+//! `n * 2^-23` of a quantization step reading the next step. A direction with an infinite or NaN
+//! component gives an unspecified footprint, whose fetches stay on the cube.
 //!
-//! **Gathers** (the RT13-cg-probe-m4 and RT13-cg2-probe-m4, Apple M4 on macOS 27.0.1, each run with
-//! and without Metal's validation layer). A gather reads these four taps at the same position, in
-//! gather order `x` `(i, j + 1)`, `y` `(i + 1, j + 1)`, `z` `(i + 1, j)` and `w` `(i, j)`, whatever
-//! the sampler's filters, mip filter and anisotropy, from level 0, and wraps as a sample does. The
-//! tap past both edges is the format's: the `x` face's corner texel for a 32-bit float, half-float
-//! or integer format, the made-up texel for a normalized one (an sRGB color channel's a step `k`,
-//! gathered as `RN(k / 4095)`). A `half` gather is the `float` texel rounded to nearest even. A
-//! depth cube's taps are its depth texels, `depth32Float`'s corner the `x` face's and
-//! `depth16Unorm`'s made up; a comparison compares each tap with the reference (`compare`;
-//! RT13-cg3-probe-m4 and RT13-cg4-probe-m4). Outside those families the corner is measured for the
-//! formats of a `metal::texel_format::CubeCorner` (the WRN-fc-probe): the `x` face's texel for
-//! `depth32Float_stencil8`'s depth (compared as `depth32Float`'s), the small floats, BC6H, and ASTC
-//! HDR, and for the packed normalized and compressed formats the made-up texel of each channel's
-//! codes on its decoded grid. [`CubeGather`] answers a cube gather through a constexpr normalized
-//! sampler with the same fetches (`fetch_taps`): an integer result's taps as fetched, a `float` or
-//! `half` result's corner by the corner routine under the slot's `TexelFormat` specialization, an
-//! sRGB variant's from the raw view, each step decoded exactly (`texture::srgb_raw_gather`), and a
-//! comparison's taps compared in the shader. Every lane of both probes fits but one scaled lane per
-//! run, the reciprocal's residue above. A gather through a runtime sampler slot is answered alike:
-//! its face axes wrap by the bound sampler's word's address modes, and a comparison takes the
-//! word's compare function; an argument buffer's texture keeps the device's gather.
+//! **Gathers** (the probes, Apple M4 on macOS 27.0.1, each run with and without Metal's validation
+//! layer). A gather reads these four taps at the same position, in gather order `x` `(i, j + 1)`,
+//! `y` `(i + 1, j + 1)`, `z` `(i + 1, j)` and `w` `(i, j)`, whatever the sampler's filters, mip
+//! filter and anisotropy, from level 0, and wraps as a sample does. The tap past both edges is the
+//! format's: the `x` face's corner texel for a 32-bit float, half-float or integer format, the
+//! made-up texel for a normalized one (an sRGB color channel's a step `k`, gathered as
+//! `RN(k / 4095)`). A `half` gather is the `float` texel rounded to nearest even. A depth cube's
+//! taps are its depth texels, `depth32Float`'s corner the `x` face's and `depth16Unorm`'s made up;
+//! a comparison compares each tap with the reference (`compare`). Outside those families the corner
+//! is measured for the formats of a `metal::texel_format::CubeCorner` (the probe): the `x` face's
+//! texel for `depth32Float_stencil8`'s depth (compared as `depth32Float`'s), the small floats,
+//! BC6H, and ASTC HDR, and for the packed normalized and compressed formats the made-up texel of
+//! each channel's codes on its decoded grid. [`CubeGather`] answers a cube gather through a
+//! constexpr normalized sampler with the same fetches (`fetch_taps`): an integer result's taps as
+//! fetched, a `float` or `half` result's corner by the corner routine under the slot's
+//! `TexelFormat` specialization, an sRGB variant's from the raw view, each step decoded exactly
+//! (`texture::srgb_raw_gather`), and a comparison's taps compared in the shader. Every lane of both
+//! probes fits but one scaled lane per run, the reciprocal's residue above. A gather through a
+//! runtime sampler slot is answered alike: its face axes wrap by the bound sampler's word's address
+//! modes, and a comparison takes the word's compare function; an argument buffer's texture keeps
+//! the device's gather.
 
 use crate::air::abi::{CompareFunction, Coordinates, SamplerState};
 use crate::air::intrinsics::{ImageDim, ImageShape};
@@ -143,7 +141,7 @@ pub(super) fn select(
 /// against reference `dref`) compares each tap's depth, the corner's by the format's rule
 /// (`Depth32Float`'s the `x` face's texel, `Depth16Unorm`'s the made-up code), and sums the passes
 /// as `r8Unorm` codes 0 and 255 through the exact routine: its value is the sum's first channel, a
-/// scalar (RT13-px5-probe-m4: 3,072 directions, `less` and `greater_equal`, cubes and a cube array,
+/// scalar (3,072 directions, `less` and `greater_equal`, cubes and a cube array,
 /// every lane).
 pub(super) fn emulate(
     cx: &mut EmitCx<'_>,

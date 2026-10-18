@@ -1,5 +1,5 @@
-//! PVRTC textures on the device the cfg selects, under the validation layer, against what EV
-//! SPCrp-probe7-m4 measured on an M4 (macOS 27.0.1), alike plain twice and the row-linear copies
+//! PVRTC textures on the device the cfg selects, under the validation layer, against what our probe
+//! measured on an M4 (macOS 27.0.1), alike plain twice and the row-linear copies
 //! alike under Metal's API validation:
 //!
 //! - Every PVRTC format makes a texture, `Private` and `Shared`, of levels down to 1 x 1, and a
@@ -9,21 +9,19 @@
 //!   texture move the blocks row by row: whole levels, a region of whole blocks, from an offset,
 //!   rows padded apart, and each level of a full chain, the levels under 4 x 4 one block each.
 //!   A copy between two such textures moves the blocks. Without the option and with a nonzero
-//!   `bytesPerRow`, which Metal's validation stops, plain Metal copies as with it (EV
-//!   RRP-probe6-m4 on an M4, macOS 27.0.1, and the reims-vgpu consumer's run on an M3 Max, macOS
-//!   26.7).
+//!   `bytesPerRow`, which Metal's validation stops, plain Metal copies as with it (on an M4, macOS
+//!   27.0.1, and the reims-vgpu consumer's run on an M3 Max, macOS 26.7).
 //! - The option on another format is ignored, as plain Metal ignores it (`RGBA8Unorm` and
 //!   `BC1_RGBA`; Metal's validation stops it on `BC1_RGBA`).
 //! - At a `bytesPerRow` of 0, with the option or without it (Metal's validation stops both), the
 //!   blocks lie in the region's own Morton order, the x bit lowest, whole levels and regions of
-//!   whole blocks alike, a position no block takes neither read nor written (EV RRP-probe8-m4 on
+//!   whole blocks alike, a position no block takes neither read nor written (on
 //!   an M4, macOS 27.0.1; the reims-vgpu consumer's report of a whole 16 x 16 level on an M3 Max,
 //!   macOS 26.7).
 //! - A copy at a `bytesPerRow` of 0 of a region off its blocks copies the blocks it is rounded
-//!   to, its origin down and its size up, in their own Morton order (EV CFR-probe6-m4).
+//!   to, its origin down and its size up, in their own Morton order.
 //! - `replaceRegion` and `getBytes` of a whole level take its blocks in plain Metal's CPU order,
-//!   Z order with the y bit lowest, at a `bytesPerRow` of 0 and of the level's row (EV
-//!   CFR-probe7-m4).
+//!   Z order with the y bit lowest, at a `bytesPerRow` of 0 and of the level's row.
 //! - The runtime's gap, `NotImplemented(PvrtcBlockOrder)`: `replaceRegion` and `getBytes` of a
 //!   region other than a whole level, which plain Metal places by no rule the runtime has found,
 //!   and of a whole level at another `bytesPerRow`, unmeasured.
@@ -564,7 +562,7 @@ fn two_bit_pvrtc_textures_keep_their_blocks_through_row_linear_copies() {
     });
 }
 
-/// EV RRP-probe6-m4's copies without the option at a nonzero `bytesPerRow` (an M4 under macOS
+/// Our probe's copies without the option at a nonzero `bytesPerRow` (an M4 under macOS
 /// 27.0.1; the reims-vgpu consumer's run on an M3 Max under macOS 26.7): they move the blocks row
 /// by row as the option's copies do, in both directions. Whole 16- and 32-texel levels of the 4-bit
 /// formats and of the 2-bit ones, on the way in and out and against the option's copies; then, for
@@ -717,7 +715,7 @@ fn the_row_linear_option_on_another_format_is_ignored() {
 
 /// The position at which plain Metal lays block (`x`, `y`) of a region `blocks` wide and high out
 /// at a `bytesPerRow` of 0: the region's own Morton order, the x bit lowest, each axis as many
-/// bits as its block count needs, the larger axis's extra bits on top (EV RRP-probe8-m4).
+/// bits as its block count needs, the larger axis's extra bits on top.
 fn morton(x: u64, y: u64, blocks: [u64; 2]) -> u64 {
     let bits = |n: u64| (0..64).find(|&b| 1u64 << b >= n).unwrap();
     let (nx, ny) = (bits(blocks[0]), bits(blocks[1]));
@@ -733,7 +731,7 @@ fn morton(x: u64, y: u64, blocks: [u64; 2]) -> u64 {
     out.iter().enumerate().map(|(b, &v)| v << b).sum()
 }
 
-/// EV RRP-probe8-m4's copies at a `bytesPerRow` of 0 (an M4 under macOS 27.0.1; the reims-vgpu
+/// Our probe's copies at a `bytesPerRow` of 0 (an M4 under macOS 27.0.1; the reims-vgpu
 /// consumer's report of a whole 16 x 16 4-bit level on an M3 Max under macOS 26.7): with the option
 /// and without it, a region's blocks lie in its own Morton order from the buffer's offset. Into the
 /// texture, over a level of 0x11 bytes, from a buffer whose blocks carry their index, the blocks
@@ -793,8 +791,7 @@ fn a_pvrtc_copy_at_a_pitch_of_0_lays_blocks_in_metals_block_order() {
 
 /// A copy at a `bytesPerRow` of 0 of the texels `at` of `texture` (`side` texels square, blocks
 /// `width` texels wide), into the texture and out of it, with the option and without it, moves the
-/// blocks `blocks_of` wide and high from block `[x0, y0]` in their own Morton order, as Metal's
-/// (EV RRP-probe8-m4 and CFR-probe6-m4).
+/// blocks `blocks_of` wide and high from block `[x0, y0]` in their own Morton order, as Metal's.
 fn lays_blocks_in_metals_order(
     lane: &Lane,
     texture: &Texture,
@@ -841,7 +838,7 @@ fn lays_blocks_in_metals_order(
     }
 }
 
-/// One of EV CFR-probe6-m4's copies of a region off its blocks: the format, the texture's side
+/// One of our probe's copies of a region off its blocks: the format, the texture's side
 /// in texels, the region's texel origin and size, and the blocks Metal moved, the first and the
 /// count across and down.
 struct OffBlocks {
@@ -870,7 +867,7 @@ impl OffBlocks {
     }
 }
 
-/// EV CFR-probe6-m4's copies at a `bytesPerRow` of 0 of regions off their blocks (an M4 under
+/// Our probe's copies at a `bytesPerRow` of 0 of regions off their blocks (an M4 under
 /// macOS 27.0.1; its validation stops them): the region is the blocks it is rounded to, its
 /// origin down to its block and its size up to whole blocks, each on its own, in their own Morton
 /// order, with the option and without it, into the texture and out of it. The probe's regions:
@@ -918,12 +915,12 @@ fn a_pvrtc_copy_at_a_pitch_of_0_of_a_region_off_its_blocks_copies_the_blocks_it_
 
 /// The position plain Metal's CPU copies give block (`x`, `y`) of a whole level `blocks` across
 /// and down: Z order with the y bit lowest, the larger axis's extra bits on top ([`morton`] with
-/// the axes swapped; EV CFR-probe7-m4).
+/// the axes swapped).
 fn cpu_order(x: u64, y: u64, blocks: [u64; 2]) -> u64 {
     morton(y, x, [blocks[1], blocks[0]])
 }
 
-/// EV CFR-probe7-m4's CPU copies of whole levels (an M4 under macOS 27.0.1; valid usage at a
+/// Our probe's CPU copies of whole levels (an M4 under macOS 27.0.1; valid usage at a
 /// `bytesPerRow` of 0, plain and validated alike; at the level's row too, which validation stops):
 /// `replaceRegion` takes a whole level's blocks in Metal's CPU order, Z order with the y bit
 /// lowest, and `getBytes` gives them so. Into the level, from bytes whose blocks carry their
@@ -998,6 +995,8 @@ fn gap<T: std::fmt::Debug>(result: Result<T, Error>, what: &str) {
 }
 
 /// The runtime's block-order gap is refused `NotImplemented(PvrtcBlockOrder)`, recording
+/// nothing: `replaceRegion` and `getBytes` of a region other than a whole level (plain Metal places
+/// its blocks by no rule the runtime has found) and of a whole level at a padded `bytesPerRow`
 /// (unmeasured).
 #[test]
 fn pvrtc_block_order_is_refused_typed() {

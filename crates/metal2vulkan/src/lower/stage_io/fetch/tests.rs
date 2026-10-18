@@ -354,7 +354,7 @@ fn a_half_parameter_rounds_float_formats() {
 /// An unnormalized 8- or 16-bit integer format read into a float parameter reads each component's
 /// integer value, zero- or sign-extended, as a float, and the missing ones as `(0, 0, 0, 1)`; a
 /// `half` parameter rounds it to nearest even, 65520 and above to infinity. The rows are Metal's
-/// measured ones on an M4 (EV DSX-vconv2-m4: row `r`'s component `c` the width's value `(r + 3 c) %
+/// measured ones on an M4 (row `r`'s component `c` the width's value `(r + 3 c) %
 /// 8`; 65519 read as 65504, 65520 and 65535 as infinity, 2051 as 2052), through a view, contained
 /// or not. A 32-bit integer format into a float parameter is an invalid descriptor, as Metal
 /// refuses its pipeline.

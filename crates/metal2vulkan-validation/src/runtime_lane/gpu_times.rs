@@ -82,7 +82,7 @@ const WAIT: Duration = Duration::from_secs(60);
 /// How far, in seconds, a GPU time may lie outside the host times around it: a calibrated
 /// time's error (the calibration's deviation, and the clocks' drift over the life of a pair,
 /// `gpu_time::REFRESH`) is microseconds on the devices measured. 20 us (1 ms before): every time on
-/// lavapipe, RADV, ANV and the RTX 3090 lay 36 us or more inside its window (EVs LTF-gh1-*), so the
+/// lavapipe, RADV, ANV and the RTX 3090 lay 36 us or more inside its window, so the
 /// bound only covers the calibration's own error.
 const SLACK: f64 = 20e-6;
 
@@ -1047,7 +1047,7 @@ fn row_fills(at: usize) -> &'static [u64] {
 /// time seconds of `host_time`'s clock; and a queue's GPU starts and ends never going back,
 /// among each queue's command buffers with an encoder, or every one where `every`. Metal answers
 /// an encoder-less command buffer a zero window at a time after the next command buffer of its
-/// queue ran (EV STL-ts1-mvk4: 6 of 12 such went back), so its order is the order of the work
+/// queue ran (6 of 12 such went back), so its order is the order of the work
 /// that ran; the runtime places every one in its queue's order. Where `late_kernel_ends`, a
 /// kernel end after the GPU start (and end) breaks no rule, the kernel end still between the
 /// kernel start and the handler: Metal answers so on macOS 27 ([`LATE_KERNEL_END`]). The broken

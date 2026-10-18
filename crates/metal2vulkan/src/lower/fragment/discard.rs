@@ -10,8 +10,8 @@
 //!   Metal too, like any other loop. A non-quad subgroup operation after a predicated site is
 //!   refused (below).
 //! - **MSL < 2.3**, whose specification says a discard ends the thread: Metal does not end it.
-//!   An M4 runs a discarded thread of MSL 2.2 exactly as one of MSL 2.3 (EV REF-discard-probe,
-//!   macOS 27.0.1, offline and run-time compiles, with and without the debug layer): its device
+//!   An M4 runs a discarded thread of MSL 2.2 exactly as one of MSL 2.3 (macOS 27.0.1, offline and
+//!   run-time compiles, with and without the debug layer): its device
 //!   stores and atomics do not land, and it runs a later loop to the end, joins `quad_shuffle`
 //!   inside and after it, and stays a lane of `simd_sum` and `simd_ballot`. So by what is
 //!   forward-reachable from the site:
@@ -29,16 +29,16 @@
 //! write and copy a predicated site reaches runs only where `discarded` is clear ([`guarded`]): the
 //! emitter puts it in `if !discarded`, and an atomic's result is zero for a discarded invocation,
 //! whose atomics Metal's helper semantics do not land (an M4 drops a discarded thread's device
-//! stores and atomics, EV REF-discard-probe), so no family's emitter takes a guard of its own. An
-//! asynchronous copy, which its simdgroup's threads make together, is no side effect of one thread
-//! to guard: a predicated site reaching one keeps the rules for a non-quad subgroup operation
-//! below. A predicated site from which a non-quad subgroup operation is reachable is a device gap
-//! instead, `Unsupported{Lowering(Fragment)}` needing `shaderDemoteToHelperInvocation`: the
-//! predicated invocation is not a helper, so it is a live lane there in every quad, while an M4
-//! counts a discarded thread only while its quad keeps a live thread, and drops a quad whose every
-//! thread is discarded from the simdgroup (EV REF-discard-probe-2). Demote, which the profile lacks
-//! there, maps Metal's helper to Vulkan's, as for every other helper lane, and is the form every
-//! profile with it takes; `MaximallyReconvergesKHR`, which an entry with a tangled instruction
+//! stores and atomics), so no family's emitter takes a guard of its own. An asynchronous copy,
+//! which its simdgroup's threads make together, is no side effect of one thread to guard: a
+//! predicated site reaching one keeps the rules for a non-quad subgroup operation below. A
+//! predicated site from which a non-quad subgroup operation is reachable is a device gap instead,
+//! `Unsupported{Lowering(Fragment)}` needing `shaderDemoteToHelperInvocation`: the predicated
+//! invocation is not a helper, so it is a live lane there in every quad, while an M4 counts a
+//! discarded thread only while its quad keeps a live thread, and drops a quad whose every thread is
+//! discarded from the simdgroup. Demote, which the profile lacks there, maps Metal's helper to
+//! Vulkan's, as for every other helper lane, and is the form every profile with it takes;
+//! `MaximallyReconvergesKHR`, which an entry with a tangled instruction
 //! declares where the profile has it (`lower::simd`), keeps such a helper a lane of later subgroup
 //! operations. Demote needs no guard: Vulkan helper invocations have no memory side effects and
 //! their outputs are discarded.
@@ -49,12 +49,12 @@
 //! function (SPIRV-Cross's `spvFAdd` for an `OpFAdd` decorated `NoContraction`) in a branch only
 //! discarded threads enter, Apple's compiler drops the texture writes of every live thread of a
 //! simdgroup (8 by 4 pixels) holding a discarded thread: measured in plain Metal on an M4 with
-//! macOS 27.0.1 (probes, EVs DSX-rog1-m4 to DSX-rog6b-m4 and DSX-apple1-m4: MoltenVK's MSL of a
-//! storage-form fragment of our own lost its writes in whole 8-by-4 blocks; without the sample,
-//! with the `optnone` call plain, in straight-line code or in a branch live threads enter too, with
-//! direct binding, or with the discard recorded and taken after the write, every write landed, and
-//! color outputs landed in every form). MoltenVK binds through argument buffers, and on an Apple
-//! GPU it carries `DriverWorkaround::DiscardDropsSimdgroupStores`. There a function meets the
+//! macOS 27.0.1 (probes: MoltenVK's MSL of a storage-form fragment of our own lost its writes in
+//! whole 8-by-4 blocks; without the sample, with the `optnone` call plain, in straight-line code or
+//! in a branch live threads enter too, with direct binding, or with the discard recorded and taken
+//! after the write, every write landed, and color outputs landed in every form). MoltenVK binds
+//! through argument buffers, and on an Apple GPU it carries
+//! `DriverWorkaround::DiscardDropsSimdgroupStores`. There a function meets the
 //! defect ([`late_discards`]) where it samples (`sample` at any LOD, or `gather`), and after a site
 //! that would discard at once (a demote; a terminate outside an interlock, since inside one it
 //! records the discard and returns to the entry) it computes or returns a floating-point value (the

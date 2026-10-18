@@ -1103,7 +1103,7 @@ fn resolves_are_refused_as_metal_refuses_them() {
             (0, 0),
         )
     };
-    // Plain Metal's answer depends on the pair (EV RRS-probe-3-m4): into `BGRA8Unorm` the
+    // Plain Metal's answer depends on the pair: into `BGRA8Unorm` the
     // values in its channel order (not built), into `R32Uint` or `RGBA16Float` nothing; the sRGB
     // twin resolves (`a_resolve_into_the_srgb_twin_keeps_the_attachment_s_encoding`).
     assert_eq!(
@@ -1312,8 +1312,7 @@ fn colour_resolves_metal_runs_past_its_validation_resolve_nothing() {
         kept,
         "res_late_store_with_resolve_texture"
     );
-    // `Unknown` still at `endEncoding` stores nothing and leaves the resolve texture untouched
-    // (EV RFX-probe2-m4's `resolve_color_unknown_left`).
+    // `Unknown` still at `endEncoding` stores nothing and leaves the resolve texture untouched.
     let resolve = untouched(&lane);
     run(Some(&resolve), StoreAction::Unknown, None).unwrap();
     assert_eq!(
@@ -1326,7 +1325,7 @@ fn colour_resolves_metal_runs_past_its_validation_resolve_nothing() {
 
 /// A depth or stencil attachment's resolve texture under a store action that does not resolve,
 /// the descriptor's or a late one, or under `Unknown` still at `endEncoding`, which Metal's
-/// validation stops, as plain Metal runs it (EV RFX-probe2-m4, an M4 with macOS 27.0.1, the
+/// validation stops, as plain Metal runs it (an M4 with macOS 27.0.1, the
 /// `resolve_depth_*` and `resolve_stencil_*` cases): the pass runs and the resolve texture is
 /// left untouched (it holds depth 0.75 and stencil 7 before the pass, which clears to 0.25 and
 /// 3).
@@ -1461,8 +1460,8 @@ fn a_single_sampled_colour_resolve_copies_its_texels() {
 }
 
 /// A multisampled color attachment resolving into a texture or a view of its format's sRGB
-/// twin, which Metal's validation stops, resolves in its own encoding as plain Metal's (EV
-/// RRS-probe-3-m4's `fmt_unorm_into_srgb`, `fmt_srgb_into_unorm` and their views, an M4; the
+/// twin, which Metal's validation stops, resolves in its own encoding as plain Metal's (the probe's
+/// `fmt_unorm_into_srgb`, `fmt_srgb_into_unorm` and their views, an M4; the
 /// probe's `v_resolve_format_mismatch`, an M3 Max too): cleared to (0.5, 0.25, 0.75, 1), an
 /// `RGBA8Unorm` attachment stores `8040bfff` into an `RGBA8Unorm_sRGB` texture or an sRGB view
 /// of an `RGBA8Unorm` one, and an `RGBA8Unorm_sRGB` attachment `bc89e1ff` the other way.
@@ -1503,7 +1502,7 @@ fn a_resolve_into_the_srgb_twin_keeps_the_attachment_s_encoding() {
 }
 
 /// A color texture without `RenderTarget` usage, which Metal's validation stops, renders as plain
-/// Metal renders it (EV RRS-probe-1-m4's `usage_*`, an M4; Metal probe case `usage_missing` on an
+/// Metal renders it (the probe's `usage_*`, an M4; Metal probe case `usage_missing` on an
 /// M4), through a stand-in: cleared and drawn white, then stored, it holds the draw; loaded and
 /// stored, its texels; cleared and drawn, then stored `DontCare`, its texels (each byte 0x11 before
 /// the pass); cleared and stored, the clear. A depth or stencil texture without it is
@@ -1563,7 +1562,7 @@ fn a_colour_texture_without_render_target_usage_renders_as_metal() {
 }
 
 /// The depth texels of [`a_depth_or_stencil_texture_without_render_target_usage_renders_as_metal`]
-/// in a texture of `pf`, as EV RRS-probe-18-m4 printed them: the fill 0.75 (written as
+/// in a texture of `pf`, as our probe printed them: the fill 0.75 (written as
 /// `0xc000` in 16 bits), the clear 0.5 (`0x7fff`) and the draw's 0.25 (`0x4000`).
 fn depth_texel(pf: PixelFormat, which: DepthTexel) -> Vec<u8> {
     let (float, unorm): (f32, u16) = match which {
@@ -1586,7 +1585,7 @@ enum DepthTexel {
 }
 
 /// A depth or stencil texture without `RenderTarget` usage (shader-read usage alone, private),
-/// which Metal's validation stops, renders as plain Metal renders it (EV RRS-probe-18-m4, an M4
+/// which Metal's validation stops, renders as plain Metal renders it (an M4
 /// with macOS 27.0.1: `Depth32Float`, `Depth16Unorm`, `Stencil8` and `Depth32Float_Stencil8`,
 /// each aspect of the combined format attached), through a stand-in: filled first by a blit
 /// (depth 0.75, stencil 0x22), each aspect cleared (0.5, 0x11) or loaded, drawn or not, stored or
@@ -1762,7 +1761,7 @@ enum Split {
 }
 
 /// A pass whose depth and stencil resolve into different textures resolves each as Metal does (a
-/// probe RRS-dsres on an M3 Max and an M4: separate textures resolve each aspect by its filter; one
+/// probe on an M3 Max and an M4: separate textures resolve each aspect by its filter; one
 /// combined attachment's two resolve textures each take their aspect alone, the other aspect
 /// keeping its texels, which Metal's debug layer stops and plain Metal runs; two slices of one
 /// array likewise, a Metal probe on the M3 Max and an M4). The samples are those of a Metal probe
@@ -2063,7 +2062,7 @@ fn split_depth_and_stencil_resolves_are_metals() {
         eprintln!("{name}: Metal's resolves");
     }
     // `StoreAndMultisampleResolve` on separate textures resolves each and keeps their samples: a
-    // later pass loads them and resolves the depth's maximum (probe RRS-dsres's `sep_store_and_resolve`).
+    // later pass loads them and resolves the depth's maximum.
     let usage = TextureUsage::RENDER_TARGET | TextureUsage::SHADER_READ;
     let depth_msaa = lane.texture(PixelFormat::Depth32Float, MSAA, usage);
     let stencil_msaa = lane.texture(PixelFormat::Stencil8, MSAA, usage);

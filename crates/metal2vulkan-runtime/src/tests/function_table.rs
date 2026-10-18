@@ -3,8 +3,8 @@
 use crate::function_table::table_allocated_size;
 use crate::VisibleFunctionTableDescriptor;
 
-/// `allocatedSize` as an M3 Max and an M4 answer it (probes `RT7-ftable-probe{1,2}`): 256 bytes
-/// and 8 per entry, whole 16-KiB pages past 16 KiB.
+/// `allocatedSize` as an M3 Max and an M4 answer it: 256 bytes and 8 per entry, whole 16-KiB pages
+/// past 16 KiB.
 #[test]
 fn a_table_is_allocated_as_metal_allocates_it() {
     let measured: [(u32, u64); 17] = [

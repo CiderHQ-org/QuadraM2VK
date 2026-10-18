@@ -1,16 +1,15 @@
-# Plain Metal's generateMipmapsForTexture: on an Apple M3 Max (macOS 27.0.1, 26A434), our own probe
-# (M27-mips4-m3): the chains of measured_m3_passes.txt, measured_m3_formats.txt,
-# measured_m3_stores.txt and measured_m3_layouts.txt rerun, each in its store, those to 512x512
-# texels a layer kept here (the larger ones, to 4096x4096 and 16384x64, matched the chain too);
-# and 3D chains of 14 formats at 13 extents, Private: 2x2x2, 4x4x4, 8x8x2, 16x16x6, 24x40x8,
-# 64x64x4, 82x122x16, 7x9x3, 40x40x10, 128x128x5, 64x32x12, 41x61x5 and 32x32x32. Rows from
-# measured_m3_passes.txt take the store private. The first levels come from
-# measured_m3_passes.txt's probe, keyed by the chain's key; a 3D chain's slices are generated as
-# layers are, in turn. Each level's digest is the first 12 hex digits of the SHA-256 of its bytes,
-# every layer or slice in turn, rows tight; level 0's is the first level as Metal read it back,
-# which is the probe's in every row. Left out: the 18 3D chains of BGRA10_XR and BGRA10_XR_sRGB
-# 16 texels or more on each side, whose first level Metal's compressed storage rewrote (their
-# levels below matched the chain from the probe's first level).
+# Plain Metal's generateMipmapsForTexture: on an Apple M3 Max (macOS 27.0.1, 26A434), our own probe:
+# the chains of measured_m3_passes.txt, measured_m3_formats.txt, measured_m3_stores.txt and
+# measured_m3_layouts.txt rerun, each in its store, those to 512x512 texels a layer kept here (the
+# larger ones, to 4096x4096 and 16384x64, matched the chain too); and 3D chains of 14 formats at 13
+# extents, Private: 2x2x2, 4x4x4, 8x8x2, 16x16x6, 24x40x8, 64x64x4, 82x122x16, 7x9x3, 40x40x10,
+# 128x128x5, 64x32x12, 41x61x5 and 32x32x32. Rows from measured_m3_passes.txt take the store
+# private. The first levels come from measured_m3_passes.txt's probe, keyed by the chain's key; a 3D
+# chain's slices are generated as layers are, in turn. Each level's digest is the first 12 hex
+# digits of the SHA-256 of its bytes, every layer or slice in turn, rows tight; level 0's is the
+# first level as Metal read it back, which is the probe's in every row. Left out: the 18 3D chains
+# of BGRA10_XR and BGRA10_XR_sRGB 16 texels or more on each side, whose first level Metal's
+# compressed storage rewrote (their levels below matched the chain from the probe's first level).
 # Format:
 #   <key> <format> <2d|2darray|cube|3d> <width>x<height>[x<depth>] <layers> <pattern>
 #   <plain|sw|pfv|rt|private|shared> <digest of level 0> ...

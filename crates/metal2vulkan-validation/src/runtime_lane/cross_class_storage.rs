@@ -5,10 +5,10 @@
 //! Plain Metal reads such a texture in its format's own class and hands back the words, a 16-bit
 //! result an integer word's low 16 bits or a float texel's `half` bits; writes the declared lanes
 //! as that class stores them, an integer channel saturated to its range; and answers its real
-//! size (EVs XCR-p1-m3 and XCR-p2-m3, our probe on the M3 Max). Each test prints one line per
-//! case that differs and a tally; that the new path ran is shown by the answers themselves (the
-//! neutral the slot bound before reads zero texels, drops every write and queries a zero size)
-//! and by no case announcing `cross-class-texture-neutral`.
+//! size (our probe on the M3 Max). Each test prints one line per case that differs and a tally;
+//! that the new path ran is shown by the answers themselves (the neutral the slot bound before
+//! reads zero texels, drops every write and queries a zero size) and by no case announcing
+//! `cross-class-texture-neutral`.
 //!
 //! - [`cross_class_storage_and_buffer_reads_are_the_native_words`]: an `access::read_write`
 //!   read and a texture buffer read of each format of [`FORMATS`] through each type of another
@@ -78,7 +78,7 @@ const FORMATS: [(PixelFormat, u64, usize); 21] = {
     ]
 };
 
-/// The 32-bit words a write's lanes take (the probe's, EV XCR-p1-m3): each channel's edges and
+/// The 32-bit words a write's lanes take (the probe's): each channel's edges and
 /// past them, both signs, and float bits.
 const WORDS: [u32; 32] = [
     0x0000_0000,
@@ -115,7 +115,7 @@ const WORDS: [u32; 32] = [
     0x1234_5678,
 ];
 
-/// The 16-bit lanes a write takes (the probe's, EV XCR-p2-m3).
+/// The 16-bit lanes a write takes (the probe's).
 const HALVES: [u16; 24] = [
     0x0000, 0x3800, 0x3C00, 0xBC00, 0x5BF8, 0x7C00, 0x7E00, 0x0001, 0x00FF, 0x0100, 0x012C, 0x7FFF,
     0x8000, 0xFFFF, 0x3400, 0xFC00, 0x03FF, 0x0080, 0xFF80, 0x4000, 0x57F8, 0x1234, 0xABCD, 0x7BFF,
@@ -583,7 +583,7 @@ fn integer_channel(format: PixelFormat, texel: &[u8], c: usize) -> (u32, bool, i
 
 /// What plain Metal stores in a channel of `bits` bits of an integer format (`signed`) from a
 /// lane (a 32-bit word, or a 16-bit lane where `sixteen`): the lane extended by the format's
-/// signedness, saturated to the channel's range (EVs XCR-p1-m3 and XCR-p2-m3).
+/// signedness, saturated to the channel's range.
 fn metal_store(lane: u32, sixteen: bool, bits: u32, signed: bool) -> i64 {
     let v: i64 = match (sixteen, signed) {
         (true, true) => i64::from(lane as u16 as i16),
@@ -685,7 +685,7 @@ fn integer_writes_store_metals_saturated_words() {
 /// the lanes' bits stores (rounded to nearest even, a finite value past the range to infinity,
 /// onto a half-float channel: what a `half` write of that rounding stores), and each `short` or
 /// `ushort` write what a `half` write of the same bits stores, through an `access::write` 2D slot
-/// and a texture buffer; a NaN as Metal stores it (EV XCR-p1-m3): an `int` or `uint` NaN's bits
+/// and a texture buffer; a NaN as Metal stores it: an `int` or `uint` NaN's bits
 /// in a half-float channel `0x7e00`, a 16-bit lane's NaN in a 32-bit float channel `0x7fc00000`.
 /// None announces the neutral.
 #[test]
@@ -703,7 +703,7 @@ fn integer_writes_into_float_formats_store_the_bits_as_floats() {
             for kind in [Kind::Write, Kind::BufWrite] {
                 for ty in [Ty::Int, Ty::Uint, Ty::Short, Ty::Ushort] {
                     // The native write giving Metal's answer, and its lanes.
-                    // Metal's NaNs (EV XCR-p1-m3): an `int` or `uint` NaN's bits into a half-float
+                    // Metal's NaNs: an `int` or `uint` NaN's bits into a half-float
                     // channel `0x7e00`, a 16-bit lane's NaN into a 32-bit float channel
                     // `0x7fc00000` (the rule for a `half` write), so those take the `float` write
                     // of the widened value, which stores its bits.

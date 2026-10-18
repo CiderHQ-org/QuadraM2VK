@@ -14,7 +14,7 @@
 //!   uses at a chosen offset (both ways, by copies), and, where
 //!   `VK_EXT_image_drm_format_modifier` is present, whether the caller can choose the row pitch
 //!   through `DRM_FORMAT_MOD_LINEAR` with an explicit layout.
-//! - **The fragment's depth** ([`depth_source`]): per case of EV XRR2-dz1b-m4 (bias, clamp and
+//! - **The fragment's depth** ([`depth_source`]): per case of our probe (bias, clamp and
 //!   depth range), at one sample and per sample, whether a fragment shader's `FragCoord.z`, clamped
 //!   to the viewport's range, is the depth the device's own test stores, with the depth attachment
 //!   in the subpass, out of it, and in it with its test off.

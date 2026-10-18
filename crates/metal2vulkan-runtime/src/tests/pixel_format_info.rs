@@ -1,8 +1,7 @@
 //! `pixel_format_info`: `MTLPixelFormatGetInfoForDevice` answers our own measurements at each Metal
-//! level (an Apple M3 Max: EV XRR2-pfi1-m3, and the consumer's macOS 27 host lane, whose answers
-//! are XRR2-pfi1-m4's on an M4 but from 630 to 645), the level describes a format exactly where the table
-//! has a row, and `MTLGetTextureLevelInfoForDeviceWithOptions` answers the probes' layouts (EVs
-//! API-tli1 to API-tli4 on each).
+//! level (an Apple M3 Max: our probe and the consumer's macOS 27 host lane, whose answers are an
+//! M4's but from 630 to 645), the level describes a format exactly where the table has a row,
+//! and `MTLGetTextureLevelInfoForDeviceWithOptions` answers the probes' layouts (on each).
 
 use crate::{MetalLevel, PixelFormatInfo, TextureLevelQuery};
 use metal2vulkan::metal::PixelFormat as P;
@@ -125,8 +124,7 @@ fn block_formats_state_their_block() {
 
 /// One measured answer of `MTLGetTextureLevelInfoForDeviceWithOptions`, as the probes printed it:
 /// format, width, height, depth, array length, level, plane argument, then Metal's 13 words.
-/// Each was answered alike on an Apple M3 Max under macOS 26.7 (EVs API-tli2-m3 to API-tli4-m3)
-/// and an Apple M4 under 27.0.1 (API-tli2-m4 to API-tli4-m4).
+/// Each was answered alike on an Apple M3 Max under macOS 26.7 and an Apple M4 under 27.0.1.
 type Measured = ([u64; 7], [u64; 13]);
 
 /// Answers that state the rule: BGRA8Unorm (80) at levels 0, 1, 64 (the level modulo 64), 1000 and
@@ -230,7 +228,7 @@ const NEAR_TOP: u64 = (1 << 62) + 3;
 /// and BGRA8Unorm (80: one texel, 4 bytes), at all ones, at the first extents whose add wraps and
 /// the last that do not, at `2^62 + 3`, and at level 1, where the shifted extent never wraps. The
 /// words are the rule's, computed apart from the runtime's code; our own probe on an Apple M4 under
-/// macOS 27.0.1 (EV FRT-tlw1-m4) answers the rule at every one of its 495 queries, most of these
+/// macOS 27.0.1 answers the rule at every one of its 495 queries, most of these
 /// among them.
 #[rustfmt::skip]
 const NEAR_TWO_TO_THE_64: &[Measured] = &[

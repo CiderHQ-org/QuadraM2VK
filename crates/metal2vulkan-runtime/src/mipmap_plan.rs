@@ -32,9 +32,8 @@ use metal2vulkan::vk::{FormatFeatureFlags2, ImageUsageFlags};
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum MipmapProblem {
     /// A compressed format, which is not color-renderable: plain Metal writes zeros over the
-    /// first bytes of the levels below the first and leaves the rest (an M4 under macOS 27.0.1,
-    /// EV SPCrp-probe1-m4 `mip_bc1_3`, `mip_bc1_5`), no defined answer. A depth or stencil texture,
-    /// also not color-renderable, is left as it is.
+    /// first bytes of the levels below the first and leaves the rest (an M4 under macOS 27.0.1), no
+    /// defined answer. A depth or stencil texture, also not color-renderable, is left as it is.
     NotColorRenderable,
 }
 
@@ -67,8 +66,7 @@ pub(super) enum MipmapPlan {
     Picks(PickPlan),
 }
 
-/// The mipmaps of an integer format as plain Metal makes them (an M4 under macOS 27.0.1, EVs
-/// SPCrp-probe1-m4 `mip_r*`, `mip_rgba8*`, SPCrp-probe3-m4 `mip_u8_*`, `mip_rgba32s_5x5`, each
+/// The mipmaps of an integer format as plain Metal makes them (an M4 under macOS 27.0.1, each
 /// twice; its API validation stops them): texel `i` of a level is texel `floor((2i + 1) W / 2w)` of
 /// the level above on each axis, `W` and `w` the two levels' sizes on it. A level halves its axes,
 /// rounding down, so that is texel `2i + 1` where the level above is more than one texel on the
@@ -205,7 +203,7 @@ pub(super) fn plan_picks(record: &ViewRecord, texel_bytes: u32) -> Option<PickPl
 
 /// Whether no blit gives `generate_mipmaps` of `pf`: an extended-range format, whose image holds
 /// the raw codes a shader decodes. The runtime computes its mipmaps with Metal's filter
-/// (`mipmap_filter.rs`; Metal's API validation takes the call, EV CPM-probe2-m3) or refuses them
+/// (`mipmap_filter.rs`; Metal's API validation takes the call) or refuses them
 /// (`NotImplemented(MipmapGeneration)`). Also a YCbCr format (`metal::format::ycbcr`), whose
 /// texture Metal makes only over a surface's planes, of one level, which [`leaves_as_is`]; Metal's
 /// answer for more levels is not measured. And, until their levels' X fields are rewritten as Metal
@@ -215,7 +213,7 @@ pub(super) fn not_implemented(pf: PixelFormat) -> bool {
 }
 
 /// Whether Metal's plain `generateMipmapsForTexture:` leaves a texture presenting `record` as it
-/// is (an M4 under macOS 27.0.1, EV SPCrp-probe1-m4; its validation stops both): a texture of one
+/// is (an M4 under macOS 27.0.1; its validation stops both): a texture of one
 /// level, of any format (`mip_single_rgba8u`, `mip_single_d32`, `mip_single_bc1`), and a depth or
 /// stencil texture of any levels (`mip_d16_3`, `mip_d32_3`, `mip_s8_3`, `mip_d32s8_3`), an
 /// extended-range format's among them.

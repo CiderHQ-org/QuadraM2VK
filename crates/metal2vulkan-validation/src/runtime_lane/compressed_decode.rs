@@ -1,7 +1,7 @@
 //! How BC1 to BC5 texels decode (the consumer's x86 guests' BC textures) on the device the cfg
 //! selects, under the validation layer, against Metal's decode ([`metal_texel`]).
 //!
-//! Metal's decode, fitted bit for bit on an Apple M4 (macOS 27.0.1; EV SID2-bcd2-m4, the format
+//! Metal's decode, fitted bit for bit on an Apple M4 (macOS 27.0.1; the format
 //! scout's reads of random blocks of every BC format, which MoltenVK's equal): each endpoint
 //! widened to 8 bits by replicating its bits; an index's weight `w` of 64, BC7's (21 and 43 for
 //! the thirds, 9, 18, 27, 37, 46 and 55 for the sevenths, 13, 26, 38 and 51 for the fifths, 32
@@ -408,7 +408,7 @@ fn bc1_to_bc5_texels_read_as_metal_s() {
 /// once exactly where the device's driver lacks either format's fact
 /// (`DriverFact::Bc6hBlockDecodeIsMetals`, `DriverFact::Bc7BlockDecodeIsMetals`, taken on a
 /// measured identity alone), and `decoded-block-twin` never. The decode itself is not re-measured
-/// here: the lane holds no model of BC6H's or BC7's (the facts' rows name the scouts' EVs).
+/// here: the lane holds no model of BC6H's or BC7's (the facts' rows name the measurements).
 #[test]
 fn bc6h_and_bc7_announce_where_their_decode_is_unmeasured() {
     on_device(|device, messages| {
@@ -1086,7 +1086,7 @@ fn blit_ms(device: &Device, texture: &Texture, blocks: &[u8], row: u64, side: u6
 /// into its whole level, against a blit of the same bytes into an `RG32Uint` or `RGBA32Uint`
 /// texture of a quarter the side (no twin): `TWINCOST` lines.
 #[test]
-#[ignore = "a measurement of GPU time: the twin cost EVs run it"]
+#[ignore = "a measurement of GPU time: the twin cost runs take it"]
 fn decoded_twin_costs() {
     for (f, (pf, kind, srgb)) in FORMATS.into_iter().enumerate() {
         if srgb {
@@ -1184,8 +1184,8 @@ fn read_after(
 /// CPU's decode (`WorkCounts::cpu_block_decodes`, counted once the later command buffer ran;
 /// announced `cpu-block-decode` once, [`BEHIND_WRITES`]). `BCBEHIND` prints each case's route. A
 /// case behind the kernel whose command buffer ran before the write is void: lavapipe runs a
-/// submission inside `vkQueueSubmit`, so the runtime submits the reader only once the kernel ended
-/// (EV XSH-cbd1-lvpx86), and Metal's reader that ran before the write reads the old blocks.
+/// submission inside `vkQueueSubmit`, so the runtime submits the reader only once the kernel ended,
+/// and Metal's reader that ran before the write reads the old blocks.
 #[test]
 fn writes_behind_work_in_flight_read_as_metal_s() {
     on_device(|device, messages| {
@@ -1416,7 +1416,7 @@ fn host_written_twins_take_no_gpu_decode() {
 /// reads it submitted (which waits for no decode): `CPUDECODE` lines; and the making of the
 /// device's first such texture, which may make the device's decode scratch.
 #[test]
-#[ignore = "a measurement of wall time: the CPU decode EVs run it in release"]
+#[ignore = "a measurement of wall time: the CPU decode runs take it in release"]
 fn cpu_block_decode_costs() {
     on_device(|device, messages| {
         let name = device.name().to_owned();

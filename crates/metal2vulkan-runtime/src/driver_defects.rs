@@ -56,7 +56,7 @@ pub(super) struct Affected {
 ///   HEIGHT CT Violation") and loses the device: into the stencil at 4x1, 4x2 and 1x4, out of it
 ///   at 1x4, whether the colour image is a colour attachment, a storage image or both, while 2x2,
 ///   the depth aspect, and an `S8_UINT` image copy. Valid usage: the validation layer reports
-///   nothing. Measured on 615.71.09 with a bare-Vulkan program (the EV `RT6-x13-matrix-3090`):
+///   nothing. Measured on 615.71.09 with a bare-Vulkan program (the probe):
 ///   known broken through 615.71.09. The RTX 5080 Laptop GPU (Blackwell, 0x2c19) on the same
 ///   release copies them (measured clean). Every other NVIDIA GPU and release takes the exact path
 ///   too until a probe finds it clean, where before only the 3090's generation did and Ada and
@@ -83,9 +83,8 @@ pub(super) struct Affected {
 ///   image asks 4112 bytes at 65536; a 1D image bound at byte 4112, written after it in the same
 ///   command buffer, read its old contents back at bytes 4112 to 4159, while one bound at 4160 or
 ///   4352 kept what was written. Measured on 26.2.4 (driverVersion 0x6802004) on Raptor Lake-P's
-///   Iris Xe (`deviceID` 0xa7a0; `runtime_lane::texture_blits`, and a bare-Vulkan program, EVs
-///   SPH-ccsrepro-ms01 and SPH-ccsrepro2-ms01) and Raptor Lake-S's UHD 770 (0xa780,
-///   SPH-ccsrepro-13900, SPH-ccsrepro2-13900); read in main's source of 2026-10-07: known broken
+///   Iris Xe (`deviceID` 0xa7a0; `runtime_lane::texture_blits`, and a bare-Vulkan program) and
+///   Raptor Lake-S's UHD 770 (0xa780); read in main's source of 2026-10-07: known broken
 ///   through 26.2.4. Nothing is refused: the runtime rounds each image's size up to whole
 ///   256-byte chunks there (`texture::ImagePlacement`). Every ANV GPU and release takes the
 ///   rounding, at most 255 bytes an image, until a probe finds it clean. Mesa's source pads the
@@ -125,7 +124,7 @@ pub(super) struct Affected {
 ///   storage, which is what a lazily allocated memory type is, so the view's first command
 ///   buffer dereferences a null heap and the process takes a `SIGSEGV`
 ///   (`runtime_lane::memoryless::a_memoryless_3d_depth_plane_renders` on an M4, 1.4.1,
-///   driverVersion 10401, EV RRP-mless1-mvk4, where the other types' views pass: they view the
+///   driverVersion 10401, where the other types' views pass: they view the
 ///   memoryless texture itself). Read in 1.4.1's source and main's of 2026-10-05 (`fae55a18`,
 ///   unchanged): known broken through 1.4.1. Nothing is refused: such an image takes
 ///   device-local memory (`ImagePlan::memory_class`).
@@ -139,7 +138,7 @@ pub(super) struct Affected {
 ///   `Shared` texture of either format reads back NaNs made quiet and shared exponents
 ///   renormalized, where Metal's `replaceRegion` and `getBytes` keep the bytes. Measured on
 ///   1.4.1 (driverVersion 10401) on an M4 under macOS 27.0.1
-///   (`runtime_lane::compressed_blits`, EV FXR-cbl1-mvk4): known broken through 1.4.1. The
+///   (`runtime_lane::compressed_blits`): known broken through 1.4.1. The
 ///   compression is Metal's, so no MoltenVK release is expected to fix it, but a probe of a
 ///   later one decides. Nothing is refused: the image of such a texture a CPU copy reaches, and
 ///   of a device's own one without `allowGPUOptimizedContents` (whose GPU blits keep the bytes
@@ -155,15 +154,15 @@ pub(super) struct Affected {
 ///   that format and exports it: a NaN in a 16-bit float channel lands as `0xfe00`, its sign and
 ///   payload lost, while a single-sampled copy kept them. Read in 26.2's source (2026-10-09), and
 ///   measured on 26.2.4 (driverVersion 0x6802004) on the Radeon 780M (`deviceID` 0x15bf;
-///   `runtime_lane::renders::multisampled_nan_clears_store_metal_s_texel`, EVs ZIN-nc7-radv and
-///   ZIN-nc8-radv: every NaN sample of a 4x `R16Float` and `RGBA16Float` NaN clear, copied from
-///   its unsigned-integer scratch, held `0xfe00`; ZIN-x7a-radv: a scratch not mutable to the
-///   attachment's format alike): known broken through 26.2.4. The path is every RADV GPU's, so
-///   every device has it. Nothing is refused: the NaN clear of a multisampled attachment is
-///   written through a view of its image in the unsigned-integer format of its texel size
-///   (`nan_clear.rs`), which the runtime's multisampled color render targets of such formats
-///   take there where it costs the image nothing (`nan_clear::view_candidate`), and is the
-///   device's copy, announced (`device-nan-encoding`), where the image takes no such view.
+///   `runtime_lane::renders::multisampled_nan_clears_store_metal_s_texel`: every NaN sample of a 4x
+///   `R16Float` and `RGBA16Float` NaN clear, copied from its unsigned-integer scratch, held
+///   `0xfe00`: a scratch not mutable to the attachment's format alike): known broken through
+///   26.2.4. The path is every RADV GPU's, so every device has it. Nothing is refused: the NaN
+///   clear of a multisampled attachment is written through a view of its image in the
+///   unsigned-integer format of its texel size (`nan_clear.rs`), which the runtime's multisampled
+///   color render targets of such formats take there where it costs the image nothing
+///   (`nan_clear::view_candidate`), and is the device's copy, announced (`device-nan-encoding`),
+///   where the image takes no such view.
 ///
 /// `ReadsCommandBuffersAfterTheirSignal`:
 /// - MoltenVK (`MOLTENVK`): on a device with `MTLSharedEvent` the GPU signals a timeline

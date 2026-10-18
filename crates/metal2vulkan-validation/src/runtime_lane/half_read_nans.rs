@@ -1,7 +1,7 @@
 //! A `float` read, nearest sample and gather of a half-float texture's NaN texels, on the device
 //! the cfg selects, under the validation layer.
 //!
-//! What plain Metal answers (an Apple M4 under macOS 27.0.1, EV FRT3-hnan1-m4): with a `float`
+//! What plain Metal answers (an Apple M4 under macOS 27.0.1): with a `float`
 //! result, every NaN of an `R16Float`, `RG16Float` or `RGBA16Float` texel, whatever its sign and
 //! payload, is `0x7fc00000`, and every other half its exact widening, denormals kept; a 32-bit
 //! float texel's words are as stored, a signalling or negative NaN's included. That holds for a
@@ -33,7 +33,7 @@ use metal2vulkan_runtime::{
 };
 
 /// The halves read: quiet and signalling NaNs of both signs and payload edges, then infinities,
-/// denormals, zeros and normals (EV FRT3-hnan1-m4's).
+/// denormals, zeros and normals (our probe's).
 const V: [u16; 24] = [
     0x7e00, 0x7c01, 0x7dff, 0x7fff, 0x7e01, 0x7d55, 0xfe00, 0xfc01, 0xfdff, 0xffff, 0xfe01, 0x7f00,
     0x7c00, 0xfc00, 0x0001, 0x8001, 0x03ff, 0x3c00, 0x0000, 0x8000, 0x7bff, 0xfbff, 0x3555, 0xff00,

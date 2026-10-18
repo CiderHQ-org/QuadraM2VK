@@ -54,7 +54,7 @@
 //! box's undrawn pixels back as the copy in read them and hid the pass's earlier draws from its
 //! reads: the consumer's x86 guest's alert corners and hover fills.)
 //!
-//! Measured (EV ZIN2-lc1-nvidia on an RTX 3090 and the consumer's run of it on an RTX 5080 Laptop
+//! Measured (on an RTX 3090 and the consumer's run of it on an RTX 5080 Laptop
 //! GPU; 1080p `BGRA8` over host pages, in place against copies of the draws' box, medians of 31
 //! interleaved): on the 5080 a blending draw reads and writes its pixels across the bus once each
 //! in place, so one layer costs 0.55 to 0.87 of the copies at every area and two or more 1.5 to 7.4

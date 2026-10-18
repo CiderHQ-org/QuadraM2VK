@@ -405,7 +405,7 @@ impl Buffer {
     ///
     /// Another format of which plain Metal makes no texture alone
     /// (`RGBA16Float_XR`, `AnyDepth`, `AnyStencil`, `Unspecialized`) answers `Nil`, as Metal
-    /// answers nil over a surface's plane (EV TTG-nil7-m4), once every rule Metal stops passed
+    /// answers nil over a surface's plane, once every rule Metal stops passed
     /// and before the surface's own.
     pub fn new_texture_with_iosurface_plane(
         &self,
@@ -482,7 +482,7 @@ impl Buffer {
         // A plain `newTextureWithDescriptor:offset:bytesPerRow:` takes the buffer's options
         // whatever the descriptor names (probe 9d); an IOSurface plane takes its descriptor's, its
         // default hazard tracking mode tracked, as the M4's plain run and validation do
-        // (IOS-modes2-m4; the plan refuses a memoryless one).
+        // (the plan refuses a memoryless one).
         let options = match form {
             BufferTextureCall::IoSurfacePlane { .. } => {
                 let hazard = match hazard {
@@ -506,11 +506,10 @@ impl Buffer {
         };
         // A format of which plain Metal makes no texture alone answers nil over a buffer (the
         // linear SPI's too) and, but for a two-plane YCbCr one, over a surface's plane, once every
-        // rule Metal stops passed and before the buffer's or the surface's own (EVs TTG-nil1-m4,
-        // TTG-nil2-m3, TTG-nil7-m4). Metal makes every two-plane YCbCr format over a surface's
-        // plane (EV TTG-nil7-m4: `YCBCR8_420_2P` and `YCBCR10_420_2P` over a 'BGRA' surface's);
-        // the runtime makes those `ycbcr.rs` reads with the surface's facts, and the others are its
-        // gap.
+        // rule Metal stops passed and before the buffer's or the surface's own. Metal makes every
+        // two-plane YCbCr format over a surface's plane (`YCBCR8_420_2P` and `YCBCR10_420_2P` over
+        // a 'BGRA' surface's); the runtime makes those `ycbcr.rs` reads with the surface's facts,
+        // and the others are its gap.
         let layout = match checked {
             Err(Refused::Nil(TextureProblem::NoTextureOfFormat))
                 if surface && ycbcr_format(asked_format).is_some() =>
@@ -522,8 +521,7 @@ impl Buffer {
             checked => checked.map_err(|refused| refused.error(call))?,
         };
         // Only an IOSurface plane takes a framebuffer-only texture: plain Metal asserts
-        // "framebufferOnly == NO" over a buffer, or on its rotation (EV ZCI2-rotprobe-m4's
-        // `buffer`).
+        // "framebufferOnly == NO" over a buffer, or on its rotation.
         if descriptor.framebuffer_only && !surface {
             return Err(invalid(
                 call,
@@ -731,7 +729,7 @@ impl Buffer {
 }
 
 /// The bytes a rotated texture made as `texture` has its CPU access and blits address: its own
-/// extent at the plane's offset and rows, as plain Metal addresses them (EV ZCI2-rotprobe5-m4),
+/// extent at the plane's offset and rows, as plain Metal addresses them,
 /// rows that overlap where a quarter turn's are longer than the plane's, and may run past the
 /// stored frame's last row.
 fn rotated_rows(texture: &BufferTexture) -> BufferLayout {
@@ -1127,12 +1125,11 @@ impl Texels {
     /// The texels of a texture buffer of `descriptor` at `placed` in `buffer`, `texel_bytes`
     /// each. A function reads and writes them from their offset rounded down to 16 bytes, as
     /// plain Metal's do where its validation alone stops an offset off 16 (an M4 under macOS
-    /// 27.0.1, EVs SPCrp-probe1-m4 `lin_tb_off*`, SPCrp-probe6-m4 `tbo_*`), and blits and the CPU
-    /// at the offset itself (`layout`). Viewed in place where the device's
-    /// `minTexelBufferOffsetAlignment`, which the binding plan holds a view's offset to, divides
-    /// the functions' offset in the buffer's `VkBuffer`; else through a staging buffer of their
-    /// own, at its start (a no-copy buffer's bytes, or Metal's offset, need not lie at a multiple
-    /// of it). Refused as `new_buffer` refuses the staging buffer.
+    /// 27.0.1), and blits and the CPU at the offset itself (`layout`). Viewed in place where the
+    /// device's `minTexelBufferOffsetAlignment`, which the binding plan holds a view's offset to,
+    /// divides the functions' offset in the buffer's `VkBuffer`; else through a staging buffer of
+    /// their own, at its start (a no-copy buffer's bytes, or Metal's offset, need not lie at a
+    /// multiple of it). Refused as `new_buffer` refuses the staging buffer.
     fn texture_buffer(
         buffer: Buffer,
         placed: BufferLayout,

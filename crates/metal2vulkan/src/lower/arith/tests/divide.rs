@@ -57,7 +57,7 @@ pub(super) fn bits(s: u64, e: u64, m: u64) -> u64 {
 /// `2^-126 - 2^-150`, which has 24 bits and is flushed although the denormal grid would round it
 /// up to the smallest normal, and its neighbors), overflow, all-ones significands, divisors past
 /// `2^126`, the edges of the range the fused path once kept to (`[2^-31, 2^33)`), divisors near
-/// `2^40` (EV FMX2-radv2's timing), quotients near rounding midpoints at moderate exponents and
+/// `2^40` (the probe's timing), quotients near rounding midpoints at moderate exponents and
 /// at every exponent (where the fused path's exponent arithmetic decides the overflow and the
 /// flush), and random bits.
 fn pairs32() -> Vec<[u64; 2]> {
@@ -525,7 +525,7 @@ fn metal_frem32(x: u64, y: u64) -> u64 {
     ftz(u64::from(r.to_bits()))
 }
 
-/// Metal's `frem` on the M3 Max without fast math (EV TRF-frem2-m3, our own probe): the
+/// Metal's `frem` on the M3 Max without fast math (our own probe): the
 /// operands' bits and the answer's, sampled from the 49,753 measured pairs, which
 /// [`metal_frem32`] answers all of bit for bit. Not the exact remainder: `frem(1, 0.1)` is `+0`
 /// where `fmod` gives `0x3DCCCCCB`.

@@ -47,10 +47,9 @@
 //! MoltenVK's completion path, so on macOS it runs alone (`.config/nextest.toml` keeps the
 //! numbers).
 //!
-//! In our plain Vulkan programs of the runtime's submissions on an M4 (EVs
-//! STL-brst2-m4 and STL-brst3-m4), every queue on MoltenVK's one queue of family 0 (as the runtime
-//! once did) put the median 1 to 1.4 busy command buffers above Metal's in the same run; a queue
-//! per family, 0.4 at most.
+//! In our plain Vulkan programs of the runtime's submissions on an M4, every queue on MoltenVK's
+//! one queue of family 0 (as the runtime once did) put the median 1 to 1.4 busy command buffers
+//! above Metal's in the same run; a queue per family, 0.4 at most.
 //!
 //! The reference is Metal's own storm, but on MoltenVK 1.4.1 with Metal argument buffers and a
 //! residency set ([`moltenvk_fences`]). There MoltenVK encodes device-wide `MTLFence`s, one set per
@@ -61,7 +60,7 @@
 //! `MVKCommandBuffer.mm` and `MVKQueue.mm`). So a light queue's blit waits for the compute fence
 //! that the busy queue's latest committed command buffer updates as it ends: about two busy command
 //! buffers, where Metal waits for none. Metal's own storm under that fence pattern
-//! (`metal::Fences::MoltenVk`) waits as long. EV QST-fence1-m3, our own Swift storm on an Apple M3
+//! (`metal::Fences::MoltenVk`) waits as long. Our probe, our own Swift storm on an Apple M3
 //! Max under macOS 27.0.1: a light burst's median was 1.91 and 1.95 busy command buffers with the
 //! fences, 0.09 and 0.08 without. The runtime's was 1.92 and 1.95 in the same hour, at the default
 //! QoS and at utility. Nothing on the runtime's side removes it: the runtime needs argument buffers

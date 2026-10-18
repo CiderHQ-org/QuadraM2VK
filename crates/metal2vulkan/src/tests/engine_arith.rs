@@ -1482,7 +1482,7 @@ fn dot_is_metals_fused_chain_on_every_profile() {
 }
 
 /// Metal's `dot` of more than four lanes, on `float` and `half`, is the same fused chain over
-/// every lane in order, with and without fast math: EV DNR-dw1-m3, an Apple M3 Max under macOS
+/// every lane in order, with and without fast math: an Apple M3 Max under macOS
 /// 27.0.1, 16,384 rows of seeded random lanes each on 5, 8 and 16 `float` lanes and 8 and 16 `half`
 /// lanes, every answer the chain's. Each row here is one where the chain backwards, the chunks'
 /// sums added and the exact sum rounded once all miss Metal's word. Where Metal's order is the
@@ -2466,7 +2466,7 @@ fn fast_sincos_flushes_past_the_last_quadrant() {
 /// where the profile states it and selected elsewhere; so does a remainder, Metal's composition of
 /// those; the functions that answer Metal at denormals and NaNs themselves (`sign`), `half`
 /// arithmetic, and the fused multiply-add routines record neither; nor does `fast::atan2`, whose
-/// device quotient reads its operands as Metal does (EV DNR-dn2-m3), flushed off the deviation.
+/// device quotient reads its operands as Metal does, flushed off the deviation.
 /// The operands come from bits (`llvm.umin` of constants, bitcast), not from `float` arithmetic.
 #[test]
 fn device_float_environment_notes_follow_the_operations() {
@@ -3915,8 +3915,8 @@ fn fast_division_follows_the_metal_float_functions_fact() {
 /// and Metal compiles the entry with fast math (it declares no `SignedZeroInfNanPreserve`), an
 /// `arcp` division is the device's `OpFDiv(x, y)` itself, which MoltenVK hands Metal's compiler as
 /// the AIR's own fast `x / y`. Metal's compiler does not treat `x * (1.0 / y)` the same way: case
-/// 24c263bb's `(a * 255) / a` was 255 on Metal and 254 as `x` times the device's `OpFDiv(1, y)` (EV
-/// FMX2-mvk995). In an entry that declares the mode, and on a profile without the fact, the
+/// 24c263bb's `(a * 255) / a` was 255 on Metal and 254 as `x` times the device's `OpFDiv(1, y)`. In
+/// an entry that declares the mode, and on a profile without the fact, the
 /// quotient stays `x` times the profile's reciprocal, a call of the fast division's routine. The
 /// interpreter's `OpFDiv` is correctly rounded, so `1e10 / 3` tells the forms apart: `RN(1e10 / 3)`
 /// is `0x4f46aea1` and `1e10 · RN(1 / 3)` is `0x4f46aea2`. The device's quotient, Metal's own,
@@ -5219,11 +5219,11 @@ fn float_sign_operations_move_the_bits_on_every_profile() {
 /// Class F: Metal's `float` `fmin`, `fmax`, `min3`, `max3`, and `clamp`, precise and `fast_` alike,
 /// and `llvm.minnum`/`llvm.maxnum` with every flag (Metal's fast-math `a < b ? a : b`), with none
 /// and with some, answer an operand bit for bit on every profile (`nan_minmax`, `nan_minmax_fast`,
-/// and their zeros-and-denormals cases, every lane; EV DNR-mm1-m3 and DNR-mm2-m3 for the other
-/// flag states): a NaN loses, two NaNs and a tie answer the second operand, and a denormal
-/// compares as zero but is returned itself. Off a profile that takes `DriverDeviation::MetalMinMax`
-/// no device `NMin`, `NMax`, or `NClamp` decides it; on one those instructions do, measured to be
-/// Metal's (the interpreter models them so), and the module requires `VkProperty::MetalMinMax`. No
+/// and their zeros-and-denormals cases, every lane; for the other flag states): a NaN loses, two
+/// NaNs and a tie answer the second operand, and a denormal compares as zero but is returned
+/// itself. Off a profile that takes `DriverDeviation::MetalMinMax` no device `NMin`, `NMax`, or
+/// `NClamp` decides it; on one those instructions do, measured to be Metal's (the interpreter
+/// models them so), and the module requires `VkProperty::MetalMinMax`. No
 /// device note is recorded.
 #[test]
 fn float_min_max_answer_metals_operand_on_every_profile() {

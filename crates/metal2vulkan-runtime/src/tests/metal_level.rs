@@ -13,8 +13,7 @@ use metal2vulkan::metal::PixelFormat as P;
 use metal2vulkan::metal::{TextureType, TextureUsage};
 
 /// The 12 three-channel formats of the macOS 27.0 SDK and `RGB16Bfloat`: values macOS 26.7's
-/// descriptor does not know (EV XRR2-pfi1-m3), and formats macOS 27.0.1 describes none of (EV
-/// XRR2-pfi1-m4).
+/// descriptor does not know, and formats macOS 27.0.1 describes none of.
 const THREE_CHANNEL: [P; 13] = [
     P::RGB8Unorm,
     P::RGB8Snorm,
@@ -40,10 +39,10 @@ const TWELVE_BIT_UINT: [P; 5] = [
     P::RGB10A8Uint2P,
 ];
 
-/// The formats from 630 to 645: made by an Apple M4 under macOS 27.0.1 (EV XRR2-pf576b-m4),
-/// described by neither release on an Apple M3 Max (EVs XRR2-pfi1-m3 and XRR2-pla1-m3 at 26.7;
-/// at 27.0.1 the consumer's macOS 27 host lane and EV M27-lin1-m3, where the alignment query
-/// asserts and the descriptor's validation stops a texture of each, "has invalid pixelFormat").
+/// The formats from 630 to 645: made by an Apple M4 under macOS 27.0.1, described by neither
+/// release on an Apple M3 Max (at 26.7; at 27.0.1 the consumer's macOS 27 host lane and where the
+/// alignment query asserts and the descriptor's validation stops a texture of each, "has invalid
+/// pixelFormat").
 const FROM_630: [P; 16] = [
     P::BGRA10UintPACKED,
     P::BGRA10XRPACKED,
@@ -73,7 +72,7 @@ fn described(level: MetalLevel) -> Vec<P> {
 }
 
 /// Each level's row is its release's measurement on an Apple M3 Max: macOS 26.7 and 27.0.1 each
-/// describe 264 values (`MTLPixelFormatGetInfoForDevice`, EV XRR2-pfi1-m3 and the consumer's
+/// describe 264 values (`MTLPixelFormatGetInfoForDevice`, our probe and the consumer's
 /// macOS 27 host lane), without `Depth24Unorm_Stencil8` and `X24_Stencil8`, which no Apple GPU
 /// has, and without the 16 from 630 to 645, which an Apple M4 under 27.0.1 also describes; 26.7's
 /// descriptor does not know the three-channel formats; and a newer release describes every format
@@ -114,8 +113,8 @@ fn each_level_describes_what_its_release_measured() {
 /// Each level makes mipmaps by its release's rule on an Apple M3 Max (`bind::MipmapRule`: macOS
 /// 26.7's passes, 27.0.1's filter at every level), and answers the heap query of a texture of a
 /// format of which Metal makes none alone, with no planes, its release's alignment: 16 KiB for an
-/// array, a cube, a cube array, a 3D texture and a multisample array under 26.7 (EVs APX2-un2-m3,
-/// TTG-nil2-m3), 128 under 27.0.1 (EV M27-heap1-m3), and alike for the other types.
+/// array, a cube, a cube array, a 3D texture and a multisample array under 26.7, 128 under 27.0.1,
+/// and alike for the other types.
 #[test]
 fn a_level_takes_its_release_s_mipmaps_and_nil_alignments() {
     assert_eq!(
@@ -255,9 +254,9 @@ fn a_device_answers_at_or_below_its_host() {
 
 /// A texture of a format the device's level describes none of is stopped as `Invalid` is, from
 /// every creator and the heap size query, before every other rule; one of a format it describes
-/// is not (Metal's validation stops it, "has invalid pixelFormat": EVs XRR2-pf576b-m4 and
-/// XRR2-pfi1-m3; at macOS 27.0.1 on the M3 Max, EV M27-lin1-m3). The 16 formats from 630 to 645
-/// are stopped at both levels, as the M3 Max stops them at both releases.
+/// is not (Metal's validation stops it, "has invalid pixelFormat": our probes; at macOS 27.0.1 on
+/// the M3 Max). The 16 formats from 630 to 645 are stopped at both levels, as the M3 Max stops them
+/// at both releases.
 #[test]
 fn a_level_stops_textures_of_the_formats_it_describes_none_of() {
     let creators = [
@@ -305,9 +304,9 @@ fn a_level_stops_textures_of_the_formats_it_describes_none_of() {
 }
 
 /// `minimumLinearTextureAlignmentForPixelFormat:` answers at the device's level, an Apple M3 Max's
-/// at each: an assertion for the formats from 630 to 645 at macOS 26.7 and at 27.0.1 (EVs
-/// XRR2-pla1-m3 and M27-lin1-m3, "MTLPixelFormatInvalid is not supported on this device"; an
-/// Apple M4 under 27.0.1 answers 16, EV XRR2-pla1-m4), which the runtime refuses `Invalid`.
+/// at each: an assertion for the formats from 630 to 645 at macOS 26.7 and at 27.0.1
+/// ("MTLPixelFormatInvalid is not supported on this device"; an Apple M4 under 27.0.1 answers 16),
+/// which the runtime refuses `Invalid`.
 #[test]
 fn the_linear_alignment_answers_at_the_devices_level() {
     let (_, desc) = committed_descriptions()
@@ -344,7 +343,7 @@ fn the_linear_alignment_answers_at_the_devices_level() {
 
 /// No level describes `Depth24Unorm_Stencil8` or `X24_Stencil8`, which an Apple GPU has neither
 /// of: the descriptor check stops a texture of each as one of no format, first, from every
-/// creator, at every level, as Metal on an Apple M4 (EV XRR2-ol4-m4, "has invalid pixelFormat
+/// creator, at every level, as Metal on an Apple M4 ("has invalid pixelFormat
 /// (255)") and an M3 Max (the consumer's run) stops them, whatever the Vulkan driver has.
 #[test]
 fn no_level_describes_either_24_bit_depth_format() {

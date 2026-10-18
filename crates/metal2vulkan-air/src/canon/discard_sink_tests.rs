@@ -237,8 +237,8 @@ fn a_side_effect_between_keeps_the_count() {
 }
 
 /// The guarded discard nested in a further branch: Metal counted the dropped quads in one shape
-/// measured (EV REF-dhoist's `m_branch`) and moved the sum in another (`hoisted_nested` of the
-/// owned fixture), so neither is known.
+/// measured and moved the sum in another (`hoisted_nested` of the owned fixture), so neither is
+/// known.
 #[test]
 fn a_nested_discard_is_unknown() {
     let b = body(|f, t| {

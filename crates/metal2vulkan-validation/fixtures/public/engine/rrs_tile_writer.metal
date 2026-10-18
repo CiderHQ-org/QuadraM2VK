@@ -1,9 +1,9 @@
-// Owned fixture: the tile function our Metal probe RRS-tilew
-// wrote an indexed indirect draw's arguments or indices with, in the form of the vertex writer
-// `icb_render_replay_template` that `runtime_lane::indirect_draws` writes them with: thread
-// (0, 0) of each tile writes `params[0] * (k + 1) + params[1]` to word `k` of `out`, for `k` 0
-// and 1. A pass binds `params` and `out` as tile buffers 0 and 1 and dispatches one thread per
-// tile. Written for this repository; no third-party source. Loop-free.
+// Owned fixture: the tile function our Metal probe wrote an indexed indirect draw's arguments or
+// indices with, in the form of the vertex writer `icb_render_replay_template` that
+// `runtime_lane::indirect_draws` writes them with: thread (0, 0) of each tile writes `params[0] *
+// (k + 1) + params[1]` to word `k` of `out`, for `k` 0 and 1. A pass binds `params` and `out` as
+// tile buffers 0 and 1 and dispatches one thread per tile. Written for this repository; no
+// third-party source. Loop-free.
 // metal-fast-math: off
 #include <metal_stdlib>
 using namespace metal;

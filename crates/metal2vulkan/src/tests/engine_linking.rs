@@ -527,12 +527,11 @@ fn a_linked_refusal_locates_an_instruction_of_the_specialized_entry() {
 }
 
 /// A pipeline state numbers the constexpr sampler of the one function the sampling kernel links
-/// and calls (EVs SID-sid13-m4 and SID-sid14-m4), with no precision note. The module's other
-/// kernel, which never reaches `linked_sample`, numbers nothing; linking it too, it numbers that
-/// function's sampler, as Metal numbers a sampler of a function of `functions` called or not (EVs
-/// SID-sid14-m4, SID-sid15-m4), with no note: one linked function brings samplers (the case 2,
-/// where it was noted and numbered nothing). Through `privateFunctions` it is numbered only where
-/// the kernel reaches it, with no note (SID-sid19-m4).
+/// and calls, with no precision note. The module's other kernel, which never reaches
+/// `linked_sample`, numbers nothing; linking it too, it numbers that function's sampler, as Metal
+/// numbers a sampler of a function of `functions` called or not, with no note: one linked function
+/// brings samplers (the case 2, where it was noted and numbered nothing). Through
+/// `privateFunctions` it is numbered only where the kernel reaches it, with no note.
 #[test]
 fn a_linked_function_s_constexpr_sampler_is_numbered() {
     use crate::pipeline::interface::NumberedSampler;

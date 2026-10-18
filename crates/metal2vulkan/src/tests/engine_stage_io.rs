@@ -815,7 +815,7 @@ fn sixty_four_bit_interface_values_are_not_metal() {
 }
 
 /// Apple's Metal compiler rejects a `bfloat` fragment return type ("invalid return type
-/// 'bfloat4' (vector of 4 'bfloat' values) for fragment function", EV FPV-pf5-m4), so a fragment
+/// 'bfloat4' (vector of 4 'bfloat' values) for fragment function"), so a fragment
 /// function whose color output is `bfloat` is invalid input on every committed profile, decided by
 /// the output's AIR type: `stage_io_fragment_point`'s `half4` color edited to `bfloat4`, its type
 /// name too. The unedited function compiles.

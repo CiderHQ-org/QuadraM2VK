@@ -7,8 +7,7 @@
 //! prints the pixels as the probe printed them.
 //!
 //! [`ANSWERS`] holds the probe's lines, as an M4 (macOS 27.0.1) printed them without API
-//! validation (EV `MESH-mp6`); the M3 Max (macOS 26.7, EV `MESH-mp6-m3`) printed the same, with
-//! and without it. Among them:
+//! validation; the M3 Max (macOS 26.7) printed the same, with and without it. Among them:
 //!
 //! - A fresh descriptor binds no object or mesh buffers. A buffer of draws of primitives beside
 //!   mesh draws, and one of both mesh kinds, are made; one of mesh draws beside dispatches is a
@@ -28,17 +27,15 @@
 //!   takes either order's words, and prints which (a device that emulates mesh draws orders
 //!   them).
 //! - A kernel's reset of a command leaves it drawing nothing.
-//! - A mesh command that reads what an earlier draw of its pass wrote (EVs IRX-mfrag-m4 and
-//!   IRX-mvtx-m4, an M4): Metal's reader reads none of a fragment's writes, behind a barrier or
-//!   not, and a vertex function's behind the command's barrier; a device that emulates mesh draws
-//!   reads so, and refuses the vertex function's cases without that barrier
-//!   (`NotImplemented(IndirectRenderCommands)`).
+//! - A mesh command that reads what an earlier draw of its pass wrote (an M4): Metal's reader reads
+//!   none of a fragment's writes, behind a barrier or not, and a vertex function's behind the
+//!   command's barrier; a device that emulates mesh draws reads so, and refuses the vertex
+//!   function's cases without that barrier (`NotImplemented(IndirectRenderCommands)`).
 //! - A pipeline state set on a command of a buffer whose command types hold no draw of its kind
 //!   (the vertex pipeline on a buffer of mesh draws alone, a mesh pipeline on a buffer of draws
-//!   of primitives, of indexed draws or of patch draws) ends Metal's process in the setter (EVs
-//!   IRX-mesh1-m4 and IRX-mesh3-m4, an M4, with and without API validation), and the runtime
-//!   refuses it (`PipelineKind`); so does the CPU's draw of primitives on a buffer of mesh draws
-//!   alone (EV IRX-mesh2-m4), refused `CommandType`.
+//!   of primitives, of indexed draws or of patch draws) ends Metal's process in the setter (an M4,
+//!   with and without API validation), and the runtime refuses it (`PipelineKind`); so does the
+//!   CPU's draw of primitives on a buffer of mesh draws alone, refused `CommandType`.
 //!
 //! Commands a kernel writes are drawn by a host step, which the device announces once; a device
 //! without `VK_EXT_mesh_shader` announces its emulated mesh draws once.
@@ -70,9 +67,9 @@ use metal2vulkan_runtime::{
 /// <words>` (the control words after the pass), and `case <case> marks=<words in hex>` (the words
 /// the vertex function marked); then the cases of
 /// [`mesh_commands_read_earlier_draws_writes_as_metal_orders_them`], as the same M4 printed them
-/// without API validation (EVs IRX-mfrag-m4 and IRX-mvtx-m4, macOS 27.0.1; with it the same, but
-/// `enc_frag_barrier`, whose barrier from the fragment stage Metal's validation stops), the
-/// vertex writer's control words in hexadecimal.
+/// without API validation (macOS 27.0.1; with it the same, but `enc_frag_barrier`, whose barrier
+/// from the fragment stage Metal's validation stops), the vertex writer's control words in
+/// hexadecimal.
 const ANSWERS: &str = "\
 PX cpu_own 0 0 a=0,0,3,2 b=c,4,100804,0
 PX cpu_own 1 0 a=1,0,3,2 b=c,4,100804,4
@@ -869,7 +866,7 @@ enum Writer {
 impl Writer {
     /// The lines of case `name` whose reader read the writer's words (`writers`) or the CPU's,
     /// `(1, 1, 1, 0)`: the reader's pixels and the writer's, and the control words after the
-    /// pass (hexadecimal for the vertex writer's, as probe IRX-mvtx-m4 printed them).
+    /// pass (hexadecimal for the vertex writer's, as our probe printed them).
     fn lines(self, name: &str, writers: bool) -> Vec<String> {
         let (z, w, cover, ctl): (u32, u32, Option<u32>, &str) = match self {
             Writer::Fragment => (1, 9, Some(0xBBBB), "3,2,1,9"),
@@ -899,18 +896,18 @@ impl Writer {
     }
 }
 
-/// Mesh commands that read what an earlier draw of their pass wrote, as Metal orders them (EVs
-/// IRX-mfrag-m4 and IRX-mvtx-m4, an M4): `mesh_barrier`'s fragment writer, then its object or grid
-/// reader, as commands 0 and 1 of one buffer, with and without the reader's barrier, and the
-/// encoder's own fragment writer before an execution of the object reader, without a barrier and
-/// behind one from the fragment stage to the object stage; the encoder's mesh-stage writer behind
-/// one from the mesh stage; and `mesh_commands`' `vtx` writing from its vertex function before the
+/// Mesh commands that read what an earlier draw of their pass wrote, as Metal orders them (an M4):
+/// `mesh_barrier`'s fragment writer, then its object or grid reader, as commands 0 and 1 of one
+/// buffer, with and without the reader's barrier, and the encoder's own fragment writer before an
+/// execution of the object reader, without a barrier and behind one from the fragment stage to the
+/// object stage; the encoder's mesh-stage writer behind one from the mesh stage; and
+/// `mesh_commands`' `vtx` writing from its vertex function before the
 /// grid reader, as command 0 of a buffer of draws and mesh draws with and without the reader's
 /// barrier, and as the encoder's draw before an execution of the reader behind the command's
 /// barrier, the encoder's, or neither.
 ///
 /// Metal's reader reads none of a fragment's writes, behind any barrier ([`ANSWERS`]; the M3 Max
-/// alike, EV IRX-fgeo-m3): on a device that emulates mesh draws the reader's object and mesh
+/// alike): on a device that emulates mesh draws the reader's object and mesh
 /// functions run before the pass, reading the CPU's words as Metal's do; on a device with
 /// `VK_EXT_mesh_shader` they read a copy of the words taken before the pass
 /// (`render/pass_start_reads.rs`), the CPU's words too. Metal's reader reads a vertex function's

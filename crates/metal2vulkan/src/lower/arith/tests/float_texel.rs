@@ -239,7 +239,7 @@ fn a_packed_texel_is_its_codes_value() {
 }
 
 /// A small or half float's one texel is the device's value, a NaN Metal's `0x7fc00000`
-/// (`RG11B10Float`'s rows; a half-float texel's, EV FRT3-hnan1-m4, whatever the device's widening
+/// (`RG11B10Float`'s rows; a half-float texel's, whatever the device's widening
 /// kept of its sign and payload); a value that may be filtered keeps its payload. Any class of
 /// neither a normalized family, a packed field nor the half-float family (32-bit floats, sRGB, a
 /// corner alone, `OTHER`) is the device's value, bit for bit.

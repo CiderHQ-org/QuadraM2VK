@@ -476,12 +476,11 @@ fn a_shared_texture_buffer_opens_over_its_texels() {
 
 /// A texture buffer over a buffer at an offset off 16 bytes, which Metal's validation alone
 /// stops: a plain run makes it, its functions read and write it from the offset rounded down to
-/// 16 bytes, and its blits and the CPU at the offset itself (an M4 under macOS 27.0.1, EVs
-/// SPCrp-probe1-m4 `lin_tb_off*`, SPCrp-probe6-m4 `tbo_*`). Each of [`TEXEL_CASES`] runs with its
-/// texture buffer at offsets 4, 20 and 33 of a buffer whose bytes from the offset rounded down
-/// are the texture's: the reader gives its own output and leaves the buffer as it was, the
-/// writer's bytes land from the offset rounded down and nowhere else, and `get_bytes` and a blit
-/// read the bytes at the offset itself.
+/// 16 bytes, and its blits and the CPU at the offset itself (an M4 under macOS 27.0.1). Each of
+/// [`TEXEL_CASES`] runs with its texture buffer at offsets 4, 20 and 33 of a buffer whose bytes
+/// from the offset rounded down are the texture's: the reader gives its own output and leaves the
+/// buffer as it was, the writer's bytes land from the offset rounded down and nowhere else, and
+/// `get_bytes` and a blit read the bytes at the offset itself.
 #[test]
 fn a_texture_buffer_off_16_bytes_reads_and_writes_from_below() {
     on_device(|device| {

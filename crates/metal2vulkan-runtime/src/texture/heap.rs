@@ -11,7 +11,7 @@
 //!   resource lies in the chunk (`texture::ImagePlacement`). Metal's answer is its GPU's own (an M4
 //!   on macOS 27.0.1 and an M3 Max on macOS 26.7 answer alike: 128-byte alignment and the sizes of
 //!   Apple's layouts, 16384 bytes for a 64x64 `RGBA8Unorm` texture a shader writes and 16512 for
-//!   one it only reads, which Metal compresses; SPR-heaptex1, SPR-heaptex2), and a program places
+//!   one it only reads, which Metal compresses), and a program places
 //!   by the query's answer, so the runtime answers its own device's. It depends on the device and
 //!   the descriptor alone, never on what was allocated. Where Metal's layout is measured
 //!   (`heap_tiled.rs`: plain and block-compressed formats; multisample textures), it answers the
@@ -43,7 +43,7 @@
 //! - **Where Metal's answer is not its image's** (the consumer's report): Metal answers a 4:2:2
 //!   texture its rows of 2-byte texels at a multiple of 16 bytes, the last unpadded, at an
 //!   alignment of 16, and an `X32_Stencil8` texture as a `Stencil8` one
-//!   (`Device::metal_heap_answer`; an M4, EV `APX-fmt1-m4`), which the runtime answers too.
+//!   (`Device::metal_heap_answer`; an M4), which the runtime answers too.
 //!   Where the device's image needs more bytes or a coarser alignment than that answer, and for
 //!   every 4:2:2 texture, the texture is a shadow of the heap's bytes in memory of its own
 //!   (`AliasRoute::MemoryShadow`): its planes fit the answer (an `X32_Stencil8` texture's stencil
@@ -95,7 +95,7 @@
 //!   `make_aliasable` gives its range to the next resource; a placement heap takes any offset that
 //!   is a multiple of the alignment with the texture's bytes inside the heap, overlapping other
 //!   resources or not (Metal: an offset not a multiple of the alignment is stopped by validation
-//!   and answers nil without it, and so does one past the heap's end; SPR-heaptex1, TTG-nil1-m4:
+//!   and answers nil without it, and so does one past the heap's end:
 //!   the runtime answers `Nil`). The texture's storage and CPU cache modes are the heap's (another
 //!   is `Invalid`, as Metal ends the process), and its hazard tracking is the heap's buffer's, so
 //!   Metal's tracking at the granularity of the heap orders a buffer's write before an
@@ -205,7 +205,7 @@ pub(crate) const HEAP_BASE_ALIGNMENT: u64 = 256 << 10;
 /// Where a heap texture's image lies: its heap, and its offset and size there. The range has
 /// this one owner from its allocation on, the texture's image once it is made. The last texture
 /// object over the image gives an automatic heap's range back (`give_back`), as Metal's texture
-/// does at its release (EV XRB-hep1-m4), unless `makeAliasable` gave it back already; the place's
+/// does at its release, unless `makeAliasable` gave it back already; the place's
 /// drop gives it back where no texture object was made over it.
 pub(crate) struct HeapPlace {
     /// Its heap, held weakly: the texture objects hold it (`TextureShared::heap`), as Metal's
@@ -650,7 +650,7 @@ impl HeapPlane {
 /// blocks tightly packed, each plane at a multiple of 4 bytes and of its block's bytes, the buffer
 /// offsets Vulkan copies the aspect at. A texture made in `X32_Stencil8` has its stencil's planes
 /// alone: its image's depth holds no texel of it; a 4:2:2 texture's rows lie at a multiple of 16
-/// bytes, the last unpadded, as Metal lays out a heap's (an M4, EV `APX-fmt1-m4`: a buffer over one
+/// bytes, the last unpadded, as Metal lays out a heap's (an M4: a buffer over one
 /// read each row there, the bytes between untouched). The planes, and the bytes they span.
 pub(crate) fn heap_plane_layout(
     format: Format,
@@ -812,7 +812,7 @@ const FOUR_TWO_TWO_ALIGNMENT: u64 = 16;
 
 /// Metal's answer for a heap's 4:2:2 texture of `layout` (2D, one level): its rows of 2-byte
 /// texels at a multiple of 16 bytes, the last unpadded, at an alignment of 16 (an M4 under macOS
-/// 27.0.1, EV `APX-fmt1-m4`: 44 bytes for 6 x 3, 148 for 10 x 5, 6000 for 1000 x 3, in every
+/// 27.0.1: 44 bytes for 6 x 3, 148 for 10 x 5, 6000 for 1000 x 3, in every
 /// storage mode and usage; the M3 Max's alike where the consumer measured). It is the span of
 /// the texture's planes as the runtime lays them out in the heap (`heap_plane_layout`).
 fn four_two_two_heap_answer(layout: &TextureLayout) -> SizeAndAlign {
@@ -833,18 +833,15 @@ fn four_two_two_heap_answer(layout: &TextureLayout) -> SizeAndAlign {
 /// `pf` and type `ty` of which plain Metal makes none (a descriptor's [`Error::Nil`]):
 ///
 /// - a two-plane YCbCr format's ([`TextureProblem::NoTextureOfFormat`]): 16, and 128 for a 2D
-///   array, for every type it takes (an Apple M4 under macOS 27.0.1, EV XRR2-ycf3p1b-m4, each of
-///   the 69 formats; with the 1D array, cube array and texture buffer, EVs TTG-nil1-m4 and an M3
-///   Max under 26.7 alike, TTG-nil2-m3);
+///   array, for every type it takes (an Apple M4 under macOS 27.0.1, each of the 69 formats; with
+///   the 1D array, cube array and texture buffer, our probe and an M3 Max under 26.7 alike);
 /// - a two-plane extended-range cube or cube array's ([`TextureProblem::TypeForFormat`]): 16
-///   (an M4, EV `APX2-xr1-m4`, plain and validated);
+///   (an M4, plain and validated);
 /// - `Unspecialized`'s, `RGBA16Float_XR`'s, `AnyDepth`'s and `AnyStencil`'s: 128 for a 1D, 2D
 ///   and 2D multisample texture, 16 for a texture buffer, and for the arrays, cubes and 3D
 ///   textures the level's answer (`MetalLevel::no_texture_stack_alignment`): 16 KiB, as for a
-///   texture of a format, on an M3 Max under macOS 26.7 (EVs `APX2-un2-m3` and TTG-nil2-m3, the
-///   consumer's report alike; plain and validated, every usage and storage mode), and 128 under
-///   macOS 27.0.1 (EV M27-heap1-m3, and an M4 alike, EVs `APX2-un1-m4`, TTG-nil1-m4,
-///   TTG-nil4-m4).
+///   texture of a format, on an M3 Max under macOS 26.7 (the consumer's report alike; plain and
+///   validated, every usage and storage mode), and 128 under macOS 27.0.1 (and an M4 alike).
 pub(crate) fn no_texture_alignment(pf: PixelFormat, ty: TextureType, level: MetalLevel) -> u64 {
     use TextureType as T;
     if ycbcr_format(pf).is_some() {
@@ -878,15 +875,14 @@ const TWO_PLANE_ALIGNMENT: u64 = 16;
 const TWO_PLANE_SLICE_ALIGNMENT: u64 = 128;
 
 /// Metal's answer for a heap's two-plane extended-range texture of `layout` (an M4 under macOS
-/// 27.0.1, EVs `APX2-xr1-m4`, `APX2-xr2-m4`, and the M3 Max under 26.7 alike, EVs TXN-xrheap-m3
-/// and `APX2-xr3-m3`, plain and validated; every usage and storage mode): plane 0's slice is its
-/// rows of 4-byte words at a multiple of 16 bytes, plane 1's its rows of alpha bytes at a multiple
-/// of 16, the last unpadded. Plane 0's slices, rounded up to [`TWO_PLANE_PAGE`], then plane 1's. A
-/// 2D or 1D array's slices each lie at a multiple of 128 in each plane, the last one's padded;
-/// a mipmapped texture answers its first level alone and a 3D one its first slice (Metal lays
-/// the rest out past the answer). The alignment is 16, 128 for a 2D array. 64 x 64 answers
-/// 20480 at 16; 1 x 1 16385; 1920 x 1080 10380288; a 2D array of three 64 x 64 slices 61440 at
-/// 128.
+/// 27.0.1, and the M3 Max under 26.7 alike, plain and validated; every usage and storage mode):
+/// plane 0's slice is its rows of 4-byte words at a multiple of 16 bytes, plane 1's its rows of
+/// alpha bytes at a multiple of 16, the last unpadded. Plane 0's slices, rounded up to
+/// [`TWO_PLANE_PAGE`], then plane 1's. A 2D or 1D array's slices each lie at a multiple of 128 in
+/// each plane, the last one's padded; a mipmapped texture answers its first level alone and a 3D
+/// one its first slice (Metal lays the rest out past the answer). The alignment is 16, 128 for a 2D
+/// array. 64 x 64 answers 20480 at 16; 1 x 1 16385; 1920 x 1080 10380288; a 2D array of three 64 x
+/// 64 slices 61440 at 128.
 fn two_plane_heap_answer(layout: &TextureLayout) -> SizeAndAlign {
     let [width, height, _] = layout.extent.map(u64::from);
     let words = height * (4 * width).next_multiple_of(TWO_PLANE_ALIGNMENT);
@@ -926,9 +922,9 @@ fn planes_answer(layout: &TextureLayout) -> Option<SizeAndAlign> {
 
 /// The descriptor Metal sizes a heap texture of `descriptor` as, where that is another's
 /// (`Device::metal_heap_answer`): an `X32_Stencil8` texture as a `Stencil8` one, a stencil
-/// texture (an M4, EV `APX-fmt1-m4`); one of Apple's private `BlockWritesOnly` usage as one
-/// without it (the consumer's report at 4ce09ab30), of `ShaderRead` usage where it has no other,
-/// which Metal compresses alike (EV API-hsa1-m4: equal answers at every shape), not as `Unknown`.
+/// texture (an M4); one of Apple's private `BlockWritesOnly` usage as one without it (the
+/// consumer's report at 4ce09ab30), of `ShaderRead` usage where it has no other, which Metal
+/// compresses alike (equal answers at every shape), not as `Unknown`.
 /// `None` for any other.
 fn sized_as(descriptor: &TextureDescriptor) -> Option<TextureDescriptor> {
     if descriptor.pixel_format == PixelFormat::X32Stencil8 {
@@ -1031,7 +1027,7 @@ impl Device {
     /// `Unsupported` for a format, size or sample count the device lacks, and `NotImplemented` for
     /// an alignment past the heap's base (`HeapTextureAlignment`).
     ///
-    /// Metal's answer by usage (EV API-hsa1-m4, an Apple M4 under macOS 27.0.1, 63210 answers, the
+    /// Metal's answer by usage (an Apple M4 under macOS 27.0.1, 63210 answers, the
     /// consumer's M3 Max rows under 26.7 alike): each shape has two answers, its compressed and its
     /// plain size, and the usage picks one as `heap_tiled::metal_keeps_uncompressed` says; the
     /// storage mode never changes it. The private usages `NoConcurrentAccess` (0x4000), `Video`
@@ -1391,7 +1387,7 @@ impl Device {
     /// Metal's answer to `heapTextureSizeAndAlignWithDescriptor:` for `descriptor` (checked as
     /// `layout`) where it is not the size of its own GPU's image of the texture, which the runtime answers
     /// for every other descriptor (the module docs); `None` for those. Measured on an M3 Max
-    /// under macOS 26.7 (the consumer's report) and an M4 under 27.0.1 (EV `APX-fmt1-m4`):
+    /// under macOS 26.7 (the consumer's report) and an M4 under 27.0.1:
     ///
     /// - A 4:2:2 texture (`GBGR422`, `BGRG422`) takes its rows of 2-byte texels at a multiple
     ///   of 16 bytes, the last unpadded, at an alignment of 16 (`four_two_two_heap_answer`).
@@ -1667,11 +1663,10 @@ impl Device {
         let _making = bytes.making_texture();
         // The descriptor first: what plain Metal answers nil for (a format of which it makes no
         // texture alone, `Unspecialized`) comes before the heap's storage mode and
-        // `framebufferOnly`, which Metal stops for another format (EVs TTG-nil1-m4, TTG-nil2-m3,
-        // TTG-nil4-m4).
+        // `framebufferOnly`, which Metal stops for another format.
         let layout = match self.heap_layout(call, descriptor, Creator::Device) {
             // A placement heap makes a two-plane extended-range cube or cube array, which the
-            // device and an automatic heap answer nil for (EV TTG-nil4-m4): the runtime's gap.
+            // device and an automatic heap answer nil for: the runtime's gap.
             Err(Error::Nil(Nil {
                 problem: Problem::Texture(TextureProblem::TypeForFormat),
                 ..
@@ -1685,7 +1680,7 @@ impl Device {
         };
         let options = heap.placed_options(call, descriptor.resource_options)?;
         // A heap makes no framebuffer-only texture (plain Metal asserts on the rotation, the
-        // consumer's report and EV ZCI2-rotprobe3-m4's `heap`).
+        // consumer's report and our probe).
         if descriptor.framebuffer_only {
             return Err(invalid(
                 call,
@@ -1738,8 +1733,7 @@ impl Device {
             }
         }
         let offset = heap_offset(heap, call, p.size_and_align, offset)?;
-        // A placement heap's texture answers aliasable from the start, as Metal's does (EVs
-        // SPH-alias1-m3, -m4).
+        // A placement heap's texture answers aliasable from the start, as Metal's does.
         let aliasable = heap.heap_type() == HeapType::Placement;
         let place = HeapPlace::new(heap, offset, p.size_and_align.size, aliasable);
         self.heap_texture_at(heap, &bytes, p, place, options, descriptor)

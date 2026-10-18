@@ -1,7 +1,7 @@
 //! Varyings a vertex function writes the same at every vertex of a primitive, read flat with
 //! Metal's words (`uniform_varyings`), on the device the cfg selects, under the validation layer.
 //!
-//! The geometry, constants and fragment functions are the Metal probe's of EV FLT-m3b (the M3
+//! The geometry, constants and fragment functions are our Metal probe's (the M3
 //! Max, macOS 26): 16 instances, each a 64 x 64 tile of six overlapping triangles whose w varies
 //! (but for the first), drawn into a 256 x 256 target; each instance's `float4` and `half4`
 //! constants read by `vs` from `constant` buffers at `[[instance_id]]` and written to the
@@ -401,7 +401,7 @@ fn constants() -> (Vec<u32>, Vec<u16>) {
     (f, h)
 }
 
-/// Metal's word for a `float` constant `v` read through an interpolation (EV FLT-m3b): every
+/// Metal's word for a `float` constant `v` read through an interpolation: every
 /// finite normal value itself; a zero or subnormal `+0`; an infinity the largest finite value of
 /// its sign; a NaN `+FLT_MAX` without perspective, and with perspective a word that depends on
 /// the pixel (`None`: a recorded residue, not compared).
@@ -420,7 +420,7 @@ fn metal_float(v: u32, perspective: bool) -> Option<u32> {
     }
 }
 
-/// Metal's word for a `half` constant `v` read through an interpolation (EV FLT-m3b): `-0`
+/// Metal's word for a `half` constant `v` read through an interpolation: `-0`
 /// `+0`, a NaN `+inf`, every other half (subnormals and infinities too) itself.
 fn metal_half(v: u16) -> u16 {
     if v == 0x8000 {

@@ -1771,7 +1771,7 @@ fn a_narrow_mask_after_a_signed_clamp_is_an_extract_under_the_workaround() {
 }
 
 /// Metal's `round`: halves away from zero, and on `float` and `half` (`positive_zero`) a zero
-/// result is `+0` (`round(-0.3)` and `round(-0)` are `+0`, EV HRD-nan-edge-metal).
+/// result is `+0` (`round(-0.3)` and `round(-0)` are `+0`).
 fn metal_round(positive_zero: bool, x: f64) -> f64 {
     let r = x.round();
     if positive_zero && r == 0.0 {
@@ -2695,7 +2695,7 @@ fn nan_answers_follow_the_measured_flag_states() {
 }
 
 /// `powr(x, y)` is Metal's canonical NaN where Metal's `exp2(y * log2(x))` is a NaN for operands
-/// that are not (EV HRD-nan-edge-metal): `x < 0` (`-0` is not), `y = ±0` with `x = ±0` or `+inf`,
+/// that are not: `x < 0` (`-0` is not), `y = ±0` with `x = ±0` or `+inf`,
 /// and `y = ±inf` with `x = 1`, an `f32` denormal read as a zero by the zero tests and, in
 /// `fast::powr` only, by the sign test; every other lane keeps the device's result, which the
 /// kernel's third input stands for, except that `fast::powr` answers IEEE's value where `y ·

@@ -2,16 +2,16 @@
 //! selects, under the validation layer, with the functions of a Metal probe on an M4
 //! (`render_state.rs`) in its 4x4 pass of a `Depth32Float` attachment cleared to 1.0.
 //!
-//! Every answer is plain Metal's on an M4 with macOS 27.0.1 (EVs IRX-inh1-m4 and IRX-inh2-m4, each
-//! case plain and under Metal's validation):
+//! Every answer is plain Metal's on an M4 with macOS 27.0.1 (each case plain and under Metal's
+//! validation):
 //!
 //! - A buffer whose descriptor leaves the depth/stencil state, the depth bias, the depth clip
 //!   mode, the cull mode, the front-facing winding and the triangle fill mode to its commands
 //!   (each `inherit_*` false) draws each command with the encoder's states at the call, as an
 //!   inheriting buffer's commands and the encoder's own draw do: Metal's validation stops the
 //!   buffer's creation, and plain Metal draws so. A buffer that supports color attachment mapping
-//!   executes in an encoder that maps none as any other. So do Apple's private properties (EV
-//!   APX2-spi1-m4, the same M4): stencil reference values, depth test bounds, scissor rectangles,
+//!   executes in an encoder that maps none as any other. So do Apple's private properties (the same
+//!   M4): stencil reference values, depth test bounds, scissor rectangles,
 //!   viewports and the blend color left to the commands, four scissor rectangles and viewports, and
 //!   render state overrides allowed: the commands draw with the encoder's viewport and scissor
 //!   rectangle too.
@@ -24,9 +24,9 @@
 //!   on a buffer of no mesh draw it ends Metal's process and is refused `Invalid`
 //!   (`ObjectThreadgroupMemory`).
 //! - A kernel that sets a render state on a render command (`render_command::set_cull_mode` and
-//!   the rest, `set_depth_stencil_state` among them) fails its compute pipeline state's creation
-//!   (EV RFL-ksetters-m4), and the runtime refuses the creation `Unsupported`
-//!   (`IndirectRenderState`, `Needs::MetalGpuFamily` of Apple10) on a device that does not claim
+//!   the rest, `set_depth_stencil_state` among them) fails its compute pipeline state's creation,
+//!   and the runtime refuses the creation `Unsupported` (`IndirectRenderState`,
+//!   `Needs::MetalGpuFamily` of Apple10) on a device that does not claim
 //!   Apple10, `NotImplemented` on one that does. A kernel whose argument buffer holds a
 //!   `depth_stencil_state` it does not read is made.
 
@@ -114,7 +114,7 @@ fn half_first(probe: &Probe, e: &mut RenderCommandEncoder, held: &mut Vec<Buffer
 }
 
 /// Commands of a buffer that does not inherit its render states draw with the encoder's at the
-/// call, as an inheriting buffer's commands and the encoder's own draw do (EV IRX-inh1-m4, the
+/// call, as an inheriting buffer's commands and the encoder's own draw do (the
 /// M4's plain answer; the module docs): under `Never` nothing; under `Less` behind an earlier
 /// draw at the same depth nothing, and through a bias of -1000 everything; culled, wound and
 /// filled as the encoder's draw; at depth 1.5 in clamp mode everything; and through the encoder's
@@ -263,10 +263,10 @@ fn commands_that_do_not_inherit_render_states_draw_with_the_encoder_s() {
 }
 
 /// Each render state setter of a command is refused, on a buffer that inherits the states and
-/// on one that does not, where Metal's process ends (EVs IRX-inh1-m4 and IRX-inh2-m4): `Invalid`
-/// (`RenderState`) off Apple10, `NotImplemented` on it. An object threadgroup length is taken at
-/// any index of a buffer of mesh draws, its command drawing as before, and refused `Invalid`
-/// (`ObjectThreadgroupMemory`) on a buffer of no mesh draw (EV IRX-inh2-m4).
+/// on one that does not, where Metal's process ends: `Invalid` (`RenderState`) off Apple10,
+/// `NotImplemented` on it. An object threadgroup length is taken at any index of a buffer of mesh
+/// draws, its command drawing as before, and refused `Invalid` (`ObjectThreadgroupMemory`) on a
+/// buffer of no mesh draw.
 #[test]
 fn a_command_s_render_states_are_refused_and_object_lengths_taken() {
     let (messages, _cache, probe) = validated();
@@ -353,7 +353,7 @@ fn a_command_s_render_states_are_refused_and_object_lengths_taken() {
 }
 
 /// Each kernel of [`setter_kernels`]: its name, and the setter it calls with its values (`None`
-/// for the control), as EV RFL-ksetters-m4's kernels set them.
+/// for the control), as our probe's kernels set them.
 const SETTER_KERNELS: [(&str, Option<(&str, &str)>); 7] = [
     ("k_ctl", None),
     ("k_cull", Some(("set_cull_mode", "i32 2"))),
@@ -375,8 +375,7 @@ const SETTER_KERNELS: [(&str, Option<(&str, &str)>); 7] = [
 
 /// One module of [`SETTER_KERNELS`], each `kernel void k(device const Enc &e [[buffer(0)]])` of
 /// `struct Enc { command_buffer cmds; depth_stencil_state ds; }` writing render command 0: its
-/// setter, then a draw of 6 vertices of triangles, as Metal's compiler declares them (EV
-/// RFL-ksetters-m4).
+/// setter, then a draw of 6 vertices of triangles, as Metal's compiler declares them.
 fn setter_kernels() -> String {
     let mut text = String::from("%enc = type { ptr addrspace(1), ptr addrspace(1) }\n\n");
     let mut declared = Vec::new();
@@ -437,12 +436,11 @@ fn setter_kernels() -> String {
 /// A kernel that sets a render state on a render command fails its compute pipeline state's
 /// creation, as on an M4 with macOS 27.0.1, plain and under Metal's validation, for each of the
 /// six setters ("Encountered unlowered function call to air.set_<state>_render_command. Verify
-/// device or GPU architecture supports this feature"; EV RFL-ksetters-m4), and on an M3 Max with
-/// macOS 26.7 (EV RFL-kcreate-m3): refused `Unsupported`
-/// (`IndirectRenderState`, `Needs::MetalGpuFamily` of Apple10) on a device that does not claim
-/// Apple10, `NotImplemented(IndirectRenderCommands)` on one that does, whose kernel would set
-/// it. The control, whose kernel draws beside a `depth_stencil_state` it does not read, is made,
-/// as Metal makes it.
+/// device or GPU architecture supports this feature"), and on an M3 Max with macOS 26.7: refused
+/// `Unsupported` (`IndirectRenderState`, `Needs::MetalGpuFamily` of Apple10) on a device that does
+/// not claim Apple10, `NotImplemented(IndirectRenderCommands)` on one that does, whose kernel would
+/// set it. The control, whose kernel draws beside a `depth_stencil_state` it does not read, is
+/// made, as Metal makes it.
 #[test]
 fn a_kernel_s_render_state_setters_fail_its_pipeline_s_creation() {
     let (messages, _cache, probe) = validated();

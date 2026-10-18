@@ -2268,8 +2268,8 @@ fn handles_are_typed_seeds() {
         );
     }
     // An indexed patch draw's overload names its patch index buffer's space, its control-point
-    // index buffer's and its factor buffer's (probe `RT7-air-icbdraws3-m4`); its operands are a
-    // patch draw's with the control-point index buffer after the patch indices.
+    // index buffer's and its factor buffer's; its operands are a patch draw's with the
+    // control-point index buffer after the patch indices.
     for (name, patch_indices, control_point_indices, factors) in [
         (
             "p1i32.p1i8.p1i8",
@@ -2324,8 +2324,8 @@ fn handles_are_typed_seeds() {
             "{name}"
         );
     }
-    // A render command's state setters, as Metal's compiler declares them (probe
-    // `ICBV-air-rstate-m4`): the command, its index, then the state's values.
+    // A render command's state setters, as Metal's compiler declares them: the command, its index,
+    // then the state's values.
     let i32s = Operand::Num(NumTy::scalar(Elem::I32));
     let f32s = Operand::Num(NumTy::scalar(Elem::F32));
     let cmd = Operand::Handle(HandleKind::Command);

@@ -1,9 +1,8 @@
 //! A render pass over a rasterization-rate map (`MTLRenderPassDescriptor.rasterizationRateMap`):
 //! what Metal takes, and each draw drawn region by region.
 //!
-//! - **What Metal's API validation stops**, measured by probes RT11-metal-probe-16, -16b and -16c
-//!   on an M3 Max (macOS 26.7) and an M4 (macOS 27.0.1), identically, is refused as the encoder
-//!   is made, `Invalid` with a
+//! - **What Metal's API validation stops**, measured by our probes on an M3 Max (macOS 26.7) and an
+//!   M4 (macOS 27.0.1), identically, is refused as the encoder is made, `Invalid` with a
 //!   [`RenderPassProblem`]: a map of another device; a `renderTargetArrayLength` past the
 //!   layer count of a map whose layers differ ("renderTargetArrayLength (2) must be <=
 //!   rasterizationRateMap.layerCount (1)"); and, without attachments, a render target width or
@@ -55,16 +54,15 @@
 //!   refused, as the compile layer refuses it ([`RegionRefusal::Scissor`]).
 //! - **A map of no layers**. Metal makes one where its API validation is off, and a pass over one
 //!   made while no map of layers has been released runs its load, clear, and store actions and its
-//!   draws write nothing (EV RRS3-rm0draw1, an M4, each in its own process three times: a
-//!   full-screen triangle over a cleared target of 8 and of 64 pixels, with and without a scissor,
-//!   a map of 256 pixels over a target of 8, beside a live map of one layer, and in a sequence of
-//!   passes); the runtime records none of its draws. Whether Metal runs such a draw's vertex
-//!   function is not measured. A map of no layers made after a map of layers was released draws on
-//!   Metal, an M4 and an M3 Max alike: a 64-pixel one over a 64-pixel target its physical rows 0 to
-//!   15 at full width, at the positions of a pass with no map, whatever map was released (EV
-//!   RRS3-rm0m3-m4). The runtime draws nothing there and announces it: a draw over a map of no
-//!   layers made after the device released a map of layers announces
-//!   `zero-layer-map-after-release`.
+//!   draws write nothing (an M4, each in its own process three times: a full-screen triangle over a
+//!   cleared target of 8 and of 64 pixels, with and without a scissor, a map of 256 pixels over a
+//!   target of 8, beside a live map of one layer, and in a sequence of passes); the runtime records
+//!   none of its draws. Whether Metal runs such a draw's vertex function is not measured. A map of
+//!   no layers made after a map of layers was released draws on Metal, an M4 and an M3 Max alike: a
+//!   64-pixel one over a 64-pixel target its physical rows 0 to 15 at full width, at the positions
+//!   of a pass with no map, whatever map was released. The runtime draws nothing there and
+//!   announces it: a draw over a map of no layers made after the device released a map of layers
+//!   announces `zero-layer-map-after-release`.
 //! - **What the plan refuses** is `NotImplemented(RuntimeGap::RateMapRegions)`, naming the
 //!   compile layer's reason ([`RegionRefusal`]): a viewport of no extent or a flipped one, a
 //!   scissor as above, a plan past its bound or past the device's viewport limits, a pipeline whose

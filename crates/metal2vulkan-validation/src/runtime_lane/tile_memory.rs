@@ -6,7 +6,7 @@
 //! `t` of its argument 0 to `out[tile * 16 + t]`, and `shift` writes word `t` of its argument 0
 //! plus `0x10000` to word `t` of its argument 1.
 //!
-//! As Metal does on an M4 and an M3 Max (EV `REF-tg-probe`, identical answers):
+//! As Metal does on an M4 and an M3 Max (identical answers):
 //!
 //! - A tile's memory persists across the pass's tile dispatches: two `add`s leave twice their
 //!   words in each tile's own memory.

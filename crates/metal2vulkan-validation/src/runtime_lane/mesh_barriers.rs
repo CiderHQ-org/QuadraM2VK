@@ -10,7 +10,7 @@
 //! threadgroup covers the pixel of its position with `(x, y, ctl.z, ctl.w)`.
 //!
 //! [`ANSWERS`] holds the probe's lines, as an M4 (macOS 27.0.1) printed them without API
-//! validation (EV `MESH-mp5`; EV `MESH-mp5-m3` runs them on the M3 Max), which the drawn pixels
+//! validation (our probe runs them on the M3 Max), which the drawn pixels
 //! and the control words are printed as and compared with. Behind a barrier after the mesh stage
 //! the reader reads the writer's words, with and without validation. A barrier after the
 //! fragment stage is one Metal's validation stops on an Apple GPU ("afterStages (0x2) can not

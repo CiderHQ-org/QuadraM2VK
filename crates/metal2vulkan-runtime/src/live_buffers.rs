@@ -1,15 +1,14 @@
 //! The program's live buffers that a command reaches without naming them on a device, and the
 //! resident set of them that every command buffer's root tables search.
 //!
-//! - **What Metal reaches** (EVs RFL-reach-m3 and RFL-warm-m3, the M3 Max under macOS 26.7, and
-//!   RFL-reach2-m4 and RFL-warm-m4, an M4 under 27.0.1; every run alike, plain and with
-//!   `MTL_DEBUG_LAYER`, the chips alike). A pointer loaded from memory, an argument buffer's
-//!   pointer, and an indirect command's buffer address, read or written, reach a buffer of its own
-//!   that no encoder of the command buffer named, from its making on. A no-copy buffer and a heap's
-//!   buffer are reached so only once a command buffer's commands used it (a binding, a blit's
-//!   operand, `useResource:`; for a heap's, any resource of the heap, or `useHeap:`): from that
-//!   command buffer on, its own commands included, before that use or after it, and whether or not
-//!   it completed. Before, the access is dropped: a read is 0, a write lands nowhere, and the
+//! - **What Metal reaches** (the M3 Max under macOS 26.7, and an M4 under 27.0.1; every run alike,
+//!   plain and with `MTL_DEBUG_LAYER`, the chips alike). A pointer loaded from memory, an argument
+//!   buffer's pointer, and an indirect command's buffer address, read or written, reach a buffer of
+//!   its own that no encoder of the command buffer named, from its making on. A no-copy buffer and
+//!   a heap's buffer are reached so only once a command buffer's commands used it (a binding, a
+//!   blit's operand, `useResource:`; for a heap's, any resource of the heap, or `useHeap:`): from
+//!   that command buffer on, its own commands included, before that use or after it, and whether or
+//!   not it completed. Before, the access is dropped: a read is 0, a write lands nowhere, and the
 //!   command buffer completes with no error.
 //! - **What is listed.** So every buffer the program made of its own
 //!   ([`Device::new_buffer`], `new_buffer_with_bytes`, `new_buffer_with_descriptor`,

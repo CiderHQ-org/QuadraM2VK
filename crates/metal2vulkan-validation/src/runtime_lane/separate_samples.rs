@@ -39,7 +39,7 @@ const EXTENT: [u32; 2] = [2, 2];
 const SAMPLES: u32 = 4;
 
 /// The extents the separate textures' passes run at: 2x2, and the shapes whose colour copies lost
-/// the RTX 3090 (4x1, 4x2, 1x4; EV `RT6-x13-matrix-3090`), which the draws now take there.
+/// the RTX 3090 (4x1, 4x2, 1x4), which the draws now take there.
 const EXTENTS: [[u32; 2]; 4] = [[2, 2], [4, 1], [4, 2], [1, 4]];
 
 /// Each pixel's samples' depths as the fill writes them.
@@ -945,7 +945,7 @@ fn probe_16_bit_codes(device: &Device) {
 /// depth's codes (`DriverFact::FragmentDepthKeepsDepth16Codes`), and is refused typed
 /// (`SeparateMultisampledDepthStencil`) elsewhere. A device that refuses the textures, or the
 /// pass for a format it lacks (`Feature::Format`: lavapipe and ANV make no `D16_UNORM_S8_UINT`
-/// attachment for the scratch image, EVs `RRX-d16-*`), is printed.
+/// attachment for the scratch image), is printed.
 #[test]
 fn a_separate_multisampled_16_bit_depth_keeps_every_code() {
     let cache = ScratchCache::new().unwrap();

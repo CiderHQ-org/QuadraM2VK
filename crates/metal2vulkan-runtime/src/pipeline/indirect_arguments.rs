@@ -1,8 +1,8 @@
 //! Metal's refusal of a pipeline state that supports indirect command buffers whose functions use
 //! a direct texture or sampler argument.
 //!
-//! - **What Metal refuses** (EVs RRS3-icbtex3/4/5/6 on an M3 Max under macOS 26.7 and an M4
-//!   under 27.0.1, alike but for the error's domain). `newRenderPipelineStateWithDescriptor:`,
+//! - **What Metal refuses** (on an M3 Max under macOS 26.7 and an M4 under 27.0.1, alike but for
+//!   the error's domain). `newRenderPipelineStateWithDescriptor:`,
 //!   `newRenderPipelineStateWithMeshDescriptor:` and `newComputePipelineStateWithDescriptor:`
 //!   with `supportIndirectCommandBuffers` answer nil with an `NSError` where a function uses a
 //!   `[[texture(n)]]` or `[[sampler(n)]]` argument: a read, a sample, a write, a texture array
@@ -21,9 +21,8 @@
 //!   where its reflection lists a used texture or sampler; a vertex, mesh or fragment function
 //!   where an instruction Metal's linking keeps reads it, so a texel that reaches only a varying no
 //!   fragment input reads, or a fragment function's color the pipeline has no attachment for or
-//!   writes no channel of (EVs RRS3-icbtex11 and -icbtex12), is dropped, as Metal drops it (EVs
-//!   RRS3-icbtex7, -icbtex9 and -icbtex10 on an M4 under macOS 27.0.1), though Metal's reflection
-//!   still lists the texture as used.
+//!   writes no channel of, is dropped, as Metal drops it (on an M4 under macOS 27.0.1), though
+//!   Metal's reflection still lists the texture as used.
 //! - **Decided from roles** (From the whole reflection, so an argument whose reflection Metal's
 //!   answer has not been measured for, such as a threadgroup `uint`, refused an ordinary state).
 //!   Whether a function uses a direct texture or sampler is decided from its arguments' roles
@@ -46,7 +45,7 @@
 //!   ([`DOMAIN`]), the closest measured to the consumer's guest (macOS 26.6.2); a consumer may
 //!   substitute its own device's.
 //! - **Tile states never support indirect command buffers**: Metal's tile descriptor has no
-//!   `supportIndirectCommandBuffers` (EV RRS3-icbtex5, both devices).
+//!   `supportIndirectCommandBuffers` (both devices).
 
 use crate::error::{Error, MetalError, Problem, Unproven};
 use metal2vulkan::error::Error as CompileError;
@@ -61,9 +60,8 @@ pub(super) const DOMAIN: &str = "AGXMetalG15X_M1";
 pub(super) const CODE: i64 = 3;
 
 /// A render or mesh state's stages in the order Metal names them, the first that uses a direct
-/// argument named (the fragment function before the vertex function, EV RRS3-icbtex3; before the
-/// mesh function, which goes before the object function, EV RRS3-icbtex6), each with Metal's
-/// `localizedDescription` for it.
+/// argument named (the fragment function before the vertex function; before the mesh function,
+/// which goes before the object function), each with Metal's `localizedDescription` for it.
 const RENDER: [(Stage, &str); 4] = [
     (
         Stage::Fragment,

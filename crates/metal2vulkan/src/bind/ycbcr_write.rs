@@ -1,11 +1,10 @@
 //! A function's writes to a 4:4:4 two-plane YCbCr texture, stored into its IOSurface's two planes
 //! as Metal stores them.
 //!
-//! **Metal's answers** (EVs XRR2-ycw1-m4, XRR2-ycw2-m4, XRR2-ycw3-m4 and XRR2-ycw4-m4, an Apple
-//! M4 under macOS 27.0.1, and XRR2-ycw2-m3, an Apple M3 Max under macOS 26.7, byte for byte the
-//! same; our own probes over CoreVideo `444v`, `444f`, `x444` and `xf44` surfaces, every texel
-//! written with fresh values: on the grid of `1 / 2048`, finer, ties of the grid and an ulp
-//! either side, any `float` in `[0, 1]`, out of range, NaNs, infinities, `-0` and subnormals;
+//! **Metal's answers** (an Apple M4 under macOS 27.0.1, and an Apple M3 Max under macOS 26.7, byte
+//! for byte the same; our own probes over CoreVideo `444v`, `444f`, `x444` and `xf44` surfaces,
+//! every texel written with fresh values: on the grid of `1 / 2048`, finer, ties of the grid and an
+//! ulp either side, any `float` in `[0, 1]`, out of range, NaNs, infinities, `-0` and subnormals;
 //! `float` and `half` writes; no matrix, BT.601, BT.709 and BT.2020; 2.4 million texels in all).
 //! A texture of `YCBCR8_444_2P`, `YCBCR10_444_2P`, `RGB8_444_2P` or `RGB10_444_2P` made over an
 //! IOSurface's plane 0 stores a written texel's luma code into the luma plane at its place and
@@ -25,31 +24,29 @@
 //!   chroma.
 //! - **Codes** ([`YCbCrOutput::Codes`], `RGB*_444_2P`): Y the green channel, Cb the blue, Cr the
 //!   red, each `round(clamp(v, 0, 1) · (2^b - 1))` of the exact product, to nearest (a NaN 0).
-//!   The `float` product rounded instead misses about 1 in 14 values within 3 ulps of a tie
-//!   (EV XRR2-ycw4-m4).
+//!   The `float` product rounded instead misses about 1 in 14 values within 3 ulps of a tie.
 //!
 //! The `_sRGB` twins' writes follow none of these (their linear value steps by `1 / 8192`, then a
 //! curve that is not the reads' inverse), and the packed formats' writes are stored by the M4 and
 //! dropped by the M3: neither is encoded here ([`ycbcr_write`] answers `None`).
 //!
 //! **A render pass's store** (our own probes over CoreVideo `420v`, `420f`, `422v`, `444v` and
-//! `444f` surfaces on an Apple M4 under macOS 27.0.1: EV XRR2-ycr1-m4, every byte of the converted
-//! 8-bit formats' clears and full-screen draws, 16 x 8, no matrix and BT.709, the consumer's Apple
-//! M3 Max under macOS 26.7 storing the same bytes; and EVs GSM2-yt1-m4 and GSM2-yt2-m4, every byte
-//! of full-screen draws, 64 x 32, of floats beside the ties of the 1/2048 grid and uniform ones,
-//! and of clears to colors beside them, the M3 Max's bytes the same; for the 10-bit formats, EV
-//! GSM2-ten2-m4, every byte of 128 x 128 draws over `x420`, `xf20`, `x422`, `xf22`, `x444` and
-//! `xf44` of every `half` in `[0, 1]`, a 1/16384 grid and values beside the ties of four grids,
-//! `float` and `half` fragments, and of 64 clears a surface). A pass whose color attachment is such
-//! a texture stores every texel of it, drawn or not, into both planes. Each texel's value is held
-//! as a `half`, and its `x` is the grid step of that: a drawn `float` channel rounded to nearest
-//! even at 8 bits, toward zero at 10 bits; a `half` a fragment returns kept; a clear's color
-//! rounded to nearest even at both (the runtime puts a clear into the pass's texels as its `half`s,
-//! which either rounding keeps). Each texel's term of a row is `t = (c · x) >> (20 + b - 8)`, its
-//! row counted at 2^-6 of an 8-bit code (2^-4 of a 10-bit one) and truncated; and a code is
-//! `clamp(o + ((Σ t + 2^(T - 1 + k)) >> (T + k)), 0, 2^b - 1)`, `T` 6 at 8 bits and 4 at 10,
-//! over the block of `2^k` texels the code covers: a texel's own luma, and each chroma pair's
-//! 2 x 2 texels at 4:2:0, 2 x 1 at 4:2:2, its own at 4:4:4 ([`ycbcr_store`]). A code of one
+//! `444f` surfaces on an Apple M4 under macOS 27.0.1: every byte of the converted 8-bit formats'
+//! clears and full-screen draws, 16 x 8, no matrix and BT.709, the consumer's Apple M3 Max under
+//! macOS 26.7 storing the same bytes; and every byte of full-screen draws, 64 x 32, of floats
+//! beside the ties of the 1/2048 grid and uniform ones, and of clears to colors beside them, the M3
+//! Max's bytes the same; for the 10-bit formats, every byte of 128 x 128 draws over `x420`, `xf20`,
+//! `x422`, `xf22`, `x444` and `xf44` of every `half` in `[0, 1]`, a 1/16384 grid and values beside
+//! the ties of four grids, `float` and `half` fragments, and of 64 clears a surface). A pass whose
+//! color attachment is such a texture stores every texel of it, drawn or not, into both planes.
+//! Each texel's value is held as a `half`, and its `x` is the grid step of that: a drawn `float`
+//! channel rounded to nearest even at 8 bits, toward zero at 10 bits; a `half` a fragment returns
+//! kept; a clear's color rounded to nearest even at both (the runtime puts a clear into the pass's
+//! texels as its `half`s, which either rounding keeps). Each texel's term of a row is `t = (c · x)
+//! >> (20 + b - 8)`, its row counted at 2^-6 of an 8-bit code (2^-4 of a 10-bit one) and truncated;
+//! and a code is `clamp(o + ((Σ t + 2^(T - 1 + k)) >> (T + k)), 0, 2^b - 1)`, `T` 6 at 8 bits and 4
+//! at 10, over the block of `2^k` texels the code covers: a texel's own luma, and each chroma
+//! pair's 2 x 2 texels at 4:2:0, 2 x 1 at 4:2:2, its own at 4:4:4 ([`ycbcr_store`]). A code of one
 //! texel is a function's write's code of the `half`.
 //!
 //! **The module** (one per device). One `GLCompute` entry `main` with local size

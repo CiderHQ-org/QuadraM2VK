@@ -39,7 +39,7 @@
 //!   until it completes.
 //! - **Textures of different sizes**, which Metal's validation stops ("When both depth (8 x 8) and
 //!   stencil (4 x 4) are used from separate textures, they must have identical dimensions") and
-//!   plain Metal renders over the smaller (EV RRS-probe-1-m4, an M4 with macOS 27.0.1, one sample,
+//!   plain Metal renders over the smaller (an M4 with macOS 27.0.1, one sample,
 //!   without draws; Metal probe `separate_sizes` on an M4, with one): the scratch image is the
 //!   smaller, the render area at most that, and its copies move the render area. Metal's clear of
 //!   the larger reaches past the render area to the end of its tiles, by 32 pixels a side for

@@ -10,9 +10,9 @@
 //!
 //! Metal's answer: the SHA-256 of each output texture's bytes, for every pairing of the formats,
 //! as an Apple M3 Max (macOS 26.7) and an Apple M4 (macOS 27.0.1) wrote them from the same inputs,
-//! plain and under Metal's validation layer (EVs TXN-xrp-m3 and TXN-xrp-m4, which keep the bytes).
-//! A differing output is printed whole, on one `XR-PLANES-DIFFERS` line, to compare texel by texel
-//! with the bytes the EVs keep.
+//! plain and under Metal's validation layer (which keep the bytes). A differing output is printed
+//! whole, on one `XR-PLANES-DIFFERS` line, to compare texel by texel with the bytes the probes
+//! keep.
 
 use super::degrade_notices::on_device;
 use crate::air_library::AirLibrary;
@@ -39,7 +39,7 @@ const COUNT: usize = (SIDE * SIDE) as usize;
 const ALPHA: PixelFormat = PixelFormat::ARGB8Unorm;
 
 /// The SHA-256 of plane 0's, the alpha view's and the joined texture's input bytes (the
-/// generator below, which the EVs' Metal harness writes in Swift).
+/// generator below, which the probes' Metal harness writes in Swift).
 const INPUT_COLOR: &str = "76bb1c1c9bd72a95199eb8fa090b7efbaf536dc9621b35343e3123356d0dd1c5";
 const INPUT_ALPHA: &str = "0add0982965c72b0d76c77c3d019a78d2e0cfbb61fb8952f9b75d1194d8496dd";
 const INPUT_JOINED: &str = "9e268ae2fa3dfc66242184ae46a352fd93c03f942d83a6022084e74e402b467c";
@@ -274,7 +274,7 @@ fn metal(kernel: &str, color: PixelFormat, joined: PixelFormat, texture: &str) -
         .unwrap_or_else(|| panic!("no Metal digest of {kernel} {color:?} {joined:?} {texture}"))
 }
 
-/// The generator writes the bytes the EVs' Metal harness wrote, by digest.
+/// The generator writes the bytes the probes' Metal harness wrote, by digest.
 #[test]
 fn the_inputs_are_the_harness_s() {
     assert_eq!(digest(&color_bytes()), INPUT_COLOR);

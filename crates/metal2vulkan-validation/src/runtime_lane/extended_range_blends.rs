@@ -14,8 +14,8 @@
 //! any refusal fails.
 //!
 //! Metal's answer: the SHA-256 of the target's bytes after the draw, a two-plane target's plane 0
-//! words and alpha bytes apart ([`METAL`]; EV XRR-rtp1-m4, an Apple M4 under macOS 27.0.1, plain
-//! and under Metal's validation layer alike, byte-identical to the M3 Max's EV XRR-rtp1-m3). A
+//! words and alpha bytes apart ([`METAL`]; an Apple M4 under macOS 27.0.1, plain
+//! and under Metal's validation layer alike, byte-identical to the M3 Max's probe). A
 //! two-plane target's words read back through a blit (Metal's plane 0), its alpha bytes as
 //! `round(255 a)` of the fixture's `float` read. A differing case is printed with its first
 //! differing texels on one `XR-BLENDS-DIFFERS` line.
@@ -451,7 +451,7 @@ fn blends_of_half_outputs_store_metals_extended_range_texels() {
 }
 
 /// The generator gives the probe's targets: the SHA-256 of each format's texels before the draws
-/// (EV XRR-rtp1-m4's files).
+/// (the probe's files).
 #[test]
 fn the_targets_are_the_probes() {
     for (pf, probe) in FORMATS {
@@ -482,8 +482,8 @@ pub(super) const STORED_CODES: [Degradation; 1] = [Degradation::ExtendedRangeBle
 /// which blends onto the `half` the first wrote, as Metal's tile memory holds it. A memory
 /// barrier between the two splits the pass, and the second draw's instance cannot hold the
 /// shadow of what the first instance stored: it blends onto the codes the first stored and
-/// announces `extended-range-blends-stored-codes` once, naming the color (EV XRB-rplxr3-mvk4,
-/// the M3 Max's run of the same probes). A pass of one blended draw, and one of two unblended
+/// announces `extended-range-blends-stored-codes` once, naming the color (the M3 Max's run of the
+/// same probes). A pass of one blended draw, and one of two unblended
 /// draws, announce none. A device with raster-order attachment access (lavapipe), which blends over
 /// the color's input attachment and holds no shadow, announces it at the pass of two draws already,
 /// once for the device.
@@ -557,9 +557,9 @@ fn a_blend_onto_an_earlier_draw_announces_the_stored_codes_only_past_its_shadow(
 
 /// A blended draw onto a two-plane extended-range color its pass clears, where the clear's
 /// alpha, 0.5, lies between two of the alpha plane's codes (Metal's tile memory holds the
-/// clear's half 0.5, the image the byte 128, which reads 128/255: `ExtendedRange::clear_read_back`,
-/// EV XRB-pxr3-m4), announces nothing: the device that blends it (in the pixel interlock) holds
-/// the color's `half` shadow from that draw, set to the clear's halves
+/// clear's half 0.5, the image the byte 128, which reads 128/255:
+/// `ExtendedRange::clear_read_back`), announces nothing: the device that blends it (in the pixel
+/// interlock) holds the color's `half` shadow from that draw, set to the clear's halves
 /// (`render/extended_shadow.rs`). A second draw a memory barrier later, in an instance of its
 /// own, still holds it: the shadow, once started, lasts through the pass's splits. A pass that
 /// clears to zero, every channel a code's value, announces none. A device with raster-order
@@ -699,7 +699,7 @@ pub(super) const UNREACHED_TILES: [Degradation; 1] = [Degradation::UnreachedTile
 
 /// A draw into `BGR10_XR` holding the probe's random texels under a write mask of none of its
 /// channels: every texel ends with its codes and its bits 30 and 31 ones, as Metal's pass leaves
-/// each tile a draw reaches (EV XRR2-xrb2 on an Apple M4 and an Apple M3 Max; the full-screen
+/// each tile a draw reaches (on an Apple M4 and an Apple M3 Max; the full-screen
 /// triangle reaches every tile), through the load pass (`render/unused_bits_load.rs`).
 /// `extended-range-bits-kept` is not announced, and `unreached-tiles-rewritten` is, once (the pass
 /// clears no color). A draw under every channel announces neither bits kind.
@@ -787,10 +787,10 @@ fn a_multisampled_extended_range_color_keeps_its_unused_bits_and_says_so() {
 /// execution of a draw: the load pass (`render/unused_bits_load.rs`) takes every color, so
 /// `extended-range-bits-kept` is not announced, and the padded
 /// colors' words are Metal's, every one `0xffc0` (Metal rewrites a padded attachment's words in
-/// a loading pass that draws, the colors its function does not write too, EVs XRR2-x6i and
-/// XRR2-x6j). The pass clears no color, so `unreached-tiles-rewritten` is announced, naming the
-/// three. A pass that clears and stores the padded colors announces none of the kinds: Metal's
-/// pass then rewrites every tile. One that draws nothing announces nothing.
+/// a loading pass that draws, the colors its function does not write too). The pass clears no
+/// color, so `unreached-tiles-rewritten` is announced, naming the three. A pass that clears and
+/// stores the padded colors announces none of the kinds: Metal's pass then rewrites every tile. One
+/// that draws nothing announces nothing.
 #[test]
 fn a_pass_of_extended_range_and_padded_colors_names_unreached_tiles_unless_one_is_cleared() {
     let kinds = [EXTENDED_RANGE_BITS[0], UNREACHED_TILES[0]];
@@ -957,8 +957,8 @@ fn half_even(x: f32) -> f32 {
 }
 
 /// Metal's read of a linear `RGB10A8_2P_XR10` tile holding the halves `held`: each color lane
-/// clamped to `[-1542/2048, 1281/1024]`, alpha to `[0, 1]`, a NaN to the low end (EV
-/// XSH-pxs-m4; `lower::arith::extended_range::tile_read`).
+/// clamped to `[-1542/2048, 1281/1024]`, alpha to `[0, 1]`, a NaN to the low end
+/// (`lower::arith::extended_range::tile_read`).
 fn tile_read(held: [f32; 4]) -> [f32; 4] {
     let (lo, hi) = (-1542.0 / 2048.0, 1281.0 / 1024.0);
     std::array::from_fn(|k| {
@@ -979,7 +979,7 @@ fn tile_read(held: [f32; 4]) -> [f32; 4] {
 /// as Metal's rule gives it: the first draw reads the tile value (`tile_of`), each computes the
 /// function's `float` arithmetic and Metal's unblended write of the `float` output, rounded to
 /// `half` to nearest even, which the tile holds unclamped; the next draw reads that `half` clamped
-/// to the source range and alpha to `[0, 1]` (`tile_read`; EV XSH-pxs-m4, where the earlier model,
+/// to the source range and alpha to `[0, 1]` (`tile_read`; where the earlier model,
 /// each draw reading the codes the one before stored, differed from Metal at 3, 558 of 4, 096
 /// texels of the probe's own such pass), and the store writes the last `half`'s encode as a
 /// kernel's write (`ExtendedRange::clear_texel`); colors 1 and 2 keep their texels, color 2's color
@@ -1132,7 +1132,7 @@ fn a_fetched_two_plane_attachment_written_unblended_stores_metals_write() {
         .filter(|&i| got_words[i] != want_words[i] || got_alpha[i] != want_alpha[i])
         .count();
     // Color 2, loaded and unwritten, keeps its codes and alpha bytes, its color words' top two
-    // bits zeroed as Metal's pass leaves each tile a draw reaches (EV XRR2-xrb2).
+    // bits zeroed as Metal's pass leaves each tile a draw reaches.
     let canonical: Vec<u8> = other_plane
         .chunks(4)
         .flat_map(|w| (u32::from_le_bytes([w[0], w[1], w[2], w[3]]) & 0x3fff_ffff).to_le_bytes())

@@ -217,11 +217,10 @@ fn digest(codes: impl IntoIterator<Item = u16>) -> u32 {
     h
 }
 
-/// One of our probes' cases (EVs XRR2-ycw3-m4 and XRR2-ycw4-m4, an Apple M4 under macOS 27.0.1;
-/// the `ycw3` cases alike on an Apple M3 Max under macOS 26.7, EV XRR2-ycw3-m3): a 256 x 256
-/// texture of `format` over a surface of `range` and `matrix`, every texel written `float`
-/// values, or `half` ones (`half`), of `mode` from `seed`; and the digest of the luma, Cb and Cr
-/// codes Metal stored, texel by texel, row by row.
+/// One of our probes' cases (an Apple M4 under macOS 27.0.1; the `ycw3` cases alike on an Apple M3
+/// Max under macOS 26.7): a 256 x 256 texture of `format` over a surface of `range` and `matrix`,
+/// every texel written `float` values, or `half` ones (`half`), of `mode` from `seed`; and the
+/// digest of the luma, Cb and Cr codes Metal stored, texel by texel, row by row.
 struct ProbeCase {
     format: PixelFormat,
     surface: (YCbCrRange, YCbCrMatrix),
@@ -701,19 +700,19 @@ fn the_kernel_stores_the_reference_s_codes_of_a_pass_s_every_texel() {
 /// The values one of our probe's draws wrote, of its generator.
 #[derive(Clone, Copy, Debug)]
 enum PassValues {
-    /// Each channel `k / 4096`, one texel in eight's mapped to `[-0.5, 1.5]` (EV XRR2-ycr1-m4).
+    /// Each channel `k / 4096`, one texel in eight's mapped to `[-0.5, 1.5]`.
     Grid,
     /// Each channel beside a tie of the 1/2048 grid (up to 3 ulps either side; a quarter of them
-    /// below 1/2, where a `half` rounds them), or a multiple of 2^-24 (EV GSM2-yt1-m4).
+    /// below 1/2, where a `half` rounds them), or a multiple of 2^-24.
     Ties,
 }
 
 /// One of our probes' passes into a texture of `size` and `format` over plane 0 of a CoreVideo
-/// surface of `surface` (EVs XRR2-ycr1-m4 and GSM2-yt1-m4, an Apple M4 under macOS 27.0.1; the
-/// consumer's run of the first on an Apple M3 Max under macOS 26.7 stored the same bytes): a
-/// clear to a color from `seed`, or a full-screen draw of values from it at every texel
-/// (`draw`); the planes' `plane_bytes` the generator filled first, and the digest of the luma
-/// codes Metal stored, row by row, then of the Cb and Cr codes of each pair, row by row.
+/// surface of `surface` (an Apple M4 under macOS 27.0.1; the consumer's run of the first on an
+/// Apple M3 Max under macOS 26.7 stored the same bytes): a clear to a color from `seed`, or a
+/// full-screen draw of values from it at every texel (`draw`); the planes' `plane_bytes` the
+/// generator filled first, and the digest of the luma codes Metal stored, row by row, then of the
+/// Cb and Cr codes of each pair, row by row.
 struct PassCase {
     format: PixelFormat,
     surface: (YCbCrRange, YCbCrMatrix),
@@ -920,7 +919,7 @@ fn the_store_reference_and_kernel_store_metal_s_codes_of_the_probe_s_passes() {
     }
 }
 
-/// What one of our probe `ten1`'s rows left in its pass's texels (EV GSM2-ten2-m4).
+/// What one of our probe `ten1`'s rows left in its pass's texels.
 #[derive(Clone, Copy, Debug)]
 enum TenValues {
     /// A draw of random channels: ties of the 1/2048, 1/4096, 1/8192 and 1/1023 grids up to 3
@@ -935,7 +934,7 @@ enum TenValues {
     Clears,
 }
 
-/// One of our probe `ten1`'s rows (EV GSM2-ten2-m4, an Apple M4 under macOS 27.0.1): passes into
+/// One of our probe `ten1`'s rows (an Apple M4 under macOS 27.0.1): passes into
 /// a texture of `size` and `format` over plane 0 of a CoreVideo surface of `surface`, the
 /// planes' `plane_bytes` the generator filled first; and the digest of the codes Metal stored,
 /// each pass's luma codes row by row, then its Cb and Cr codes of each pair, row by row.

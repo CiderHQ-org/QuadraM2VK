@@ -25,7 +25,7 @@
 //!   (the consumer's report, an M3 Max under macOS 26.7: plain Metal aborts each of the 116 other
 //!   pairs among the 32- and 64-bit color formats, "source texture pixelFormat not compatible with
 //!   texture view pixelFormat"), as a 4:2:2 format does; and so does one of two planes
-//!   (`RGB10A8_2P_XR10` and its sRGB twin: an M4 under macOS 27.0.1, EV `APX2-xv1-m4`, plain Metal
+//!   (`RGB10A8_2P_XR10` and its sRGB twin: an M4 under macOS 27.0.1, plain Metal
 //!   aborts each of its 72 pairs with 18 color formats of 1 to 16 bytes, the one-plane ones among
 //!   them, in both orders). Metal views a two-plane texture as its sRGB twin, which the runtime
 //!   refuses `Unsupported(Format)`: those reads are not measured. A converted two-plane YCbCr
@@ -109,7 +109,7 @@ pub(super) struct ViewRecord {
     pub(super) address_mode_map: AddressModeMap,
     /// The texture's `framebufferOnly`, `rotation` and `isDrawable`
     /// (`TextureDescriptor::framebuffer_only`, `rotation`, `is_drawable`): its views' too, as
-    /// plain Metal's views keep them (EV ZCI2-rotprobe3-m4).
+    /// plain Metal's views keep them.
     pub(super) presented: Presented,
     /// A view that reads its image in the image's own format (`texture/view_shadow.rs`): that
     /// format, and the swizzle over its channels through which it reads what the view reads
@@ -274,7 +274,7 @@ pub enum ViewProblem {
     BufferSlices,
     /// A view with a swizzle of a texture whose usage is none (a texture made with Apple's private
     /// usage 0x8 alone): Metal asserts on such a view, plain and validated (`_usage !=
-    /// MTLTextureUsageUnknown`, an Apple M4, EV API-usage8-m4). Its views without a swizzle are
+    /// MTLTextureUsageUnknown`, an Apple M4). Its views without a swizzle are
     /// made, and so is a swizzled view of a texture of `ShaderWrite` or `RenderTarget` usage alone,
     /// which keeps no usage.
     SwizzledViewOfNoUsage,
@@ -364,12 +364,12 @@ fn check_format(
         return Ok(());
     }
     // Metal views a 4:2:2 texture in no other format, the other order included ("not castable",
-    // plain too; EV RRP-probe11-m4).
+    // plain too).
     if [source, view].into_iter().any(is_four_two_two) {
         return Err(ViewProblem::FormatIncompatible.into());
     }
     // Metal views a converted two-plane YCbCr texture as its `_sRGB` twin, whatever its usage
-    // (EV TXN2-ycv1-m4: `YCBCR8_420_2P` as `YCBCR8_420_2P_sRGB` and `YCBCR10_420_2P` as
+    // (`YCBCR8_420_2P` as `YCBCR8_420_2P_sRGB` and `YCBCR10_420_2P` as
     // `YCBCR10_420_2P_sRGB`, `ShaderRead` alone and with `PixelFormatView`), which reads what a
     // texture of the twin over the same planes reads (`texture/ycbcr_image.rs`). The other order
     // is not measured, the runtime's gap.
@@ -393,7 +393,7 @@ fn check_format(
             Unsupported::not_implemented(Feature::Format).naming_format(view),
         ));
     }
-    // Plain Metal views a two-plane extended-range texture as its sRGB twin (EV `APX2-xv1-m4`),
+    // Plain Metal views a two-plane extended-range texture as its sRGB twin,
     // whose reads it does not measure: the runtime's gap.
     if two_planes(source) && two_planes(view) {
         return Err(ViewRefusal::Unsupported(
@@ -421,8 +421,7 @@ fn check_format(
         ));
     }
     // Nor an extended-range texture in any format but its twin (above), the other order
-    // included, though a view class of the same size holds a one-plane one (a two-plane one too, EV
-    // `APX2-xv1-m4`).
+    // included, though a view class of the same size holds a one-plane one (a two-plane one too).
     if [source, view].into_iter().any(extended_range) {
         return Err(ViewProblem::FormatIncompatible.into());
     }

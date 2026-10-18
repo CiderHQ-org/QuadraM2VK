@@ -1,7 +1,7 @@
 //! A kernel's writes at a level from a buffer into a texture of every usage on the device the cfg
 //! selects, under the validation layer.
 //!
-//! What plain Metal does (EV XRR2-usw1, the M3 Max under macOS 26.7, plain and with the
+//! What plain Metal does (the M3 Max under macOS 26.7, plain and with the
 //! validation layer; private and shared storage, the texture's own memory and a placement heap
 //! alike): a write stores at every level, through every write form (`write` at level 0, at a
 //! level from a buffer, at the constant level 1, and an explicit imageblock's slice write at a
@@ -208,7 +208,7 @@ fn written(
 }
 
 /// Every texel of every level holds [`VALUE`] after either kernel ran into a texture of each
-/// usage EV XRR2-usw1 measured, as Metal's do (the module docs); a texture of `BlockWritesOnly`
+/// usage our probe measured, as Metal's do (the module docs); a texture of `BlockWritesOnly`
 /// usage takes no shadow. The form each usage took is printed.
 #[test]
 fn writes_at_every_level_store_whatever_the_usage() {

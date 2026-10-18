@@ -10,9 +10,9 @@
 //! that product into an addition as the pair rule does ([`super::contract`]). The probes measured
 //! it on an Apple M4 (macOS 27.0.1) with every lane of every case Metal's: whatever order the
 //! factors are loaded in and the operands written, whether or not the inner product's other
-//! lanes are used, in `half` and `float`, over 2 to 4 lanes (EVs DGC-frg1-m4 and DGC-frg2c-m4).
-//! A chain whose inner lanes the outer multiply reads have another use keeps its grouping (the
-//! product is a leaf there), and so does one already paired, `v * (u * w)` (EV DGC-frg3-m4).
+//! lanes are used, in `half` and `float`, over 2 to 4 lanes. A chain whose inner lanes the outer
+//! multiply reads have another use keeps its grouping (the product is a leaf there), and so does
+//! one already paired, `v * (u * w)`.
 //!
 //! **The rewrite.** [`apply`] rewrites each such chain of the entry before selection, so the
 //! lowering reads Metal's grouping as plain AIR: the outer multiply becomes `v' * (u' * w)`,
@@ -366,7 +366,7 @@ struct Chain {
 }
 
 /// Whether the multiply `at` is a chain Metal keeps as it is because its uniform factors are
-/// already paired (module docs, EV DGC-frg3-m4): `v * w` (either order), `v` differing per lane,
+/// already paired (module docs): `v * w` (either order), `v` differing per lane,
 /// with every fast-math flag, of 2 lanes or more, and `w`, in its block, lane-uniform:
 /// the product of two lane-uniform vectors, or a splat of the product of two scalars, each
 /// product carrying every fast-math flag and no factor reaching another product. A multiply that

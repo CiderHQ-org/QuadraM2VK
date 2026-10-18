@@ -356,8 +356,8 @@ pub struct StageIo {
     /// compiled without fast math (`air.compile.fast_math_disable`) reaches as color attachments,
     /// by color index, sorted. Where such an attachment is a 16-bit float format that blends with
     /// factors one and zero, added, Metal keeps the destination's product by zero in the blend (a
-    /// NaN of an infinite or NaN texel, `+0` of a `-0` output over a texel of `+0` or above; EV
-    /// FBL-zf1-m3), which no write of the output alone stores: the pipeline blends it there and
+    /// NaN of an infinite or NaN texel, `+0` of a `-0` output over a texel of `+0` or above), which
+    /// no write of the output alone stores: the pipeline blends it there and
     /// its stage records `PrecisionNote::HalfOutputPrecision` (`link::graphics`). Empty for any
     /// other function.
     #[cfg_attr(feature = "serde", serde(default))]

@@ -3,7 +3,7 @@
 //!
 //! Vulkan copies no multisampled image to or from a buffer; Metal copies it per sample, the
 //! pixel's samples consecutive in the buffer (texel `(x, y)` sample `s` at
-//! `offset + y * bytesPerRow + (x * n + s) * bpp`, EV ZIN2-bm1-m4 on an M4). The runtime moves
+//! `offset + y * bytesPerRow + (x * n + s) * bpp`, on an M4). The runtime moves
 //! the samples through a wide image and a multisampled uint scratch. This test fills a buffer
 //! with a distinct pattern laid out per sample, copies it into a multisampled uint texture and
 //! back out into a second buffer, and checks the two buffers' covered bytes match: both

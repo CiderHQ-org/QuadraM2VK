@@ -6,14 +6,12 @@
 //! buffer over the whole heap; two one-level 2D textures of `RGB10A8_2P_XR10` (or its sRGB twin)
 //! placed where the probe placed them; one blit of the case's region from one into the other;
 //! and the heap's bytes read back through the buffer. Metal's answer: the first 16 hex digits of
-//! the SHA-256 of the heap's bytes after the blit, as the probe printed them (EVs XRR2-tph1-m4
-//! and XRR2-tph2-m4, an Apple M4 under macOS 27.0.1, each blit three times on the same bytes and
-//! every case twice, alike; and XRR2-tph1-m3 and XRR2-tph2-m3, an Apple M3 Max under macOS 26.7,
-//! the same digests).
-//! The copy's alpha bytes land past the destination's alpha plane, on the heap's other bytes, and
-//! in `end255` past the heap's end, which Metal's blit writes and the device's announces
-//! (`two-plane-texture-copy`). A differing heap's digest is printed on one
-//! `XR-TWO-PLANE-HEAP-BLITS-DIFFERS` line.
+//! the SHA-256 of the heap's bytes after the blit, as the probe printed them (an Apple M4 under
+//! macOS 27.0.1, each blit three times on the same bytes and every case twice, alike; and an Apple
+//! M3 Max under macOS 26.7, the same digests). The copy's alpha bytes land past the destination's
+//! alpha plane, on the heap's other bytes, and in `end255` past the heap's end, which Metal's blit
+//! writes and the device's announces (`two-plane-texture-copy`). A differing heap's digest is
+//! printed on one `XR-TWO-PLANE-HEAP-BLITS-DIFFERS` line.
 
 use super::degrade_notices::{counts, on_device};
 use super::extended_range_two_planes::{get, put};

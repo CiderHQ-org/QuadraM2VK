@@ -6,7 +6,7 @@
 //! takes no increment. The increment reaches the status word by its device address where the device
 //! addresses buffers, and through the stage's binding of the status buffer elsewhere.
 //!
-//! The kernel is the store-buffering litmus of EV SDX-p1-m3
+//! The kernel is the store-buffering litmus of our probe
 //! (`metal2vulkan_devtools::litmus::store_buffering`; `runtime_lane::seq_cst_fences` runs it on
 //! devices).
 

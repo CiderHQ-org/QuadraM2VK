@@ -48,9 +48,8 @@ pub(super) const RATE_MAP_LAYERS: u64 = 2;
 
 /// The largest vertex amplification count Metal supports: `supportsVertexAmplificationCount:`
 /// answers yes from 1 to 8 and no from 9 to 16 (a Metal probe: the M3 Max with macOS 26.7 and an M4
-/// with macOS 27.0.1, alike), and yes for 0 (EVs API-props1-m3 and API-props1-m4, alike). A device
-/// with `multiview` draws every such count: as views where multiview draws them as Metal does, else
-/// one amplification at a time.
+/// with macOS 27.0.1, alike), and yes for 0 (alike). A device with `multiview` draws every such
+/// count: as views where multiview draws them as Metal does, else one amplification at a time.
 pub(super) const MAX_VERTEX_AMPLIFICATION: u64 = 8;
 
 /// A device's identity and Metal's public device queries, as the runtime answers them on the
@@ -318,7 +317,7 @@ impl DeviceProperties {
     /// `supportsTextureWriteRoundingMode:` (Apple SPI): yes for Metal's raw 0 to 2, every mode
     /// a pipeline descriptor's `texture_write_rounding_mode` takes on every device
     /// ([`TextureWriteRoundingMode::from_raw`](metal2vulkan::metal::TextureWriteRoundingMode::from_raw)),
-    /// as an M4 answers (macOS 27.0.1, EV TXN2-twr-m4); no for 3 and above.
+    /// as an M4 answers (macOS 27.0.1); no for 3 and above.
     pub fn supports_texture_write_rounding_mode(&self, mode: u64) -> bool {
         metal2vulkan::metal::TextureWriteRoundingMode::from_raw(mode).is_ok()
     }

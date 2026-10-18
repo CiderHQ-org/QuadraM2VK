@@ -834,8 +834,8 @@ fn stride_less(text: &str) -> String {
 /// setter), write exactly the records of today's form called with a stride of all ones, as Metal's
 /// compiler spells the plain setter now, on every profile with device addresses: the buffer's
 /// address at its slot and the pipeline's own stride, the slot `set_kernel_buffer` (Metal's
-/// `setKernelBuffer:offset:atIndex:`) leaves on the host, over a dynamic stride set before too (EV
-/// API-icbget2-m4: the kernel-side plain setter writes all ones over it).
+/// `setKernelBuffer:offset:atIndex:`) leaves on the host, over a dynamic stride set before too (the
+/// kernel-side plain setter writes all ones over it).
 #[test]
 fn air_2_5_buffer_setters_write_the_plain_setters_records() {
     let (Some(today_runs), Some(air25_runs)) = (
@@ -1160,11 +1160,11 @@ fn encoding_without_device_addresses_names_what_the_profile_lacks() {
 }
 
 /// A kernel's render state setter (cull mode, depth bias, depth clip mode, front-facing winding,
-/// triangle fill mode, depth/stencil state; the declarations Metal's compiler writes, probes
-/// `ICBV-air-rstate-m4` and `RFL-ksetters-m4`) decodes, and on every profile with device
-/// addresses the lowering refuses it `NotImplemented(IndirectRenderState)`: the record holds no
-/// render state, and Metal's compiler refuses every one on an M4. The depth/stencil state is the
-/// argument buffer's second member, `air.depth_stencil_state`, in place of a pipeline state.
+/// triangle fill mode, depth/stencil state; the declarations Metal's compiler writes) decodes, and
+/// on every profile with device addresses the lowering refuses it
+/// `NotImplemented(IndirectRenderState)`: the record holds no render state, and Metal's compiler
+/// refuses every one on an M4. The depth/stencil state is the argument buffer's second member,
+/// `air.depth_stencil_state`, in place of a pipeline state.
 #[test]
 fn render_state_setters_refuse_as_indirect_render_state() {
     let render = COMPUTE_META.replace("compute_pipeline_state", "render_pipeline_state");
@@ -1255,9 +1255,9 @@ declare void @air.{setter}(ptr addrspace(1), i32, {types})
 }
 
 /// A kernel whose argument buffer holds a `depth_stencil_state` it never reads compiles on every
-/// profile with device addresses, as Metal's compiler compiles such a kernel's draw on an M4 (EV
-/// `RFL-ksetters-m4`'s `ctl`); one that reads the state for anything but a setter is refused
-/// `NotImplemented(IndirectRenderState)`, the state's one use being a render command's.
+/// profile with device addresses, as Metal's compiler compiles such a kernel's draw on an M4; one
+/// that reads the state for anything but a setter is refused `NotImplemented(IndirectRenderState)`,
+/// the state's one use being a render command's.
 #[test]
 fn a_depth_stencil_state_member_compiles_unread_and_is_refused_read() {
     let meta = COMPUTE_META.replace("compute_pipeline_state", "depth_stencil_state");
@@ -1389,8 +1389,8 @@ fn a_command_word_is_named_by_the_memory_it_reaches() {
 }
 
 /// A kernel's `clear_barrier`, `set_stage_in_region`, `set_imageblock_size` and `reset` on a
-/// compute command (the symbols and shapes Apple's compiler emits for `compute_command`'s members,
-/// probe `RT7-probe3c2`) round-trip on every profile with device addresses: each even thread's
+/// compute command (the symbols and shapes Apple's compiler emits for `compute_command`'s members)
+/// round-trip on every profile with device addresses: each even thread's
 /// command, which they follow the dispatch of, decodes with its barrier cleared, its region, its
 /// size (a width of 65535 held zero-extended), or as the default record but for the pipeline it
 /// executes with, retained and reported cleared, and the bytes are exactly the encoded records.

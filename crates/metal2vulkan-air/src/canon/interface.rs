@@ -301,19 +301,19 @@ fn past_table(r: &ParamRole) -> bool {
 /// reference ([`Absent::Null`]): a load through an undeclared buffer is undefined, so the access
 /// family's null root (zero) refines it. A texture or sampler is read through texture calls
 /// ([`Absent::Reads`]): the result of a read, query, or sample of an absent texture, or of a sample
-/// through an absent sampler, is undefined, not a null texture's. Measured on device (SPC-metal2),
-/// Metal's compiler drops a store of such a result and makes a fragment color computed from one
-/// all-zero, where its validation layer reads zero instead; with a gated-off texture table beside
-/// it, it dropped a kernel's whole body (SPC-metal). No one translation is Metal's, so each such
-/// call becomes [`FunctionConstant::AbsentRead`], which fails the command buffer where it runs; a
-/// handle that reaches its calls through memory, an aggregate, a table element or a merge is
-/// lowering's absent handle, whose calls are that read. Threadgroup memory has no contents Metal
-/// defines either: measured on an M4 (EV GTG-tg-metal), its compiler dropped stores of values
-/// loaded from it, dropped a kernel's whole body where an access ran on every path, and an atomic
-/// on it changed another argument's threadgroup memory under the validation layer and not without
-/// it. So each load or atomic through it is the same absent read, and each store is dropped
-/// ([`Absent::Memory`]). Stage inputs, builtins, color inputs, and objects have no absent value
-/// Metal defines (an observed read of one passed by value reads zero instead, [`absent_values`]).
+/// through an absent sampler, is undefined, not a null texture's. Measured on device, Metal's
+/// compiler drops a store of such a result and makes a fragment color computed from one all-zero,
+/// where its validation layer reads zero instead; with a gated-off texture table beside it, it
+/// dropped a kernel's whole body. No one translation is Metal's, so each such call becomes
+/// [`FunctionConstant::AbsentRead`], which fails the command buffer where it runs; a handle that
+/// reaches its calls through memory, an aggregate, a table element or a merge is lowering's absent
+/// handle, whose calls are that read. Threadgroup memory has no contents Metal defines either:
+/// measured on an M4, its compiler dropped stores of values loaded from it, dropped a kernel's
+/// whole body where an access ran on every path, and an atomic on it changed another argument's
+/// threadgroup memory under the validation layer and not without it. So each load or atomic through
+/// it is the same absent read, and each store is dropped ([`Absent::Memory`]). Stage inputs,
+/// builtins, color inputs, and objects have no absent value Metal defines (an observed read of one
+/// passed by value reads zero instead, [`absent_values`]).
 fn absent_null(r: &ParamRole) -> Absent {
     match r {
         ParamRole::Buffer(_) | ParamRole::ArgumentBuffer(_) => Absent::Null,

@@ -5,14 +5,14 @@
 //! **Metal's fast `sin` and `cos`** below their flush point (`math::fast_trig_flush` answers
 //! past it) are its precise functions: they agree on 864 of the 865 such lanes of cases 087758cb
 //! and cc234732 (the one apart, `fast::sin(-2^-12)`, is an ulp below), and on every `float` of
-//! `[0.25, 1)` (EV MBB-trig1-m3), within 2.2 ulp of the exact value inside and outside `[-π, π]`.
-//! Inside `[-π, π]`, where Apple bounds them by `2^-13` absolute (MSL Table 8.2) and every device
-//! measured meets it, the device's `Sin` or `Cos` answers; past `π`, where the table states no
-//! bound and the devices are up to 1.8 off (ANV; RADV 0.21, NVIDIA 0.56, EV TRN-probe), the
-//! precise routine does, per lane under a branch, so a wave whose lanes all lie inside `[-π, π]`
-//! runs the device's instruction alone. A denormal operand joins the branch too: Metal keeps it
-//! (`fast::sin(x) = x`, `fast::cos(x) = 1`, case cc234732) where RADV, ANV, and NVIDIA flush it,
-//! and the routine's selects answer it ([`denormal::operand`]).
+//! `[0.25, 1)`, within 2.2 ulp of the exact value inside and outside `[-π, π]`. Inside `[-π, π]`,
+//! where Apple bounds them by `2^-13` absolute (MSL Table 8.2) and every device measured meets it,
+//! the device's `Sin` or `Cos` answers; past `π`, where the table states no bound and the devices
+//! are up to 1.8 off (ANV; RADV 0.21, NVIDIA 0.56), the precise routine does, per lane under a
+//! branch, so a wave whose lanes all lie inside `[-π, π]` runs the device's instruction alone. A
+//! denormal operand joins the branch too: Metal keeps it (`fast::sin(x) = x`, `fast::cos(x) = 1`,
+//! case cc234732) where RADV, ANV, and NVIDIA flush it, and the routine's selects answer it
+//! ([`denormal::operand`]).
 
 use crate::lower::arith::libm::atan::read;
 use crate::lower::arith::libm::{quarter, sincos, Fun, E};
@@ -37,7 +37,7 @@ pub(crate) enum Trig {
 /// ([`denormal::operand`]) where a device that flushes it answers its zero, under a branch on the
 /// lane's `|x|`. So the device answers only inside `[-π, π]`, where Apple bounds its answer
 /// (MSL Table 8.2) and the user accepts it; at `±float(π)` it was outside that bound on RADV, ANV
-/// and the RTX 5080 (EVs MBB-9v-*), where the routine is Metal's word. The denormal is told by its
+/// and the RTX 5080, where the routine is Metal's word. The denormal is told by its
 /// bits, so a device that flushes in comparisons tells it too.
 pub(crate) fn fast(e: &mut E<'_, '_>, which: Trig, x: Value) -> BResult<Value> {
     let (op, fun) = match which {
@@ -87,7 +87,7 @@ pub(crate) const HALF_TAN_P: [u32; 4] = [0x3FC9_0D3B, 0x3FA6_963B, 0x3F8C_CDD0, 
 /// fma(x, c0, m)`, `m = 1.5 2^23`, and `r = fma(x, c1, fma(x, c0, m - s))` of `2/π`'s first two
 /// parts ([`quarter::QUARTER`]), `t = r P(r r)` of [`HALF_TAN_P`], and `t` for an even `k`, Metal's
 /// reciprocal of `-t` ([`E::recip`]) for an odd one. A zero gives `+0`, and an infinity or a NaN
-/// Metal's NaN. Rounded to `half`, Metal's word at every `half` (EV MB2-half1-m3).
+/// Metal's NaN. Rounded to `half`, Metal's word at every `half`.
 pub(crate) fn half_tan(e: &mut E<'_, '_>, x: Value) -> BResult<Value> {
     let ax = e.abs(x)?;
     let bits = e.bits(ax)?;

@@ -696,8 +696,8 @@ pub fn partly_live_words(s: &Strategy, tier: Tier) -> u32 {
 ///   fragment quad tier the value is `SubgroupLocalInvocationId & 3`, and the class is raised with
 ///   the quad class. Where it has none (no fragment subgroups, none with quad operations, or one
 ///   narrower than a quad), the lane is the pixel's place in its aligned 2x2 block, `(x & 1) + 2 *
-///   (y & 1)` of the pixel `FragCoord` lies in, and raises no class. That is what Metal gives: EV
-///   C1R-quad-metal read the lane of every written pixel equal to it on the M3 Max, single-sampled,
+///   (y & 1)` of the pixel `FragCoord` lies in, and raises no class. That is what Metal gives: our
+///   probe read the lane of every written pixel equal to it on the M3 Max, single-sampled,
 ///   at 4x pixel rate, and at 4x sample rate (where `FragCoord` is a sample's position inside its
 ///   pixel). A quad operation in the same function still needs the tier and is refused by it.
 /// - `[[thread_index_in_simdgroup]]`. Which pixels share a simdgroup, and in what order, is Apple's

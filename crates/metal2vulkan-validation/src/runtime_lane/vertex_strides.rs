@@ -9,12 +9,11 @@
 //!   offset form, which sets both.
 //! - A buffer bound without a stride (the plain setters, the plain offset form after a stride
 //!   form, or `MTLAttributeStrideStatic`) under a dynamic layout reads at stride 0, as plain
-//!   Metal does (an M4, EV `CFIT-metal-probe-3`; an M3 Max and an M4, EVs `ICBV-plainstride2-m3`,
-//!   `-m4`), where Metal's debug layer stops the draw; a stride past 32 bits is refused at the
-//!   setter.
+//!   Metal does (an M4; an M3 Max and an M4), where Metal's debug layer stops the draw; a stride
+//!   past 32 bits is refused at the setter.
 //! - An executed indirect render command's vertex buffer set without a stride under a dynamic
 //!   layout refuses the commit (`UnstridedBuffer`): Metal reads it at stride 2^32 - 1, past
-//!   vertex 0 whatever memory lies 4 GiB on (EVs `ICBV-plainstride3-m3`, `-m4`).
+//!   vertex 0 whatever memory lies 4 GiB on.
 
 use super::{buffer_with, read_buffer, validated_device, Messages, ScratchCache, WAIT};
 use crate::air_library::AirLibrary;
@@ -167,8 +166,8 @@ fn vertex_buffers_bind_the_strides_a_dynamic_layout_reads() {
             Ok(read_at(0, 0)),
             "MTLAttributeStrideStatic"
         );
-        // A stride past 32 bits reads at its low 32 bits, as plain Metal reads it (an M4, EV
-        // RRP-probe2-m4; Metal's validation takes it).
+        // A stride past 32 bits reads at its low 32 bits, as plain Metal reads it (an M4; Metal's
+        // validation takes it).
         assert_eq!(
             draw(&|e, b| e.set_vertex_buffer_with_stride(Some(b), 0, (1 << 32) + 8, 0)),
             Ok(read_at(0, 2)),

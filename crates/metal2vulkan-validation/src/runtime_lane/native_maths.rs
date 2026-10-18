@@ -628,6 +628,13 @@ fn half_operands() -> Vec<[f32; 2]> {
 /// `half`, 65504 where Metal answers infinity from 65520 up on a device that rounds toward zero,
 /// and the zero of its sign below `2^-14` on one that flushes 16-bit denormals; or the `float`
 /// computation itself, each rounding the device dropped left out: NVIDIA's (RTX 3090) and
+/// lavapipe's (Mesa 26.2.4 with LLVM 23.1.1; 2526 of 8192 sums Metal's) compilers drop the
+/// conversion pair, so `half(a)` is `a` and the sum `a + b` rounded to `float` once (or of the
+/// operands rounded, or rounded itself), exactly. CI's lavapipe (Mesa 26.0.8 with LLVM 21.1.8)
+/// rounds here (8192 of 8192). With it off (Metal's integer rounding) each is Metal's `half(float)`
+/// exactly, and neither kind is recorded. A device measured to round as Metal does (MoltenVK), or
+/// whose float controls make its conversion Metal's (the module declares `RoundingModeRTE`,
+/// `DenormPreserve` and `SignedZeroInfNanPreserve` for 16 bits: ANV and RADV), records neither
 /// under either setting and answers Metal's exactly.
 #[test]
 fn half_rounding_answers_within_its_recorded_bound_on_and_metal_s_off() {

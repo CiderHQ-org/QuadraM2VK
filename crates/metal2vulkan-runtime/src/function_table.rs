@@ -121,7 +121,7 @@ pub enum FunctionTableProblem {
     /// which is not one stage: empty, or more than one. Metal's validation stops each ("stage
     /// invalid"); plain Metal answers the handle nil, and the table of more than one stage (an
     /// [`Error::Nil`](crate::Error::Nil)), and faults on a table of no stage (an
-    /// [`Error::Invalid`](crate::Error::Invalid); an M4 under macOS 27.0.1, EV TTG-nil8-m4). One
+    /// [`Error::Invalid`](crate::Error::Invalid); an M4 under macOS 27.0.1). One
     /// stage the state has no function of answers no handle and makes a table, as plain Metal's.
     StageWithoutFunction {
         /// The stage asked for.
@@ -210,10 +210,7 @@ impl Maker {
     /// The entry a table of this state holds for `handle`: its own function for one of this
     /// state's, but one added without the stage's support flag, which calls this state's last
     /// other callable function, or none where it has none, as plain Metal's handle of it does
-    /// (EVs RFC-probe2-m4 `bf_off_two`, `bf_off_empty`, RFC-probe3-m4 `bf_off_one_add_two`, for
-    /// kernels; RFC-probe4-m4 `vtx_off_two`, `frag_off_two`, `tile_off_two`,
-    /// `vtx_off_one_add_two`, `frag_off_one_add_two`, `tile_off_one_add_two`, `vtx_off_empty`,
-    /// for drawing and tile states); else
+    /// (for kernels; for drawing and tile states); else
     /// [`handle_at_position_of`](Self::handle_at_position_of)'s. `None` where Metal's answer
     /// was not measured: Metal numbers the added functions past the others
     /// (`metal_numbering`), so where this state links only private functions, its last is one.
@@ -244,18 +241,15 @@ impl Maker {
 
     /// This state's handle at the position Metal numbers `handle`, another state's, by: the one
     /// a table of this state holds for it, as plain Metal's table calls its own state's function
-    /// at that position (probe `RT7-ftable-probe1` `handle_of_another_pipeline`, an M3 Max and an
-    /// M4: a handle of another kernel's second function called the table's kernel's second; EVs
-    /// RFC-probe1-m4 `ft_handle_other_render` and RFC-probe2-m4 `ft_other_fragment`, an M4: the
-    /// same of two drawing states' vertex and fragment functions). Metal numbers a state's
-    /// private functions first, then its callable ones (`metal_numbering`; EV RFC-probe2-m4
-    /// `ft_private_shift_compute`, `ft_private_shift_vertex`). A position at or past this state's
-    /// functions calls its last one, and none where it links none, an entry that reads null, as
-    /// plain Metal's (EVs RFC-probe2-m4 `ft_position_past_compute`, RFC-probe3-m4 `ft_past1`,
-    /// `ft_past2`, and through functions added without the support flag, `bf_off_two`,
-    /// `bf_off_empty`, `bf_off_one_add_two`). `None` where Metal's answer was not measured: states
-    /// of two kinds, a tile state's, an object or mesh stage's, two stages, either numbering
-    /// unmeasured, or a position that names a private function of this state.
+    /// at that position (an M3 Max and an M4: a handle of another kernel's second function called
+    /// the table's kernel's second; an M4: the same of two drawing states' vertex and fragment
+    /// functions). Metal numbers a state's private functions first, then its callable ones
+    /// (`metal_numbering`). A position at or past this state's functions calls its last one, and
+    /// none where it links none, an entry that reads null, as plain Metal's (and through functions
+    /// added without the support flag, `bf_off_two`, `bf_off_empty`, `bf_off_one_add_two`). `None`
+    /// where Metal's answer was not measured: states of two kinds, a tile state's, an object or
+    /// mesh stage's, two stages, either numbering unmeasured, or a position that names a private
+    /// function of this state.
     ///
     /// This state's functions added without its support flag are not its functions here: a
     /// position past the others calls its last other one.
@@ -353,11 +347,11 @@ fn live_tables(device: &Device, made: impl Fn(&Maker) -> bool) -> Vec<VisibleFun
 
 /// How Metal numbers the functions `linked` lists, where measured: its private functions first,
 /// then the callable ones, `functions` then `binary_functions`, one function in both lists once
-/// (probe `RT7-ftable-probe2`, an M3 Max and an M4: `number_private_unnumbered`,
-/// `number_binary_after_functions`, `number_same_function_in_both_lists`). The count of private
-/// functions, and the callable functions' handles in order, but the last `added_unsupported`
-/// `binary_functions` (added without the support flag). `None` where it was not measured: a private
-/// function listed twice or in a numbered list too, or functions in groups.
+/// (an M3 Max and an M4: `number_private_unnumbered`, `number_binary_after_functions`,
+/// `number_same_function_in_both_lists`). The count of private functions, and the callable
+/// functions' handles in order, but the last `added_unsupported` `binary_functions` (added without
+/// the support flag). `None` where it was not measured: a private function listed twice or in a
+/// numbered list too, or functions in groups.
 fn metal_numbering(
     linked: &LinkedFunctions,
     added_unsupported: usize,
@@ -507,7 +501,7 @@ impl RenderPipelineState {
             return Some(maker);
         }
         // One stage the state has no function of: plain Metal answers its handles nil and makes
-        // its tables (EV RFC-probe1-m4: a vertex-only state's fragment stage, a drawing state's
+        // its tables (a vertex-only state's fragment stage, a drawing state's
         // tile, object and mesh stages, a tile state's vertex and fragment stages).
         let stages = [
             RenderStages::VERTEX,
@@ -523,7 +517,7 @@ impl RenderPipelineState {
 }
 
 /// `call` for `stage`, which is not one stage, a table's where `table`: Metal's validation stops
-/// each; plain Metal answers nil but for a table of no stage, where it faults (EV TTG-nil8-m4).
+/// each; plain Metal answers nil but for a table of no stage, where it faults.
 fn not_one_stage(call: &'static str, stage: RenderStages, table: bool) -> Error {
     let problem = Problem::FunctionTable(FunctionTableProblem::StageWithoutFunction { stage });
     if table && stage.is_empty() {
@@ -727,9 +721,8 @@ impl VisibleFunctionTable {
     /// the stage's last other callable function, or none. Refused: an index at or past the table's
     /// size (`Invalid(IndexOutOfRange)`), which Metal's validation stops and plain Metal writes
     /// past the table's entries, where its memory decides: the entries kept their functions, and
-    /// its process ended past the table's allocation (EV RFC-probe1-m4 `ft_set_past_count`,
-    /// `ft_set_past_count_page`); a handle of another state where plain Metal's answer was not
-    /// measured (`Invalid(FunctionTable(HandleOfAnotherState))`, its doc).
+    /// its process ended past the table's allocation; a handle of another state where plain Metal's
+    /// answer was not measured (`Invalid(FunctionTable(HandleOfAnotherState))`, its doc).
     pub fn set_function(&self, function: Option<&FunctionHandle>, index: u32) -> Result<(), Error> {
         self.set("set_function", &[function], index)
     }

@@ -1,10 +1,10 @@
 //! Unnormalized 8- and 16-bit integer vertex formats read into float attributes
 //! (`dsx_int_attributes`), on the device the cfg selects, under the validation layer.
 //!
-//! Metal's answer, measured on an M4 (EVs DSX-vconv2-m4 and DSX-vconv3-m4, plain and under its
-//! debug layer alike): each component reads as its integer value, zero- or sign-extended, as a
-//! float, the missing ones as `(0, 0, 0, 1)`; a `half` attribute rounds the value to nearest
-//! even, 65520 and above to infinity; a 32-bit integer format is refused at pipeline creation.
+//! Metal's answer, measured on an M4 (plain and under its debug layer alike): each component reads
+//! as its integer value, zero- or sign-extended, as a float, the missing ones as `(0, 0, 0, 1)`; a
+//! `half` attribute rounds the value to nearest even, 65520 and above to infinity; a 32-bit integer
+//! format is refused at pipeline creation.
 //!
 //! - `int_attribute_to_float4` and `int_attribute_to_half4`, for each of the 16 formats at byte
 //!   `16 i` of a 256-byte record (row `r`'s component `c` the width's value `(r + 3 c) % 8`, the
@@ -16,7 +16,7 @@
 //!   `UShort2` among them read as `float2`; nine varyings of mixed interpolation), into a 4x4
 //!   `BGRA8Unorm_sRGB` target blended source-over beside a `Depth32Float_Stencil8` attachment:
 //!   every pixel is `(255, 0, 255, 255)` in memory order, the fragment's checks of each varying
-//!   against Metal's values passed. Metal draws the same pixels (EV DSX-vconv3-m4).
+//!   against Metal's values passed. Metal draws the same pixels.
 //! - A 32-bit integer format read into a float attribute refuses the pipeline,
 //!   `InvalidDescriptor(VertexAttribute)`, where Metal refuses it too.
 

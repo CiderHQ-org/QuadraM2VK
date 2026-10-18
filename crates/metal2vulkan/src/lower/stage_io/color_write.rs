@@ -237,12 +237,11 @@ pub(crate) fn plan(cx: &mut SelectCx<'_>, color: u32, f: Form) {
 
 /// Whether a storage write the shader blends into a 16-bit float attachment stores its NaN as
 /// Metal does: the blend gives every NaN as `0x7fc00000` (`fetch::half_blended`; Metal stores
-/// every NaN of that blend as `0x7e00`, EV FBL-zf1-m3), which the storage image's store converts
-/// to Metal's `0x7e00` where the profile takes `DriverDeviation::MetalFloatStorageNans`, whose
-/// property the module then relies on (`relied`). Elsewhere the NaN stored is the device's (ANV
-/// stores every NaN as `0xfe00`, EV `TXN2-hsw2-anvp`), which the module notes
-/// (`PrecisionNote::DeviceNanEncoding`): no value written to a 16-bit float storage image stores
-/// another there.
+/// every NaN of that blend as `0x7e00`), which the storage image's store converts to Metal's
+/// `0x7e00` where the profile takes `DriverDeviation::MetalFloatStorageNans`, whose property the
+/// module then relies on (`relied`). Elsewhere the NaN stored is the device's (ANV stores every NaN
+/// as `0xfe00`), which the module notes (`PrecisionNote::DeviceNanEncoding`): no value written to a
+/// 16-bit float storage image stores another there.
 fn storage_nan(cx: &SelectCx<'_>, relied: &mut BTreeSet<VkProperty>) -> bool {
     let metal = cx
         .profile

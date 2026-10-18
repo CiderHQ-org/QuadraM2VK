@@ -1,24 +1,23 @@
 //! Tile dispatches in a render encoder (`dispatchThreadsPerTile:`) and the encoder's tile stage
 //! table.
 //!
-//! - **Checks** (measured by probe RT11-metal-probe-10 on an M3 Max and an M4): the state set is
+//! - **Checks** (measured by our probe on an M3 Max and an M4): the state set is
 //!   a tile pipeline's ("the renderPipelineState was not created with a tileDescriptor"); the
 //!   threads per tile are not empty and fit the pass's tile ("threadsPerTile.width(32) must be
 //!   <= 16"). Threads per tile past Metal's limit for the state, which Metal's validation stops,
-//!   run nothing, as plain Metal runs them (EV TTG-probe1-m4, an M4); those within it but past the
-//!   state's `max_total_threads_per_threadgroup`, where this device's limit is lower, are refused
-//!   typed by the binder. A depth other than 1, which Metal's validation stops
-//!   ("threadsPerTile.depth(2) must be 1"), runs as 1, as plain Metal runs it (a Metal probe on an
-//!   M4: 8x8 threads per tile of depth 2 and 4 ran 64 threads a tile, each `z` 0 and
-//!   `threads_per_threadgroup.z` 1). Threads per tile past the tile stay refused: plain Metal runs
-//!   them, their imageblock cells past the tile landing in the neighbouring tiles' pixels (probe
-//!   RT11-metal-probe-10 `d_32in16`), a layout of Metal's tile memory the runtime does not model. A
-//!   pass is single-sampled: the compile layer stages one sample a pixel, so a tile state of more
-//!   samples is not made (`Unsupported`), and the encoder takes no state of another sample count
-//!   than its pass's. The state's color formats may differ from the pass's past the last color its
-//!   function reaches through its implicit imageblock, which plain Metal runs as it runs matching
-//!   ones (a Metal probe on an M4); before it, or with an explicit imageblock, the encoder refuses
-//!   the state (`DrawProblem::AttachmentFormat`).
+//!   run nothing, as plain Metal runs them (an M4); those within it but past the state's
+//!   `max_total_threads_per_threadgroup`, where this device's limit is lower, are refused typed by
+//!   the binder. A depth other than 1, which Metal's validation stops ("threadsPerTile.depth(2)
+//!   must be 1"), runs as 1, as plain Metal runs it (a Metal probe on an M4: 8x8 threads per tile
+//!   of depth 2 and 4 ran 64 threads a tile, each `z` 0 and `threads_per_threadgroup.z` 1). Threads
+//!   per tile past the tile stay refused: plain Metal runs them, their imageblock cells past the
+//!   tile landing in the neighbouring tiles' pixels, a layout of Metal's tile memory the runtime
+//!   does not model. A pass is single-sampled: the compile layer stages one sample a pixel, so a
+//!   tile state of more samples is not made (`Unsupported`), and the encoder takes no state of
+//!   another sample count than its pass's. The state's color formats may differ from the pass's
+//!   past the last color its function reaches through its implicit imageblock, which plain Metal
+//!   runs as it runs matching ones (a Metal probe on an M4); before it, or with an explicit
+//!   imageblock, the encoder refuses the state (`DrawProblem::AttachmentFormat`).
 //! - **What runs** is what Metal runs: one threadgroup of the threads per tile on each tile of
 //!   the pass's tile size covering the render area, `ceil(area / tile)` of them, whose stores
 //!   reach each tile's pixels past the render area as far as the attachments go (measured: a
@@ -35,7 +34,7 @@
 //!   before the pass's first instance ([`ScratchEdges`]), and never copied to or from the
 //!   attachment, so the pass's dispatches carry them along.
 //! - **Over a region** (`dispatchThreadsPerTile:inRegion:` and its form with a render target
-//!   array index, SPI; measured by probes RT11-metal-probe-19 to -19e on an M3 Max and an M4,
+//!   array index, SPI; measured by our probes on an M3 Max and an M4,
 //!   identically, with no validation stop but the threads per tile's, as above). The tiles that
 //!   run are those from `x / tile` to the end `(x + w + tile - 1) / tile`, in 32-bit arithmetic
 //!   that wraps, each origin and size cut to its low 32 bits, and cut to the pass's tiles
@@ -758,8 +757,8 @@ impl RenderCommandEncoder {
             )))
         });
         // Metal draws into layer `index` of a layered pass and into layer 0 for an index at or
-        // past its layers (probe RT11-metal-probe-19b); the planner refuses a dispatch in a
-        // layered pass, so every pass one runs in has one layer, which every index draws into.
+        // past its layers; the planner refuses a dispatch in a layered pass, so every pass one runs
+        // in has one layer, which every index draws into.
         let _ = render_target_array_index;
         self.dispatch_tiles("dispatch_threads_per_tile_in_region", threads, Some(region))
     }
@@ -835,7 +834,7 @@ impl RenderCommandEncoder {
             ));
         }
         // Threads per tile past Metal's limit for the state run nothing, as plain Metal runs them
-        // (EV TTG-probe1-m4: a state of 256 threads dispatched 32x32 per tile left every pixel
+        // (a state of 256 threads dispatched 32x32 per tile left every pixel
         // and record as the pass had them; Metal's validation stops it). Threads within it but
         // past this device's lower limit (`max_total_threads_per_threadgroup`) are the device's
         // gap, which Metal runs: the binder refuses them typed below (`Bind`, `Unsupported`), and
@@ -854,6 +853,7 @@ impl RenderCommandEncoder {
         let function_tables = kernel.function_tables();
         // A buffer where the tile function reads a table reads as a null table, and a table
         // where it reads a buffer it does not write as an unbound buffer, as a kernel's and a
+        // drawing stage's do.
         let views = kernel.at_bind_views();
         let stage_table = (self.tile).stage_table_reading(Stage::Kernel, kernel.interface(), views);
         // Its runtime samplers' address modes as the textures they sample map them.
@@ -1316,10 +1316,10 @@ impl RenderCommandEncoder {
 }
 
 /// The tiles `region`'s pixels touch in a pass of `groups` tiles of `tile` pixels, per axis
-/// `(first, count)`, as Metal takes the region (the module docs; probes RT11-metal-probe-19 to
-/// -19e): in 32-bit arithmetic that wraps, the first tile is `x / tile`, the end
-/// `(x + w + tile - 1) / tile`, and the count `end - first`, each origin and size cut to its low
-/// 32 bits; the tiles from the first, cut to the pass's. The region's `z` and depth are not read.
+/// `(first, count)`, as Metal takes the region (the module docs): in 32-bit arithmetic that wraps,
+/// the first tile is `x / tile`, the end `(x + w + tile - 1) / tile`, and the count `end - first`,
+/// each origin and size cut to its low 32 bits; the tiles from the first, cut to the pass's. The
+/// region's `z` and depth are not read.
 fn region_tiles(region: &Region, tile: [u32; 2], groups: [u32; 2]) -> [(u32, u32); 2] {
     let axis = |origin: u64, size: u64, i: usize| {
         // Metal's 32-bit origin and size (measured: an origin of 2^32 + 16 is 16).

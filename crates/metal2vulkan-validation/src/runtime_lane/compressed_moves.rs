@@ -1,7 +1,7 @@
 //! How block-compressed textures move their blocks (the consumer's x86 guests: BC textures on
 //! NVIDIA showed corrupt texels), on the device the cfg selects, under the validation layer,
 //! against a byte model of Metal's copies, and the model against plain Metal's own answers
-//! ([`METAL_TRANSCRIPT`], EV SID2-cmv1-m4: our own probe on an Apple M4, the same steps over the
+//! ([`METAL_TRANSCRIPT`]: our own probe on an Apple M4, the same steps over the
 //! same bytes).
 //!
 //! Every BC format, in five shapes whose levels end in partial blocks: a 2D texture 13 x 7 of four
@@ -46,7 +46,7 @@ use std::time::Duration;
 
 const WAIT: Duration = Duration::from_secs(60);
 
-/// The SHA-256 of plain Metal's lines on an Apple M4 (macOS 27.0.1; EV SID2-cmv1-m4, our own probe
+/// The SHA-256 of plain Metal's lines on an Apple M4 (macOS 27.0.1; our own probe
 /// running these steps over these bytes), one `"<format> <shape> <step>: <n> bytes, sha <first six
 /// bytes of the bytes' SHA-256>\n"` per format, shape and step in the test's order: Metal moved
 /// every block as the model does.
@@ -650,7 +650,7 @@ fn compressed_blocks_move_as_metal_moves_them() {
         device,
     };
     let mut wrong = Vec::new();
-    // The model's lines, as plain Metal printed its own (EV SID2-cmv1-m4).
+    // The model's lines, as plain Metal printed its own.
     let mut transcript = Sha256::new();
     for (pf, block) in FORMATS {
         for (k, shape) in SHAPES.iter().enumerate() {
@@ -696,7 +696,7 @@ fn compressed_blocks_move_as_metal_moves_them() {
 // ---- The second lane: views, interior regions and a large texture ----
 
 /// The SHA-256 of plain Metal's lines for [`views_regions_and_large_levels_move_as_metal_s`]
-/// (an Apple M4, macOS 27.0.1; EV SID2-cmv3-m4, our own probe), as [`METAL_TRANSCRIPT`] is the
+/// (an Apple M4, macOS 27.0.1; our own probe), as [`METAL_TRANSCRIPT`] is the
 /// first test's: Metal moved every block as the model does.
 const METAL_TRANSCRIPT_2: &str = "888ee9af670a85af8ca6b60fa45ef0aff50a47f08947827cf1bb9f5046141ddd";
 

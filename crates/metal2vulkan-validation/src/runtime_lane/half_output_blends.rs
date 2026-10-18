@@ -35,7 +35,7 @@
 //! device blends there and the pipeline announces it. The rule reads the blend color's `half`
 //! before its one minus (the fit of `RGBA16Float`'s blue lane, a blend color of 0.9: `h(1 - h(c))`)
 //! and keeps a term whose factor is `Zero` in the 16-bit float formats' sum, as Metal does there
-//! (EV FBL-zf1-m3: `+0` where the other term is `-0`, a product of a destination of zero), but
+//! (`+0` where the other term is `-0`, a product of a destination of zero), but
 //! drops it in the 32-bit float formats', as Metal's extended-range model does.
 
 use super::degrade_notices::counts;
@@ -540,7 +540,7 @@ fn factor(f: F, c: usize, s: [f64; 4], d: [f64; 4], bc: [f64; 4], r: &dyn Fn(f64
 /// Channel `c` of blend `b`, every factor, product and the result rounded by `r`, with the
 /// largest operand's magnitude: the source, the destination, or the products' magnitudes
 /// summed; and with the factors' magnitudes too (the recorded bound's measure). A term whose
-/// factor is `Zero` is kept in the sum where `kept` (Metal's 16-bit float blend, EV FBL-zf1-m3),
+/// factor is `Zero` is kept in the sum where `kept` (Metal's 16-bit float blend),
 /// else dropped.
 fn blended(
     b: &Blend,

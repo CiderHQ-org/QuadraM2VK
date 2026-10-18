@@ -1079,10 +1079,10 @@ fn a_buffer_made_after_an_unreported_remap_shares_the_live_import() {
 /// Which pages a no-copy buffer uses when the caller maps other pages at its address between its
 /// making and its first GPU use: guest page P1 mapped at address X, B made over X, X remapped in
 /// place to guest page P2 of the same shared memory object (`map_in_place`), and only then B's
-/// first use, a read and a fill of its bytes 0x30..0x40. Metal keeps the pages at the making (EV
-/// ZCI2-remapprobe-m4), and so does the runtime on macOS, whose import is MoltenVK's
-/// `newBufferWithBytesNoCopy:` in the making call: checked there. Elsewhere the driver decides,
-/// and the remap breaks `HostMemory::new`'s contract: printed only (`REMAP-BEFORE-USE`; lavapipe
+/// first use, a read and a fill of its bytes 0x30..0x40. Metal keeps the pages at the making, and
+/// so does the runtime on macOS, whose import is MoltenVK's `newBufferWithBytesNoCopy:` in the
+/// making call: checked there. Elsewhere the driver decides, and the remap breaks
+/// `HostMemory::new`'s contract: printed only (`REMAP-BEFORE-USE`; lavapipe
 /// follows the address, its imports reading through the pointer). Where the device imports no
 /// shared memory, the refusal is printed (typed, as
 /// `host_memory_kinds_are_imported_or_refused_typed` shows).
@@ -1346,8 +1346,7 @@ fn remaps_reported_from_any_thread_change_no_answer() {
 }
 
 /// A copy out of a no-copy buffer reads past its length to the end of its host pages: the
-/// caller's bytes there, the current ones, as plain Metal reads them (an M4 under macOS 27.0.1,
-/// EV SPCrp-probe4-m4 `p_nocopy_page`, `p_nocopy_live`, `p_nocopy_offset`, `p_nocopy_b2b`;
+/// caller's bytes there, the current ones, as plain Metal reads them (an M4 under macOS 27.0.1;
 /// its API validation stops them). The consumer's transfer buffer: 0x3f bytes at the start of a
 /// page-aligned mapping (and at 256 bytes into it), options 0, paged into a texture and copied into
 /// a buffer. A copy past the pages is refused (`Invalid`), as past any other buffer's length.
@@ -1509,7 +1508,7 @@ fn host_memory_kinds_are_imported_or_refused_typed() {
 
 /// A read-only page (Metal makes the buffer, and its GPU reads it). On Linux the runtime refuses
 /// it typed before the import, as it refuses every page the process cannot write: Linux drivers
-/// pin imported pages for writing (measured at 83a57ba2, EVs `RT4-dev-*`: RADV refused the page,
+/// pin imported pages for writing (measured at 83a57ba2: RADV refused the page,
 /// NVIDIA failed it as out of device memory, ANV made it and lost the device at the GPU's read;
 /// lavapipe read it, so there the rule refuses more than the driver would). Elsewhere (MoltenVK,
 /// which hands the range to Metal) it is made, and the GPU reads what the CPU wrote before the
@@ -1554,7 +1553,7 @@ fn a_read_only_page_is_refused_on_linux_and_read_elsewhere() {
 /// fence returned as the first of its Metal command buffer's handlers marked the device lost,
 /// the command pools went, and a later handler aborted the process (`mutex lock failed`): in
 /// one run of `a_gpu_fault_fails_its_command_buffer_and_the_queue_runs_on` on each of two Apple
-/// M4s (EV STL-au2-mvk4). On MoltenVK alone, as that test.
+/// M4s. On MoltenVK alone, as that test.
 #[test]
 fn a_lost_device_s_command_buffers_let_go_of_their_pools_after_the_driver_s_completion() {
     /// Devices lost one after another, each by one fault.
@@ -1669,16 +1668,15 @@ fn a_lost_device_s_command_buffers_let_go_of_their_pools_after_the_driver_s_comp
 }
 
 /// A GPU write into read-only host pages fails its command buffer, and the queue runs on, as
-/// Metal answers (EV RFX-probe1-m4, an M4 with macOS 27.0.1: `Internal`, 1; the consumer's M3
-/// Max with 26.7: `PageFault`, 3): MoltenVK reports the failed Metal command buffer, the runtime
-/// relays its code to the command buffer whose batch it was, and the next command buffer
-/// completes (`device/relay.rs`). A command buffer committed while the failing one runs finishes
-/// with its own answer: completed, or, as Metal's victim of the recovery (EV RFX-probe1-m4's
-/// `next0`), `Execution(1)` or `PageFault`, never the failed one's error. Under the program's own
-/// MoltenVK setting that loses the device after a failure (`MVK_CONFIG_RESUME_LOST_DEVICE` off,
-/// which wins over the runtime's), MoltenVK marks the device lost before it reports, so no
-/// batch's fence can be read: the failed command buffer and every later one fail `DeviceLost`
-/// (EV RFX-lane1-mvk4), and the device refuses new buffers `DeviceLost` (EV ZCI2-hostmem-mvk4);
+/// Metal answers (an M4 with macOS 27.0.1: `Internal`, 1; the consumer's M3 Max with 26.7:
+/// `PageFault`, 3): MoltenVK reports the failed Metal command buffer, the runtime relays its code
+/// to the command buffer whose batch it was, and the next command buffer completes
+/// (`device/relay.rs`). A command buffer committed while the failing one runs finishes with its own
+/// answer: completed, or, as Metal's victim of the recovery, `Execution(1)` or `PageFault`, never
+/// the failed one's error. Under the program's own MoltenVK setting that loses the device after a
+/// failure (`MVK_CONFIG_RESUME_LOST_DEVICE` off, which wins over the runtime's), MoltenVK marks the
+/// device lost before it reports, so no batch's fence can be read: the failed command buffer and
+/// every later one fail `DeviceLost`, and the device refuses new buffers `DeviceLost`;
 /// no runtime thread reaches the lost device outside a section of the exit
 /// guard on the way (a debug build once ended the process there). MoltenVK's reports of the failure
 /// are the only messages. On MoltenVK alone: a Linux driver is refused the pages
@@ -1805,7 +1803,7 @@ fn a_gpu_fault_fails_its_command_buffer_and_the_queue_runs_on() {
             );
         }
         // The next command buffer, committed once the failed one completed, over a buffer made
-        // then: on a lost device the buffer's making may be refused too (EV ZCI2-hostmem-mvk4).
+        // then: on a lost device the buffer's making may be refused too.
         let after = device.new_buffer(256, ResourceOptions::shared());
         let next = after.clone().and_then(|after| {
             let next = queue.command_buffer()?;
@@ -1854,12 +1852,12 @@ fn a_gpu_fault_fails_its_command_buffer_and_the_queue_runs_on() {
 }
 
 /// Memory Metal makes no buffer over is refused by the call that makes the buffer, as Metal
-/// answers nil there (EV ZCI2-remapprobe-m4: pages mapped without access, pages not mapped, and a
-/// mapped page followed by one that is not), never at a later use: typed, `Unsupported`
-/// (`HostMemory`) or `OutOfMemory` (on Linux the runtime's check of the process's mappings, on
-/// macOS the import's answer), the deallocator dropped unrun. Nothing reaches the GPU. Each answer
-/// is printed (`REFUSED-AT-MAKING`). The driver may report each import it failed, as MoltenVK
-/// reports its failed `vkAllocateMemory` (EV ZCI2-lane-mvk4); nothing else is reported.
+/// answers nil there (pages mapped without access, pages not mapped, and a mapped page followed by
+/// one that is not), never at a later use: typed, `Unsupported` (`HostMemory`) or `OutOfMemory` (on
+/// Linux the runtime's check of the process's mappings, on macOS the import's answer), the
+/// deallocator dropped unrun. Nothing reaches the GPU. Each answer is printed
+/// (`REFUSED-AT-MAKING`). The driver may report each import it failed, as MoltenVK reports its
+/// failed `vkAllocateMemory`; nothing else is reported.
 #[test]
 fn memory_metal_makes_no_buffer_over_is_refused_when_it_is_made() {
     let reported = on_device_reporting(|device| {
@@ -1939,7 +1937,7 @@ fn memory_metal_makes_no_buffer_over_is_refused_when_it_is_made() {
 /// Each refusal drops the deallocator without running it, as Metal never runs it for a buffer it
 /// did not make: what Metal stops (`Invalid`: Private and Memoryless storage), and what plain
 /// Metal answers nil for (`Nil`: length 0, and its descriptor form, and a length past
-/// `max_buffer_length`; EV TTG-nil10-m4). (The private option bit the consumer's detached buffers
+/// `max_buffer_length`). (The private option bit the consumer's detached buffers
 /// send, 0x1000000, is taken: `degrade_notices`' `the_private_option_bit_is_ignored_once`.)
 #[test]
 fn refused_no_copy_buffers_never_run_their_deallocator() {

@@ -20,7 +20,7 @@
 //!   everything its creation reads, so a description that covers a making loosely costs a
 //!   compile, never a wrong pipeline.
 //! - **No figure of the driver's to meet.** A record holds one making's data (an Xgc pipeline's
-//!   1.7 MB on an RTX 3090, EV PRDP-wm2-nv3090), so how much of a large cache's initial data a
+//!   1.7 MB on an RTX 3090), so how much of a large cache's initial data a
 //!   driver keeps does not decide which pipelines are kept. The shader cache's cap and its scans,
 //!   the least recently used first (`store.rs`), do: a hit refreshes a record's access time.
 //! - **One making's libraries.** A driver that compiles every shader of a cache's initial data

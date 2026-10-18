@@ -27,8 +27,7 @@
 //!   device's count of addressable buffers is the count of such blocks, not of the program's
 //!   buffers: MoltenVK makes each addressable buffer resident in every encoder whose pipeline reads
 //!   pointers, a cost each command buffer paid per live buffer (2.5 ms a commit at 32768 live
-//!   buffers on an Apple M4, EV CPF-rset1-mvk4; MoltenVK's
-//!   `MVKDevice::encodeGPUAddressableBuffers`).
+//!   buffers on an Apple M4; MoltenVK's `MVKDevice::encodeGPUAddressableBuffers`).
 //!
 //! - **Freed after the batches in flight** where the driver fails pending work when memory a
 //!   device-address buffer lay in is freed (`freed_memory.rs`): a block that goes has its buffer
@@ -110,9 +109,8 @@ pub(super) enum MemoryClass {
 /// What a block of the runtime's holds: buffers (a heap's bytes and every buffer of addresses
 /// among them), or images, never both. On an RTX 5080 a new texture's image bound into the block
 /// that held the running work's buffers, 1024 bytes past a buffer's, waited in
-/// `vkBindImageMemory` for that work to end (493 ms and 502 ms behind a 0.5 s kernel, EVs
-/// STL-ps8-nv5080 and STL-p8-nv5080), where images bound into a block of images, or a new one,
-/// took microseconds (EVs STL-p6-nv5080, STL-p8-nv5080, STL-p9-nv5080). So images take blocks
+/// `vkBindImageMemory` for that work to end (493 ms and 502 ms behind a 0.5 s kernel), where images
+/// bound into a block of images, or a new one, took microseconds. So images take blocks
 /// of their own, one pool per memory type beside the buffers'.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Holds {
@@ -124,7 +122,7 @@ pub(super) enum Holds {
 /// whatever its size: memory no submission has used, so its bind waits for none. On an RTX 5080
 /// a neutral image bound into a block of images, 1024 bytes past another neutral image that a
 /// queued command buffer sampled, waited in `vkBindImageMemory` (NVIDIA's ioctl) until that work
-/// ended (EV STL-au3-nvgdb; 490 ms behind a 0.5 s kernel in EV STL-au2-nv5080). On lavapipe the
+/// ended (490 ms behind a 0.5 s kernel in our probe). On lavapipe the
 /// same case waits for its queue lock instead, in making the image's view.
 ///
 /// Other drivers bind without waiting. Measured with a probe outside the runtime: an image bound
@@ -155,7 +153,7 @@ pub(super) enum ImportFailure {
 /// device-coherent and device-uncached ones of `VK_AMD_device_coherent_memory`, which only a
 /// device with its `deviceCoherentMemory` feature enabled may allocate
 /// (`VUID-vkAllocateMemory-deviceCoherentMemory-02790`), and the runtime enables no such feature.
-/// RADV lists them whether or not it is enabled (types 13 to 16 on a Radeon 780M, EV PERF-types2),
+/// RADV lists them whether or not it is enabled (types 13 to 16 on a Radeon 780M),
 /// with the properties of its other types beside those bits.
 pub(super) fn allocatable(flags: vk::MemoryPropertyFlags) -> bool {
     !flags.intersects(
@@ -169,7 +167,7 @@ pub(super) fn allocatable(flags: vk::MemoryPropertyFlags) -> bool {
 /// `vkCopyImageToMemoryEXT` read a 1920 x 1080 `BGRA8Unorm` image's 8 MiB in 758 ms from
 /// device-local host-visible memory (resizable BAR), in 127 ms from uncached system memory and in
 /// 2.9 ms from host-cached system memory; on a Radeon 780M in 144 ms from RADV's device-local
-/// host-visible type and in 4.6 ms from its host-cached one (EVs XSH-hrp2-3090, XSH-hrp4-radv).
+/// host-visible type and in 4.6 ms from its host-cached one.
 ///
 /// Only coherent ones: the runtime flushes and invalidates no mapped range, as Metal's `Shared`
 /// and `Managed` textures need no flush, so a cached type that is not coherent leaves the image's
@@ -205,8 +203,8 @@ pub(super) fn host_incoherent(types: &[vk::MemoryType]) -> u32 {
 /// of `Shared` memory where it has one among them, as Metal's `Shared` and `Managed` textures on
 /// unified memory lie in memory the CPU reads at its speed (on a Radeon 780M, which has no
 /// device-local type the host caches, in system memory the host caches: the GPU samples, renders
-/// into, clears and copies a 1080p image there as fast as in its device-local memory or faster,
-/// EV XSH-cost2-radv). `None` where it has none: the image takes `class` and every allowed type,
+/// into, clears and copies a 1080p image there as fast as in its device-local memory or faster).
+/// `None` where it has none: the image takes `class` and every allowed type,
 /// as any image of the class does. A discrete GPU with no host-cached memory of the class (NVIDIA
 /// on an RTX 3090) so still copies on the host, slowly: a copy through a submission would queue
 /// behind the program's work, and its GPU reaches system memory across the bus.
@@ -236,14 +234,13 @@ pub(super) fn host_cached_placement(
 /// `Shared` and `WriteCombined` memory is host-visible and coherent, as Metal's shared storage
 /// needs no flush. `Shared` memory prefers a host-cached type, then a device-local one: the host
 /// reads uncached memory slowly (0.14 GB/s from RADV's device-local host-visible type on a Radeon
-/// 780M, against 21 GB/s from its cached one, EV PERF-mem2; 0.01 GB/s from resizable BAR on an
-/// RTX 3090, against 45 GB/s, EV PERF-types2), while an integrated GPU uses either at one speed.
-/// A discrete GPU uses host-cached system memory across the bus (on the RTX 3090, 16-byte stores
-/// at 1.7 GB/s and 4-byte stores 12 bytes apart at 0.08 GB/s, against 425 and 850 GB/s in
-/// device-local memory), as a discrete Mac's GPU uses a shared resource; `Device::new_buffer`
-/// announces it (`Degradation::SharedInSystemMemory`). So without unified memory
-/// `WriteCombined` memory, which the host does not read, prefers a device-local type; with
-/// unified memory it is `Shared` memory.
+/// 780M, against 21 GB/s from its cached one; 0.01 GB/s from resizable BAR on an RTX 3090, against
+/// 45 GB/s), while an integrated GPU uses either at one speed. A discrete GPU uses host-cached
+/// system memory across the bus (on the RTX 3090, 16-byte stores at 1.7 GB/s and 4-byte stores 12
+/// bytes apart at 0.08 GB/s, against 425 and 850 GB/s in device-local memory), as a discrete Mac's
+/// GPU uses a shared resource; `Device::new_buffer` announces it
+/// (`Degradation::SharedInSystemMemory`). So without unified memory `WriteCombined` memory, which
+/// the host does not read, prefers a device-local type; with unified memory it is `Shared` memory.
 pub(super) fn candidates(
     types: &[vk::MemoryType],
     allowed: u32,

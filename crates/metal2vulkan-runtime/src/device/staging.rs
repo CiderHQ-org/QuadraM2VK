@@ -11,7 +11,7 @@
 //!   `replaceRegion` of shared storage are CPU copies that wait for no GPU work. Another queue of
 //!   the graphics family is not enough: on the 3090 (615.71.09) a readback there waited 1.88 s for
 //!   a 2 s kernel running on the first, where the copy engine's took 7.8 to 13.5 ms with the
-//!   kernel still running, and 2.65 ms idle (EV XSH-sqp1-3090, raw Vulkan). Here nothing but these
+//!   kernel still running, and 2.65 ms idle (raw Vulkan). Here nothing but these
 //!   copies runs, each waited for before the next, so a copy waits for itself alone.
 //! - **What it waits for.** Each submission waits, on the GPU, for the value through which each
 //!   of the device's other `VkQueue`s completed as the host saw it: work that already completed,

@@ -11,8 +11,7 @@
 //! bytes, and every read of it sees alpha 1, at a slot through its view's component mapping. This
 //! lane asks whether such a texture's reads (`float` and `half` results, or `uint` or `int` ones
 //! for an integer format) and its size and level queries through an argument buffer are, bit for
-//! bit, the same texture's through a slot, whose reads are Metal's (EV FPV-sw1-m4, TXN-xrprobe4,
-//! the bfloat probes; FPV-pf1-m4 for RGBX).
+//! bit, the same texture's through a slot, whose reads are Metal's (the bfloat probes; for RGBX).
 //!
 //! Each texture is 8 x 4 with its full chain of four levels, every level the probe's
 //! pseudo-random bytes; the kernel reads every texel of each level, two texels past it, and a

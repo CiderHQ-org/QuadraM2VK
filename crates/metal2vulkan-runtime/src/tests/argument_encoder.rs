@@ -108,8 +108,8 @@ fn a_buffer_is_written_as_its_address_plus_the_offset() {
         Ok(0x0000_0100_0001_8fff)
     );
     assert_eq!(buffer_word(None, 0), Ok(0));
-    // No buffer writes 0 whatever the offset, as plain Metal writes it (EV RFL-argmisuse1-m4,
-    // where validation stops "offset(16) must be 0 when buffer is nil").
+    // No buffer writes 0 whatever the offset, as plain Metal writes it (where validation stops
+    // "offset(16) must be 0 when buffer is nil").
     assert_eq!(buffer_word(None, 100_000), Ok(0));
     // probe 4's refusal: "offset (4096) should be smaller than the buffer length (4096)".
     assert_eq!(
@@ -123,7 +123,7 @@ fn a_buffer_is_written_as_its_address_plus_the_offset() {
 
 #[test]
 fn constant_data_answers_as_plain_metal() {
-    // SPR-probe1-m4 (an M4, plain Metal): `constantDataAtIndex:` answers a constant's offset, the
+    // Measured on an M4, plain Metal: `constantDataAtIndex:` answers a constant's offset, the
     // arguments' start (offset 0) at an index no argument has (in a gap or past the layout), and
     // the other argument's own offset at an argument of another type (a texture at index 3 ->
     // its offset 32). `MTL_DEBUG_LAYER=1` asserts at the last two; the runtime follows plain

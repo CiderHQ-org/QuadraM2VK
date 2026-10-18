@@ -263,8 +263,8 @@ pub enum CommandStage {
     Mesh,
 }
 
-/// The fixed-function state a render command's setter sets (MSL 4.0 `render_command::set_*`;
-/// probe `ICBV-air-rstate-m4`): each a `void (cmd, i32, ...)` whose values follow the index.
+/// The fixed-function state a render command's setter sets (MSL 4.0 `render_command::set_*`): each
+/// a `void (cmd, i32, ...)` whose values follow the index.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum RenderState {
     /// `air.set_cull_mode_render_command`: an `i32` cull mode.
@@ -279,7 +279,7 @@ pub enum RenderState {
     /// `air.set_triangle_fill_mode_render_command`: an `i32` fill mode.
     TriangleFillMode,
     /// `air.set_depth_stencil_state_render_command`: a `depth_stencil_state` handle (`ptr
-    /// addrspace(1)`), as Metal's compiler declares it (EV `RFL-ksetters-m4`).
+    /// addrspace(1)`), as Metal's compiler declares it.
     DepthStencilState,
 }
 
@@ -320,7 +320,7 @@ pub enum IndirectCommand {
     /// `air.draw_indexed_primitives_render_command.p<space>i<16|32>`: `void (cmd, i32, i32, i32,
     /// ptr, i32, i32, i32)`: the index, primitive type, index count, the index buffer (16-bit or
     /// 32-bit indices, as `wide` says, the overload naming the index type), instance count, base
-    /// vertex, base instance (probe `RT7-air-icbdraws2-m4`).
+    /// vertex, base instance.
     DrawIndexedPrimitives {
         /// The address space of the index buffer: device or constant.
         space: AddrSpace,
@@ -330,8 +330,8 @@ pub enum IndirectCommand {
     /// `air.draw_patches_render_command.p<space>i32.p<space>i8`: `void (cmd, i32, i32, i32, i32,
     /// ptr, i32, i32, ptr, i32, float)`: the index, control points, patch start, patch count, the
     /// patch index buffer (`uint`s; null for none), instance count, base instance, the
-    /// tessellation factor buffer, its instance stride, and a factor scale (probe
-    /// `RT7-air-icbdraws3-m4`); the overload names each buffer's space.
+    /// tessellation factor buffer, its instance stride, and a factor scale; the overload names each
+    /// buffer's space.
     DrawPatches {
         /// The address space of the patch index buffer: device or constant.
         patch_indices: AddrSpace,
@@ -363,7 +363,7 @@ pub enum IndirectCommand {
     /// patch start, patch count, the patch index buffer (`uint`s; null for none), the
     /// control-point index buffer (bytes of the pipeline's index type; null for none), instance
     /// count, base instance, the tessellation factor buffer, its instance stride, and a factor
-    /// scale (probe `RT7-air-icbdraws3-m4`); the overload names each buffer's space.
+    /// scale; the overload names each buffer's space.
     DrawIndexedPatches {
         /// The address space of the patch index buffer: device or constant.
         patch_indices: AddrSpace,

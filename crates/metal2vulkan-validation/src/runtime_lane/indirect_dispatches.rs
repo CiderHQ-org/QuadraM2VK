@@ -12,8 +12,8 @@
 //! - a group count past the device's `maxComputeWorkGroupCount` on y (65536 groups), which the
 //!   direct dispatch splits;
 //! - nothing for a zero axis of the grid or the group counts, a threadgroup with a zero axis, or
-//!   one past the state's `max_total_threads_per_threadgroup`, as probes RT11-metal-probe-17b and
-//!   -18 measured Metal's on an M3 Max and an M4;
+//!   one past the state's `max_total_threads_per_threadgroup`, as our probes measured Metal's on an
+//!   M3 Max and an M4;
 //! - arguments at an offset that is not a multiple of 4 read at the multiple below, as plain
 //!   Metal reads them;
 //! - refused as Metal's API validation refuses arguments past the buffer, and with no pipeline
@@ -352,7 +352,7 @@ fn indirect_dispatches_are_refused_where_metal_refuses_them() {
 }
 
 /// An offset that is not a multiple of 4 reads the arguments at the multiple below, as plain
-/// Metal reads them where its API validation asserts (EV SWP-misuse5-m4): the dispatch writes what
+/// Metal reads them where its API validation asserts: the dispatch writes what
 /// the one at [`OFFSET`] writes, its arguments running past the end of the buffer from the offset
 /// given but not from there.
 #[test]

@@ -437,7 +437,7 @@ fn render_states_give_handles_and_tables_per_stage() {
             );
         }
         // A stage that is not one stage: plain Metal answers nil, but faults on a table of no
-        // stage (EV TTG-nil8-m4).
+        // stage.
         for stage in [
             RenderStages::empty(),
             RenderStages::VERTEX | RenderStages::FRAGMENT,

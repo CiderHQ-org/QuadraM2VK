@@ -161,16 +161,16 @@ pub(super) const UNMEASURED_FLOAT_DEPTH: &str = "its driver's fragment depth is 
 /// on these as the announced `drawn-depth-copy`, naming them; on a driver neither here nor exact
 /// it runs announced too, naming what Vulkan leaves to the driver ([`UNMEASURED_FLOAT_DEPTH`]).
 const FRAGMENT_DEPTH_CHANGES: &[(DriverId, &str)] = &[
-    // MoltenVK 1.4.1 on an M3 Max and an M4 (EVs `RT6-fragdepth-mvk`, `RPL-ss1-*`; the NaNs by
-    // EV ZIN2-dm3-mvk4 on an M4, which drew them over a depth of 0.25: changed).
+    // MoltenVK 1.4.1 on an M3 Max and an M4 (the NaNs by our probe on an M4, which drew them
+    // over a depth of 0.25: changed).
     (
         DriverId::MOLTENVK,
         "its driver's fragment depth changes values: a value with the sign bit set (-0, a \
          negative value, -inf, a negative NaN) is stored as +0, a value past 1 and +inf as 1, \
          and a positive NaN writes nothing, the sample keeping the depth it held",
     ),
-    // NVIDIA's 615.71.09 on the RTX 3090 (EV `RT6-fragdepth-nv3090`), with
-    // `VK_EXT_depth_range_unrestricted`: values outside `[0, 1]` are kept.
+    // NVIDIA's 615.71.09 on the RTX 3090, with `VK_EXT_depth_range_unrestricted`: values outside
+    // `[0, 1]` are kept.
     (
         DriverId::NVIDIA_PROPRIETARY,
         "its driver's fragment depth changes values: denormals are flushed to zero of their \

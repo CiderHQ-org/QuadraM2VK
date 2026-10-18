@@ -3,7 +3,7 @@
 //!
 //! The store-buffering litmus (`metal2vulkan_devtools::litmus::store_buffering`): of each pair
 //! of threads, one stores `x[i]`, fences and loads `y[i]`, the other stores `y[i]`, fences and
-//! loads `x[i]`. Under Metal's `seq_cst` device fence no pair reads 0 twice (EV SDX-p1-m3: none
+//! loads `x[i]`. Under Metal's `seq_cst` device fence no pair reads 0 twice (none
 //! of 13.1 M pairs on an M3, where 2,684 did without a fence). The translation keeps the order
 //! through an acquire-release increment of the command buffer's status word after each such
 //! fence; Vulkan's own `SequentiallyConsistent` is `AcquireRelease`. The lane runs

@@ -61,9 +61,9 @@ fn a_screen_side_is_1_to_32768_pixels() {
     }
 }
 
-/// A map takes 0 to 2 layers, counted as Metal counts them (probe RT11-metal-probe-8): from
-/// index 0 up to the first layer without samples on an axis (nil in Metal's descriptor). The
-/// layers after it are ignored. A count of 0 makes a map of no layers, as plain Metal does.
+/// A map takes 0 to 2 layers, counted as Metal counts them: from index 0 up to the first layer
+/// without samples on an axis (nil in Metal's descriptor). The layers after it are ignored. A count
+/// of 0 makes a map of no layers, as plain Metal does.
 #[test]
 fn a_map_takes_zero_to_two_layers() {
     let empty = compile(&descriptor(64, 64, &[])).unwrap();
@@ -111,7 +111,7 @@ fn the_compile_layers_bounds_are_its_own_error() {
 
 /// `physicalSizeForLayer:` is the layer's physical size, depth 1, and past the layers width 0
 /// and the layers' shared vertical extent: Metal's height there, and its width just past a map
-/// of one layer (probes RT11-metal-probe-7 and -9).
+/// of one layer.
 #[test]
 fn a_layer_past_the_map_has_no_width_and_the_shared_height() {
     let map = compile(&descriptor(64, 64, &[HALF, (&[1.0], &[0.25])])).unwrap();
@@ -121,7 +121,7 @@ fn a_layer_past_the_map_has_no_width_and_the_shared_height() {
         assert_eq!(physical_size(&map, past), Size::new(0, 33, 1), "{past}");
     }
     // A map of no layers: width 0 and its vertical axis's 16 rows at layers 0 and 1, as Metal
-    // answers (EV RRS3-rmprobe2, an M4); at layer 2 Metal reads 16 past its table, the runtime 0.
+    // answers (an M4); at layer 2 Metal reads 16 past its table, the runtime 0.
     let empty = compile(&descriptor(256, 256, &[])).unwrap();
     for layer in [0, 1, 2] {
         assert_eq!(physical_size(&empty, layer), Size::new(0, 16, 1), "{layer}");

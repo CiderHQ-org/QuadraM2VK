@@ -23,14 +23,13 @@
 //!   and the barrier makes each lane's part visible to the simdgroup. A wait then reads no event,
 //!   so an event stored into thread memory that only waits read goes with the unobserved code.
 //!
-//! **Measured** (EVs RFS-acp2-m4 and -m3, an M4 and the M3 Max, with and without Metal's
-//! validation layers; our own kernels whose declared functions are renamed to the intrinsics):
-//! the threadgroup memory after the wait of one-, two-, and four-byte copies over tiles from 0x4 to
-//! 64x16, element strides 1 to 3, a destination pitch past its tile, offsets positive, negative,
-//! mixed, and past the source, source tiles smaller than the destination's, empty, and of a
-//! negative extent (every column copied: the test is unsigned), two simdgroups copying apart,
-//! simdgroups that copy nothing, and partial simdgroups of 8 lanes and of 1 lane (each copies the
-//! whole tile); and every event's `is_null`.
+//! **Measured** (an M4 and the M3 Max, with and without Metal's validation layers; our own kernels
+//! whose declared functions are renamed to the intrinsics): the threadgroup memory after the wait
+//! of one-, two-, and four-byte copies over tiles from 0x4 to 64x16, element strides 1 to 3, a
+//! destination pitch past its tile, offsets positive, negative, mixed, and past the source, source
+//! tiles smaller than the destination's, empty, and of a negative extent (every column copied: the
+//! test is unsigned), two simdgroups copying apart, simdgroups that copy nothing, and partial
+//! simdgroups of 8 lanes and of 1 lane (each copies the whole tile); and every event's `is_null`.
 //!
 //! Not expanded (lowering refuses each call left, typed): a copy outside a kernel, from
 //! threadgroup to device memory, of another element size, with a `clamp` operand other than 0

@@ -6,14 +6,13 @@
 //! in rows `align(w, 16)` bytes apart. Metal's blits address both planes by rows
 //! `⌊4 w / 16⌋ · 16` bytes apart ([`PlaneRows::blit`](super::PlaneRows::blit), `plane_copy`'s
 //! model). Where the destination's planes lie in a heap's bytes, the bytes the blit writes are
-//! the heap's (EVs XRR2-tph1-m4 and XRR2-tph1-m3, an Apple M4 under macOS 27.0.1 and an M3 Max
-//! under macOS 26.7, byte for byte alike): a copy of `sw x sh` texels writes, for each row
-//! `r < sh` and column `c < sw`, the 4 color bytes at `Dc + r · Bd + 4 c` and the alpha byte at
-//! `Da + r · Bd + c`, from the source's at `Sc + r · Bs + 4 c` and `Sa + r · Bs + c`, where `Dc`
-//! and `Da` are the copy's first color and alpha bytes, `Bd` and `Bs` the two textures' blit rows.
-//! The alpha bytes land past the alpha plane, on whatever else the bytes hold; the source's
-//! bytes are read as they were before the copy. Where the copy's rows overlap in the destination,
-//! the later row's bytes are kept here.
+//! the heap's (an Apple M4 under macOS 27.0.1 and an M3 Max under macOS 26.7, byte for byte alike):
+//! a copy of `sw x sh` texels writes, for each row `r < sh` and column `c < sw`, the 4 color bytes
+//! at `Dc + r · Bd + 4 c` and the alpha byte at `Da + r · Bd + c`, from the source's at `Sc + r ·
+//! Bs + 4 c` and `Sa + r · Bs + c`, where `Dc` and `Da` are the copy's first color and alpha bytes,
+//! `Bd` and `Bs` the two textures' blit rows. The alpha bytes land past the alpha plane, on
+//! whatever else the bytes hold; the source's bytes are read as they were before the copy. Where
+//! the copy's rows overlap in the destination, the later row's bytes are kept here.
 //!
 //! **The module** (one per device). One `GLCompute` entry `main` with local size
 //! ([`PlaneBytesCopyModule::LOCAL_SIZE`], 1, 1), no push constants, and three storage buffers of

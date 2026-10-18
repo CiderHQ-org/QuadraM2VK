@@ -1,19 +1,18 @@
 //! Device tests of a constant depth bias on a `Depth16Unorm` depth on the device the cfg selects,
 //! under the validation layer.
 //!
-//! Metal probes (EVs RRS-probe-7-m3, RRS-probe-7-m4 and RRS-probe-7b-m3; an M3 Max and an M4 alike,
-//! each case plain and under Metal's API validation) drew a full-screen triangle at each depth
-//! below into a `Depth16Unorm` texture cleared to 1, its depth test `Always` and written, under
-//! each constant bias, and read the stored codes: probe 7 at 16 depths (0, near the ends, at codes
-//! and between them) under 27 factors (0, ±0.25 to ±8, ±100, ±1000 and ±30000), probe 7b at 39
-//! depths around the midpoints of codes 100 and 40000 under 7 (0, ±0.5, ±1 and ±2). Every code is
-//! Metal's rule ([`metal_code`]): wherever the constant `c` (finite) or the slope factor is
-//! nonzero, the constant biases by `c + 1` units of 1/65535 for `c` of 0 or more and `c - 1` below,
-//! as `float`, added to the depth rounded toward zero, and the sum clamped to `[0, 1]` and stored
-//! rounded to nearest. Our probe `depth16.swift` on the M3 Max under macOS 27.0.1 drew both grids
-//! again (every code as before) and 24000 random depths and constants (every code the rule's),
-//! and found that a slope alone brings the one unit: [`SLOPE_ALONE`], flat triangles (so the slope
-//! adds nothing itself) under a constant of 0.
+//! Metal probes (an M3 Max and an M4 alike, each case plain and under Metal's API validation) drew
+//! a full-screen triangle at each depth below into a `Depth16Unorm` texture cleared to 1, its depth
+//! test `Always` and written, under each constant bias, and read the stored codes: probe 7 at 16
+//! depths (0, near the ends, at codes and between them) under 27 factors (0, ±0.25 to ±8, ±100,
+//! ±1000 and ±30000), probe 7b at 39 depths around the midpoints of codes 100 and 40000 under 7 (0,
+//! ±0.5, ±1 and ±2). Every code is Metal's rule ([`metal_code`]): wherever the constant `c`
+//! (finite) or the slope factor is nonzero, the constant biases by `c + 1` units of 1/65535 for `c`
+//! of 0 or more and `c - 1` below, as `float`, added to the depth rounded toward zero, and the sum
+//! clamped to `[0, 1]` and stored rounded to nearest. Our probe `depth16.swift` on the M3 Max under
+//! macOS 27.0.1 drew both grids again (every code as before) and 24000 random depths and constants
+//! (every code the rule's), and found that a slope alone brings the one unit: [`SLOPE_ALONE`], flat
+//! triangles (so the slope adds nothing itself) under a constant of 0.
 //!
 //! Where the profile takes `DriverDeviation::MetalDepth16Stores`, the device converts an unbiased
 //! depth, and where it also takes `DriverDeviation::MetalDepth16BiasedStores` a biased one: the

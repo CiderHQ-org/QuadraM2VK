@@ -277,8 +277,8 @@ impl Device {
     /// `memory` carries a dma-buf source ([`HostMemory::with_dma_buf`]), the dma-bufs it makes of
     /// the pages are imported instead.
     ///
-    /// Refused: a length of 0 or past `max_buffer_length` (`Nil`, as plain Metal answers nil, EV
-    /// TTG-nil10-m4); `Private` or `Memoryless` storage, as Metal stops them, and an undefined
+    /// Refused: a length of 0 or past `max_buffer_length` (`Nil`, as plain Metal answers nil);
+    /// `Private` or `Memoryless` storage, as Metal stops them, and an undefined
     /// option (`Invalid`); a device
     /// without `VK_EXT_external_memory_host` (`Unsupported`, naming it); memory this device
     /// cannot import exactly, by its pointer or by its dma-bufs (`Unsupported`, `HostMemory`),

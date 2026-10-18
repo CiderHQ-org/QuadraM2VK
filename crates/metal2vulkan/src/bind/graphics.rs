@@ -22,7 +22,7 @@
 //! - **Vertex buffers.** One [`VertexBufferBind`] per fixed-function binding of the pipeline's
 //!   `VertexInputState`; the slot must be bound (`UnboundVertexBuffer`), and a `PerBind` stride
 //!   is the bind's `attributeStride`: 0 for a buffer or inline bytes bound without one, as plain
-//!   Metal's encoder reads them (its debug layer stops the draw; EV `RFL-vbytes-m4`); inline bytes
+//!   Metal's encoder reads them (its debug layer stops the draw); inline bytes
 //!   bound at `MTLAttributeStrideStatic`, which an M4 read as element 0 and zeros past it, are
 //!   `MissingVertexStride`. A binding the shape binds where fixed-function input cannot fetch it (a
 //!   bind offset whose alignment class misses an attribute's Vulkan alignment; a per-bind stride
@@ -3401,10 +3401,10 @@ fn factor_template(
 const HALF_INFINITY: u16 = 0x7c00;
 
 /// The scale the control stage is pushed for a scale that is infinite as a `half`, which
-/// multiplies every positive factor past the maximum level, as Metal's does (EVs ICBV-scale-m3
-/// and -m4: 70000 and `+∞` drew what the maximum factor draws). 2^32 does so finitely, as the
-/// control stage requires (its module docs): its product with the least positive `half` factor,
-/// 2^-24, is 2^8, past every level (at most 64), and with the largest finite one below 2^48.
+/// multiplies every positive factor past the maximum level, as Metal's does (70000 and `+∞` drew
+/// what the maximum factor draws). 2^32 does so finitely, as the control stage requires (its module
+/// docs): its product with the least positive `half` factor, 2^-24, is 2^8, past every level (at
+/// most 64), and with the largest finite one below 2^48.
 const INFINITE_SCALE: f32 = 4_294_967_296.0;
 
 /// What a patch draw binds and writes ([`patch_binding`]): the factor buffer's range, residual bind
@@ -3497,7 +3497,7 @@ fn patch_binding(
     }
     let f = state.tessellation_factors;
     // Metal takes the scale as a `half`, rounded to nearest even, and multiplies the factors by a
-    // positive one, subnormal and infinite ones included (EVs ICBV-scale-m3 and -m4); one that is
+    // positive one, subnormal and infinite ones included; one that is
     // 0, negative or NaN as a `half` is refused.
     let scale = f32_to_f16_bits(f.scale);
     if !(0x0001..=HALF_INFINITY).contains(&scale) {
@@ -4579,8 +4579,8 @@ fn amplification_writes(t: &GraphicsTemplate) -> Result<Vec<Vec<PushConstantWrit
 }
 
 /// The stride a per-bind layout reads inline bytes bound at `attribute_stride` at, for the
-/// vertex buffer `slot`: the bind's, 0 without one, as plain Metal reads them (EV
-/// `RFL-vbytes-m4`). `MTLAttributeStrideStatic` (`u32::MAX`), which an M4 read as element 0 and
+/// vertex buffer `slot`: the bind's, 0 without one, as plain Metal reads them.
+/// `MTLAttributeStrideStatic` (`u32::MAX`), which an M4 read as element 0 and
 /// zeros past it, is not emulated: `MissingVertexStride`.
 fn bytes_stride(attribute_stride: Option<u32>, slot: SlotRef) -> Result<u32, BindError> {
     match attribute_stride {

@@ -10,7 +10,7 @@
 //! that very `VkRenderPass` sets (`MVKGraphicsPipeline` in MoltenVK 1.4.1's `MVKPipeline.mm`; a
 //! `MVKRenderSubpass` begins with 1). A pass made per encoder, after the pipelines it draws were
 //! made against another, compatible one, rasterized one sample: at 2x each pixel held sample 0
-//! alone (EV `RT6-atl-gpu-mvk`). The kept pass is the one its pipelines were made against, on every
+//! alone. The kept pass is the one its pipelines were made against, on every
 //! device, so it is the one its subpass's default was set on; the others rasterize the pipelines'
 //! count either way. A pass of no attachments has no load or store operation, so the one pass
 //! serves both as the compatible pass and as the pass begun.

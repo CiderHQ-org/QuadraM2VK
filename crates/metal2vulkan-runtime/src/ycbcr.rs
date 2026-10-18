@@ -10,28 +10,24 @@
 //! (`newTextureWithDescriptor:iosurface:plane:`; plain creation answers nil,
 //! `TextureProblem::NoTextureOfFormat`), or as a view of its converted format.
 //!
-//! - **What Metal reads** (an Apple M4 under macOS 27.0.1, EVs XRR2-ycc1-m4, XRR2-ycc2-m4 and
-//!   TXN2-ycr1-m4; TXN2-ycq1-m4 for 4:2:2 and 4:4:4): each texel from the luma code at its place
-//!   and the chroma pairs around it at the format's subsampling: 4:2:0 9/3/3/1 over the four
-//!   nearest pairs at the middle of each 2x2 block, 4:2:2 3/1 over the two nearest across, its
-//!   row's down, 4:4:4 its own pair (the chroma plane of a surface of finer chroma read as the
-//!   format's at its rows), each code a byte, the high 10 bits of a 16-bit word, or one of three
-//!   10-bit codes of a 32-bit word, packed (EVs TXN2-ycq1-m4 and TXN2-ycp1-m4). The converted
-//!   formats read the color converted by the surface's range (its OSType: `4..v` and `x4..`
-//!   video, `4..f` and `xf..` full) and the matrix it held when the texture was made
-//!   (`kIOSurfaceYCbCrMatrix`: BT.601 or none, BT.709, BT.2020, the last EV TXN2-ycr3-m4, and
-//!   SMPTE 240M, read as BT.709, EV XRR2-ycf3p4-m4): every channel a multiple of 1/2048, and
-//!   alpha 1. The code formats (540 to 545) read the codes, red Cr, green Y, blue Cb, each
-//!   `code / 1023` or `code / 255`, alpha 1 (EVs XRR2-ycr540-m4 for 540, XRR2-ycr541-m4 for 541,
-//!   542, 544 and 545). The `_sRGB` twins read the converted sum
-//!   through the sRGB curve, every channel a multiple of 1/8192 (EVs TXN2-ycr1-m4 and
-//!   TXN2-ycv1-m4, every one of the curve's 8193 steps), and a `half` read of it rounds with
-//!   ties away from zero (`metal2vulkan::bind::ycbcr_read` states the arithmetic). `read()`, a
-//!   nearest sample and a gather read those texels; a 4:4:4 texture samples repeat, mirrored
-//!   repeat and mirror-clamp-to-edge as those modes, a 4:2:0 or 4:2:2 one as clamp-to-edge (EVs
-//!   TXN2-ycb1-m4 and TXN2-ycb2-m4; XRR2-ycr541-m4 and XRR2-ycr541b-m4 for the code formats), and
-//!   the borders read alpha 1, but for a texture read as codes, whose clamp-to-zero and
-//!   clamp-to-border-color read as clamp-to-edge too.
+//! - **What Metal reads** (an Apple M4 under macOS 27.0.1; for 4:2:2 and 4:4:4): each texel from
+//!   the luma code at its place and the chroma pairs around it at the format's subsampling: 4:2:0
+//!   9/3/3/1 over the four nearest pairs at the middle of each 2x2 block, 4:2:2 3/1 over the two
+//!   nearest across, its row's down, 4:4:4 its own pair (the chroma plane of a surface of finer
+//!   chroma read as the format's at its rows), each code a byte, the high 10 bits of a 16-bit word,
+//!   or one of three 10-bit codes of a 32-bit word, packed. The converted formats read the color
+//!   converted by the surface's range (its OSType: `4..v` and `x4..` video, `4..f` and `xf..` full)
+//!   and the matrix it held when the texture was made (`kIOSurfaceYCbCrMatrix`: BT.601 or none,
+//!   BT.709, BT.2020 (measured too), and SMPTE 240M, read as BT.709): every channel a
+//!   multiple of 1/2048, and alpha 1. The code formats (540 to 545) read the codes, red Cr, green
+//!   Y, blue Cb, each `code / 1023` or `code / 255`, alpha 1 (for 540, for 541, 542, 544 and 545).
+//!   The `_sRGB` twins read the converted sum through the sRGB curve, every channel a multiple of
+//!   1/8192 (every one of the curve's 8193 steps), and a `half` read of it rounds with ties away
+//!   from zero (`metal2vulkan::bind::ycbcr_read` states the arithmetic). `read()`, a nearest sample
+//!   and a gather read those texels; a 4:4:4 texture samples repeat, mirrored repeat and
+//!   mirror-clamp-to-edge as those modes, a 4:2:0 or 4:2:2 one as clamp-to-edge (for the code
+//!   formats), and the borders read alpha 1, but for a texture read as codes, whose clamp-to-zero
+//!   and clamp-to-border-color read as clamp-to-edge too.
 //! - **The image.** The texture is an image of those texels, which holds every one exactly
 //!   (`R16G16B16A16_SFLOAT` of the converted values, `R32G32B32A32_SFLOAT` of the sRGB twins',
 //!   16 bytes a texel where a half holds no step of 1/8192 above 1/4,
@@ -51,14 +47,12 @@
 //!   tell cheaply that they are unchanged since the last conversion, and converts at every
 //!   encoder that uses the texture.
 //! - **The texels Metal's copies move** are the luma plane's bytes, a code's bytes a texel
-//!   (EVs TXN2-ycr2-m4, TXN2-ycr4-m4 for 4:2:2 and 4:4:4 and, for the code formats,
-//!   XRR2-ycr540c-m4 and XRR2-ycr541-m4):
-//!   `get_bytes`, `replace_region` and a blit to or from a buffer move the luma rows (Metal
-//!   keeps the chroma plane), the texture's `Texels` (`buffer_texture.rs`). A packed texture's
-//!   `get_bytes` and `replace_region` move nothing, at any bytes per row (EV TXN2-ycp1-m4: the
-//!   bytes and both planes as they were, 48 calls of each), and its blits with a buffer, which
-//!   move bytes at places that follow no rule found, are refused.
-//! - **Plane 1** (EV XRR2-ycp3-m4: each of the 18 unpacked formats above over plane 1 of `422v`,
+//!   (for 4:2:2 and 4:4:4 and, for the code formats): `get_bytes`, `replace_region` and a blit to
+//!   or from a buffer move the luma rows (Metal keeps the chroma plane), the texture's `Texels`
+//!   (`buffer_texture.rs`). A packed texture's `get_bytes` and `replace_region` move nothing, at
+//!   any bytes per row (the bytes and both planes as they were, 48 calls of each), and its blits
+//!   with a buffer, which move bytes at places that follow no rule found, are refused.
+//! - **Plane 1** (each of the 18 unpacked formats above over plane 1 of `422v`,
 //!   `422f`, `444v`, `444f`, `x422`, `xf22`, `x444` and `xf44` surfaces, without a matrix and with
 //!   BT.709, 7 x 5 to 64 x 64; `read()`, a `half` read and nearest samples, 0 texels off). Over
 //!   plane 1 of a surface whose plane 1 is as tall as plane 0 (4:2:2, 4:4:4), Metal reads plane 1's
@@ -69,28 +63,27 @@
 //! - **Views.** A converted texture's view as its `_sRGB` twin (Metal makes it with
 //!   `ShaderRead` usage alone) is a texture of the twin over the same planes, with a conversion
 //!   of its own: Metal's view reads what a texture of the twin over the surface reads, bit for
-//!   bit (EVs TXN2-ycv1-m4 and TXN2-ycq1-m4; `texture/ycbcr_image.rs`).
+//!   bit (`texture/ycbcr_image.rs`).
 //! - **Refused** (`Unsupported`, `NotImplemented`, `Feature::Format`, naming what): a surface of
 //!   an OSType the format is not measured over (Metal makes 505 and 543 over plane 0 of many
-//!   more, EV TXN2-ycr1-m4), or whose chroma plane is smaller than the format's (Metal reads
-//!   past it, EV TXN2-ycq1-m4), plane 1 of a 4:2:0 surface (Metal reads its rows past the plane,
-//!   into the bytes after it), plane 1 of a packed surface (not measured), a plane past 1, plane 1
-//!   at other bytes than the surface's facts name, a matrix other than BT.601, BT.709, BT.2020 or
-//!   SMPTE 240M, a texture of another size than the surface's, planes at offsets or rows off 16
-//!   bytes, a row shorter than its codes, planes past the buffer, and planes past one storage
-//!   range; a packed texture's blit with a buffer (above); a copy between two such textures (Metal
-//!   copies both planes), a view in another format than the twin (a twin's view as its converted
-//!   format among them, unmeasured), and a pass rendering into one but as **Passes** below say
-//!   (Metal converts back into the planes). A function's writes to a 4:2:0 or 4:2:2 format are
-//!   dropped, as Metal drops them (`metal::format::writes_dropped`); a 4:4:4 `_sRGB` twin's or
-//!   packed format's are refused (the twins' encoding is not found, and the M3 drops the packed
-//!   formats' writes where the M4 stores them), as are a texture's over plane 1 (not measured) and
-//!   a slot's that reads the texture too.
-//! - **Writes** (EVs XRR2-ycw1-m4 to XRR2-ycw4-m4 on an Apple M4 under macOS 27.0.1, XRR2-ycw2-m3
-//!   and XRR2-ycw3-m3 on an Apple M3 Max under macOS 26.7, byte for byte alike). Metal stores a
-//!   function's writes to `YCBCR8_444_2P`, `YCBCR10_444_2P`, `RGB8_444_2P` and `RGB10_444_2P` (503,
-//!   507, 542, 545) into both planes: each written texel's luma code at its place and its Cb and Cr
-//!   pair at its own, the codes `metal2vulkan::bind::ycbcr_write` states (the converted formats' by
+//!   more), or whose chroma plane is smaller than the format's (Metal reads past it), plane 1 of a
+//!   4:2:0 surface (Metal reads its rows past the plane, into the bytes after it), plane 1 of a
+//!   packed surface (not measured), a plane past 1, plane 1 at other bytes than the surface's facts
+//!   name, a matrix other than BT.601, BT.709, BT.2020 or SMPTE 240M, a texture of another size
+//!   than the surface's, planes at offsets or rows off 16 bytes, a row shorter than its codes,
+//!   planes past the buffer, and planes past one storage range; a packed texture's blit with a
+//!   buffer (above); a copy between two such textures (Metal copies both planes), a view in another
+//!   format than the twin (a twin's view as its converted format among them, unmeasured), and a
+//!   pass rendering into one but as **Passes** below say (Metal converts back into the planes). A
+//!   function's writes to a 4:2:0 or 4:2:2 format are dropped, as Metal drops them
+//!   (`metal::format::writes_dropped`); a 4:4:4 `_sRGB` twin's or packed format's are refused (the
+//!   twins' encoding is not found, and the M3 drops the packed formats' writes where the M4 stores
+//!   them), as are a texture's over plane 1 (not measured) and a slot's that reads the texture too.
+//! - **Writes** (on an Apple M4 under macOS 27.0.1, on an Apple M3 Max under macOS 26.7, byte for
+//!   byte alike). Metal stores a function's writes to `YCBCR8_444_2P`, `YCBCR10_444_2P`,
+//!   `RGB8_444_2P` and `RGB10_444_2P` (503, 507, 542, 545) into both planes: each written texel's
+//!   luma code at its place and its Cb and Cr pair at its own, the codes
+//!   `metal2vulkan::bind::ycbcr_write` states (the converted formats' by
 //!   the surface's range and matrix; the code formats' green, blue and red as codes), and leaves
 //!   every other byte. The function writes such a texture through its write shadow (`shadow.rs`,
 //!   `ShadowSource::YCbCrWrite`; `texture/ycbcr_image.rs`): an `RGBA32Uint` image of each written
@@ -100,25 +93,24 @@
 //!   (`bind::ycbcr_write_module`), which stores the codes of the marked texels, and copies the
 //!   planes' rows of codes back. The texture's converted texels then convert again at their next
 //!   use, as after any write of the planes. Exact, so announced nowhere.
-//! - **Passes** (EVs XRR2-ycr1-m4, GSM2-yt1-m4 and GSM2-yt2-m4 on an Apple M4 under macOS 27.0.1,
-//!   and XRR2's probe on the consumer's Apple M3 Max under macOS 26.7, byte for byte alike). Metal
-//!   stores a pass's color attachment of `YCBCR8_420_2P`, `YCBCR8_422_2P` and `YCBCR8_444_2P` (500,
-//!   502, 503) over plane 0 into both planes at its store: every texel's luma code, drawn or
-//!   not, and each chroma pair's codes of the block of texels it covers, the codes
-//!   `metal2vulkan::bind::ycbcr_store` states (`metal::format::ycbcr_renders`). The pass renders
-//!   into the texture's render shadow (`texture/ycbcr_image.rs`), an `R32G32B32A32_SFLOAT`
-//!   image of the texture's size, cleared at its copy in; its copy back is the write-back above
-//!   storing every texel ([`YCbCrWriteBack`] of a store), and the texture's converted texels
-//!   convert again at their next use. Exact for a pass that clears the attachment or leaves it
-//!   to the pass (`DontCare`) and stores it, a draw writing red, green and blue unblended; a
-//!   load, another store action, a resolve, a blend and a partial write mask are refused
-//!   (`NotImplemented(Format)`, naming the format, at the pass or the pipeline), as are a
-//!   texture over plane 1 and one whose size the chroma blocks do not tile, none measured; the
-//!   other formats' passes stay refused (the 10-bit ones' draws match no rule yet). A packed
-//!   10-bit format's pipeline is made, as Metal makes it, and its pass refused at its start,
-//!   naming the format (`metal::format::ycbcr_pass_refused`): Metal fails the pass's command
-//!   buffer, its error and the luma bytes it leaves varying from run to run (EVs GSM2-pk1-m4 and
-//!   GSM2-pk2-m4), so no exact form exists.
+//! - **Passes** (on an Apple M4 under macOS 27.0.1, and XRR2's probe on the consumer's Apple M3 Max
+//!   under macOS 26.7, byte for byte alike). Metal stores a pass's color attachment of
+//!   `YCBCR8_420_2P`, `YCBCR8_422_2P` and `YCBCR8_444_2P` (500, 502, 503) over plane 0 into both
+//!   planes at its store: every texel's luma code, drawn or not, and each chroma pair's codes of
+//!   the block of texels it covers, the codes `metal2vulkan::bind::ycbcr_store` states
+//!   (`metal::format::ycbcr_renders`). The pass renders into the texture's render shadow
+//!   (`texture/ycbcr_image.rs`), an `R32G32B32A32_SFLOAT` image of the texture's size, cleared at
+//!   its copy in; its copy back is the write-back above storing every texel ([`YCbCrWriteBack`] of
+//!   a store), and the texture's converted texels convert again at their next use. Exact for a pass
+//!   that clears the attachment or leaves it to the pass (`DontCare`) and stores it, a draw writing
+//!   red, green and blue unblended; a load, another store action, a resolve, a blend and a partial
+//!   write mask are refused (`NotImplemented(Format)`, naming the format, at the pass or the
+//!   pipeline), as are a texture over plane 1 and one whose size the chroma blocks do not tile,
+//!   none measured; the other formats' passes stay refused (the 10-bit ones' draws match no rule
+//!   yet). A packed 10-bit format's pipeline is made, as Metal makes it, and its pass refused at
+//!   its start, naming the format (`metal::format::ycbcr_pass_refused`): Metal fails the pass's
+//!   command buffer, its error and the luma bytes it leaves varying from run to run, so no exact
+//!   form exists.
 //! - **Linear filtering** is Metal's, exact: the function emulates Metal's filter of the texels on
 //!   their grid of 1/2048 or 1/8192 (`metal2vulkan::metal::texel_format::PackedTexels::YCbCr2048`,
 //!   `YCbCr8192`), under MoltenVK through the slot's YCbCr variant, and announces, naming the slot,
@@ -247,7 +239,7 @@ pub enum SurfaceYCbCrMatrix {
     Itu709,
     /// `ITU_R_2020`.
     Itu2020,
-    /// `SMPTE_240M_1995`, which Metal reads as BT.709 (EV XRR2-ycf3p4-m4).
+    /// `SMPTE_240M_1995`, which Metal reads as BT.709.
     Smpte240M,
     /// Any other value.
     Other,

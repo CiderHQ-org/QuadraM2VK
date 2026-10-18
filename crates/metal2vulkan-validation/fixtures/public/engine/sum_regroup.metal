@@ -9,7 +9,7 @@
 // compiled with the default fast math. The frontend regroups each sum itself, and Metal's backend
 // regroups the AIR's sum again by its ranks, so the AIR's grouping is not the one Metal computes.
 // Each fragment returns its two sums' bits, or zeros where the centre sample is above 1000 (none
-// is), which keeps the centre sample live. Measured on an Apple M4 (EV DGC-fx1-m4):
+// is), which keeps the centre sample live. Measured on an Apple M4:
 // - regroup: samples in the order C L R U D TL TR BL BR. Metal computes
 //   gx = (((wR - (wL + TL)) + TR) - BL) + BR and gy = ((wD - ((wU + TL) + TR)) + BL) + BR.
 // - tied: samples in the order TL U BL C L BR R TR D, where leaves tie in rank and keep the tree's

@@ -588,7 +588,7 @@ pub struct LoweringInputs {
     /// The runtime sampler slots bound to a sampler whose min or mag filter is Metal's `Cubic`
     /// (`VariantKey::cubic_samplers`, `RuntimeFact::CubicSampler`), each with the bound word's
     /// `SamplerWord::CUBIC_STATE` bits. A sample through such a slot is Metal's bicubic filter
-    /// of that state (EV GSM2-bcs2-m4), which the function emulates by fetches as it does a
+    /// of that state, which the function emulates by fetches as it does a
     /// constexpr bicubic sampler's, refusing what that emulation refuses and a mip filter
     /// (`NotImplemented(SamplerBicubicFilter)`). A slot the function samples through without
     /// being named here filters as its word says.
@@ -689,7 +689,7 @@ pub struct LoweringInputs {
     /// (`StageIo::uniform_outputs`). The function reads each flat, from the provoking vertex, as
     /// Metal's interpolation returns such a value: a zero or subnormal as `+0`, an infinity as the
     /// largest finite value of its sign, and a NaN as `+FLT_MAX`; every other value exactly
-    /// (measured on the M3 Max in every qualifier, EV FLT-m3b). It lists them among
+    /// (measured on the M3 Max in every qualifier). It lists them among
     /// `StageIo::uniform_inputs`. `Device::compile_render_pipeline` sets it for a `Function`
     /// fragment stage from the pipeline's vertex function, and a fragment compiled on its own for
     /// such a pipeline compiles under the same keys: link refuses one compiled under a key its
@@ -917,8 +917,7 @@ pub enum HalfOutputLane {
 /// factor pair alike in its color and alpha arithmetic, and the rotation moves Metal's blue into
 /// the image's alpha and Metal's alpha into its red: under Metal's color factors `SourceAlpha` over
 /// `OneMinusSourceAlpha`, Metal's color is `fma(d, 1 - a, s * a)`, and the image's alpha blends a
-/// factor and one minus it as `fma(f, s - d, d)`, which rounds one code apart near half-code ties
-/// (EVs GSM2-f84b-m4 and GSM2-f84d-m4/-m3).
+/// factor and one minus it as `fma(f, s - d, d)`, which rounds one code apart near half-code ties.
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -931,7 +930,7 @@ pub enum RotatedBlendForm {
     Premultiplied,
     /// None of the measured forms: the blend stores Metal's channels rotated by Vulkan's factors
     /// (`pipeline::rotated_blend`'s search), which Apple's blend may round one code apart from
-    /// Metal's (up to 1,767 of 65,536 tie-heavy texels in EV GSM2-f84e-m4's sweep). The function
+    /// Metal's (up to 1,767 of 65,536 tie-heavy texels in our probe's sweep). The function
     /// records `PrecisionNote::RotatedBlendRounding`.
     Unmeasured,
 }
@@ -954,7 +953,7 @@ pub enum FactorLane {
 
 /// How a fragment function writes a color attachment of one of Apple's extended-range formats
 /// (`LoweringInputs::extended_range_colors`), as Metal stores its output there (measured on an
-/// Apple M3 Max and an M4, EVs XRR-rtp1-m3 and -m4): a `float` output is rounded to `half` (nearest
+/// Apple M3 Max and an M4): a `float` output is rounded to `half` (nearest
 /// even), a `half` one is taken as it is, and the value is stored as a kernel write stores it.
 /// Under blending Metal first clamps the output to the format's range (each color channel to the
 /// values of codes 0 and 1022 as `half`s, an `_sRGB` color channel of `BGRA10_XR_sRGB` to its
@@ -1042,7 +1041,7 @@ pub enum ChannelWrite {
     /// A floating-point channel as [`ChannelWrite::FloatTowardZero`]'s, rounded to nearest even:
     /// a finite value from the midpoint past the largest up to infinity, an infinity kept, a NaN
     /// to the quiet NaN; where unsigned, a negative value to 0. A render pipeline's half-float
-    /// channel under `TextureWriteRoundingMode::NearestEven` (EV TXN2-twr-m4).
+    /// channel under `TextureWriteRoundingMode::NearestEven`.
     FloatNearestEven {
         /// The channel's fraction bits.
         mantissa: u8,
@@ -1064,8 +1063,8 @@ pub enum ChannelWrite {
     /// A unorm channel of `bits` bits of a packed 16-bit format (`B5G6R5Unorm`, `A1BGR5Unorm`,
     /// `ABGR4Unorm`, `BGR5A1Unorm`): the value rounded to a half first (to nearest even, a
     /// finite value from 65520 up to infinity), then as [`ChannelWrite::Unorm`]'s: clamped to
-    /// `[0, 1]` (a NaN 0) times `2^bits - 1`, the exact product rounded to nearest even (EV
-    /// TXN2-pk16b-m3). A Clear load action of these formats converts so too.
+    /// `[0, 1]` (a NaN 0) times `2^bits - 1`, the exact product rounded to nearest even. A Clear
+    /// load action of these formats converts so too.
     HalfUnorm {
         /// The channel's bits.
         bits: u8,

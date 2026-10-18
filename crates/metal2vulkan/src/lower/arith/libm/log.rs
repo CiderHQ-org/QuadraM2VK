@@ -11,14 +11,14 @@
 //! accurate to about `2^-40` relative: enough for the exact value [`metal_log2`] rounds.
 //!
 //! **Metal's `log2`** ([`metal_log2`]): what Metal's hardware computes, read off every `float` of
-//! the M4 (EV MATH-sweep2-m4; the M3 answers every one alike, EV MATH-sweep3-m3). It is the
-//! exponent plus `L(m)` of the significand, rounded toward zero, and `L(m) - log2(m)` is a smooth
-//! error per 32nd of `m` (about `2^-26` at most) under a noise of about `2^-31` the model does not
-//! reproduce: [`TABLE`] fits the smooth part, so the routine is `RZ(log2(x) + eps(m))`, and next to
-//! 1 (`[1 - 2^-8, 1 + 2^-5)`), where the hardware keeps a relative accuracy the model lacks,
-//! `RZ(log2(x))`. Metal's word at 2,130,133,076 of the 2,130,706,432 positive normal operands
-//! (99.973 %); a word one unit off at the others (an open near-equivalent), and within 3 ulp of the
-//! exact value everywhere, as Metal's. Metal's fast `log2` is the same function, so `air.fast_log2`
+//! the M4 (the M3 answers every one alike). It is the exponent plus `L(m)` of the significand,
+//! rounded toward zero, and `L(m) - log2(m)` is a smooth error per 32nd of `m` (about `2^-26` at
+//! most) under a noise of about `2^-31` the model does not reproduce: [`TABLE`] fits the smooth
+//! part, so the routine is `RZ(log2(x) + eps(m))`, and next to 1 (`[1 - 2^-8, 1 + 2^-5)`), where
+//! the hardware keeps a relative accuracy the model lacks, `RZ(log2(x))`. Metal's word at
+//! 2,130,133,076 of the 2,130,706,432 positive normal operands (99.973 %); a word one unit off at
+//! the others (an open near-equivalent), and within 3 ulp of the exact value everywhere, as
+//! Metal's. Metal's fast `log2` is the same function, so `air.fast_log2`
 //! and the fast functions' formulas take the same routine (before SEMANTICS 1262 they took the core
 //! rounded toward zero without the table, Metal's word on 99.76 % of those operands).
 //!
@@ -59,7 +59,7 @@ const SQRT2_BITS: u32 = 0x3FB5_04F3;
 /// coefficients (by their bits, lowest first) of the quintic in `t` (the offset in the 32nd, in
 /// `[0, 1)`) that models the hardware's error `L(m) - log2(m)`, where Metal's `log2(x)` is `L(m)`
 /// plus the exponent rounded toward zero. Fitted by least squares to the bounds Metal's words set
-/// on `L(m)` at every significand (EV MATH-sweep2-m4: the binades `[1/2, 1)`, `[1, 2)`, `[2, 4)`;
+/// on `L(m)` at every significand (the binades `[1/2, 1)`, `[1, 2)`, `[2, 4)`;
 /// the words of `[1, 1 + 1/32)` and `[1 - 1/64, 1)` left out, where the hardware keeps the relative
 /// accuracy no such model gives). The first segment's constant is 0, so the powers of 2 are exact.
 pub(crate) const TABLE: [[u32; 6]; 32] = [
@@ -344,7 +344,7 @@ pub(crate) const PLAIN_END: u32 = 0x3F84_0000;
 pub(crate) const LN_2_BITS: u32 = 0x3F31_7218;
 pub(crate) const LOG10_2_BITS: u32 = 0x3E9A_209B;
 
-/// Metal's precise `log` or `log10` next to 1 (EV MATH-sweep2-m4): for `x` strictly between the
+/// Metal's precise `log` or `log10` next to 1: for `x` strictly between the
 /// bits `low` and `end`, `RN(f fma(p(f), f, lead))` of `f = x - 1` (exact there), `p` by Horner's
 /// rule with fused steps, `f32` coefficients by their bits, lowest first. Each is Metal's word at
 /// every `float` of its range.

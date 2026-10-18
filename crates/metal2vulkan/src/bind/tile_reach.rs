@@ -5,11 +5,9 @@
 //! primitive reaches, which decides what a `DontCare` load clears (`clear_reach`), which tiles a
 //! rotated texture's frame turns, and which tiles an extended-range or padded 10-bit attachment's
 //! store makes canonical ([`unused_bits_module`](super::unused_bits_module)). Measured on an Apple
-//! M4 under macOS 27.0.1 (EVs RRS3-reach1, -reach2, -reach3 and -reach4c, 111 cases, each in a
-//! process of its own; alike in every case on an Apple M3 Max under macOS 26.7, the kit
-//! `share-reach`; EVs RRS3-reach5, -reach6b, -reach7, -reach8, -reach9 and -reach10, 168 cases
-//! on the small-primitive cull; and EVs RRS3-reach11, -reach12, RCH-reach13 and -reach14 on a
-//! point's square):
+//! M4 under macOS 27.0.1 (111 cases, each in a process of its own; alike in every case on an Apple
+//! M3 Max under macOS 26.7, the kit `share-reach`; 168 cases on the small-primitive cull; and our
+//! probes on a point's square):
 //!
 //! - **Tiles** are 32 by 32 pixels from the render area's origin at 1 and 2 samples, 32 by 16 at
 //!   4, whatever the attachments' formats and count (up to eight `RGBA32Float`); each is

@@ -21,11 +21,11 @@
 //!   into memory and reads it back sees the number, and the consumer measured Metal's, so Metal's
 //!   numbers are the contract, where only "plain allocation skips reserved IDs" was kept before).
 //!   Plain allocation ([`IdPlacement::Any`]) hands out IDs as Metal's pool does ([`Pool`]; the M4
-//!   probes MESH-rid1-m4 to MESH-rid4-m4, plain and under API validation alike, matched in every
-//!   one of 1,915 orders after reservations and 20 orders of IDs given back, 8 of them predicted
+//!   probes, plain and under API validation alike, matched in every one of 1,915 orders after
+//!   reservations and 20 orders of IDs given back, 8 of them predicted
 //!   before they were measured). A space's pool holds the IDs below its size, 16 for textures and
 //!   sampler states and 32 for visible-function tables, pipeline states and indirect command
-//!   buffers (MESH-rid6-m4's tables: 2 to 6 of 1 to 13 given back came back before 14, 2 to 10 of 1
+//!   buffers (the probe's tables: 2 to 6 of 1 to 13 given back came back before 14, 2 to 10 of 1
 //!   to 29 after 30 and 31), as free ranges from 1 (0 is the null handle). Each plain ID is the
 //!   lowest of the smallest free range, the lower range of two alike; where none is free the pool
 //!   doubles, its new IDs one range. An ID given back joins the free ranges either side of it, so
@@ -41,14 +41,14 @@
 //!   gives 21 to 31, 1 to 15, 1 to 15 again, 16 to 19, 32 on). The runtime hands them out as Metal
 //!   does: both textures answer the ID, the slot is the later one's (Slots), and each gives it back
 //!   as it goes, as Metal's do ([`Pool`]).
-//! - **The device's sampler ID** (the consumer's M3 Max report at 701572bbf, the M4 probes
-//!   MESH-rid1-m4 to MESH-rid3-m4, plain and under API validation alike). Metal's device keeps a
-//!   sampler ID for itself for good as it makes its first command queue, indirect command buffer,
-//!   or texture whose memory is its own (of any type, usage or storage mode, memoryless, shared,
-//!   placed at an ID, a surface's, or a texture buffer the device makes); a library, a function, a
-//!   compute or tile pipeline state, a visible function table, a depth-stencil state, an event, a
-//!   fence, a buffer, a heap (automatic, placement or sparse), a heap's or a buffer's texture, a
-//!   view of a heap's texture, a rasterization rate map and a binary archive take none. A texture
+//! - **The device's sampler ID** (the consumer's M3 Max report at 701572bbf, the M4 probes, plain
+//!   and under API validation alike). Metal's device keeps a sampler ID for itself for good as it
+//!   makes its first command queue, indirect command buffer, or texture whose memory is its own (of
+//!   any type, usage or storage mode, memoryless, shared, placed at an ID, a surface's, or a
+//!   texture buffer the device makes); a library, a function, a compute or tile pipeline state, a
+//!   visible function table, a depth-stencil state, an event, a fence, a buffer, a heap (automatic,
+//!   placement or sparse), a heap's or a buffer's texture, a view of a heap's texture, a
+//!   rasterization rate map and a binary archive take none. A texture
 //!   opened from a shared handle needs none: the handle's texture took it on the same device. It is
 //!   a plain sampler ID, handed out as a state's would be and never given back, so states made
 //!   after it start past it, and a sampler reservation after it is ignored; Metal has one device
@@ -74,20 +74,20 @@
 //!   measured Metal's descriptor array grow at the 15th, 31st, 63rd and 127th sampler states
 //!   after the device's own, where the pool ([`Pool`]) doubles from 16 to 32, 64, 128 and 256.
 //! - **Placement** (`resourceIndex` with `forceResourceIndex`, Apple's private properties, a
-//!   runtime extension; probes `RT7-place-probe2` to `7` on an M3 Max and an M4). A resource
-//!   made [`At`](IdPlacement::At) an ID has it, whether a live resource has it too or not, and
-//!   plain allocation does not count it: it may hand the ID out again. `At(ResourceId(0))` is
-//!   plain allocation, as Metal's forced index 0 is. A pipeline state made with
-//!   `supportIndirectCommandBuffers` is placed by `PipelineOptions::placement` (the probes on an
-//!   M4): Metal places it at its descriptor's `resourceIndex`, forced or not, compute and render
-//!   states in their one space, keeping the index's low 32 bits; a state without that support, and
-//!   a tile state, answer 0 whatever the index. Metal ended the process for a state placed before
-//!   any pipeline ID was handed out or reserved, a defect the runtime does not copy: it places that
-//!   state too. An indirect command buffer is placed by its descriptor's `placement` (Metal's
-//!   `resourceIndex`, unforced), keeping the index's low 32 bits, as the same rules say
-//!   (`address.rs`). A texture [`Device::new_texture`](super::Device::new_texture) makes
-//!   [`Outside`](IdPlacement::Outside) takes no ID, as the runtime's own textures: a runtime
-//!   extension for a caller's helper texture, refused for every other resource.
+//!   runtime extension; on an M3 Max and an M4). A resource made [`At`](IdPlacement::At) an ID has
+//!   it, whether a live resource has it too or not, and plain allocation does not count it: it may
+//!   hand the ID out again. `At(ResourceId(0))` is plain allocation, as Metal's forced index 0 is.
+//!   A pipeline state made with `supportIndirectCommandBuffers` is placed by
+//!   `PipelineOptions::placement` (the probes on an M4): Metal places it at its descriptor's
+//!   `resourceIndex`, forced or not, compute and render states in their one space, keeping the
+//!   index's low 32 bits; a state without that support, and a tile state, answer 0 whatever the
+//!   index. Metal ended the process for a state placed before any pipeline ID was handed out or
+//!   reserved, a defect the runtime does not copy: it places that state too. An indirect command
+//!   buffer is placed by its descriptor's `placement` (Metal's `resourceIndex`, unforced), keeping
+//!   the index's low 32 bits, as the same rules say (`address.rs`). A texture
+//!   [`Device::new_texture`](super::Device::new_texture) makes [`Outside`](IdPlacement::Outside)
+//!   takes no ID, as the runtime's own textures: a runtime extension for a caller's helper texture,
+//!   refused for every other resource.
 //! - **Reservations** ([`Device::reserve_resource_ids`](super::Device::reserve_resource_ids),
 //!   textures, sampler states, pipeline states and indirect command buffers, Metal's types 0, 1,
 //!   4 and 5) keep IDs from plain allocation for good, whether a resource placed at one lives or
@@ -95,33 +95,32 @@
 //!   placed or plain, or took a reservation is ignored, with a diagnostic line, as Metal's is
 //!   (its pool logs "reserve() must be called before any allocation takes place" for both). A
 //!   call of no ID, or of 0 alone, changes nothing, and 0 beside other IDs reserves nothing:
-//!   Metal's pool, given 0, later hands IDs out twice (MESH-rid9-m4: 1 to 4 again after 9), a
-//!   defect not copied. A call holding an ID of 2^32 or more is dropped whole, silently, and a
-//!   later call is the reservation (MESH-rid6-m4 to MESH-rid9-m4: 2^32 to 2^63, alone or beside
-//!   10, for textures, sampler states and indirect command buffers).
+//!   Metal's pool, given 0, later hands IDs out twice (1 to 4 again after 9), a defect not copied.
+//!   A call holding an ID of 2^32 or more is dropped whole, silently, and a later call is the
+//!   reservation (2^32 to 2^63, alone or beside 10, for textures, sampler states and indirect
+//!   command buffers).
 //! - **Limits.** A placement ([`At`](IdPlacement::At)) of [`ID_LIMIT`] or more ended Metal's
 //!   process for every kind (probes 3 and 4), and of [`PIPELINE_ID_LIMIT`] or more for pipeline
 //!   states (a probe): it is refused `Invalid`. Metal itself was unreliable above about 9000 forced
 //!   texture IDs (some runs ended there). A reservation past them is Metal's (16382, 16383, 20000,
 //!   65536 and 1,000,000 of each type were taken, and plain IDs past them handed out: 20000 gives
 //!   20001 next), and the runtime's. A texture or sampler state ID of [`RESERVED_POOL_LIMIT`]
-//!   (2^28) or more, whose pool would hold 2^29 IDs, ended Metal's process (MESH-rid6-m4 to
-//!   MESH-rid8-m4: 2^27 + 5 was taken, 2^28 + 5 to 2^32 - 1 ended it, at the reservation or the
-//!   first allocation after it): refused `Invalid`. So is an indirect command buffer ID of
-//!   [`RECORDS_RESERVED_LIMIT`] (2^30) or more (MESH-icb3-m4: 2^30 - 1 was taken, 2^30 + 5 and up
-//!   ended the process), and a placement of one at [`RECORDS_PLACEMENT_LIMIT`] (16384) or more,
-//!   past Metal's table of them (MESH-icb4-m4). A reserved indirect command buffer ID needs no
-//!   records, but a buffer whose own ID is 2^23 or more has no records address: it is refused
-//!   `OutOfMemory` as it is made, as a buffer is once every ID below it is held. Pipeline state
-//!   IDs, measured to 1,000,000, are refused nowhere. The texture table reaches every ID a heap
-//!   array can (`heap_sets.rs`), so a texture Metal numbers past its placement limit is reached as
-//!   any other. A texture's ID indexes every set-1 array its usage can bind it through (sampled
-//!   where it reads, storage where it writes), so an ID past the least of those arrays'
-//!   update-after-bind limits is refused `Unsupported`; a reservation is refused only past the
-//!   larger, since no usage is known then. A sampler state is never refused for the sampler arrays:
-//!   its element there is not its ID but the lowest no live state holds (`ElementHold`), which the
-//!   sampler table maps its ID to, so a state at any ID is listed; only where more states live than
-//!   an array holds is one left out,
+//!   (2^28) or more, whose pool would hold 2^29 IDs, ended Metal's process (2^27 + 5 was taken,
+//!   2^28 + 5 to 2^32 - 1 ended it, at the reservation or the first allocation after it): refused
+//!   `Invalid`. So is an indirect command buffer ID of [`RECORDS_RESERVED_LIMIT`] (2^30) or more
+//!   (2^30 - 1 was taken, 2^30 + 5 and up ended the process), and a placement of one at
+//!   [`RECORDS_PLACEMENT_LIMIT`] (16384) or more, past Metal's table of them. A reserved indirect
+//!   command buffer ID needs no records, but a buffer whose own ID is 2^23 or more has no records
+//!   address: it is refused `OutOfMemory` as it is made, as a buffer is once every ID below it is
+//!   held. Pipeline state IDs, measured to 1,000,000, are refused nowhere. The texture table
+//!   reaches every ID a heap array can (`heap_sets.rs`), so a texture Metal numbers past its
+//!   placement limit is reached as any other. A texture's ID indexes every set-1 array its usage
+//!   can bind it through (sampled where it reads, storage where it writes), so an ID past the least
+//!   of those arrays' update-after-bind limits is refused `Unsupported`; a reservation is refused
+//!   only past the larger, since no usage is known then. A sampler state is never refused for the
+//!   sampler arrays: its element there is not its ID but the lowest no live state holds
+//!   (`ElementHold`), which the sampler table maps its ID to, so a state at any ID is listed; only
+//!   where more states live than an array holds is one left out,
 //!   [`Degradation::UnlistedArgumentSampler`](super::Degradation::UnlistedArgumentSampler), and a
 //!   command buffer whose commands list the argument samplers then fails.
 //! - **Slots.** Each ID has one slot, held by the resource last made with it, placed or plain:
@@ -132,7 +131,7 @@
 //!   it again (`ResourceIds::released_pipeline`): a record the GPU wrote naming it runs the
 //!   released state's program on Metal, which the runtime no longer has.
 //! - **When an ID is resolved.** A command reaches texture ID `X` whatever its encoder named,
-//!   as Metal's did (the M4 probe RFL-res-m4: a texture no encoder named, or one a later encoder
+//!   as Metal's did (the M4 probe: a texture no encoder named, or one a later encoder
 //!   made resident, was read through its ID in an argument buffer): the device writes each
 //!   slot's holder into its texture table and heap sets as the holder takes the slot, and the
 //!   neutral as it goes (`heap_sets.rs`), so a command reads the holder as it runs. Each slot's
@@ -205,8 +204,8 @@ pub enum ResourceIdKind {
 pub(super) const ID_LIMIT: u64 = 16381;
 
 /// The first texture or sampler state ID whose reservation ended Metal's process: its pool would
-/// hold 2^29 IDs or more (EVs MESH-rid6-m4 to MESH-rid8-m4 on an M4: 2^27 + 5 was taken, and
-/// 2^28 + 5 to 2^32 - 1 ended the process).
+/// hold 2^29 IDs or more (on an M4: 2^27 + 5 was taken, and 2^28 + 5 to 2^32 - 1 ended the
+/// process).
 const RESERVED_POOL_LIMIT: u64 = 1 << 28;
 
 /// The first ID Metal ended the process for at a pipeline state's placement (probe 6c on an M4:
@@ -214,13 +213,13 @@ const RESERVED_POOL_LIMIT: u64 = 1 << 28;
 pub(super) const PIPELINE_ID_LIMIT: u64 = 16384;
 
 /// The first indirect command buffer ID whose reservation ended Metal's process: its pool would
-/// hold 2^31 IDs or more (EV MESH-icb3-m4 on an M4: 2^29 + 5 and 2^30 - 1 were taken and plain
+/// hold 2^31 IDs or more (on an M4: 2^29 + 5 and 2^30 - 1 were taken and plain
 /// IDs handed out past them; 2^30 + 5 to 2^31 - 1 ended it at the first allocation, 2^31 and up
 /// at the reservation).
 const RECORDS_RESERVED_LIMIT: u64 = 1 << 30;
 
 /// The first ID an indirect command buffer's placement is refused at: past Metal's table of
-/// them, which Metal writes past (EV MESH-icb4-m4 on an M4: 16384 to 50367 made in each of six
+/// them, which Metal writes past (on an M4: 16384 to 50367 made in each of six
 /// runs, 100000 ended the process; the consumer's M3 Max runs made or ended it at random from
 /// 16384 to 50367).
 pub(super) const RECORDS_PLACEMENT_LIMIT: u64 = 16384;
@@ -384,7 +383,7 @@ impl ResourceIds {
 
     /// Take the sampler ID Metal's device keeps for itself as it makes its first object of a
     /// kind that keeps one (the module docs): the ID a live pipeline state's numbered device
-    /// sampler has, kept now for good (EV TTG-sid6-m4: a queue or a texture made after a render
+    /// sampler has, kept now for good (a queue or a texture made after a render
     /// pipeline state took no new ID, and its ID stayed out once the state went), else a plain
     /// sampler ID, handed out like a sampler state's; never given back, so a sampler reservation
     /// after it is ignored. Once per device.
@@ -470,7 +469,7 @@ impl ResourceIds {
 
     /// The kind and hold serial of the state that last held pipeline state ID `id`, where the
     /// program released that state and no state took the ID since: a record the GPU wrote naming
-    /// it runs the released state's program on Metal (EV RRS2-icbprobe1-m4).
+    /// it runs the released state's program on Metal.
     pub(super) fn released_pipeline(&self, id: u64) -> Option<(StateKind, u64)> {
         self.released_pipelines.get(&id).copied()
     }
@@ -538,7 +537,7 @@ impl Space {
 /// leaves (16 reserved after a queue gives 1 to 15 once), and an ID two textures held, given back
 /// by both with nothing free beside it (5 twice gives 5 once). A range that grows to equal one is
 /// a second ([`Pool::put`]): 5, 6, 5 and 6 given back, each held twice, gives 5, 6, 5, 6, where
-/// 5, 5, 6, 6 gives 6, 5, 6 (EV TTG-rid1-m4 on an M4). Metal's pool behaves as a set of ranges
+/// 5, 5, 6, 6 gives 6, 5, 6 (on an M4). Metal's pool behaves as a set of ranges
 /// whose joins change a range in place.
 #[derive(Debug)]
 pub(super) struct Pool {
@@ -584,7 +583,7 @@ impl Pool {
     }
 
     /// The device made the pool before anything started it, as Metal's device makes its texture
-    /// pool with its first command queue or indirect command buffer (EV APX2-rid1-m4): a
+    /// pool with its first command queue or indirect command buffer: a
     /// reservation then keeps the pool's first range beside the ranges it leaves.
     pub(super) fn make(&mut self) {
         if !self.started {
@@ -1203,9 +1202,9 @@ pub(super) fn pipeline_placement(
 }
 
 /// The records ID an indirect command buffer's `placement` places it at, as Metal keeps it, for
-/// `call`: the low 32 bits of the index (EV MESH-icb1-m4 on an M4: `2^32 + 5` placed the buffer
-/// at 5; MESH-icb4-m4: `2^32` is plain allocation), `None` for plain allocation; refused
-/// `Invalid(ResourceId)` at [`RECORDS_PLACEMENT_LIMIT`] or more, and `Invalid(OutsidePlacement)`
+/// `call`: the low 32 bits of the index (on an M4: `2^32 + 5` placed the buffer at 5: `2^32` is
+/// plain allocation), `None` for plain allocation; refused `Invalid(ResourceId)` at
+/// [`RECORDS_PLACEMENT_LIMIT`] or more, and `Invalid(OutsidePlacement)`
 /// for [`IdPlacement::Outside`].
 pub(super) fn records_placement(
     call: &'static str,

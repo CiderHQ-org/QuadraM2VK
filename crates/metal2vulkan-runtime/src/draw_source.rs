@@ -47,11 +47,11 @@
 //!   bytes behind one, the copy runs before the draw's own render pass instance instead, after
 //!   the writer's ([`CopySteps`]), and reads the write, as the draw does in Metal. A write since
 //!   the last barrier races the draw's read in Metal. Before any barrier of the encoder, Metal's
-//!   indexed indirect draw read the bytes from before the write in every run measured (a probe
-//!   RRS-race, an M3 Max and an M4), so such a draw whose arguments or indices a draw of the
+//!   indexed indirect draw read the bytes from before the write in every run measured (a probe, an
+//!   M3 Max and an M4), so such a draw whose arguments or indices a draw of the
 //!   encoder wrote reads a copy of them taken before the pass for that reason alone
 //!   ([`DrawSource::racing`]), announced once as `Degradation::UnorderedDrawBytes`. After a
-//!   barrier, a rewrite since it was read in some runs (probe RRS-race2), so no copy is taken
+//!   barrier, a rewrite since it was read in some runs, so no copy is taken
 //!   there.
 //! - **Bounds.** The copy holds every byte the draw reads inside the buffer: a direct draw's
 //!   indices that lie wholly inside it, an indirect draw's arguments, or an indexed indirect

@@ -3,7 +3,7 @@
 //!
 //! Metal's identifiers are addresses of its own allocations: a pipeline state's measured by the
 //! consumer on an M3 Max under macOS 26.7, an indirect command buffer's by our probes
-//! ICR-icbspace3-m4 and ICR-icbspace4-m4 (an M4 under 27.0.1) and ICR-icbspace4-m3 (the M3 Max):
+//! (an M4 under 27.0.1 and the M3 Max):
 //!
 //! - **A state made without `supportIndirectCommandBuffers`** answers an address Metal allocates
 //!   as any memory, which differs from run to run. What a program can rely on is how they relate:
@@ -37,26 +37,26 @@
 //!   buffer that executes it may run, where the runtime frees it as the buffer's last holder goes.
 //!
 //! **Which answers are Metal's**. An indirect command buffer made before its device opened any
-//! command encoder answers Metal's number (the rule above; ICR-icbspace3-m4 and ICR-icbspace4-m4 on
-//! an M4, ICR-icbspace4-m3 on the M3 Max, gaps and releases included): Metal's own encoders take
-//! ranges from their first, by kind and by machine (EVs API-icbenc1-m4 on an M4 and the M3 Max
-//! package of the same probe): a compute encoder that dispatches or executes a buffer takes a slot,
-//! and one that is empty, makes a buffer resident or is never committed none; a blit encoder that
-//! copies takes a range on both, an empty one on the M4 only; a render encoder takes one, never
-//! committed too, of another size on each machine. The runtime counts every encoder, as no rule
-//! tells the encoders that take nothing on every machine (a resource-state encoder's is not
-//! measured). No state's answer is measured to be Metal's. The first answer of a program's call
-//! that is not Metal's number (`ComputePipelineState::unique_identifier`,
-//! `RenderPipelineState::unique_identifier`, `IndirectCommandBuffer::unique_identifier`, an
-//! indirect command's state identifier but 0) announces, once a device, one of two kinds by how
-//! Metal's own answer stands: a plain state's, which differs from run to run on Metal,
-//! `plain-state-unique-identifier` ([`Degradation::PlainStateUniqueIdentifier`], one of Metal's
-//! answers); a state's with indirect command buffer support, or a buffer's made after an encoder,
-//! which Metal answers alike in every run of one program started alike,
-//! `unmeasured-unique-identifier` ([`Degradation::UnmeasuredUniqueIdentifier`], a
-//! near-equivalent). A program that reads only the first buffers' identifiers announces nothing.
-//! The allocations and the encoder flag are the device's: Metal's measured space is one
-//! process's one device, which a device of the runtime stands for.
+//! command encoder answers Metal's number (the rule above; on an M4, on the M3 Max, gaps and
+//! releases included): Metal's own encoders take ranges from their first, by kind and by machine
+//! (on an M4 and the M3 Max package of the same probe): a compute encoder that dispatches or
+//! executes a buffer takes a slot, and one that is empty, makes a buffer resident or is never
+//! committed none; a blit encoder that copies takes a range on both, an empty one on the M4 only; a
+//! render encoder takes one, never committed too, of another size on each machine. The runtime
+//! counts every encoder, as no rule tells the encoders that take nothing on every machine (a
+//! resource-state encoder's is not measured). No state's answer is measured to be Metal's. The
+//! first answer of a program's call that is not Metal's number
+//! (`ComputePipelineState::unique_identifier`, `RenderPipelineState::unique_identifier`,
+//! `IndirectCommandBuffer::unique_identifier`, an indirect command's state identifier but 0)
+//! announces, once a device, one of two kinds by how Metal's own answer stands: a plain state's,
+//! which differs from run to run on Metal, `plain-state-unique-identifier`
+//! ([`Degradation::PlainStateUniqueIdentifier`], one of Metal's answers); a state's with indirect
+//! command buffer support, or a buffer's made after an encoder, which Metal answers alike in every
+//! run of one program started alike, `unmeasured-unique-identifier`
+//! ([`Degradation::UnmeasuredUniqueIdentifier`], a near-equivalent). A program that reads only the
+//! first buffers' identifiers announces nothing. The allocations and the encoder flag are the
+//! device's: Metal's measured space is one process's one device, which a device of the runtime
+//! stands for.
 //!
 //! No run reads an identifier: a translated function never sees one.
 

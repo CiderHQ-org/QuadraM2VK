@@ -5,11 +5,10 @@
 //!   data runs through the runtime ([`census`]): each map is made with
 //!   `new_rasterization_rate_map` and copied into a buffer of the size it answers with
 //!   `copy_parameter_data_to_buffer`, as the Metal oracle makes its own.
-//! - A map answers Metal's queries as an M3 Max and an M4 do (probe RT11-metal-probe-7, EV
-//!   RRS3-rmprobe2), a map of no layers included, its creation refuses what Metal's API
-//!   validation stops (but a count of 0, which plain Metal makes) and what the compile layer does
-//!   not compile, and its copy writes Metal's parameter data at any offset of a buffer the CPU
-//!   reaches, refusing the rest.
+//! - A map answers Metal's queries as an M3 Max and an M4 do, a map of no layers included, its
+//!   creation refuses what Metal's API validation stops (but a count of 0, which plain Metal makes)
+//!   and what the compile layer does not compile, and its copy writes Metal's parameter data at any
+//!   offset of a buffer the CPU reaches, refusing the rest.
 
 use super::degrade_notices::{assert_once, counts};
 use super::kernel_textures::census;
@@ -82,13 +81,12 @@ fn refused(problem: RateMapProblem) -> Error {
     ))
 }
 
-/// A map of half quality over 64 by 64 screen pixels answers what an M3 Max and an M4 answer
-/// (probe RT11-metal-probe-7): its screen and granularity of depth 1, one layer of 33 by 33
-/// physical pixels, width 0 and the shared height past it, the label it was made with, and
-/// Metal's coordinate maps, a layer past the map's reading the last. Its parameter data is Metal's
-/// 24,624 bytes, aligned to 4. A map of no layers has no width and its vertical axis's 16 rows. The
-/// first map that is not the identity announces the `rasterization-rate-map` degradation, once; an
-/// identity map announces nothing.
+/// A map of half quality over 64 by 64 screen pixels answers what an M3 Max and an M4 answer: its
+/// screen and granularity of depth 1, one layer of 33 by 33 physical pixels, width 0 and the shared
+/// height past it, the label it was made with, and Metal's coordinate maps, a layer past the map's
+/// reading the last. Its parameter data is Metal's 24,624 bytes, aligned to 4. A map of no layers
+/// has no width and its vertical axis's 16 rows. The first map that is not the identity announces
+/// the `rasterization-rate-map` degradation, once; an identity map announces nothing.
 #[test]
 fn a_rate_map_answers_as_metal_does() {
     on_device(|device, messages| {
@@ -148,8 +146,8 @@ fn a_rate_map_answers_as_metal_does() {
     });
 }
 
-/// Creation refuses what Metal's API validation stops, typed (probes RT11-metal-probe-7 and -8),
-/// and, `Error::RateMap`, what the compile layer does not compile.
+/// Creation refuses what Metal's API validation stops, typed, and, `Error::RateMap`, what the
+/// compile layer does not compile.
 #[test]
 fn a_rate_map_is_refused_where_metal_or_the_compile_stops_it() {
     on_device(|device, _| {

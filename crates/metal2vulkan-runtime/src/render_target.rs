@@ -1434,7 +1434,7 @@ pub(super) fn later_resolve(
 /// before its pass (`clear_reach.rs`), and the uses they make: one subpass of the attachment
 /// alone, over the pass's layers, every aspect loaded and stored. Not a load operation's clear: a
 /// device that renders through Metal (MoltenVK) clears a pass without a draw over the whole
-/// attachment, as Metal does (lane `clear_reach` on MoltenVK, EV RRS-lane9-mvk3).
+/// attachment, as Metal does (lane `clear_reach` on MoltenVK).
 pub(super) fn reach_pass(
     device: &Device,
     target: &Target,

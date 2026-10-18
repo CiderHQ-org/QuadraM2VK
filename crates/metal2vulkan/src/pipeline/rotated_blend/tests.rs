@@ -468,7 +468,7 @@ fn unmeasured_blends_are_announced() {
     let mvk = moltenvk();
     let lvp = profile("lavapipe", DevicePolicy::default()).expect("profile");
     // Metal's color kept and its alpha replaced: in the 440-state sweep, 902 of 65,536 texels
-    // apart on the M4 (EV GSM2-f84e-m4).
+    // apart on the M4.
     let kept = attachment((F::Zero, F::One, O::Add), (F::One, F::Zero, O::Add));
     let straight = (F::SourceAlpha, F::OneMinusSourceAlpha, O::Add);
     let mut off = attachment(straight, straight);

@@ -799,7 +799,7 @@ fn emit_command<'c>(cx: &mut EmitCx<'c>, fb: &mut FunctionBuilder<'_>, c: &Comma
             let to = fb.binary(BinOp::IAdd, field, eight)?;
             match stride {
                 // The plain form writes the pipeline's stride, all ones, over a stride set
-                // before too, as Metal's kernel-side setter does (EV API-icbget2-m4).
+                // before too, as Metal's kernel-side setter does.
                 None => {
                     let all = k64(fb, u64::MAX)?;
                     writes.push((to, all, DOUBLE));
@@ -1155,9 +1155,9 @@ where
 
 /// Write the default record (`CommandRecord::default`'s encoding) at displacement `record` of the
 /// record buffer `b`: zero in every `u64` of the record, a buffer binding's address and stride
-/// too, as Metal's reset clears them (EVs API-icbget1-m4, API-icbget2-m4), in a loop. Where
-/// `retain`, a compute command's reset, the pipeline word keeps the pipeline the command executes
-/// with, and the state word flags it retained when there is one (`layout::RETAINED`).
+/// too, as Metal's reset clears them, in a loop. Where `retain`, a compute command's reset, the
+/// pipeline word keeps the pipeline the command executes with, and the state word flags it retained
+/// when there is one (`layout::RETAINED`).
 fn default_record(
     cx: &mut EmitCx<'_>,
     fb: &mut FunctionBuilder<'_>,

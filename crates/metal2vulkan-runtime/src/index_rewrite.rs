@@ -3,9 +3,9 @@
 //!
 //! After `RenderCommandEncoder::set_primitive_restart_enabled` (Apple's
 //! `setPrimitiveRestartEnabled:index:`), Metal restarts an indexed line or triangle strip at the
-//! call's index `k'` alone, and draws the index type's all-ones index as a vertex (EV
-//! RFX-probe5-m4, RFX-probe6-m4); Vulkan restarts at the all-ones index alone. Where `k'` is not
-//! the all-ones index, the render encoder draws the strip as the list this pass writes:
+//! call's index `k'` alone, and draws the index type's all-ones index as a vertex; Vulkan restarts
+//! at the all-ones index alone. Where `k'` is not the all-ones index, the render encoder draws the
+//! strip as the list this pass writes:
 //!
 //! - **Before the pass** (hoisted, as the index bounds pass is, `index_bounds.rs`): three
 //!   dispatches of the program's modules, one per `RewritePhase` (count, place, write), read

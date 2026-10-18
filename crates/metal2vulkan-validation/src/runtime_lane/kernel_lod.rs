@@ -3,9 +3,9 @@
 //!
 //! Outside a fragment function Metal answers `calculate_unclamped_lod` with 0 and
 //! `calculate_clamped_lod` with the sampler's minimum level bounded by the texture's last level,
-//! whatever the coordinate (EVs RFS-lod2-m4 to RFS-lod4-m3, the M3 Max and an M4): the minimum
-//! level is 0 without a mip filter; under a nearest mip filter `L + 1` where the fraction of
-//! `lodMinClamp` above `L = floor(lodMinClamp)`, truncated onto sixty-fourths, exceeds one half,
+//! whatever the coordinate (the M3 Max and an M4): the minimum level is 0 without a mip filter;
+//! under a nearest mip filter `L + 1` where the fraction of `lodMinClamp` above
+//! `L = floor(lodMinClamp)`, truncated onto sixty-fourths, exceeds one half,
 //! else `L`; under a linear one `lodMinClamp` truncated onto sixty-fourths. A runtime sampler's
 //! clamp is the descriptor's `f32`, a constexpr sampler's its `half`. The rule is written here
 //! from the measurements, apart from the product's `metal::sampler::query_min_level`.
@@ -282,8 +282,8 @@ fn kernel_lod_queries_answer_metals_level() {
     assert_eq!(messages.take(), Vec::new(), "the validation layer reported");
 }
 
-/// The rule's own arithmetic at the measured points (RFS-lod3-m4, RFS-lod4-m3): a nearest mip
-/// filter's half-way point, the grid's truncation, and the bound at the last level.
+/// The rule's own arithmetic at the measured points: a nearest mip filter's half-way point, the
+/// grid's truncation, and the bound at the last level.
 #[test]
 fn the_rule_reads_the_measured_levels() {
     use SamplerMipFilter::{Linear, Nearest, NotMipmapped};
