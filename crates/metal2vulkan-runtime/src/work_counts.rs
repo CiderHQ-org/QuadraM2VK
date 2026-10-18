@@ -99,6 +99,7 @@ pub(crate) struct Counters {
     internal_submissions: AtomicU64,
     queue_submissions: AtomicU64,
     command_buffers_submitted: AtomicU64,
+    batch_submit_nanos: AtomicU64,
     command_buffers_begun: AtomicU64,
     encoder_command_buffers_begun: AtomicU64,
     command_buffers_begun_by: [AtomicU64; Begun::COUNT],
@@ -808,9 +809,10 @@ impl Counters {
         (self.command_buffers_submitted).fetch_add(command_buffers as u64, Ordering::Relaxed);
     }
 
-    /// A `VkCommandBuffer` was begun (`vkBeginCommandBuffer`).
-    pub(crate) fn command_buffer_begun(&self) {
-        self.command_buffers_begun.fetch_add(1, Ordering::Relaxed);
+    /// A batch's `vkQueueSubmit` (or a group's, or a command buffer's fence's) spent `nanos`
+    /// nanoseconds in the driver (`device/relay.rs`).
+    pub(crate) fn batch_submitted_in(&self, nanos: u64) {
+        self.batch_submit_nanos.fetch_add(nanos, Ordering::Relaxed);
     }
 
     /// A `VkCommandBuffer` was begun (`vkBeginCommandBuffer`) for `what`.
@@ -2305,6 +2307,12 @@ pub struct WorkCounts {
     pub queue_submissions: u64,
     /// The `VkCommandBuffer`s those calls submitted.
     pub command_buffers_submitted: u64,
+    /// Nanoseconds the batches' `vkQueueSubmit` calls spent in the driver, from the call to its
+    /// return with the `VkQueue` taken (`device/relay.rs`): each batch's or group's one call, and
+    /// a command buffer's fence submitted with no work. The thread that submits waits there for
+    /// the driver, so a lane that times the scheduler thread's take-up of later commits leaves it
+    /// out (`runtime_lane::queue_order`).
+    pub batch_submit_nanos: u64,
     /// `VkCommandBuffer`s the runtime began once the device was made: each encoder's, a render
     /// encoder's draws' secondary ones, segments', a batch's barrier and first-work ones, internal
     /// and staging submissions'. A driver may clear a command buffer's state as it begins one
@@ -3393,6 +3401,7 @@ impl Device {
             internal_submissions: counters.internal_submissions.load(Ordering::Relaxed),
             queue_submissions: counters.queue_submissions.load(Ordering::Relaxed),
             command_buffers_submitted: counters.command_buffers_submitted.load(Ordering::Relaxed),
+            batch_submit_nanos: counters.batch_submit_nanos.load(Ordering::Relaxed),
             command_buffers_begun: counters.command_buffers_begun.load(Ordering::Relaxed),
             command_buffers_begun_encoders: begun(Begun::Encoder),
             command_buffers_begun_segments: begun(Begun::Segment),

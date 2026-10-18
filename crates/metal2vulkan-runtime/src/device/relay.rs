@@ -381,7 +381,8 @@ impl super::DeviceShared {
     /// failure for `failed` ([`By::Batch`]), and dropped from the log again when `f` fails. A
     /// batch that signals the queue's timeline to `value` notes it once submitted (the exit
     /// hook's value, and where freed memory waits for the batches in flight, theirs, under the
-    /// gate's read lock: `freed_memory.rs`).
+    /// gate's read lock: `freed_memory.rs`). The time `f` takes, the driver's, is counted
+    /// (`WorkCounts::batch_submit_nanos`).
     pub(crate) fn submit_logged(
         &self,
         (queue, value): (usize, Option<u64>),
@@ -397,7 +398,9 @@ impl super::DeviceShared {
             if let Some((fence, flights)) = logged {
                 flights.push(fence, By::Batch(Arc::clone(failed)));
             }
+            let entered = crate::gpu_time::host_nanos();
             let submitted = f(vk_queue);
+            (self.counts).batch_submitted_in(crate::gpu_time::host_nanos().saturating_sub(entered));
             match (&submitted, logged, value) {
                 (Err(_), Some((fence, flights)), _) => flights.unpush(fence),
                 (Ok(()), _, Some(value)) => {

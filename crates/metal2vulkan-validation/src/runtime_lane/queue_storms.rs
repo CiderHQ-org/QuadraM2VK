@@ -16,8 +16,9 @@
 //! not behind the busy queue's next one too, as it does where every queue is one `VkQueue`.
 //! Where Metal runs (a Mac's GPU), the light bursts' median and 99th percentile, each in units of
 //! a busy command buffer, must stay within half a busy command buffer and one busy command buffer
-//! of the reference's, and the busy queue must keep its throughput beside the light queues
-//! as well as the reference does, within a quarter of it (`metal::judge`). The unit, for both
+//! of the reference's, the 99th percentile also within twice the host's delivery of a completion
+//! (below), and the busy queue must keep its throughput beside the light queues as well as the
+//! reference does, within a quarter of it (`metal::judge`). The unit, for both
 //! sides, is the median GPU window of the reference's busy command buffers that ran beside the
 //! light queues, by Metal's GPU timestamps ([`Storm::unit`], [`interleaved`]): the cap those
 //! timestamps chose is the runtime's too, and both spin the same loads, so the same GPU work sets
@@ -46,6 +47,26 @@
 //! Beside the runtime lane's other tests it passed 1 storm of 4, failing at the 99th percentile on
 //! MoltenVK's completion path, so on macOS it runs alone (`.config/nextest.toml` keeps the
 //! numbers).
+//!
+//! The host still delays the threads a light burst goes through, and the runtime's burst goes
+//! through two more than Metal's: its commit is taken up on the device's scheduler thread, and its
+//! completion, which MoltenVK's completed handler signals on Metal's completion thread as Metal's
+//! own handler is, reaches the waiting thread through the `VkQueue`'s waiter. So the 99th
+//! percentile may also exceed the reference's by twice the reference's own delivery of a
+//! completion at its 99th percentile, from a light burst's GPU end by Metal's timestamps to the
+//! return of the wait for it (Metal's completion thread, then the waiting thread), measured in the
+//! same slices ([`Storm::delivery`]). On the M3 Max under the harness's utility clamp
+//! (`taskpolicy -c utility`, which lowers the runtime's user-interactive threads with every other),
+//! that delivery took 0.33 to 0.51 ms at the 99th percentile with no load added, 0.04 to 0.06
+//! busy command buffers, in 4 storms. Running alone in a full suite at a load average of 23.9, the
+//! runtime's 99th percentile was 4.71 busy command buffers against the reference's 3.15, its median
+//! within 0.07 of the reference's, plain Metal's own bursts taking 12.31 ms at the 99th percentile
+//! against 0.60 to 0.66 ms with no load added. Beside 8 threads spinning at the default class,
+//! above the clamp (a load average of 22.5), the runtime's 99th percentile was 7.10 busy command
+//! buffers against the reference's 5.13, its median 2.16 against 2.08, and the reference's
+//! deliveries took 11.76 ms (2.77 busy command buffers) at their 99th percentile. Beside 16 such
+//! threads, one for each of its CPUs, those deliveries took 203 ms, and the runtime's median was
+//! 15.55 busy command buffers against 8.41: the storm fails there.
 //!
 //! In our plain Vulkan programs of the runtime's submissions on an M4, every queue on MoltenVK's
 //! one queue of family 0 (as the runtime once did) put the median 1 to 1.4 busy command buffers
@@ -165,6 +186,11 @@ trait Side: Sync {
     ) -> Result<Self::Committed, String>;
     /// Wait for `committed`, which must complete.
     fn wait(&self, committed: Self::Committed) -> Result<(), String>;
+    /// Wait for `committed`, which must complete, and give its completion's delivery: from its
+    /// GPU end by the GPU's own timestamps to the wait's return. `None` where the side has no
+    /// timestamps of its own GPU end (the runtime's on MoltenVK, `gpu_time.rs`): only the
+    /// reference's is read ([`Storm::delivery`]).
+    fn wait_delivered(&self, committed: Self::Committed) -> Result<Option<Duration>, String>;
     /// Wait for `committed`, which must complete, and give its GPU window: from its GPU start
     /// time to its GPU end time.
     fn wait_timed(&self, committed: Self::Committed) -> Result<Duration, String>;
@@ -192,6 +218,9 @@ struct Storm {
     beside: f64,
     /// Every light burst, from its first commit to its last's completion, sorted.
     bursts: Vec<Duration>,
+    /// Each light burst's completion delivery, where the side gives it
+    /// ([`Side::wait_delivered`]), sorted.
+    deliveries: Vec<Duration>,
     /// The host's load average over a minute, before the storm and after it, where the host
     /// gives one.
     load: [Option<f64>; 2],
@@ -202,6 +231,13 @@ impl Storm {
     fn percentile(&self, p: usize) -> f64 {
         let at = (self.bursts.len() * p / 100).min(self.bursts.len() - 1);
         self.bursts[at].as_secs_f64() / self.unit.as_secs_f64()
+    }
+
+    /// The light bursts' completion delivery at the 99th percentile, in busy command buffers,
+    /// where the side gives it ([`Side::wait_delivered`]).
+    fn delivery(&self) -> Option<f64> {
+        let at = (self.deliveries.len() * 99 / 100).min(self.deliveries.len().max(1) - 1);
+        (self.deliveries.get(at)).map(|delivery| delivery.as_secs_f64() / self.unit.as_secs_f64())
     }
 
     /// The fraction of its throughput alone the busy queue keeps beside the light queues.
@@ -218,7 +254,7 @@ impl Storm {
             "STORM {side}: busy {:.2} ms of GPU beside the light queues ({} command buffers; \
              {:.2} ms alone before the phases, {:.2} ms after); unit {:.2} ms{}; bursts {} median \
              {:.2} ms ({:.2} busy), p99 {:.2} ms ({:.2} busy); busy {:.0}/s alone, {:.0}/s beside \
-             ({:.2} kept); load average {} before, {} after{}",
+             ({:.2} kept){}; load average {} before, {} after{}",
             self.windows[self.windows.len() / 2].as_secs_f64() * 1e3,
             self.windows.len(),
             self.gpu[0].as_secs_f64() * 1e3,
@@ -237,6 +273,10 @@ impl Storm {
             self.alone,
             self.beside,
             self.kept(),
+            self.delivery().map_or(String::new(), |delivery| format!(
+                "; completions delivered {:.2} ms after their GPU end at the 99th percentile",
+                delivery * unit * 1e3
+            )),
             load(self.load[0]),
             load(self.load[1]),
             self.unsteady
@@ -275,6 +315,8 @@ struct Measured {
     elapsed: Duration,
     /// Each light burst's time.
     bursts: Vec<Duration>,
+    /// Each light burst's completion delivery, where the side gives it.
+    deliveries: Vec<Duration>,
     /// Each completed busy command buffer's GPU window.
     windows: Vec<Duration>,
 }
@@ -285,6 +327,7 @@ impl Measured {
         self.done += slice.done;
         self.elapsed += slice.elapsed;
         self.bursts.extend(slice.bursts);
+        self.deliveries.extend(slice.deliveries);
         self.windows.extend(slice.windows);
     }
 
@@ -305,7 +348,7 @@ fn phase<S: Side>(side: &S, cap: u32, lights: bool, length: Duration) -> Result<
             .unwrap_or_else(PoisonError::into_inner)
             .get_or_insert(error);
     };
-    let bursts: Mutex<Vec<Duration>> = Mutex::new(Vec::new());
+    let bursts: Mutex<(Vec<Duration>, Vec<Duration>)> = Mutex::new((Vec::new(), Vec::new()));
     let (done, elapsed, windows) = std::thread::scope(|scope| {
         let busy = scope.spawn(|| {
             let began = Instant::now();
@@ -342,25 +385,28 @@ fn phase<S: Side>(side: &S, cap: u32, lights: bool, length: Duration) -> Result<
             .map(|light| {
                 let (stop, bursts, fail) = (&stop, &bursts, &fail);
                 scope.spawn(move || {
-                    let run = || -> Result<Vec<Duration>, String> {
+                    let run = || -> Result<(Vec<Duration>, Vec<Duration>), String> {
                         let target = side.target()?;
                         // The light queue's first burst, not timed.
                         side.wait(side.burst(light, &target, 0)?)?;
-                        let mut times = Vec::new();
+                        let (mut times, mut deliveries) = (Vec::new(), Vec::new());
                         let mut value = 0u8;
                         while !stop.load(Ordering::SeqCst) {
                             value = value.wrapping_add(1);
                             let at = Instant::now();
-                            side.wait(side.burst(light, &target, value)?)?;
+                            let delivered =
+                                side.wait_delivered(side.burst(light, &target, value)?)?;
                             times.push(at.elapsed());
+                            deliveries.extend(delivered);
                         }
-                        Ok(times)
+                        Ok((times, deliveries))
                     };
                     match run() {
-                        Ok(times) => bursts
-                            .lock()
-                            .unwrap_or_else(PoisonError::into_inner)
-                            .extend(times),
+                        Ok((times, deliveries)) => {
+                            let mut all = bursts.lock().unwrap_or_else(PoisonError::into_inner);
+                            all.0.extend(times);
+                            all.1.extend(deliveries);
+                        }
                         Err(error) => fail(error),
                     }
                 })
@@ -376,10 +422,12 @@ fn phase<S: Side>(side: &S, cap: u32, lights: bool, length: Duration) -> Result<
     if let Some(error) = failure.into_inner().unwrap_or_else(PoisonError::into_inner) {
         return Err(error);
     }
+    let (bursts, deliveries) = bursts.into_inner().unwrap_or_else(PoisonError::into_inner);
     Ok(Measured {
         done,
         elapsed,
-        bursts: bursts.into_inner().unwrap_or_else(PoisonError::into_inner),
+        bursts,
+        deliveries,
         windows,
     })
 }
@@ -458,6 +506,7 @@ impl<'a, S: Side> Run<'a, S> {
         let (alone, beside) = (self.alone.rate(), self.beside.rate());
         let Measured {
             mut bursts,
+            mut deliveries,
             mut windows,
             ..
         } = self.beside;
@@ -470,6 +519,7 @@ impl<'a, S: Side> Run<'a, S> {
             ));
         }
         bursts.sort();
+        deliveries.sort();
         windows.sort();
         let unsteady = (unit.is_none() && (after * 2 < before || after > before * 2)).then(|| {
             format!(
@@ -486,6 +536,7 @@ impl<'a, S: Side> Run<'a, S> {
             alone,
             beside,
             bursts,
+            deliveries,
             load: [self.load, load_average()],
         })
     }
@@ -649,6 +700,10 @@ impl Side for Runtime {
         }
     }
 
+    fn wait_delivered(&self, command_buffer: CommandBuffer) -> Result<Option<Duration>, String> {
+        self.wait(command_buffer).map(|()| None)
+    }
+
     fn wait_timed(&self, command_buffer: CommandBuffer) -> Result<Duration, String> {
         self.wait(command_buffer.clone())?;
         let start = command_buffer.gpu_start_time();
@@ -691,6 +746,11 @@ mod metal {
     /// light queues, as a fraction of its throughput alone.
     const BUSY_MARGIN: f64 = 0.25;
 
+    /// The host's thread hand-offs a light burst makes on the runtime's side beyond Metal's (the
+    /// module docs), each allowed the reference's completion delivery at its 99th percentile
+    /// ([`Storm::delivery`]) on top of [`P99_MARGIN`].
+    const HAND_OFFS: f64 = 2.0;
+
     /// The runtime's storm `ours` against Metal's `metal` (the module docs), both counted in
     /// Metal's unit and measured at a steady spin ([`super::tried`]).
     pub(super) fn judge(ours: &Storm, metal: &Storm) {
@@ -703,10 +763,11 @@ mod metal {
             "a light burst's median is {median:.2} busy command buffers, Metal's {metal_median:.2}"
         );
         let (p99, metal_p99) = (ours.percentile(99), metal.percentile(99));
+        let delivery = metal.delivery().expect("Metal's completions' delivery");
         assert!(
-            p99 <= metal_p99 + P99_MARGIN,
+            p99 <= metal_p99 + P99_MARGIN + HAND_OFFS * delivery,
             "a light burst's 99th percentile is {p99:.2} busy command buffers, Metal's \
-             {metal_p99:.2}"
+             {metal_p99:.2}, its completions delivered in {delivery:.2} at their 99th percentile"
         );
         assert!(
             ours.kept() >= metal.kept() - BUSY_MARGIN,
@@ -876,6 +937,16 @@ mod metal {
 
         fn wait(&self, (command_buffer, watched): Self::Committed) -> Result<(), String> {
             settle_watched(&command_buffer, watched, "the queue storm")
+        }
+
+        /// Its GPU end and the wait's return in the same seconds: Metal's GPU times count the
+        /// clock `host_time` reads (`CLOCK_UPTIME_RAW`, which `mach_absolute_time` counts).
+        fn wait_delivered(&self, committed: Self::Committed) -> Result<Option<Duration>, String> {
+            let command_buffer = committed.0.clone();
+            self.wait(committed)?;
+            let returned = metal2vulkan_runtime::host_time();
+            let delivery = returned - command_buffer.GPUEndTime();
+            Ok(Some(Duration::from_secs_f64(delivery.max(0.0))))
         }
 
         fn wait_timed(&self, committed: Self::Committed) -> Result<Duration, String> {
