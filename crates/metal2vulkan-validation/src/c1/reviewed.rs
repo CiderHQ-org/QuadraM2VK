@@ -300,7 +300,7 @@ mod tests {
                 evidence: vec!["a device probe".into()],
                 note: "reviewed".into(),
                 sign_off: SignOff::AwaitingUser {
-                    decision: "U11".into(),
+                    decision: "a device limit".into(),
                 },
             },
         }
@@ -316,7 +316,7 @@ mod tests {
     }
 
     #[test]
-    fn the_list_keeps_only_buckets_d151_lets_it_hold() {
+    fn the_list_keeps_only_the_buckets_it_may_hold() {
         let ok = entry(
             "device_capability_missing",
             "Float64 needs Feature(Float64)",

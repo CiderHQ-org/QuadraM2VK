@@ -75,7 +75,7 @@ pub trait List: Clone + Serialize + DeserializeOwned {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
 pub enum SignOff {
-    /// The entry awaits the user's decision `decision` (for example `U11`).
+    /// The entry awaits the user's decision `decision` (for example `sign off as a device limit`).
     AwaitingUser { decision: String },
     /// The user signed the entry off under `decision` on `date` (`YYYY-MM-DD`).
     SignedOff { decision: String, date: String },
@@ -86,7 +86,7 @@ impl SignOff {
         matches!(self, SignOff::SignedOff { .. })
     }
 
-    /// `awaiting_user(U11)` or `signed_off(U11 2026-10-02)`.
+    /// `awaiting_user(<decision>)` or `signed_off(<decision> <date>)`.
     pub fn label(&self) -> String {
         match self {
             SignOff::AwaitingUser { decision } => format!("awaiting_user({decision})"),
@@ -125,8 +125,8 @@ fn is_date(text: &str) -> bool {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Review {
-    /// The evidence: the design-log entries, measurements and profile facts behind the review. At
-    /// least one, none empty.
+    /// The evidence: the measurements, code and profile facts behind the review. At least one, none
+    /// empty.
     pub evidence: Vec<String>,
     /// The reviewer's note.
     pub note: String,
@@ -161,18 +161,18 @@ mod tests {
     #[test]
     fn a_review_needs_evidence_a_note_and_a_well_formed_sign_off() {
         let awaiting = SignOff::AwaitingUser {
-            decision: "U11".into(),
+            decision: "a device limit".into(),
         };
         assert!(review(awaiting.clone()).check().is_ok());
         assert!(!awaiting.is_signed_off());
-        assert_eq!(awaiting.label(), "awaiting_user(U11)");
+        assert_eq!(awaiting.label(), "awaiting_user(a device limit)");
         let signed = SignOff::SignedOff {
-            decision: "U11".into(),
+            decision: "a device limit".into(),
             date: "2026-10-02".into(),
         };
         assert!(review(signed.clone()).check().is_ok());
         assert!(signed.is_signed_off());
-        assert_eq!(signed.label(), "signed_off(U11 2026-10-02)");
+        assert_eq!(signed.label(), "signed_off(a device limit 2026-10-02)");
 
         let mut bad = review(awaiting.clone());
         bad.evidence.clear();
@@ -191,7 +191,7 @@ mod tests {
         for date in ["2026-1-02", "02-10-2026", "2026/10/02", ""] {
             assert!(
                 review(SignOff::SignedOff {
-                    decision: "U11".into(),
+                    decision: "a device limit".into(),
                     date: date.into(),
                 })
                 .check()
@@ -204,26 +204,29 @@ mod tests {
     #[test]
     fn a_sign_off_reads_as_a_tagged_state_and_rejects_unknown_fields() {
         let awaiting: SignOff =
-            serde_json::from_str(r#"{"state":"awaiting_user","decision":"U11"}"#).unwrap();
+            serde_json::from_str(r#"{"state":"awaiting_user","decision":"a device limit"}"#)
+                .unwrap();
         assert_eq!(
             awaiting,
             SignOff::AwaitingUser {
-                decision: "U11".into()
+                decision: "a device limit".into()
             }
         );
-        let signed: SignOff =
-            serde_json::from_str(r#"{"state":"signed_off","decision":"U11","date":"2026-10-02"}"#)
-                .unwrap();
+        let signed: SignOff = serde_json::from_str(
+            r#"{"state":"signed_off","decision":"a device limit","date":"2026-10-02"}"#,
+        )
+        .unwrap();
         assert!(signed.is_signed_off());
         assert!(serde_json::from_str::<SignOff>(
-            r#"{"state":"awaiting_user","decision":"U11","by":"x"}"#
+            r#"{"state":"awaiting_user","decision":"a device limit","by":"x"}"#
         )
         .is_err());
-        assert!(
-            serde_json::from_str::<SignOff>(r#"{"state":"approved","decision":"U11"}"#).is_err()
-        );
+        assert!(serde_json::from_str::<SignOff>(
+            r#"{"state":"approved","decision":"a device limit"}"#
+        )
+        .is_err());
         assert!(serde_json::from_str::<Review>(
-            r#"{"evidence":["e"],"note":"n","sign_off":{"state":"awaiting_user","decision":"U11"},"extra":1}"#
+            r#"{"evidence":["e"],"note":"n","sign_off":{"state":"awaiting_user","decision":"a device limit"},"extra":1}"#
         )
         .is_err());
     }

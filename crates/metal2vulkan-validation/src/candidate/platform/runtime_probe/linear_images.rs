@@ -371,8 +371,8 @@ fn usage_names(usage: vk::ImageUsageFlags) -> Vec<String> {
     flag_names(u64::from(usage.as_raw()), IMAGE_USAGE)
 }
 
-/// A 2D, single-level, single-layer image of `format` at `width` x [`HEIGHT`], initially
-/// `PREINITIALIZED` so its memory's bytes are its texels.
+/// A 2D, single-level, single-layer image of `format` at `width` x [`HEIGHT`], starting in
+/// [`initial_layout`] of `tiling`.
 fn image_info<'a>(
     format: vk::Format,
     width: u32,
@@ -393,7 +393,19 @@ fn image_info<'a>(
         .tiling(tiling)
         .usage(usage)
         .sharing_mode(vk::SharingMode::EXCLUSIVE)
-        .initial_layout(vk::ImageLayout::PREINITIALIZED)
+        .initial_layout(initial_layout(tiling))
+}
+
+/// The layout a probe image of `tiling` starts in: `PREINITIALIZED` for linear tiling, so its
+/// memory's bytes are its texels, and `UNDEFINED` for the modifier tiling, which Vulkan starts in
+/// no other layout (`VUID-VkImageCreateInfo-initialLayout-12478`), as the runtime's image at
+/// Metal's row pitch does.
+fn initial_layout(tiling: vk::ImageTiling) -> vk::ImageLayout {
+    if tiling == vk::ImageTiling::LINEAR {
+        vk::ImageLayout::PREINITIALIZED
+    } else {
+        vk::ImageLayout::UNDEFINED
+    }
 }
 
 fn measure_format(
@@ -449,7 +461,7 @@ fn measure_format(
     drop(owned);
     let transfer = vk::ImageUsageFlags::TRANSFER_SRC | vk::ImageUsageFlags::TRANSFER_DST;
     if usage.contains(transfer) && ALIAS_WIDTH <= limits.max_extent.width {
-        out.alias = Some(alias_round_trip(context, format, |owned| {
+        out.alias = Some(alias_round_trip(context, format, linear, |owned| {
             owned
                 .image(&image_info(format.vulkan, ALIAS_WIDTH, usage, linear))
                 .map(|image| (image, vk::ImageAspectFlags::COLOR))
@@ -575,7 +587,7 @@ fn measure_drm_linear(
         .or_else(|| accepted.first().copied());
     let transfer = vk::ImageUsageFlags::TRANSFER_SRC | vk::ImageUsageFlags::TRANSFER_DST;
     if let (Some(pitch), true) = (chosen, usage.contains(transfer)) {
-        out.alias = Some(alias_round_trip(context, format, |owned| {
+        out.alias = Some(alias_round_trip(context, format, tiling, |owned| {
             let layouts = [explicit_layout(pitch)];
             let mut explicit = vk::ImageDrmFormatModifierExplicitCreateInfoEXT::default()
                 .drm_format_modifier(DRM_FORMAT_MOD_LINEAR)
@@ -644,14 +656,20 @@ fn modifier_list(
     entries
 }
 
-/// Bind the image `make` creates (with transfer usage, initially `PREINITIALIZED`, at
-/// [`ALIAS_WIDTH`] x [`HEIGHT`]) into the memory of a buffer at a nonzero offset, the image's own
-/// alignment, then check both directions by copies: rows the host wrote through the buffer's
-/// mapping read back through the image, and rows a copy wrote into the image read back through the
-/// buffer (by a copy, and by the host).
+/// Bind the image `make` creates (of `tiling`, with transfer usage, starting in its
+/// [`initial_layout`], at [`ALIAS_WIDTH`] x [`HEIGHT`]) into the memory of a buffer at a nonzero
+/// offset, the image's own alignment, then check both directions by copies: rows the host wrote
+/// through the buffer's mapping read back through the image, and rows a copy wrote into the image
+/// read back through the buffer (by a copy, and by the host). An image starting `UNDEFINED` moves
+/// to `GENERAL` before the host writes its rows, which a move from `UNDEFINED` need not keep, as
+/// the runtime's keep writes the texels back after the first move of its image at Metal's row
+/// pitch (`texture/first_move.rs`). The host writes the image's memory only in `PREINITIALIZED` or
+/// `GENERAL`, where Vulkan defines host access to a linear resource's memory (a
+/// `DRM_FORMAT_MOD_LINEAR` image is one).
 fn alias_round_trip(
     context: &VulkanContext,
     format: &ProbeFormat,
+    tiling: vk::ImageTiling,
     make: impl FnOnce(&mut Owned<'_>) -> Result<(vk::Image, vk::ImageAspectFlags), String>,
 ) -> Alias {
     let mut out = Alias {
@@ -659,7 +677,7 @@ fn alias_round_trip(
         height: HEIGHT,
         ..Alias::default()
     };
-    if let Err(error) = alias_into(context, format, make, &mut out) {
+    if let Err(error) = alias_into(context, format, initial_layout(tiling), make, &mut out) {
         out.error = Some(error);
     }
     out
@@ -668,6 +686,7 @@ fn alias_round_trip(
 fn alias_into(
     context: &VulkanContext,
     format: &ProbeFormat,
+    initial: vk::ImageLayout,
     make: impl FnOnce(&mut Owned<'_>) -> Result<(vk::Image, vk::ImageAspectFlags), String>,
     out: &mut Alias,
 ) -> Result<(), String> {
@@ -720,6 +739,42 @@ fn alias_into(
     unsafe { context.device.bind_image_memory(image, memory, offset) }
         .map_err(|error| format!("bind the image at {offset}: {}", result_name(error)))?;
     let mapped = owned.map(memory)?;
+    let color = vk::ImageSubresourceRange {
+        aspect_mask: vk::ImageAspectFlags::COLOR,
+        base_mip_level: 0,
+        level_count: 1,
+        base_array_layer: 0,
+        layer_count: 1,
+    };
+    // Where the image keeps no bytes of its memory through its first move, it moves before the
+    // host writes them, from `GENERAL` on.
+    let first = if initial == vk::ImageLayout::UNDEFINED {
+        owned.submit("the runtime probe's first move", |device, command| {
+            let moved = vk::ImageMemoryBarrier::default()
+                .dst_access_mask(vk::AccessFlags::HOST_WRITE)
+                .old_layout(vk::ImageLayout::UNDEFINED)
+                .new_layout(vk::ImageLayout::GENERAL)
+                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .image(image)
+                .subresource_range(color);
+            // SAFETY: the command buffer is recording, and the image is live and bound.
+            unsafe {
+                device.cmd_pipeline_barrier(
+                    command,
+                    vk::PipelineStageFlags::TOP_OF_PIPE,
+                    vk::PipelineStageFlags::HOST,
+                    vk::DependencyFlags::empty(),
+                    &[],
+                    &[],
+                    &[moved],
+                )
+            };
+        })?;
+        vk::ImageLayout::GENERAL
+    } else {
+        initial
+    };
     let row_at = |row: u64| first_texel + row * layout.row_pitch;
     // The buffer's bytes, as the host writes them through its mapping: the image's rows hold
     // pattern 1, everything else 0xee.
@@ -747,13 +802,6 @@ fn alias_into(
             }
         }
     }
-    let color = vk::ImageSubresourceRange {
-        aspect_mask: vk::ImageAspectFlags::COLOR,
-        base_mip_level: 0,
-        level_count: 1,
-        base_array_layer: 0,
-        layer_count: 1,
-    };
     let region = vk::BufferImageCopy::default()
         .image_subresource(vk::ImageSubresourceLayers {
             aspect_mask: vk::ImageAspectFlags::COLOR,
@@ -775,10 +823,10 @@ fn alias_into(
         })
         .collect::<Vec<_>>();
     owned.submit("the runtime probe's alias copies", |device, command| {
-        let preinitialized = vk::ImageMemoryBarrier::default()
+        let host_written = vk::ImageMemoryBarrier::default()
             .src_access_mask(vk::AccessFlags::HOST_WRITE)
             .dst_access_mask(vk::AccessFlags::TRANSFER_READ)
-            .old_layout(vk::ImageLayout::PREINITIALIZED)
+            .old_layout(first)
             .new_layout(vk::ImageLayout::GENERAL)
             .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
             .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
@@ -811,7 +859,7 @@ fn alias_into(
                 none,
                 &[],
                 &[],
-                &[preinitialized],
+                &[host_written],
             );
             device.cmd_copy_image_to_buffer(
                 command,

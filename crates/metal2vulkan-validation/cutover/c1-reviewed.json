@@ -4,7 +4,7 @@
       "profile": "lunarg-desktop-baseline-2023",
       "outcome": "device_capability_missing",
       "key": "FramebufferFetch needs Feature(RasterizationOrderColorAttachmentAccess) | Feature(FragmentShaderPixelInterlock)",
-      "class": "near_equivalent",
+      "class": "device_lacks",
       "rows": 8,
       "rows_digest": "7010f0557b7c62397a6f66bf553930ea5dbacd8d429f9a9ea82ca51335adbb62",
       "new_census": "dae6c9c8021e6a3de6b1ebabf3bfb5e8756e9161930b55f912d7407288c442a8",
@@ -12,20 +12,16 @@
       "review": {
         "evidence": [
           "the engine's census of lunarg-desktop-baseline-2023 refuses this entry's rows `device_capability_missing FramebufferFetch needs Feature(RasterizationOrderColorAttachmentAccess) | Feature(FragmentShaderPixelInterlock)` (rows, rows_digest, new_census)",
-          "the old engine's L3 table of lunarg-desktop-baseline-2023 (old_l3): the rows' old output passes L3 there or has no verdict (DESIGN D163)",
-          "BUILD_PLAN U7 (answered 2026-10-02: RequireOrdered, AcceptUnordered a recorded opt-in)",
-          "DESIGN D74.8 (fetch ordering under U7) and D151.2 (near-equivalents)",
-          "DESIGN D255.4 and D255.5 (WP-C1E: the opt-in's evidence for the rows reviewed then)",
-          "DESIGN D287.2 and D287.4 (WP-DVP: the ordered fetch through the pixel interlock; on a device with neither ordered form the refusal names both, and AcceptUnordered falls back to the unordered input attachment)",
-          "DESIGN D273 (U11): the user signed off this family's earlier rows on this profile as a device limit on 2026-10-03",
+          "the old engine's L3 table of lunarg-desktop-baseline-2023 (old_l3): the rows' old output passes L3 there or has no verdict",
           "validation/profiles/lunarg-desktop-baseline-2023.json: none of its 41 extensions is VK_EXT_fragment_shader_interlock or a rasterization-order attachment access extension, and no capability block states fragmentShaderPixelInterlock or rasterizationOrderColorAttachmentAccess",
-          "EV C1R-measure (DESIGN D298): at master 1758b8a9 (train t59), corpus-ab --c1-report finds this bucket's rows (new census dae6c9c8, old L3 eeb826d3)",
-          "DESIGN D298.12: the user's sign-off of 2026-10-03 (U11)"
+          "the translator orders a framebuffer fetch in one of two exact forms: an input attachment under rasterization-order attachment access, or each read attachment as a coherent storage image inside the ordered pixel interlock (crates/metal2vulkan/src/lower/fragment/color.rs and fetch.rs); with neither, it refuses the read, naming both forms",
+          "corpus-ab --c1-report at commit 1758b8a9 finds this bucket's rows (new census dae6c9c8, old L3 eeb826d3)",
+          "the user's sign-off of 2026-10-03"
         ],
-        "note": "Refreshed by WP-C1R (D298); a recorded near-equivalent, open until an exact path exists (the user's rule of 2026-10-03). The user signed off this family's 6 rows on lunarg-desktop-baseline-2023 as a device limit on 2026-10-03 (U11, D273). That sign-off covers only those rows. WP-DVP then re-keyed the refusal to name both ordered forms (D287.4), so that entry no longer finds its bucket, and the bucket gained fragment_fetch's public fetch_ordered (a4d33db3) and fetch_scalar (f6350577) beside the 6 signed-off rows (0d33931d, 353da437, 92428fc0, 9efdcbd4, f420722e, fe6bea5b), which were new to the user. The user signed off the whole bucket on 2026-10-03, those two rows included (U11, D298.12); it stays a recorded near-equivalent, open until an exact path exists. The exact paths are rasterization-order attachment access, or D287's storage form: each read attachment as a coherent storage image inside the ordered pixel interlock (D287.2, D287.3). The profile states neither rasterizationOrderColorAttachmentAccess nor fragmentShaderPixelInterlock, so the storage form cannot apply there, and Metal's ordered framebuffer fetch has no exact form. Under the default RequireOrdered the engine refuses; U7's AcceptUnordered opt-in translates through the unordered input attachment, recorded as PrecisionNote::UnorderedFramebufferFetch (D74.8, D151.2, D287.4). The old engine emits one input attachment per color index (src/passes/stage_input/mod.rs), read unordered and unrecorded. D255.5 measured the opt-in's compile for the signed-off rows; the added public rows' opt-in compile is expected from D287.4 and was not run here.",
+        "note": "The bucket's 8 rows are 6 private rows (0d33931d, 353da437, 92428fc0, 9efdcbd4, f420722e, fe6bea5b) and the public fragment_fetch fixture's fetch_ordered (a4d33db3) and fetch_scalar (f6350577). Each reads a color attachment through Metal's framebuffer fetch, which Metal orders after every earlier fragment of the pixel. The profile states neither rasterizationOrderColorAttachmentAccess nor fragmentShaderPixelInterlock, so neither exact form applies and no exact emulation is known: the engine refuses the rows, naming both forms. No unordered input-attachment read is offered in their place: it could return the attachment before an earlier overlapping fragment's write, a value Metal never shows. The old engine emits one input attachment per color index (src/passes/stage_input/mod.rs), read unordered and unrecorded. The user signed off the 6 private rows as a device limit on 2026-10-03, and the whole bucket the same day as a recorded near-equivalent; with the unordered read removed, the bucket is the device's lack.",
         "sign_off": {
           "state": "signed_off",
-          "decision": "U11: sign off as a recorded near-equivalent that stays open until an exact path exists and does not count against C1 (the user's answer of 2026-10-03)",
+          "decision": "sign off this family's rows as a device limit, and the bucket as a recorded near-equivalent that stays open until an exact path exists and does not count against C1 (the user's answers of 2026-10-03); the near-equivalent, an unordered read, is removed, as no fast form may change what a Metal program observes (the user's rule of 2026-10-18)",
           "date": "2026-10-03"
         }
       }
@@ -42,17 +38,16 @@
       "review": {
         "evidence": [
           "the engine's census of lunarg-desktop-baseline-2023 refuses this entry's rows `device_capability_missing MinLodClamp needs Feature(ShaderResourceMinLod)` (rows, rows_digest, new_census)",
-          "the old engine's L3 table of lunarg-desktop-baseline-2023 (old_l3): the rows' old output passes L3 there or has no verdict (DESIGN D163)",
+          "the old engine's L3 table of lunarg-desktop-baseline-2023 (old_l3): the rows' old output passes L3 there or has no verdict",
           "validation/profiles/lunarg-desktop-baseline-2023.json: its one capability block with features (VP_LUNARG_desktop_baseline_2023_block) grants 29 VkPhysicalDeviceFeatures, and shaderResourceMinLod is not among them",
-          "DESIGN D73.2: a nonzero min_lod_clamp on an implicit-level or gradient sample is SPIR-V's MinLod operand, which needs shaderResourceMinLod",
-          "DESIGN D151.1 and D151.4",
-          "EV C1R-measure (DESIGN D298): at master 1758b8a9 (train t59), corpus-ab --c1-report finds this bucket's rows (new census dae6c9c8, old L3 eeb826d3)",
-          "DESIGN D298.12: the user's sign-off of 2026-10-03 (U11)"
+          "a nonzero min_lod_clamp on an implicit-level or gradient sample is SPIR-V's MinLod image operand, which needs shaderResourceMinLod",
+          "corpus-ab --c1-report at commit 1758b8a9 finds this bucket's rows (new census dae6c9c8, old L3 eeb826d3)",
+          "the user's sign-off of 2026-10-03"
         ],
-        "note": "Proposed by WP-C1R (D298); the user signed it off on 2026-10-03 (U11, D298.12). The one row is the public sampling fixture's sample_min_lod (f2af5b3d), a fragment function's implicit-level sample with min_lod_clamp(1.5). Vulkan clamps an implicit level from below only through the MinLod image operand, whose capability needs shaderResourceMinLod, and the profile lacks it. No exact emulation is known. Sampler state cannot carry the clamp, because the clamp is an operand of the call, not of the sampler. A rewrite to an explicit level (the queried level, raised to the clamp) or to scaled gradients replaces the implementation's own level selection, and so its filtering (anisotropy included); neither is shown to equal Metal's clamped implicit sample. The old output passes L3 on this profile: expected from its requirements, not executed.",
+        "note": "The user signed it off on 2026-10-03. The one row is the public sampling fixture's sample_min_lod (f2af5b3d), a fragment function's implicit-level sample with min_lod_clamp(1.5). Vulkan clamps an implicit level from below only through the MinLod image operand, whose capability needs shaderResourceMinLod, and the profile lacks it. No exact emulation is known. Sampler state cannot carry the clamp, because the clamp is an operand of the call, not of the sampler. A rewrite to an explicit level (the queried level, raised to the clamp) or to scaled gradients replaces the implementation's own level selection, and so its filtering (anisotropy included); neither is shown to equal Metal's clamped implicit sample. The old output passes L3 on this profile: expected from its requirements, not executed.",
         "sign_off": {
           "state": "signed_off",
-          "decision": "U11: sign off as a device limit (the user's answer of 2026-10-03)",
+          "decision": "sign off as a device limit (the user's answer of 2026-10-03)",
           "date": "2026-10-03"
         }
       }
@@ -69,19 +64,18 @@
       "review": {
         "evidence": [
           "the engine's census of moltenvk-m3 refuses this entry's rows `invalid_input Canon::CallTypeMismatch` (rows, rows_digest, new_census)",
-          "the old engine's L3 table of moltenvk-m3 (old_l3): the rows' old output passes L3 there or has no verdict (DESIGN D163)",
-          "DESIGN D231.3 (these two rows: a call whose arguments the callee's parameters cannot receive is invalid input)",
+          "the old engine's L3 table of moltenvk-m3 (old_l3): the rows' old output passes L3 there or has no verdict",
+          "a call whose arguments the callee's parameters cannot receive is invalid input",
           "the arity: each row's fragment entry calls a 10-parameter internal constructor with 12 arguments; its eighth is an i32 where the callee takes <3 x float>",
-          "the old engine's output for both rows (the product CLI at wp/C1R 1758b8a9, --stage fragment): the callee's <3 x half> parameter receives the call's eleventh argument and its i1 the last (false), so the branch on that i1 is unconditional; positional binding would give them the undefined [12 x i8] and a <3 x float>",
-          "DESIGN D298 (the list admits old_output_wrong on input the product classes as malformed)",
-          "DESIGN D151.5 (old output that was wrong or guessed)",
-          "EV C1R-measure (DESIGN D298): at master 1758b8a9 (train t59), corpus-ab --c1-report finds this bucket's rows (new census ed6999d3, old L3 ff4c349d)",
-          "DESIGN D298.12: the user's sign-off of 2026-10-03 (U11)"
+          "the old engine's output for both rows (the product CLI at 1758b8a9, --stage fragment): the callee's <3 x half> parameter receives the call's eleventh argument and its i1 the last (false), so the branch on that i1 is unconditional; positional binding would give them the undefined [12 x i8] and a <3 x float>",
+          "the list admits an invalid-input bucket only as old_output_wrong, on input the product classes as malformed (crates/metal2vulkan-validation/src/c1/reviewed.rs)",
+          "corpus-ab --c1-report at commit 1758b8a9 finds this bucket's rows (new census ed6999d3, old L3 ff4c349d)",
+          "the user's sign-off of 2026-10-03"
         ],
-        "note": "Proposed by WP-C1R (D298); the user signed it off on 2026-10-03 (U11, D298.12). Both rows (3c535a11, 9f1fdeb0) pass 12 arguments to a 10-parameter internal constructor; the eighth is an i32 where the callee takes <3 x float>. No rule binds such arguments: C11 6.5.2.2p9 leaves the call undefined, the IR defines no binding, and AIR does not carry Apple's calling convention (D231.3). The old engine translated both, and its output passes L3 on moltenvk-m3. Its output for both rows (the product CLI at 1758b8a9; the two differ only in a type's id) binds the callee's last two parameters to the call's last two arguments. The <3 x half> receives the decoded normal, which the output converts to float, and the i1 receives false, so the callee's branch on it becomes an unconditional branch. The caller's i32 and 12 padding bytes are dropped. A positional binding would instead give the <3 x half> the 12 undefined bytes and the i1 a <3 x float>. The input defines neither binding, so the old output is guessed. The same two rows are in this bucket on the three real-device profiles (no entry there).",
+        "note": "The user signed it off on 2026-10-03. Both rows (3c535a11, 9f1fdeb0) pass 12 arguments to a 10-parameter internal constructor; the eighth is an i32 where the callee takes <3 x float>. No rule binds such arguments: C11 6.5.2.2p9 leaves the call undefined, the IR defines no binding, and AIR does not carry Apple's calling convention. The old engine translated both, and its output passes L3 on moltenvk-m3. Its output for both rows (the product CLI at 1758b8a9; the two differ only in a type's id) binds the callee's last two parameters to the call's last two arguments. The <3 x half> receives the decoded normal, which the output converts to float, and the i1 receives false, so the callee's branch on it becomes an unconditional branch. The caller's i32 and 12 padding bytes are dropped. A positional binding would instead give the <3 x half> the 12 undefined bytes and the i1 a <3 x float>. The input defines neither binding, so the old output is guessed. The same two rows are in this bucket on the three real-device profiles (no entry there).",
         "sign_off": {
           "state": "signed_off",
-          "decision": "U11: sign off as old output that was guessed (the user's answer of 2026-10-03)",
+          "decision": "sign off as old output that was guessed (the user's answer of 2026-10-03)",
           "date": "2026-10-03"
         }
       }
@@ -98,16 +92,15 @@
       "review": {
         "evidence": [
           "the engine's census of moltenvk-m3 refuses this entry's rows `unsupported not_implemented ArgumentBufferObjects` (rows, rows_digest, new_census)",
-          "the old engine's L3 table of moltenvk-m3 (old_l3): the rows' old output passes L3 there or has no verdict (DESIGN D163)",
-          "DESIGN D211 (an indirect command buffer's private command layout has no exact emulation) and D231.7 (these two rows, recorded)",
-          "DESIGN D151.5 (old output that was wrong or guessed)",
-          "EV C1R-measure (DESIGN D298): at master 1758b8a9 (train t59), corpus-ab --c1-report finds this bucket's rows (new census ed6999d3, old L3 ff4c349d)",
-          "DESIGN D298.12: the user's sign-off of 2026-10-03 (U11)"
+          "the old engine's L3 table of moltenvk-m3 (old_l3): the rows' old output passes L3 there or has no verdict",
+          "an indirect command buffer's private command layout has no exact emulation: AIR does not describe it",
+          "corpus-ab --c1-report at commit 1758b8a9 finds this bucket's rows (new census ed6999d3, old L3 ff4c349d)",
+          "the user's sign-off of 2026-10-03"
         ],
-        "note": "Proposed by WP-C1R (D298); the user signed it off on 2026-10-03 (U11, D298.12). Both rows (3b6a7600, c4b9ba7a) are GPU-debug indirect-command-buffer vertex functions. Each loads a pointer at 16 + 8 * sext(stride * (start + vid)) from a {command_buffer; int; int} argument (air.buffer_size 16), so a signed index can reach the command-buffer field (D231.7). What lies there is Metal's private command layout, which AIR does not describe; D211 decided that no translation of it is sound. The old engine translated both, and its output passes L3 on moltenvk-m3, so it reads that layout as it guessed it: the old output is guessed, not Metal's. The same two rows are in this bucket on amd-rdna3-radv, intel-irisxe-anv, and nvidia-rtx50-linux (no entry: C1 is measured on the three C1 profiles).",
+        "note": "The user signed it off on 2026-10-03. Both rows (3b6a7600, c4b9ba7a) are GPU-debug indirect-command-buffer vertex functions. Each loads a pointer at 16 + 8 * sext(stride * (start + vid)) from a {command_buffer; int; int} argument (air.buffer_size 16), so a signed index can reach the command-buffer field. What lies there is Metal's private command layout, which AIR does not describe, so no translation of it is sound. The old engine translated both, and its output passes L3 on moltenvk-m3, so it reads that layout as it guessed it: the old output is guessed, not Metal's. The same two rows are in this bucket on amd-rdna3-radv, intel-irisxe-anv, and nvidia-rtx50-linux (no entry: C1 is measured on the three C1 profiles).",
         "sign_off": {
           "state": "signed_off",
-          "decision": "U11: sign off as old output that was guessed (the user's answer of 2026-10-03)",
+          "decision": "sign off as old output that was guessed (the user's answer of 2026-10-03)",
           "date": "2026-10-03"
         }
       }
@@ -124,17 +117,16 @@
       "review": {
         "evidence": [
           "the engine's census of moltenvk-m3 refuses this entry's rows `unsupported not_implemented FunctionConstantArgument` (rows, rows_digest, new_census)",
-          "the old engine's L3 table of moltenvk-m3 (old_l3): the rows' old output passes L3 there or has no verdict (DESIGN D163)",
-          "DESIGN D291.7 (WP-SPC, train t62): an observed read, query, or sample of a texture argument whose function-constant gate is off is refused at the argument; Metal has no one answer for it (M3 Max, macOS 26.7: with the validation layer off the result is never written, with it on the read is the null texture's)",
-          "DESIGN D151.5 (old output that was wrong or guessed)",
-          "DESIGN D298.13 (the rows translated at t61 and refuse from t62; drafted for the user)",
-          "EV C1R-final (DESIGN D298): at wp/C1R 6c12df7e (master 7c1db064, train t63), corpus-ab --c1-report finds this bucket's rows (new census 9f96fd49, old L3 57183eb5)",
-          "DESIGN D298.14: the user's sign-off of 2026-10-03 (U11)"
+          "the old engine's L3 table of moltenvk-m3 (old_l3): the rows' old output passes L3 there or has no verdict",
+          "an observed read, query, or sample of a texture argument whose function-constant gate is off is refused at the argument; Metal has no one answer for it (M3 Max, macOS 26.7: with the validation layer off the result is never written, with it on the read is the null texture's)",
+          "the engine translated these rows before it refused such a read, and refuses them since",
+          "corpus-ab --c1-report at commit 6c12df7e finds this bucket's rows (new census 9f96fd49, old L3 57183eb5)",
+          "the user's sign-off of 2026-10-03"
         ],
-        "note": "Proposed by WP-C1R (D298.13); the user signed it off on 2026-10-03 as old output that was guessed (U11, D298.14). The four rows (037ec336, 76177e5a, 9e44ff7a, c5441e58) are private fragment functions. Each reads a texture argument whose function constant is off when no constants are given, on a path the function's output observes. At train t61 the engine translated them: they were C1 rows outside the gap, and the old census and L3 counts are unchanged since. From t62 WP-SPC refuses such a read (D291.7), because Metal answers it two ways: with the validation layer off the read's result is never written, and with it on it reads as the null texture. No translation reproduces one defined answer, so the old engine's output, which passes L3 on moltenvk-m3, is a guess. The old engine's output for these rows was not inspected here. All four refuse the same way on lunarg-desktop-baseline-2023, and two of them on vk12-floor, where C1 excludes them because their old output fails L3 there.",
+        "note": "The user signed it off on 2026-10-03 as old output that was guessed. The four rows (037ec336, 76177e5a, 9e44ff7a, c5441e58) are private fragment functions. Each reads a texture argument whose function constant is off when no constants are given, on a path the function's output observes. The engine translated them earlier, when they were C1 rows outside the gap (the old census and L3 counts are unchanged since); it now refuses such a read, because Metal answers it two ways: with the validation layer off the read's result is never written, and with it on it reads as the null texture. No translation reproduces one defined answer, so the old engine's output, which passes L3 on moltenvk-m3, is a guess. The old engine's output for these rows was not inspected here. All four refuse the same way on lunarg-desktop-baseline-2023, and two of them on vk12-floor, where C1 excludes them because their old output fails L3 there.",
         "sign_off": {
           "state": "signed_off",
-          "decision": "U11: sign off as old output that was guessed (the user's answer of 2026-10-03)",
+          "decision": "sign off as old output that was guessed (the user's answer of 2026-10-03)",
           "date": "2026-10-03"
         }
       }
@@ -151,17 +143,16 @@
       "review": {
         "evidence": [
           "the engine's census of moltenvk-m3 refuses this entry's rows `unsupported not_implemented Linking` (rows, rows_digest, new_census)",
-          "the old engine's L3 table of moltenvk-m3 (old_l3): the rows' old output passes L3 there or has no verdict (DESIGN D163)",
-          "DESIGN D231.7 (the row, recorded: a call to the extern_weak mtl.force_not_checked.load.i64.p1)",
+          "the old engine's L3 table of moltenvk-m3 (old_l3): the rows' old output passes L3 there or has no verdict",
+          "the row: a call to the extern_weak mtl.force_not_checked.load.i64.p1",
           "AGENTS.md, Translation honesty: dispatch on stable ABI symbols only (air.*, llvm.*), never on another name",
-          "DESIGN D151.5 (old output that was wrong or guessed)",
-          "EV C1R-measure (DESIGN D298): at master 1758b8a9 (train t59), corpus-ab --c1-report finds this bucket's rows (new census ed6999d3, old L3 ff4c349d)",
-          "DESIGN D298.12: the user's sign-off of 2026-10-03 (U11)"
+          "corpus-ab --c1-report at commit 1758b8a9 finds this bucket's rows (new census ed6999d3, old L3 ff4c349d)",
+          "the user's sign-off of 2026-10-03"
         ],
-        "note": "Proposed by WP-C1R (D298); the user signed it off on 2026-10-03 (U11, D298.12). The row (1506f7a3) calls the extern_weak declaration mtl.force_not_checked.load.i64.p1, in section air.externally_defined, which Metal's shader-validation runtime defines. Its definition is not in the input, and the symbol is not in the air./llvm. ABI families. The old engine lowered the call as a load because of its name (D231.7), a meaning the input does not carry, so the old output is guessed. The engine refuses it as Linking, naming the symbol at the call. The same row is in this bucket on the three real-device profiles (no entry there).",
+        "note": "The user signed it off on 2026-10-03. The row (1506f7a3) calls the extern_weak declaration mtl.force_not_checked.load.i64.p1, in section air.externally_defined, which Metal's shader-validation runtime defines. Its definition is not in the input, and the symbol is not in the air./llvm. ABI families. The old engine lowered the call as a load because of its name, a meaning the input does not carry, so the old output is guessed. The engine refuses it as Linking, naming the symbol at the call. The same row is in this bucket on the three real-device profiles (no entry there).",
         "sign_off": {
           "state": "signed_off",
-          "decision": "U11: sign off as old output that was guessed (the user's answer of 2026-10-03)",
+          "decision": "sign off as old output that was guessed (the user's answer of 2026-10-03)",
           "date": "2026-10-03"
         }
       }
@@ -178,16 +169,15 @@
       "review": {
         "evidence": [
           "the engine's census of moltenvk-m3 refuses this entry's rows `unsupported not_representable DereferenceLoadedPointer` (rows, rows_digest, new_census)",
-          "the old engine's L3 table of moltenvk-m3 (old_l3): the rows' old output passes L3 there or has no verdict (DESIGN D163)",
-          "DESIGN D136.7 (Metal's threadgroup address numbering is not the arena's) and D231.2 (this row: a threadgroup pointer made from an integer literal is not representable)",
-          "DESIGN D151.5 (old output that was wrong or guessed)",
-          "EV C1R-measure (DESIGN D298): at master 1758b8a9 (train t59), corpus-ab --c1-report finds this bucket's rows (new census ed6999d3, old L3 ff4c349d)",
-          "DESIGN D298.12: the user's sign-off of 2026-10-03 (U11)"
+          "the old engine's L3 table of moltenvk-m3 (old_l3): the rows' old output passes L3 there or has no verdict",
+          "Metal's threadgroup address numbering is not the arena's, and a threadgroup pointer made from an integer literal is not representable",
+          "corpus-ab --c1-report at commit 1758b8a9 finds this bucket's rows (new census ed6999d3, old L3 ff4c349d)",
+          "the user's sign-off of 2026-10-03"
         ],
-        "note": "Proposed by WP-C1R (D298); the user signed it off on 2026-10-03 (U11, D298.12). The row (434cde47) is a kernel that subtracts atomically through inttoptr (i64 1024 to ptr addrspace(3)) beside three threadgroup arrays (D231.2). A threadgroup address is a byte of the threadgroup memory Apple's compiler lays out after AIR. AIR places no threadgroup global at an address and gives the literal no object, so the input does not say which byte Metal updates (D136.7). The old engine translated the row, and its output passes L3 on moltenvk-m3, so it updates a byte of its own layout: a guess. The same row is in this bucket on the three real-device profiles (no entry there).",
+        "note": "The user signed it off on 2026-10-03. The row (434cde47) is a kernel that subtracts atomically through inttoptr (i64 1024 to ptr addrspace(3)) beside three threadgroup arrays. A threadgroup address is a byte of the threadgroup memory Apple's compiler lays out after AIR. AIR places no threadgroup global at an address and gives the literal no object, so the input does not say which byte Metal updates. The old engine translated the row, and its output passes L3 on moltenvk-m3, so it updates a byte of its own layout: a guess. The same row is in this bucket on the three real-device profiles (no entry there).",
         "sign_off": {
           "state": "signed_off",
-          "decision": "U11: sign off as old output that was guessed (the user's answer of 2026-10-03)",
+          "decision": "sign off as old output that was guessed (the user's answer of 2026-10-03)",
           "date": "2026-10-03"
         }
       }
@@ -196,7 +186,7 @@
       "profile": "vk12-floor",
       "outcome": "device_capability_missing",
       "key": "FramebufferFetch needs Feature(RasterizationOrderColorAttachmentAccess) | Feature(FragmentShaderPixelInterlock)+Feature(FragmentStoresAndAtomics)",
-      "class": "near_equivalent",
+      "class": "device_lacks",
       "rows": 6,
       "rows_digest": "9d6f4b909eda2168f0f4ed52c894e87defa44a01479140048696b79be7f46a80",
       "new_census": "fe02751bc8bf5dbf3ee1a60eff5281544a1d8396b5b53a646026224e613b529d",
@@ -204,20 +194,16 @@
       "review": {
         "evidence": [
           "the engine's census of vk12-floor refuses this entry's rows `device_capability_missing FramebufferFetch needs Feature(RasterizationOrderColorAttachmentAccess) | Feature(FragmentShaderPixelInterlock)+Feature(FragmentStoresAndAtomics)` (rows, rows_digest, new_census)",
-          "the old engine's L3 table of vk12-floor (old_l3): the rows' old output passes L3 there or has no verdict (DESIGN D163)",
-          "BUILD_PLAN U7 (answered 2026-10-02: RequireOrdered, AcceptUnordered a recorded opt-in)",
-          "DESIGN D74.8 (fetch ordering under U7) and D151.2 (near-equivalents)",
-          "DESIGN D255.4 and D255.5 (WP-C1E: the opt-in's evidence for the rows reviewed then)",
-          "DESIGN D287.2 and D287.4 (WP-DVP: the ordered fetch through the pixel interlock; on a device with neither ordered form the refusal names both, and AcceptUnordered falls back to the unordered input attachment)",
-          "DESIGN D273 (U11): the user signed off this family's earlier rows on this profile as a device limit on 2026-10-03",
+          "the old engine's L3 table of vk12-floor (old_l3): the rows' old output passes L3 there or has no verdict",
           "validation/profiles/vk12-floor.json: it states no extension, and its capability blocks state neither fragmentShaderPixelInterlock nor rasterizationOrderColorAttachmentAccess, nor fragmentStoresAndAtomics among the 4 VkPhysicalDeviceFeatures it grants",
-          "EV C1R-measure (DESIGN D298): at master 1758b8a9 (train t59), corpus-ab --c1-report finds this bucket's rows (new census fe02751b, old L3 657baac9)",
-          "DESIGN D298.12: the user's sign-off of 2026-10-03 (U11)"
+          "the translator orders a framebuffer fetch in one of two exact forms: an input attachment under rasterization-order attachment access, or each read attachment as a coherent storage image inside the ordered pixel interlock (crates/metal2vulkan/src/lower/fragment/color.rs and fetch.rs); with neither, it refuses the read, naming both forms",
+          "corpus-ab --c1-report at commit 1758b8a9 finds this bucket's rows (new census fe02751b, old L3 657baac9)",
+          "the user's sign-off of 2026-10-03"
         ],
-        "note": "Refreshed by WP-C1R (D298); a recorded near-equivalent, open until an exact path exists (the user's rule of 2026-10-03). The user signed off this family's 4 rows on vk12-floor as a device limit on 2026-10-03 (U11, D273). That sign-off covers only those rows. WP-DVP then re-keyed the refusal to name both ordered forms (D287.4), so that entry no longer finds its bucket, and the bucket gained fragment_fetch's public fetch_ordered (a4d33db3) and fetch_scalar (f6350577) beside the 4 signed-off rows (353da437, 92428fc0, 9efdcbd4, f420722e), which were new to the user. The user signed off the whole bucket on 2026-10-03, those two rows included (U11, D298.12); it stays a recorded near-equivalent, open until an exact path exists. The exact paths are rasterization-order attachment access, or D287's storage form: each read attachment as a coherent storage image inside the ordered pixel interlock (D287.2, D287.3). The profile states neither rasterizationOrderColorAttachmentAccess nor fragmentShaderPixelInterlock (nor fragmentStoresAndAtomics, which the storage form's write needs), so the storage form cannot apply there, and Metal's ordered framebuffer fetch has no exact form. Under the default RequireOrdered the engine refuses; U7's AcceptUnordered opt-in translates through the unordered input attachment, recorded as PrecisionNote::UnorderedFramebufferFetch (D74.8, D151.2, D287.4). The old engine emits one input attachment per color index (src/passes/stage_input/mod.rs), read unordered and unrecorded. D255.5 measured the opt-in's compile for the signed-off rows; the added public rows' opt-in compile is expected from D287.4 and was not run here.",
+        "note": "The bucket's 6 rows are 4 private rows (353da437, 92428fc0, 9efdcbd4, f420722e) and the public fragment_fetch fixture's fetch_ordered (a4d33db3) and fetch_scalar (f6350577). Each reads a color attachment through Metal's framebuffer fetch, which Metal orders after every earlier fragment of the pixel. The profile states neither rasterizationOrderColorAttachmentAccess nor fragmentShaderPixelInterlock (nor fragmentStoresAndAtomics, which the storage form's write needs), so neither exact form applies and no exact emulation is known: the engine refuses the rows, naming both forms. No unordered input-attachment read is offered in their place: it could return the attachment before an earlier overlapping fragment's write, a value Metal never shows. The old engine emits one input attachment per color index (src/passes/stage_input/mod.rs), read unordered and unrecorded. The user signed off the 4 private rows as a device limit on 2026-10-03, and the whole bucket the same day as a recorded near-equivalent; with the unordered read removed, the bucket is the device's lack.",
         "sign_off": {
           "state": "signed_off",
-          "decision": "U11: sign off as a recorded near-equivalent that stays open until an exact path exists and does not count against C1 (the user's answer of 2026-10-03)",
+          "decision": "sign off this family's rows as a device limit, and the bucket as a recorded near-equivalent that stays open until an exact path exists and does not count against C1 (the user's answers of 2026-10-03); the near-equivalent, an unordered read, is removed, as no fast form may change what a Metal program observes (the user's rule of 2026-10-18)",
           "date": "2026-10-03"
         }
       }

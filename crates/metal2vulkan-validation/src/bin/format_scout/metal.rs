@@ -73,6 +73,18 @@ fn region(w: u64, h: u64) -> MTLRegion {
     }
 }
 
+/// Refuses a render pass into a surface texture of a two-plane YCbCr format: on the M3 under
+/// macOS 27.0.1, a pass into an IOSurface-backed `YCBCR10_420_2P_PACKED` texture ended with
+/// `kIOGPUCommandBufferCallbackErrorHang`, so the scout never draws into one.
+fn refuse_ycbcr_surface_pass(pf: PixelFormat) -> Result<(), Fail> {
+    match metal2vulkan::metal::format::ycbcr_format(pf) {
+        Some(_) => Err(Fail::Skip(
+            "no render pass into a two-plane YCbCr surface (it hangs the GPU)".into(),
+        )),
+        None => Ok(()),
+    }
+}
+
 fn storage_raw(storage: StorageMode) -> usize {
     match storage {
         StorageMode::Shared => 0,
@@ -564,6 +576,9 @@ impl Side {
                 self.digest_of(&t)
             }
             Op::OverSurface { planar, render } => {
+                if render {
+                    refuse_ycbcr_surface_pass(pf)?;
+                }
                 let s = self.surface(planar)?;
                 let usage = if render { Self::target_usage() } else { read };
                 let d = self.desc(usage, StorageMode::Shared);
@@ -890,6 +905,7 @@ impl Side {
                 let usage = Self::target_usage();
                 match form {
                     Form::Surface => {
+                        refuse_ycbcr_surface_pass(pf)?;
                         let s = self.surface(true)?;
                         let d = self.desc(usage, StorageMode::Shared);
                         let device: &ProtocolObject<dyn MTLDevice> = &self.device;
