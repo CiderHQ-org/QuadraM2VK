@@ -22,7 +22,9 @@ use super::buffer_with;
 use super::degrade_notices::{
     assert_made_once, forced, made_render_kinds, shared_in_system_memory,
 };
-use super::render_state::{quiet, validated, Pipe, Probe, PASS, WHITE};
+use super::render_state::{
+    quiet, validated, validated_checking_synchronization, Pipe, Probe, PASS, WHITE,
+};
 use super::{read_buffer, WAIT};
 use crate::air_library::AirLibrary;
 use metal2vulkan::metal::{
@@ -246,6 +248,60 @@ fn a_vertex_stage_reads_the_bytes_from_before_its_pass_s_fragment_writes() {
     let reader = [WHITE.depth(PixelFormat::Depth32Float)];
     let first = forced_kinds(&probe, (false, false), &reader, true);
     assert_made_once(&messages, &[Degradation::UnorderedDrawBytes], &first);
+    quiet(probe, &messages);
+}
+
+/// A later draw's fragments read and write what an earlier draw's vertex stage wrote in the same
+/// render pass instance after the write, as Metal's run every draw's vertex functions before any
+/// draw's fragments: the writer (the fixture `icb_render_replay_template`, rasterizing nothing)
+/// stores `WORD` in word 0, then the marker ORs bit 0 into it, which leaves `WORD | 1`; the
+/// validation layer, checking synchronization, reports no hazard between the write and the
+/// fragments' access, which records after a memory dependency from the write. Twice: in the
+/// second pass both pipelines are made, so the marker's draw records into the writer's render
+/// pass instance (in the first, a draw whose pipeline is being made may record into an instance
+/// of its own, `render/inline_first.rs`).
+#[test]
+fn a_fragment_stage_touches_what_an_earlier_vertex_stage_of_its_pass_wrote_after_the_write() {
+    const WORD: u32 = 0x100;
+    let (messages, _cache, probe) = validated_checking_synchronization();
+    let marker = pipeline(
+        &probe,
+        "rt6_attachmentless",
+        "rt6_cover",
+        Some("rt6_mark_sample"),
+        false,
+    );
+    let writer = pipeline(
+        &probe,
+        "icb_render_replay_template",
+        "icb_render_replay_template",
+        None,
+        false,
+    );
+    // The writer's word: `params[0] * (vid + 1) + params[1]`.
+    let params = buffer_with(
+        &probe.device,
+        &[0u32, WORD]
+            .iter()
+            .flat_map(|w| w.to_le_bytes())
+            .collect::<Vec<u8>>(),
+    )
+    .unwrap();
+    for pass in 0..2 {
+        let words = buffer_with(&probe.device, &[0u8; 64]).unwrap();
+        probe.run(PASS.depth(PixelFormat::Depth32Float, 1.0), |_, e, _| {
+            e.set_render_pipeline_state(&writer).unwrap();
+            e.set_vertex_buffer(Some(&params), 0, 0).unwrap();
+            e.set_vertex_buffer(Some(&words), 0, 1).unwrap();
+            e.draw_primitives(PrimitiveType::Point, 0, 1, 1, 0).unwrap();
+            mark(e, &marker, &words);
+        });
+        assert_eq!(
+            read_buffer(&words, 0, 4).unwrap(),
+            (WORD | 1).to_le_bytes(),
+            "pass {pass}"
+        );
+    }
     quiet(probe, &messages);
 }
 

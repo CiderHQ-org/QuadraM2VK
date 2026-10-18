@@ -407,6 +407,9 @@ calls! {
     CmdSetStencilWriteMask => c"vkCmdSetStencilWriteMask",
     CmdSetStencilReference => c"vkCmdSetStencilReference",
     CreateGraphicsPipelines => c"vkCreateGraphicsPipelines",
+    // A graphics pipeline's debug name, where the device's instance reports messages
+    // ([`NAMING_CALLS`](crate::device::prime::NAMING_CALLS), `pipeline/graphics.rs`).
+    SetDebugUtilsObjectName => c"vkSetDebugUtilsObjectNameEXT",
     // A render host step's execution under a visibility result mode: the query lent to it, begun
     // in its secondary before its first command and ended after its last.
     CmdBeginQuery => c"vkCmdBeginQuery",
@@ -492,6 +495,8 @@ pub(crate) const HOST_STEP: &[Call] = &[
     Call::CmdSetStencilWriteMask,
     Call::CmdSetStencilReference,
     Call::CreateGraphicsPipelines,
+    // The pipeline's debug name, where the instance reports messages (`pipeline/graphics.rs`).
+    Call::SetDebugUtilsObjectName,
     // An execution recorded under a visibility result mode: its lent query.
     Call::CmdBeginQuery,
     Call::CmdEndQuery,

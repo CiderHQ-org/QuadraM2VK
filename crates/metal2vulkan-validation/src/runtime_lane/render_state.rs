@@ -31,7 +31,7 @@
 
 use super::degrade_notices::made_render_kinds;
 use super::viewport_ranges::{depth_ranges_refused, native_depth_range};
-use super::{buffer_with, validated_device_with, Messages, ScratchCache, WAIT};
+use super::{buffer_with, validated_device_with, LaneChecks, Messages, ScratchCache, WAIT};
 use crate::air_library::AirLibrary;
 use crate::gpu::TEST_DEVICE;
 use metal2vulkan::device::VkFeature;
@@ -46,10 +46,10 @@ use metal2vulkan::vk;
 use metal2vulkan_devtools::llvm_assemble;
 use metal2vulkan_runtime::Degradation;
 use metal2vulkan_runtime::{
-    Buffer, ClearColor, CommandBuffer, CommandQueue, Device, Error, ExecutedPipeline, Invalid,
-    Library, LoadAction, PipelineOptions, Problem, Region, RenderCommandEncoder,
-    RenderPassDescriptor, RenderPipelineState, RenderStateProblem, ResourceOptions, RuntimeGap,
-    ScissorRect, StoreAction, Texture, TextureDescriptor, Viewport,
+    Buffer, ClearColor, CommandBuffer, CommandQueue, Device, DeviceOptions, Error,
+    ExecutedPipeline, Invalid, Library, LoadAction, PipelineOptions, Problem, Region,
+    RenderCommandEncoder, RenderPassDescriptor, RenderPipelineState, RenderStateProblem,
+    ResourceOptions, RuntimeGap, ScissorRect, StoreAction, Texture, TextureDescriptor, Viewport,
 };
 use std::cell::RefCell;
 use std::collections::BTreeSet;
@@ -448,12 +448,26 @@ pub(super) fn validated() -> (Messages, ScratchCache, Probe) {
 
 /// [`validated`] on the test device without `withheld`.
 pub(super) fn validated_without(withheld: &[VkFeature]) -> (Messages, ScratchCache, Probe) {
+    validated_adjusted(|options| options.withheld_features.extend(withheld.iter().copied()))
+}
+
+/// [`validated`] on the test device whose validation layer checks synchronization too, as the
+/// lane's `sync` switch has it ([`LaneChecks`]).
+pub(super) fn validated_checking_synchronization() -> (Messages, ScratchCache, Probe) {
+    validated_adjusted(|options| {
+        LaneChecks {
+            synchronization: true,
+            ..LaneChecks::default()
+        }
+        .apply(options)
+    })
+}
+
+/// [`validated`] on the test device made with options `adjust` changed.
+fn validated_adjusted(adjust: impl FnOnce(&mut DeviceOptions)) -> (Messages, ScratchCache, Probe) {
     let messages = Messages::default();
     let cache = ScratchCache::new().unwrap();
-    let device = validated_device_with(TEST_DEVICE, &messages, cache.path(), |options| {
-        options.withheld_features.extend(withheld.iter().copied())
-    })
-    .unwrap();
+    let device = validated_device_with(TEST_DEVICE, &messages, cache.path(), adjust).unwrap();
     let probe = Probe {
         queue: device.new_command_queue().unwrap(),
         library: library(&device),

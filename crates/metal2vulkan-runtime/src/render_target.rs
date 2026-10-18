@@ -59,8 +59,16 @@
 //!   needs. Storage the pixel interlock orders (the fragment imageblock's, `fragment_imageblock.rs`,
 //!   and an interlocked color's storage image, `framebuffer_fetch.rs`) takes the fragment
 //!   shader's scopes alone (`STORAGE_SELF_DEPENDENCY`, `between_storage_draws`), and a memory
-//!   barrier over the render targets all of them (`between_draws`, `fence.rs`). Every pass has
-//!   it, so every pass of a shape stays compatible with every other.
+//!   barrier over the render targets all of them (`between_draws`, `fence.rs`). It depends on
+//!   itself too from the draws' reads of their indirect arguments to every graphics stage, an
+//!   execution dependency alone, not by region (`INDIRECT_SELF_DEPENDENCY`): the dependency of
+//!   the barrier before a draw that writes what an earlier draw of the instance read as its
+//!   arguments (`after_indirect_reads`); and from the shader writes of the stages a draw runs
+//!   before its fragments to the fragment shader's reads and writes, not by region
+//!   (`GEOMETRY_SELF_DEPENDENCY`): the dependency of the barrier before a draw whose fragment
+//!   shader reads or writes what an earlier draw of the instance wrote in those stages
+//!   (`after_geometry_writes`). Every pass of a device has all three, so every pass of a shape
+//!   stays compatible with every other.
 //! - **Later resolves**. A depth/stencil resolve the device makes one aspect at a time
 //!   (`resolve.rs`) resolves its first aspect in the draws' subpass and its second after the pass's
 //!   instances, in a render pass of its own ([`later_resolve`]) that has only the depth/stencil
@@ -138,7 +146,7 @@ use super::render_values::{LoadAction, StoreAction};
 use super::resolve::{Resolve, ResolveMode, ResolveStep};
 use super::resource::ResourceKey;
 use super::texture::TextureMemory;
-use super::tracker::{Access, Use};
+use super::tracker::{Access, LegacyBarrier, Use};
 use super::Device;
 use crate::release;
 use ash::vk;
@@ -554,7 +562,9 @@ impl Drop for FramebufferObject {
 }
 
 /// A dependency of the draws' subpass on itself (the module docs), whose scopes a barrier
-/// recorded between two draws of an instance takes (`between_storage_draws`, `between_draws`).
+/// recorded between two draws of an instance takes (`between_storage_draws`, `between_draws`,
+/// `after_geometry_writes`): `stages` are both scopes' stages, but for
+/// [`GEOMETRY_SELF_DEPENDENCY`]'s, whose source stages are the device's.
 pub(super) struct SelfDependency {
     pub(super) stages: vk::PipelineStageFlags,
     pub(super) src_access: vk::AccessFlags,
@@ -608,6 +618,161 @@ pub(super) fn self_dependency_flags(view_mask: u32) -> vk::DependencyFlags {
         vk::DependencyFlags::BY_REGION | vk::DependencyFlags::VIEW_LOCAL
     } else {
         vk::DependencyFlags::BY_REGION
+    }
+}
+
+/// The draws' subpass's dependency on itself from the draws' reads of their indirect arguments,
+/// in `DRAW_INDIRECT`, to every graphics stage, with no access type: an execution dependency,
+/// which "Write-after-read hazards can be solved with just" (the Synchronization chapter's
+/// Execution and Memory Dependencies). `DRAW_INDIRECT` is no framebuffer-space stage, so it is not
+/// by region, and the stage of its source scope is logically earlier than or equal to every stage
+/// of its destination scope, as a subpass's dependency on itself over other stages needs
+/// (`VUID-VkSubpassDependency2-srcSubpass-03087`). A barrier before a draw that writes what an
+/// earlier draw of its instance read as its arguments takes it (`after_indirect_reads`).
+pub(super) const INDIRECT_SELF_DEPENDENCY: (vk::PipelineStageFlags, vk::PipelineStageFlags) = (
+    vk::PipelineStageFlags::DRAW_INDIRECT,
+    vk::PipelineStageFlags::ALL_GRAPHICS,
+);
+
+/// The flags of [`INDIRECT_SELF_DEPENDENCY`] and [`GEOMETRY_SELF_DEPENDENCY`] in a pass whose
+/// subpasses have `view_mask`, which their barriers take too: view by view in a subpass of more
+/// than one view (`VUID-VkRenderPassCreateInfo2-pDependencies-03060`), and never by region, which
+/// "must not" be in the dependency of a barrier that is not
+/// (`VUID-vkCmdPipelineBarrier-None-07889`).
+fn stage_dependency_flags(view_mask: u32) -> vk::DependencyFlags {
+    if view_mask.count_ones() > 1 {
+        vk::DependencyFlags::VIEW_LOCAL
+    } else {
+        vk::DependencyFlags::empty()
+    }
+}
+
+/// Record, into `draws`, a render pass instance's secondary command buffer (or its pass's
+/// command buffer, inline) whose subpasses have `view_mask`, the barrier before a draw that
+/// writes, in `stages`, memory an earlier draw of the instance read as its indirect arguments:
+/// an execution dependency from the earlier draws' `DRAW_INDIRECT` to `stages`, within
+/// [`INDIRECT_SELF_DEPENDENCY`] and with its flags. Metal reads a draw's arguments before a later
+/// draw of the encoder writes them, behind no barrier (measured on an M3 Max and an M4); Vulkan
+/// orders the read before the write only by a dependency, which a write-after-read hazard needs
+/// with no memory dependency.
+///
+/// # Safety
+///
+/// `draws` is a command buffer of `raw`'s device recording inside a pass this module made, of
+/// `view_mask`, and only this thread records it; `stages` are graphics stages the device has.
+pub(super) unsafe fn after_indirect_reads(
+    raw: &ash::Device,
+    draws: vk::CommandBuffer,
+    view_mask: u32,
+    stages: vk::PipelineStageFlags,
+) {
+    // SAFETY: the caller's contract; the pass's subpass depends on itself from `DRAW_INDIRECT`
+    // to every graphics stage with these flags, so the barrier is valid inside it.
+    unsafe {
+        raw.cmd_pipeline_barrier(
+            draws,
+            INDIRECT_SELF_DEPENDENCY.0,
+            stages,
+            stage_dependency_flags(view_mask),
+            &[],
+            &[],
+            &[],
+        );
+    }
+}
+
+/// The destination scope and the access types of the source scope of the draws' subpass's
+/// dependency on itself from the shader writes of the stages a draw runs before its fragments
+/// ([`geometry_write_stages`], the source stages) to the fragment shader's reads and writes:
+/// Metal's tile-based passes run every draw's vertex, object and mesh functions before any draw's
+/// fragments, which Vulkan orders only by a dependency ("read-after-write and write-after-write
+/// hazards need appropriate memory dependencies to be included between them", the
+/// Synchronization chapter's Execution and Memory Dependencies). No source stage is a
+/// framebuffer-space one, so it is not by region (`VUID-VkSubpassDependency2-srcSubpass-02245`
+/// asks that only of a dependency whose two scopes hold one), and every source stage is
+/// logically earlier than the fragment shader (`VUID-VkSubpassDependency2-srcSubpass-03087`). A
+/// barrier before a draw whose fragment shader reads or writes what an earlier draw of its
+/// instance wrote in those stages takes it (`after_geometry_writes`).
+pub(super) const GEOMETRY_SELF_DEPENDENCY: SelfDependency = SelfDependency {
+    stages: vk::PipelineStageFlags::FRAGMENT_SHADER,
+    src_access: vk::AccessFlags::SHADER_WRITE,
+    dst_access: vk::AccessFlags::from_raw(
+        vk::AccessFlags::SHADER_READ.as_raw()
+            | vk::AccessFlags::SHADER_WRITE.as_raw()
+            | vk::AccessFlags::UNIFORM_READ.as_raw(),
+    ),
+};
+
+/// The source stages of [`GEOMETRY_SELF_DEPENDENCY`] on `device`: the vertex shader, and the
+/// tessellation, geometry, task and mesh shaders where the device enables them (a dependency names
+/// no stage whose feature is off, `VUID-VkSubpassDependency2-srcStageMask-04091` and its
+/// siblings). Every pass of the device names the same, so its passes stay compatible.
+fn geometry_write_stages(device: &Device) -> vk::PipelineStageFlags {
+    use metal2vulkan::device::VkFeature;
+    let features = &device.enabled().features;
+    let mut stages = vk::PipelineStageFlags::VERTEX_SHADER;
+    for (feature, more) in [
+        (
+            VkFeature::TessellationShader,
+            vk::PipelineStageFlags::TESSELLATION_CONTROL_SHADER
+                | vk::PipelineStageFlags::TESSELLATION_EVALUATION_SHADER,
+        ),
+        (
+            VkFeature::GeometryShader,
+            vk::PipelineStageFlags::GEOMETRY_SHADER,
+        ),
+        (
+            VkFeature::TaskShader,
+            vk::PipelineStageFlags::TASK_SHADER_EXT,
+        ),
+        (
+            VkFeature::MeshShader,
+            vk::PipelineStageFlags::MESH_SHADER_EXT,
+        ),
+    ] {
+        if features.contains(&feature) {
+            stages |= more;
+        }
+    }
+    stages
+}
+
+/// Record, into `draws`, a render pass instance's secondary command buffer (or its pass's
+/// command buffer, inline) whose subpasses have `view_mask`, the barrier before a draw whose
+/// fragment shader reads or writes memory an earlier draw of the instance wrote before its
+/// fragments: `barrier`, from the earlier writes' stages and access types to the fragment shader
+/// and the later draw's access types there, within [`GEOMETRY_SELF_DEPENDENCY`] and with its
+/// flags. Metal runs the earlier draw's vertex, object and mesh functions before the later
+/// draw's fragments.
+///
+/// # Safety
+///
+/// `draws` is a command buffer of `raw`'s device recording inside a pass this module made, of
+/// `view_mask`, and only this thread records it; `barrier`'s source stages are among
+/// [`geometry_write_stages`]'s and its access types within [`GEOMETRY_SELF_DEPENDENCY`]'s, and
+/// its destination stage is the fragment shader.
+pub(super) unsafe fn after_geometry_writes(
+    raw: &ash::Device,
+    draws: vk::CommandBuffer,
+    view_mask: u32,
+    barrier: LegacyBarrier,
+) {
+    let memory = vk::MemoryBarrier::default()
+        .src_access_mask(barrier.src_access)
+        .dst_access_mask(barrier.dst_access);
+    // SAFETY: the caller's contract; the pass's subpass depends on itself from the device's
+    // stages before the fragments to the fragment shader with these access types and flags, so
+    // the barrier is valid inside it.
+    unsafe {
+        raw.cmd_pipeline_barrier(
+            draws,
+            barrier.src_stages,
+            barrier.dst_stages,
+            stage_dependency_flags(view_mask),
+            &[memory],
+            &[],
+            &[],
+        );
     }
 }
 
@@ -1603,14 +1768,31 @@ fn make_pass(
         draws = draws.push_next(ds_resolve);
     }
     let own = DRAWS_SELF_DEPENDENCY;
-    let dependencies = [vk::SubpassDependency2::default()
-        .src_subpass(0)
-        .dst_subpass(0)
-        .src_stage_mask(own.stages)
-        .dst_stage_mask(own.stages)
-        .src_access_mask(own.src_access)
-        .dst_access_mask(own.dst_access)
-        .dependency_flags(self_dependency_flags(shape.view_mask))];
+    let (indirect, graphics_stages) = INDIRECT_SELF_DEPENDENCY;
+    let dependencies = [
+        vk::SubpassDependency2::default()
+            .src_subpass(0)
+            .dst_subpass(0)
+            .src_stage_mask(own.stages)
+            .dst_stage_mask(own.stages)
+            .src_access_mask(own.src_access)
+            .dst_access_mask(own.dst_access)
+            .dependency_flags(self_dependency_flags(shape.view_mask)),
+        vk::SubpassDependency2::default()
+            .src_subpass(0)
+            .dst_subpass(0)
+            .src_stage_mask(indirect)
+            .dst_stage_mask(graphics_stages)
+            .dependency_flags(stage_dependency_flags(shape.view_mask)),
+        vk::SubpassDependency2::default()
+            .src_subpass(0)
+            .dst_subpass(0)
+            .src_stage_mask(geometry_write_stages(device))
+            .dst_stage_mask(GEOMETRY_SELF_DEPENDENCY.stages)
+            .src_access_mask(GEOMETRY_SELF_DEPENDENCY.src_access)
+            .dst_access_mask(GEOMETRY_SELF_DEPENDENCY.dst_access)
+            .dependency_flags(stage_dependency_flags(shape.view_mask)),
+    ];
     let subpasses = [draws];
     let info = vk::RenderPassCreateInfo2::default()
         .attachments(&attachments)

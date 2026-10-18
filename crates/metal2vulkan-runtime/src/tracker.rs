@@ -18,7 +18,10 @@
 //!   order it schedules the command buffers, which is this order. Untracked resources are the
 //!   program's to order, through fences, barriers and events, and the summary leaves them out.
 //!   Metal evaluates a fence at submission, so a wait orders after the fence's last update in
-//!   submission order.
+//!   submission order. A render encoder's wait and update cover the draw stages its call names
+//!   ([`FenceUse`]): a wait before the fragment stage alone lets the draws' earlier stages run
+//!   before the update, and an update after the vertex stage alone lets a later wait run before
+//!   the draws' fragments, as an M3 Max's did (`fence.rs`).
 //!
 //! **Barriers and waits.** Every image rests in `VK_IMAGE_LAYOUT_GENERAL` outside render passes,
 //! so nothing here changes a layout; but for a held multisampled depth (`texture/held_depth.rs`),
@@ -460,7 +463,9 @@ const LEGACY_STAGES: u64 = (1 << 26) - 1;
 /// The access bits `VkAccessFlags` defines, the same in both families (bits 0 to 27).
 const LEGACY_ACCESS: u64 = (1 << 28) - 1;
 
-fn legacy_stages(
+/// `stages` as `VkPipelineStageFlags` name them, each the same or a broader legacy stage, as a
+/// barrier's ([`Barrier::legacy`]); `none` where `stages` is empty.
+pub(super) fn legacy_stages(
     stages: vk::PipelineStageFlags2,
     none: vk::PipelineStageFlags,
 ) -> vk::PipelineStageFlags {
@@ -993,12 +998,53 @@ pub(super) struct EncoderUses<K> {
     /// The parts, in order: the last is the current one. Never empty.
     parts: Vec<Part<K>>,
     /// The fences waited for: before the encoder's first part.
-    waits: Vec<K>,
+    waits: Vec<FenceUse<K>>,
     /// The fences updated: after its last part.
+    updates: Vec<FenceUse<K>>,
     /// The images it holds in their attachment layout (`texture/held_depth.rs`).
     held: Vec<K>,
     /// A use of a held image but as a depth/stencil attachment was recorded after its hold.
     broke: bool,
+}
+
+/// A fence an encoder waits for or updates, and the stages of its draws the call names: a render
+/// encoder's `waitForFence:beforeStages:` and `updateFence:afterStages:` name render stages
+/// (`fence.rs`), which `draws` holds as the stages of `render::PASS_DRAW_STAGES` they run in;
+/// `None` covers every stage of the encoder (a compute or blit encoder's call). Either way the
+/// use covers the encoder's stages outside its draws (the runtime's own copies and dispatches
+/// before and after its render pass instances), which only orders more.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) struct FenceUse<K> {
+    fence: K,
+    draws: Option<vk::PipelineStageFlags2>,
+}
+
+impl<K> FenceUse<K> {
+    /// The stages, of an encoder whose commands ran in `stages`, the use covers: those of its
+    /// draws it names and every one outside its draws.
+    fn covered(&self, stages: vk::PipelineStageFlags2) -> vk::PipelineStageFlags2 {
+        match self.draws {
+            None => stages,
+            Some(draws) => {
+                let pass = super::render::PASS_DRAW_STAGES;
+                stages & (draws | vk::PipelineStageFlags2::from_raw(!pass.as_raw()))
+            }
+        }
+    }
+}
+
+/// Add `used` to `fences`, which hold each fence once: a fence named twice covers the stages of
+/// both calls.
+fn add_fence<K: PartialEq>(fences: &mut Vec<FenceUse<K>>, used: FenceUse<K>) {
+    match fences.iter_mut().find(|known| known.fence == used.fence) {
+        Some(known) => {
+            known.draws = match (known.draws, used.draws) {
+                (Some(a), Some(b)) => Some(a | b),
+                _ => None,
+            }
+        }
+        None => fences.push(used),
+    }
 }
 
 /// The uses of one part of an encoder.
@@ -1156,13 +1202,19 @@ impl<K: Copy + Ord + Hash> EncoderUses<K> {
     /// it. Fences are waited for at the start of the encoder and updated at its end, so a wait
     /// after the encoder updated the fence waits for the update before the encoder, as plain
     /// Metal's compute, blit and render encoders do (an M4 read the earlier encoder's write in
-    /// three runs of each); Metal's API validation asserts.
-    pub(super) fn wait_for_fence(&mut self, fence: K) {
-        if !self.waits.contains(&fence) {
-            self.waits.push(fence);
-        }
+    /// three runs of each); Metal's API validation asserts. Before the draw stages `draws` alone
+    /// where `Some` ([`FenceUse`]): the encoder's draws in those stages, and its commands outside
+    /// its draws, run after the update; its draws' other stages may run before it.
+    pub(super) fn wait_for_fence(&mut self, fence: K, draws: Option<vk::PipelineStageFlags2>) {
+        add_fence(&mut self.waits, FenceUse { fence, draws });
     }
 
+    /// `update_fence`: the fence is updated after the encoder's work; after the draw stages
+    /// `draws` alone where `Some` ([`FenceUse`]): a later wait orders after the encoder's draws in
+    /// those stages and its commands outside its draws, not after its draws' other stages.
+    pub(super) fn update_fence(&mut self, fence: K, draws: Option<vk::PipelineStageFlags2>) {
+        add_fence(&mut self.updates, FenceUse { fence, draws });
+    }
 
     /// Hold the image known by `key` in its attachment layout through the encoder
     /// (`texture/held_depth.rs`): a use of it recorded from now on but as a depth/stencil
@@ -1308,6 +1360,158 @@ impl<K: Copy + Ord + Hash> UnorderedWrites<K> {
     }
 }
 
+/// Uses of earlier commands kept by resource and range, tracked or not alike: one entry per range,
+/// at most [`ENTRIES_PER_KEY`] per resource, merged as [`UnorderedWrites`] merges its own, which
+/// claims more and stays exact.
+#[derive(Clone)]
+struct KeptUses<K> {
+    uses: KeyMap<K, Vec<Use<K>>>,
+}
+
+impl<K: Copy + Ord + Hash> KeptUses<K> {
+    fn new() -> KeptUses<K> {
+        KeptUses {
+            uses: KeyMap::default(),
+        }
+    }
+
+    fn push(&mut self, used: Use<K>) {
+        if used.range.is_empty() {
+            return;
+        }
+        let ranges = self.uses.entry(used.key).or_default();
+        ranges.push(used);
+        if ranges.len() > ENTRIES_PER_KEY {
+            coalesce_uses(ranges);
+        }
+    }
+
+    /// The kept uses of `used`'s resource whose ranges overlap its range.
+    fn meeting<'a>(&'a self, used: &'a Use<K>) -> impl Iterator<Item = &'a Use<K>> + 'a {
+        let known = self.uses.get(&used.key).map(Vec::as_slice).unwrap_or(&[]);
+        known
+            .iter()
+            .filter(move |known| known.range.overlaps(&used.range))
+    }
+}
+
+/// The memory a render pass instance's draws read as their indirect arguments (in
+/// `DRAW_INDIRECT`) since the instance began (`render.rs`), tracked or not alike: Metal reads a
+/// draw's arguments before a later draw of the encoder writes them, behind no barrier (measured),
+/// whatever the resource's hazard tracking, and Vulkan orders the two only by a dependency.
+#[derive(Clone)]
+pub(super) struct IndirectReads<K> {
+    reads: KeptUses<K>,
+}
+
+impl<K: Copy + Ord + Hash> IndirectReads<K> {
+    /// No reads.
+    pub(super) fn new() -> IndirectReads<K> {
+        IndirectReads {
+            reads: KeptUses::new(),
+        }
+    }
+
+    /// Add the indirect argument reads of a draw with `uses`.
+    pub(super) fn add(&mut self, uses: &[Use<K>]) {
+        for used in uses.iter().filter(|used| {
+            used.read
+                .stages
+                .intersects(vk::PipelineStageFlags2::DRAW_INDIRECT)
+        }) {
+            self.reads.push(Use {
+                write: Access::NONE,
+                ..used.clone()
+            });
+        }
+    }
+
+    /// The stages in which a later draw with `uses` writes memory one of the reads read: empty
+    /// where it writes none of it.
+    pub(super) fn written_in(&self, uses: &[Use<K>]) -> vk::PipelineStageFlags2 {
+        uses.iter()
+            .filter(|used| !used.write.is_empty() && self.reads.meeting(used).next().is_some())
+            .fold(vk::PipelineStageFlags2::empty(), |stages, used| {
+                stages | used.write.stages
+            })
+    }
+}
+
+/// The stages a draw runs before its fragments in which a shader writes memory: the vertex,
+/// tessellation, geometry, object and mesh stages.
+pub(super) const PRE_RASTERIZATION_WRITES: vk::PipelineStageFlags2 =
+    vk::PipelineStageFlags2::from_raw(
+        vk::PipelineStageFlags2::VERTEX_SHADER.as_raw()
+            | vk::PipelineStageFlags2::TESSELLATION_CONTROL_SHADER.as_raw()
+            | vk::PipelineStageFlags2::TESSELLATION_EVALUATION_SHADER.as_raw()
+            | vk::PipelineStageFlags2::GEOMETRY_SHADER.as_raw()
+            | vk::PipelineStageFlags2::TASK_SHADER_EXT.as_raw()
+            | vk::PipelineStageFlags2::MESH_SHADER_EXT.as_raw(),
+    );
+
+/// The memory a render pass instance's draws wrote in their stages before their fragments
+/// ([`PRE_RASTERIZATION_WRITES`]) since the instance began (`render.rs`), tracked or not alike:
+/// Metal's tile-based passes run every draw's vertex, object and mesh functions before any draw's
+/// fragments, so a later draw's fragment shader reads and writes such memory after the write,
+/// whatever the resource's hazard tracking, and Vulkan orders the two only by a dependency.
+#[derive(Clone)]
+pub(super) struct GeometryWrites<K> {
+    writes: KeptUses<K>,
+}
+
+impl<K: Copy + Ord + Hash> GeometryWrites<K> {
+    /// No writes.
+    pub(super) fn new() -> GeometryWrites<K> {
+        GeometryWrites {
+            writes: KeptUses::new(),
+        }
+    }
+
+    /// Add the writes before its fragments of a draw with `uses`: a use that writes in one of
+    /// those stages and in the fragment stage too is taken as written before the fragments, which
+    /// claims more and stays exact.
+    pub(super) fn add(&mut self, uses: &[Use<K>]) {
+        for used in uses {
+            let stages = used.write.stages & PRE_RASTERIZATION_WRITES;
+            if stages.is_empty() {
+                continue;
+            }
+            self.writes.push(Use {
+                read: Access::NONE,
+                write: Access::new(stages, used.write.access),
+                ..used.clone()
+            });
+        }
+    }
+
+    /// The memory dependency a later draw with `uses` needs before its fragment shader reads or
+    /// writes memory one of the writes wrote: from the writes' stages and access types to the
+    /// fragment shader and the later draw's access types there. `None` where its fragment
+    /// shader touches none of it.
+    pub(super) fn barrier_before(&self, uses: &[Use<K>]) -> Option<Barrier> {
+        const FRAGMENT: vk::PipelineStageFlags2 = vk::PipelineStageFlags2::FRAGMENT_SHADER;
+        let mut src = Access::NONE;
+        let mut dst = Access::NONE;
+        for used in uses {
+            let mut fragment = Access::NONE;
+            if used.read.stages.intersects(FRAGMENT) {
+                fragment = fragment.union(Access::new(FRAGMENT, used.read.access));
+            }
+            if used.write.stages.intersects(FRAGMENT) {
+                fragment = fragment.union(Access::new(FRAGMENT, used.write.access));
+            }
+            if fragment.is_empty() {
+                continue;
+            }
+            for known in self.writes.meeting(used) {
+                src = src.union(known.write);
+                dst = dst.union(fragment);
+            }
+        }
+        (!src.is_empty()).then_some(Barrier { src, dst })
+    }
+}
+
 /// Whether `known`, a use of earlier commands, touches in one of `stages` memory `used` touches
 /// where either writes: overlapping ranges of one tracked resource, `known` writing in `stages`
 /// what `used` reads, or reading or writing in `stages` what `used` writes. `known`'s stages
@@ -1371,9 +1575,9 @@ pub(super) struct Summary<K> {
     /// Every stage the encoder's commands ran in.
     stages: vk::PipelineStageFlags2,
     /// The fences waited for before the encoder.
-    waits: Vec<K>,
+    waits: Vec<FenceUse<K>>,
     /// The fences updated after the encoder.
-    updates: Vec<K>,
+    updates: Vec<FenceUse<K>>,
 }
 
 impl<K> fmt::Debug for Summary<K> {
@@ -1404,18 +1608,21 @@ impl<K: Copy + Ord> Summary<K> {
     /// `waits` and updates `updates`, in every stage, so a wait on its queue orders after all of
     /// its batch's work before it, which its sparse binding precedes.
     pub(super) fn of_fences(waits: Vec<K>, updates: Vec<K>) -> Summary<K> {
+        let every = |fence| FenceUse { fence, draws: None };
         Summary {
             uses: Vec::new(),
             stages: vk::PipelineStageFlags2::ALL_COMMANDS,
-            waits,
-            updates,
+            waits: waits.into_iter().map(every).collect(),
+            updates: updates.into_iter().map(every).collect(),
         }
     }
 
     /// The summary of an encoder whose commands do not run (`CommandBuffer::commit_failed`): its
-    /// fences' waits and updates alone, as [`of_fences`](Self::of_fences) makes them.
+    /// fences' waits and updates alone, in every stage, as [`of_fences`](Self::of_fences) makes
+    /// them.
     pub(super) fn fences_only(&self) -> Summary<K> {
-        Summary::of_fences(self.waits.clone(), self.updates.clone())
+        let fences = |uses: &[FenceUse<K>]| uses.iter().map(|used| used.fence).collect();
+        Summary::of_fences(fences(&self.waits), fences(&self.updates))
     }
 
     /// The resources of the tracked uses, in order, each once per range.
@@ -1464,15 +1671,11 @@ impl<K: Copy + Ord> Summary<K> {
             }
         }
         self.uses.sort_by_key(|used| used.key);
-        for fence in other.waits {
-            if !self.waits.contains(&fence) {
-                self.waits.push(fence);
-            }
+        for used in other.waits {
+            add_fence(&mut self.waits, used);
         }
-        for fence in other.updates {
-            if !self.updates.contains(&fence) {
-                self.updates.push(fence);
-            }
+        for used in other.updates {
+            add_fence(&mut self.updates, used);
         }
     }
 }
@@ -1513,8 +1716,12 @@ impl<K: Copy + Ord> Footprint<K> {
         };
         for summary in summaries {
             footprint.uses.extend(summary.uses.iter().cloned());
-            footprint.waits.extend(&summary.waits);
-            footprint.updates.extend(&summary.updates);
+            footprint
+                .waits
+                .extend(summary.waits.iter().map(|used| used.fence));
+            footprint
+                .updates
+                .extend(summary.updates.iter().map(|used| used.fence));
         }
         footprint.uses.sort_by_key(|used| used.key);
         footprint
@@ -1575,7 +1782,8 @@ pub(super) fn ordered<K: Copy + Ord>(
 #[derive(Clone, Copy)]
 #[cfg_attr(test, derive(PartialEq))]
 struct FenceUpdate {
-    /// The stages it covers: the updating encoder's, and those of the fences it waited for.
+    /// The stages it covers: those of the updating encoder's the call names
+    /// ([`FenceUse::covered`]), and those of the fences it waited for.
     stages: vk::PipelineStageFlags2,
     /// The batch of the updating encoder.
     at: Point,
@@ -1857,10 +2065,13 @@ impl<K: Copy + Ord + Hash> Tracker<K> {
             let alone = plan.barriers.is_empty() && encoders.peek().is_none();
             let mut barrier = Barrier::default();
             let mut waited = vk::PipelineStageFlags2::NONE;
-            for fence in &summary.waits {
+            for wait in &summary.waits {
+                let fence = &wait.fence;
                 let update = plan.fences.get(fence).or_else(|| self.fences.get(fence));
                 if let Some(update) = update {
                     waited |= update.stages;
+                    // The stages the call names wait, and the encoder's work outside its draws.
+                    let stages = wait.covered(summary.stages);
                     if update.at.queue == at.queue {
                         barrier.add(
                             Access::new(update.stages, vk::AccessFlags2::MEMORY_WRITE),
@@ -1874,7 +2085,7 @@ impl<K: Copy + Ord + Hash> Tracker<K> {
                             &mut plan.waits,
                             Wait {
                                 at: update.at,
-                                stages: summary.stages,
+                                stages,
                             },
                         );
                     }
@@ -1904,9 +2115,9 @@ impl<K: Copy + Ord + Hash> Tracker<K> {
                 true => plan.uses.extend(summary.uses.iter().cloned()),
                 false => admit(&mut plan.resources, &summary.uses, barrier, &plan.waits, at),
             }
-            for &fence in &summary.updates {
-                let stages = summary.stages | waited;
-                plan.fences.insert(fence, FenceUpdate { stages, at });
+            for update in &summary.updates {
+                let stages = update.covered(summary.stages) | waited;
+                plan.fences.insert(update.fence, FenceUpdate { stages, at });
             }
             plan.barriers.push(barrier);
         }

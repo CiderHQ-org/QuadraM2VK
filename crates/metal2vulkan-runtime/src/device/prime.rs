@@ -20,23 +20,8 @@
 //! ([`TIMESTAMP_CALLS`], made only there), ended, submitted after each queue's timeline at 0 and
 //! signalling a timeline of its own and a new fence; the wait for the timeline, a read of every
 //! timeline, the wait for the fence and its reset, a wait for the queue to be idle (its drain after
-//! a failed wait), and the read of the two timestamps, as a completion turn makes them); a
-//! sampler, an occlusion query pool, a buffer in host-visible memory, mapped (and, where the device
-//! has device addresses, [`DEVICE_ADDRESS_CALLS`], its address read), and an image with their
-//! memory and views, a depth image, a render pass and a framebuffer, a descriptor set layout, a
-//! pipeline layout with a push constant range and a descriptor pool with a set written, and a
-//! compute pipeline made with a pipeline cache from a shader module, its stage specialized as the
-//! runtime's makings are ([`SPECIALIZED`]), whose data is read; a command buffer, recorded and
-//! never submitted, with what a host step records: the pipeline and the set bound, a push
-//! constant, a dispatch and one from the buffer's arguments, a copy within the buffer, a copy from
-//! the buffer to the image and back with a barrier between them, a copy between the image's texels
-//! and the image's clear (a render host step's pass steps) and the depth image's (a batch's first
-//! work's), then a render host step's: a graphics pipeline that rasterizes nothing, its stage
-//! specialized too, drawn in a secondary command buffer, directly and from the buffer's arguments,
-//! with a vertex buffer and the states a draw sets, inside a query of the occlusion pool, which the
-//! render pass's subpass executes; where the queues bind sparse memory, an empty
-//! `vkQueueBindSparse` ([`SPARSE_CALLS`]); a wait for the device to be idle; and the release of
-//! each object made. Nothing of it outlives the call.
+//! too (and named, where the instance reports messages, [`NAMING_CALLS`]), drawn in a secondary
+//! command buffer, directly and from the buffer's arguments, with a
 //!
 //! **Specialized, with an extended instruction, as the runtime's makings are.** A stage with
 //! specialization constants takes paths of its own: in a driver's compiler, and in the Khronos
@@ -113,6 +98,15 @@ pub(crate) const GENERATED_COMMANDS_CALLS: [Call; 2] = [
 /// The table's entry points a device that binds no sparse memory never calls, nor primes: a
 /// batch's sparse binding (`sparse/bind.rs`).
 pub(crate) const SPARSE_CALLS: [Call; 1] = [Call::QueueBindSparse];
+
+/// The table's entry points a device whose instance reports no messages never calls, nor primes:
+/// a graphics pipeline's debug name (`pipeline/graphics.rs`).
+pub(crate) const NAMING_CALLS: [Call; 1] = [Call::SetDebugUtilsObjectName];
+
+/// The debug name of a render host step's pipeline that priming makes, where the instance reports
+/// messages ([`NAMING_CALLS`]).
+const PRIMING_PIPELINE: &std::ffi::CStr =
+    c"metal2vulkan: a priming pipeline that rasterizes nothing";
 
 /// The longest the priming submission is waited for: it holds two barriers.
 const LIMIT: Duration = Duration::from_secs(10);
@@ -294,6 +288,7 @@ pub(crate) struct Has {
     pub(crate) device_addresses: bool,
     pub(crate) generated_commands: bool,
     pub(crate) sparse_binding: bool,
+    pub(crate) object_names: bool,
 }
 
 /// Prime `device` of `physical`, made from `instance`, whose queues are `queues`, the first of
@@ -359,9 +354,9 @@ pub(super) unsafe fn prime(
 }
 
 /// The table's entry points, but [`UNPRIMED`], those of [`TIMESTAMP_CALLS`] where the device
-/// has no timestamps, those of [`DEVICE_ADDRESS_CALLS`] where it has no device addresses, those
-/// of [`GENERATED_COMMANDS_CALLS`] where it has no generated commands, and those of
-/// [`SPARSE_CALLS`] where it binds no sparse memory, that `calls` (one bit each) does not hold.
+/// has no push command, those of [`CALIBRATION_CALLS`] where it calibrates no timestamps, those
+/// of [`NAMING_CALLS`] where its instance reports no messages, and those of
+/// [`EXTENDED_DYNAMIC_STATE_CALLS`], [`PRIMITIVE_RESTART_CALLS`],
 pub(crate) fn missing(calls: u128, has: Has) -> Vec<Call> {
     Call::ALL
         .iter()
@@ -373,6 +368,7 @@ pub(crate) fn missing(calls: u128, has: Has) -> Vec<Call> {
                 && (has.device_addresses || !DEVICE_ADDRESS_CALLS.contains(&call))
                 && (has.generated_commands || !GENERATED_COMMANDS_CALLS.contains(&call))
                 && (has.sparse_binding || !SPARSE_CALLS.contains(&call))
+                && (has.object_names || !NAMING_CALLS.contains(&call))
         })
         .collect()
 }
@@ -1162,6 +1158,16 @@ impl Primer<'_> {
                 .map_err(|(_, error)| vulkan(error))?[0];
             self.made(Call::CreateGraphicsPipelines);
             self.hold(pipeline);
+            // Its debug name, where the instance reports messages, as a making names its pipeline
+            // (`pipeline/graphics.rs`): the loader serves the call.
+            if let Some(name) = device.object_name() {
+                self.loader_word.restore();
+                let info = vk::DebugUtilsObjectNameInfoEXT::default()
+                    .object_handle(pipeline)
+                    .object_name(PRIMING_PIPELINE);
+                let _ = name(device.handle(), &info);
+                self.made(Call::SetDebugUtilsObjectName);
+            }
 
             let allocate = vk::CommandBufferAllocateInfo::default()
                 .command_pool(commands)

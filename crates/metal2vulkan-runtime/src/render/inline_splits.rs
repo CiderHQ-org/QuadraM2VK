@@ -57,7 +57,7 @@ use crate::render_pass::PassLayout;
 use crate::render_target::{self, Feedback, Position, RenderPassObject};
 use crate::render_values::LoadAction;
 use crate::shadow::ShadowCopy;
-use crate::tracker::Barrier;
+use crate::tracker::{Barrier, LegacyBarrier};
 use ash::vk;
 
 /// The commands of an instance recorded inline after a split (the module docs), kept until the
@@ -80,6 +80,12 @@ enum KeptCommand {
     /// A barrier before a draw that reaches interlocked storage a draw before it wrote, of the
     /// view mask (`render_target::between_storage_draws`).
     StorageBarrier(u32),
+    /// A barrier before a draw that writes, in the stages, what a draw before it read as its
+    /// indirect arguments, of the view mask (`render_target::after_indirect_reads`).
+    IndirectBarrier(u32, vk::PipelineStageFlags),
+    /// A barrier before a draw whose fragment shader touches what a draw before it wrote before
+    /// its fragments, of the view mask (`render_target::after_geometry_writes`).
+    GeometryBarrier(u32, LegacyBarrier),
 }
 
 impl Kept {
@@ -96,7 +102,21 @@ impl Kept {
 
     /// Keep a barrier before a draw that reaches interlocked storage.
     pub(super) fn storage_barrier(&mut self, view_mask: u32) {
-        self.commands.push(KeptCommand::StorageBarrier(view_mask));
+
+    /// Keep a barrier before a draw that writes, in `stages`, what a draw before it read as its
+    /// indirect arguments.
+    pub(super) fn indirect_barrier(&mut self, view_mask: u32, stages: vk::PipelineStageFlags) {
+        self.room
+            .commands
+            .push(KeptCommand::IndirectBarrier(view_mask, stages));
+    }
+
+    /// Keep a barrier before a draw whose fragment shader touches what a draw before it wrote
+    /// before its fragments.
+    pub(super) fn geometry_barrier(&mut self, view_mask: u32, barrier: LegacyBarrier) {
+        self.room
+            .commands
+            .push(KeptCommand::GeometryBarrier(view_mask, barrier));
     }
 }
 
@@ -397,6 +417,12 @@ fn record_kept(
                 }
                 KeptCommand::StorageBarrier(view_mask) => {
                     render_target::between_storage_draws(raw, held, *view_mask)
+                }
+                KeptCommand::IndirectBarrier(view_mask, stages) => {
+                    render_target::after_indirect_reads(raw, held, *view_mask, *stages)
+                }
+                KeptCommand::GeometryBarrier(view_mask, barrier) => {
+                    render_target::after_geometry_writes(raw, held, *view_mask, *barrier)
                 }
             }
         }

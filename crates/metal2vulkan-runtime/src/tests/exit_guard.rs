@@ -1921,19 +1921,20 @@ fn the_table_names_each_entry_point_once() {
 
 /// Priming's check misses nothing but the entry points it cannot make (and, on a queue family
 /// that writes no timestamps, the timestamp commands, on a device without device addresses, a
-/// buffer's address, and on one without generated commands, the release of their objects), and
-/// names an entry point of the table it did not make.
+/// completion turn's calibration reading, on one whose instance reports no messages, a pipeline's
+/// debug name, and on one without a render encoder's command of an extension or of Vulkan 1.3,
+/// that command), and names an entry point of the table it did not make.
 #[test]
 fn the_priming_check_names_what_was_not_made() {
     use crate::device::prime::{
-        missing, Has, DEVICE_ADDRESS_CALLS, GENERATED_COMMANDS_CALLS, SPARSE_CALLS,
-        TIMESTAMP_CALLS, UNPRIMED,
+        HOST_QUERY_RESET_CALLS, NAMING_CALLS, PRIMITIVE_RESTART_CALLS, PUSH_DESCRIPTOR_CALLS,
     };
     let has = |timestamps, device_addresses| Has {
         timestamps,
         device_addresses,
         generated_commands: true,
         sparse_binding: true,
+        object_names: true,
     };
     let all = Call::ALL.iter().fold(0, |bits, call| bits | call.bit());
     assert!(missing(all, has(true, true)).is_empty());
@@ -1986,6 +1987,16 @@ fn the_priming_check_names_what_was_not_made() {
     };
     assert!(missing(unbound, without).is_empty());
     assert_eq!(missing(unbound, has(true, true)), SPARSE_CALLS);
+    // Without messages reported, nor is a pipeline's debug name.
+    let unnamed = NAMING_CALLS
+        .iter()
+        .fold(made, |bits, call| bits & !call.bit());
+    let without = Has {
+        object_names: false,
+        ..has(true, true)
+    };
+    assert!(missing(unnamed, without).is_empty());
+    assert_eq!(missing(unnamed, has(true, true)), NAMING_CALLS);
 }
 
 /// A thread is in a section, so that the device's functions are the table's alone, while its

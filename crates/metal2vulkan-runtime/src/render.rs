@@ -329,7 +329,7 @@ use super::tessellation::{FactorBuffer, Factors};
 use super::texture::held_depth;
 use super::texture::signed_depth::{self, MagnitudeCopies, SignStrip};
 use super::texture::Texture;
-use super::tracker::{self, Access, Barrier, UnorderedWrites, Use};
+use super::tracker::{self, Access, Barrier, GeometryWrites, IndirectReads, UnorderedWrites, Use};
 use super::used_resources::EncoderKind;
 use super::visibility::{self, Continuation, Visibility, VisibilityResultMode};
 use crate::device::functions::Vk;
@@ -796,6 +796,14 @@ struct Instance {
     /// barrier: a draw that reaches any of it records after a barrier from them
     /// (`InterlockedStorage`).
     interlocked_writes: InterlockedStorage,
+    /// The memory the draws recorded into `draws` read as their indirect arguments: a draw that
+    /// writes any of it records after a barrier from those reads
+    /// (`render_target::after_indirect_reads`).
+    indirect_reads: IndirectReads<ResourceKey>,
+    /// The memory the draws recorded into `draws` wrote before their fragments: a draw whose
+    /// fragment shader reads or writes any of it records after a barrier from those writes
+    /// (`render_target::after_geometry_writes`).
+    geometry_writes: GeometryWrites<ResourceKey>,
     /// A draw recorded into `draws` reaches the pass's tile threadgroup memory, so the next such
     /// draw records into a new instance (`render/tile_memory.rs`).
     tile_memory: bool,
@@ -1614,6 +1622,8 @@ impl RenderCommandEncoder {
                 shader_tests: false,
                 imageblock: false,
                 interlocked_writes: InterlockedStorage::NONE,
+                indirect_reads: IndirectReads::new(),
+                geometry_writes: GeometryWrites::new(),
                 tile_memory: false,
                 barriers: false,
                 views: ViewSetup::default(),
@@ -5547,6 +5557,8 @@ impl RenderCommandEncoder {
             shader_tests,
             imageblock: false,
             interlocked_writes: InterlockedStorage::NONE,
+            indirect_reads: IndirectReads::new(),
+            geometry_writes: GeometryWrites::new(),
             tile_memory: false,
             barriers: false,
             views,
@@ -5660,6 +5672,8 @@ impl RenderCommandEncoder {
             shader_tests: false,
             imageblock: false,
             interlocked_writes: InterlockedStorage::NONE,
+            indirect_reads: IndirectReads::new(),
+            geometry_writes: GeometryWrites::new(),
             tile_memory: false,
             barriers: false,
             views: self.current.views,
@@ -8665,6 +8679,59 @@ impl RenderCommandEncoder {
                     },
                 }
             }
+            // A draw that writes what an earlier draw of the instance read as its indirect
+            // arguments records after an execution dependency from those reads to its writes'
+            // stages (`render_target::after_indirect_reads`), as Metal's draw read them first.
+            // Instances follow one another behind a barrier from everything before.
+            let written = self.current.indirect_reads.written_in(uses) & PASS_DRAW_STAGES;
+            let mut indirect_barrier = None;
+            if !written.is_empty() {
+                let view_mask = self.current.shape.view_mask;
+                let stages = tracker::legacy_stages(written, vk::PipelineStageFlags::ALL_GRAPHICS);
+                match (pending.is_some(), &mut self.current.kept) {
+                    (true, _) => indirect_barrier = Some((view_mask, stages)),
+                    (false, Some(kept)) => kept.indirect_barrier(view_mask, stages),
+                    // SAFETY: as for the storage barrier; the stages are those of the draw's
+                    // writes, which its pipeline has.
+                    (false, None) => unsafe {
+                        render_target::after_indirect_reads(
+                            device.shared().vk(),
+                            self.current.draws,
+                            view_mask,
+                            stages,
+                        )
+                    },
+                }
+            }
+            self.current.indirect_reads.add(uses);
+            // A draw whose fragment shader reads or writes what an earlier draw of the instance
+            // wrote before its fragments records after a memory dependency from those writes
+            // (`render_target::after_geometry_writes`): Metal runs every draw's vertex, object
+            // and mesh functions before any draw's fragments.
+            let mut geometry_barrier = None;
+            if let Some(barrier) = self.current.geometry_writes.barrier_before(uses) {
+                let view_mask = self.current.shape.view_mask;
+                let scopes = render_target::GEOMETRY_SELF_DEPENDENCY;
+                let mut legacy = barrier.legacy();
+                legacy.src_access &= scopes.src_access;
+                legacy.dst_access &= scopes.dst_access;
+                match (pending.is_some(), &mut self.current.kept) {
+                    (true, _) => geometry_barrier = Some((view_mask, legacy)),
+                    (false, Some(kept)) => kept.geometry_barrier(view_mask, legacy),
+                    // SAFETY: as for the storage barrier; the source stages are those of the
+                    // earlier draws' writes, which their pipelines have, and the access types
+                    // are within the dependency's.
+                    (false, None) => unsafe {
+                        render_target::after_geometry_writes(
+                            device.shared().vk(),
+                            self.current.draws,
+                            view_mask,
+                            legacy,
+                        )
+                    },
+                }
+            }
+            self.current.geometry_writes.add(uses);
             if imageblock_use.is_some() {
                 self.current.imageblock = true;
             }
@@ -8826,6 +8893,8 @@ impl RenderCommandEncoder {
                     variant: variant.key().clone(),
                     specialization: variant.constants(specialization),
                     storage_barrier,
+                    indirect_barrier,
+                    geometry_barrier,
                     query,
                     recordings: owned,
                     recorded: Mutex::new(None),

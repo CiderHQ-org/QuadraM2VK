@@ -22,11 +22,14 @@
 //! every device; after a barrier, where a rewrite since it was read in some runs (probe RRS-race2),
 //! the index bounds pass is refused typed.
 
-use super::buffer_with;
 use super::degrade_notices::{
     assert_made_once, forced, made_render_kinds, shared_in_system_memory, UNORDERED_DRAWS,
 };
-use super::render_state::{quiet, rows, texture, validated, Probe, EMPTY, FULL, PASS, WHITE};
+use super::render_state::{
+    quiet, rows, texture, validated, validated_checking_synchronization, Probe, EMPTY, FULL, PASS,
+    WHITE,
+};
+use super::{buffer_with, read_buffer};
 use crate::air_library::AirLibrary;
 use metal2vulkan::device::VkFeature;
 use metal2vulkan::metal::{BarrierScope, IndexType, PixelFormat, PrimitiveType, RenderStages};
@@ -501,6 +504,49 @@ fn an_indexed_indirect_draw_reads_what_a_draw_wrote_behind_a_barrier() {
     // The small white triangle's pipeline beside the writer's and the white one's.
     let small = probe.made(WHITE.vertex("rt6_small"));
     assert_made_once(&messages, &UNORDERED_DRAWS, &forced_beside(&probe, small));
+    quiet(probe, &messages);
+}
+
+/// A draw that writes the arguments an earlier indexed indirect draw of its pass read, behind no
+/// barrier, leaves that draw's texels as Metal's (probe 2's `ix2_args_barrier_twice`: the earlier
+/// draw read them first, on the M3 Max and the M4), and writes them; the validation layer, checking
+/// synchronization, reports no hazard between the read and the write, which records after an
+/// execution dependency from the read where the draw reads its arguments in place (no index bounds
+/// pass, [`bounds_pass`]). Twice: in the second pass both pipelines are made, so the writer's draw
+/// records into the indirect draw's render pass instance (in the first, a draw whose pipeline is
+/// being made may record into an instance of its own, `render/inline_first.rs`).
+#[test]
+fn a_draw_writes_arguments_an_earlier_draw_read_after_the_read() {
+    let (messages, _cache, probe) = validated_checking_synchronization();
+    let writer = writer(&probe);
+    let indices = u16s(&probe, &[0, 1, 2, 0]);
+    for pass in 0..2 {
+        let arguments = u32s(&probe, &[3, 1, 0, 0, 0]);
+        let stored = probe.run(PASS, |p, e, h| {
+            prepare(p, e, h);
+            e.draw_indexed_primitives_indirect(
+                PrimitiveType::Triangle,
+                IndexType::UInt16,
+                &indices,
+                0,
+                &arguments,
+                0,
+            )
+            .unwrap();
+            let params = u32s(p, &ZEROS);
+            e.set_render_pipeline_state(&writer).unwrap();
+            e.set_vertex_buffer(Some(&params), 0, 0).unwrap();
+            e.set_vertex_buffer(Some(&arguments), 0, 1).unwrap();
+            e.draw_primitives(PrimitiveType::Point, 0, 2, 1, 0).unwrap();
+            h.push(params);
+        });
+        assert_eq!(stored.color, rows(&FULL), "pass {pass}");
+        assert_eq!(
+            read_buffer(&arguments, 0, 20).unwrap(),
+            [0; 20],
+            "pass {pass}"
+        );
+    }
     quiet(probe, &messages);
 }
 

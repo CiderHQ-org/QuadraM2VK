@@ -292,7 +292,9 @@ use crate::sampler::ArgumentSamplers;
 use crate::shadow::{self, ShadowUse};
 use crate::shadow_stencil::ShadowStencil;
 use crate::tessellation::{FactorBuffer, Factors};
-use crate::tracker::{Barrier, EncoderUses, Summary, UnorderedWrites, Use};
+use crate::tracker::{
+    Barrier, EncoderUses, GeometryWrites, IndirectReads, Summary, UnorderedWrites, Use,
+};
 use crate::visibility::{Lent, Visibility};
 use crate::Device;
 use ahead::Ahead;
@@ -640,6 +642,8 @@ impl RenderCommandEncoder {
             compatible: Arc::clone(&self.current.compatible),
             tile_memory: self.tile_memory.arguments(),
             tile_memory_reached: self.current.tile_memory,
+            indirect_reads: self.current.indirect_reads.clone(),
+            geometry_writes: self.current.geometry_writes.clone(),
             drawn: self.core.uses().tracked_in(PASS_DRAW_STAGES),
             pass_start: self.pass_start.notes(),
         };
@@ -771,6 +775,12 @@ struct Snapshot {
     tile_memory: TileMemory,
     /// A draw of the instance before the call reached the tile threadgroup memory.
     tile_memory_reached: bool,
+    /// What the draws of the instance before the call read as their indirect arguments: a
+    /// command's draw that writes any of it records after a barrier from those reads.
+    indirect_reads: IndirectReads<ResourceKey>,
+    /// What the draws of the instance before the call wrote before their fragments: a command's
+    /// draw whose fragment shader touches any of it records after a barrier from those writes.
+    geometry_writes: GeometryWrites<ResourceKey>,
     /// The tracked uses of the encoder's draws before the call, in the stages a draw runs in
     /// inside its pass: an emulated mesh command's dispatches, recorded before the pass, must not
     /// touch them but as Metal orders them (`RenderCommandEncoder::drawn_before`).
@@ -2046,6 +2056,10 @@ impl RenderExecution {
                 imageblock: true,
                 // So may they have written the instance's interlocked colors.
                 interlocked_writes: InterlockedStorage::ALL,
+                // And read as their indirect arguments what the commands' draws may write.
+                indirect_reads: snapshot.indirect_reads.clone(),
+                // And wrote before their fragments what the commands' fragments may touch.
+                geometry_writes: snapshot.geometry_writes.clone(),
                 tile_memory: snapshot.tile_memory_reached,
                 // Its commands read an attachment in place (`texture/attached_reads.rs`).
                 barriers: false,

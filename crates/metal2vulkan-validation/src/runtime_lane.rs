@@ -382,6 +382,8 @@ mod failed_commits;
 mod families;
 mod fatal_signals;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
+mod fence_stages;
+#[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
 mod fetch_costs;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
 mod first_use;
@@ -1099,17 +1101,25 @@ fn dynamic_input_assembly(device: &Device) -> bool {
 ///
 /// - `sync`: the layer's synchronization validation (`validate_sync`), which reports a hazard
 ///   between two accesses the runtime's barriers, waits and submissions leave unordered, inside a
-///   command buffer and, at submission (`syncval_submit_time_validation`), across command
-///   buffers and queues; with the shaders' accesses through descriptors
+///   command buffer and, at submission, across command buffers and queues. The layer validates
+///   at submission by default: `syncval_submit_time_validation` (default on) through 1.4.357,
+///   which 1.4.363 deprecates for `syncval_full_validation` (default on) and reports, when asked
+///   for, as a settings warning, while an older layer reports the newer setting as unrecognized;
+///   so the lane asks for neither and takes the default every release has. With the shaders'
+///   accesses through descriptors
 ///   (`syncval_shader_accesses_heuristic`: the layer's default, off, sees no shader access at
 ///   all, only transfers, attachments and fixed-function reads). Even so, the layer sees no
 ///   access through a descriptor array of more than one element (the runtime's set 1, the heap
 ///   of argument-buffer resources) and none through a buffer device address (a pointer loaded
-///   from memory, an argument buffer's buffer, a large-buffer slot), it takes a descriptor's
-///   whole range as accessed, and it does not model a fragment shader interlock's critical
-///   sections; layer 1.4.341 also drops every write-after-write of a bound descriptor it finds
-///   while recording. A clean run is evidence for the other accesses alone
-///   (`runtime_lane/sync_coverage.rs` holds the controls).
+///   from memory, an argument buffer's buffer, a large-buffer slot), it takes a bound
+///   descriptor's whole range from its offset as accessed (draws that write their own bytes of
+///   one buffer bound at different offsets read as writing each other's: `int_attributes`,
+///   `render_executions`), it reads no indirect draw's counts (a draw of none reads as accessing
+///   what its shaders could: the index bounds pass's idle draw in `draw_bases`, `patches`' draws
+///   of no patches), and it does not model a fragment shader interlock's critical sections; layer
+///   1.4.341 also drops every write-after-write of a bound descriptor it finds while recording.
+///   A clean run is evidence for the other accesses alone (`runtime_lane/sync_coverage.rs` holds
+///   the controls).
 /// - `load-store`: a render pass's load operations checked against an earlier pass's stores
 ///   (`syncval_load_op_after_store_op_validation`, off by default), which a layer release that
 ///   does not know the setting reports as unrecognized (Ubuntu 26.04's 1.4.341 does not; the
@@ -1190,11 +1200,7 @@ impl LaneChecks {
 
     /// The validation layer's settings the checks take.
     pub fn layer_settings(self) -> Vec<LayerSetting> {
-        let synchronization = [
-            c"validate_sync",
-            c"syncval_submit_time_validation",
-            c"syncval_shader_accesses_heuristic",
-        ];
+        let synchronization = [c"validate_sync", c"syncval_shader_accesses_heuristic"];
         let load_after_store = [c"syncval_load_op_after_store_op_validation"];
         let on = |names: &[&std::ffi::CStr]| -> Vec<LayerSetting> {
             names
@@ -1577,7 +1583,6 @@ mod lane_checks {
             vec![
                 setting(c"enable_message_limit", LayerSettingValue::Bool(false)),
                 on(c"validate_sync"),
-                on(c"syncval_submit_time_validation"),
                 on(c"syncval_shader_accesses_heuristic"),
                 on(c"syncval_load_op_after_store_op_validation"),
             ]

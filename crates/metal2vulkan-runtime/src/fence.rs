@@ -8,10 +8,26 @@
 //!   an identity the tracker keys on.
 //! - **Resource barriers** order dispatches of one compute encoder: one global memory barrier,
 //!   as for a scope barrier.
-//! - **A render encoder's** fences are the same encoder-level orderings: a wait orders all of
-//!   the encoder's work after the update, and an update follows all of it, which covers any
-//!   stages the calls name (Metal's fences are evaluated at the pass's start and end; "Drivers
-//!   may delay fence updates until the end of the encoder"). Its memory barriers order the draws
+//! - **A render encoder's** fences order the render stages its calls name, as the M3 Max's do
+//!   (macOS 27.0.1): with `waitForFence:beforeStages:` of the fragment stage a pass's vertex
+//!   function read an untracked buffer before an earlier encoder's update wrote it, and with the
+//!   vertex stage after; with `updateFence:afterStages:` of the vertex stage a later encoder
+//!   waiting for the fence read the buffer before the pass's fragment function wrote it, and with
+//!   the fragment stage after. A wait's barrier, recorded before the encoder's first command, has
+//!   as its destination the Vulkan stages of the named stages and of every stage logically after
+//!   them (`before_stages_of`), and an update's source, in a later wait's barrier, the stages of
+//!   the named stages and of every stage logically before them (`after_stages_of`). The encoder's
+//!   commands outside its draws (the runtime's copies and dispatches before and after its render
+//!   pass instances) are covered either way, which only orders more (`tracker::FenceUse`).
+//!   Vulkan scopes a barrier so: "Including any given stage in the destination stage mask for a
+//!   particular synchronization command also implies that any logically later stages are
+//!   included in Scope2nd for that command", the same for the source mask and logically earlier
+//!   stages, and the access scopes "only includes memory accesses performed by pipeline stages
+//!   explicitly specified" in each mask. So each mask names its logically later or earlier
+//!   stages explicitly, and the stages it leaves out may run either side of the dependency (a
+//!   driver that does not synchronize at a stage may substitute a logically later source or
+//!   earlier destination stage, which "must not affect the semantics of execution or memory
+//!   dependencies"; Vulkan's synchronization chapter). Its memory barriers order the draws
 //!   after them behind those before. Vulkan's barriers inside a render pass instance are limited
 //!   to its subpass's dependency on itself, which is by region over the framebuffer-space
 //!   stages: it orders the fragment stages' accesses of one pixel. A barrier over the render
@@ -48,9 +64,11 @@ use super::error::Error;
 use super::predication::Event;
 use super::render::RenderCall;
 use super::render::RenderCommandEncoder;
+use super::render::{FRAGMENT_DRAW_STAGES, GEOMETRY_DRAW_STAGES};
 use super::replay::{BlitCall, ComputeCall, Resource};
 use super::resource::{ResourceKey, ResourceRef};
 use super::tracker::Barrier;
+use ash::vk;
 use metal2vulkan::metal::{BarrierScope, RenderStages};
 use std::sync::{Arc, Mutex};
 
@@ -121,19 +139,31 @@ impl Fence {
 }
 
 impl EncoderCore {
-    /// `updateFence:` of `call`: the fence is updated after the encoder's work.
-    fn update_fence(&mut self, call: &'static str, fence: &Fence) -> Result<(), Error> {
+    /// `updateFence:` of `call`: the fence is updated after the encoder's work, its draws' work
+    /// in `draws` alone where `Some` (`tracker::FenceUse`).
+    fn update_fence(
+        &mut self,
+        call: &'static str,
+        fence: &Fence,
+        draws: Option<vk::PipelineStageFlags2>,
+    ) -> Result<(), Error> {
         self.check_device(call, fence.device())?;
-        self.uses().update_fence(fence.0.key);
+        self.uses().update_fence(fence.0.key, draws);
         Ok(())
     }
 
     /// `waitForFence:` of `call`: the encoder's work waits for the fence's last update before
     /// the encoder in the queue's commit order, also after the encoder updated the fence itself,
-    /// as plain Metal's does (its API validation asserts).
-    fn wait_for_fence(&mut self, call: &'static str, fence: &Fence) -> Result<(), Error> {
+    /// as plain Metal's does (its API validation asserts); its draws' work in `draws` alone where
+    /// `Some` (`tracker::FenceUse`).
+    fn wait_for_fence(
+        &mut self,
+        call: &'static str,
+        fence: &Fence,
+        draws: Option<vk::PipelineStageFlags2>,
+    ) -> Result<(), Error> {
         self.check_device(call, fence.device())?;
-        self.uses().wait_for_fence(fence.0.key);
+        self.uses().wait_for_fence(fence.0.key, draws);
         Ok(())
     }
 }
@@ -164,14 +194,14 @@ impl ComputeCommandEncoder {
     /// `updateFence:`: the fence is updated after the encoder's dispatches.
     pub fn update_fence(&mut self, fence: &Fence) -> Result<(), Error> {
         self.log(|_| ComputeCall::UpdateFence(fence.clone()));
-        self.core().update_fence("update_fence", fence)
+        self.core().update_fence("update_fence", fence, None)
     }
 
     /// `waitForFence:`: the encoder's dispatches wait for the fence's last update before them in
     /// the queue's commit order.
     pub fn wait_for_fence(&mut self, fence: &Fence) -> Result<(), Error> {
         self.log(|_| ComputeCall::WaitForFence(fence.clone()));
-        self.core().wait_for_fence("wait_for_fence", fence)
+        self.core().wait_for_fence("wait_for_fence", fence, None)
     }
 }
 
@@ -179,14 +209,63 @@ impl BlitCommandEncoder {
     /// `updateFence:`: the fence is updated after the encoder's commands.
     pub fn update_fence(&mut self, fence: &Fence) -> Result<(), Error> {
         self.log(|_| BlitCall::UpdateFence(fence.clone()));
-        self.core().update_fence("update_fence", fence)
+        self.core().update_fence("update_fence", fence, None)
     }
 
     /// `waitForFence:`: the encoder's commands wait for the fence's last update before them in
     /// the queue's commit order.
     pub fn wait_for_fence(&mut self, fence: &Fence) -> Result<(), Error> {
         self.log(|_| BlitCall::WaitForFence(fence.clone()));
-        self.core().wait_for_fence("wait_for_fence", fence)
+        self.core().wait_for_fence("wait_for_fence", fence, None)
+    }
+}
+
+/// The Vulkan stages of a draw's vertex stage: its indirect arguments, vertex input, vertex,
+/// tessellation and geometry stages (`render::GEOMETRY_DRAW_STAGES` without the task and mesh
+/// stages).
+const VERTEX_DRAW_STAGES: vk::PipelineStageFlags2 = vk::PipelineStageFlags2::from_raw(
+    GEOMETRY_DRAW_STAGES.as_raw()
+        & !(vk::PipelineStageFlags2::TASK_SHADER_EXT.as_raw()
+            | vk::PipelineStageFlags2::MESH_SHADER_EXT.as_raw()),
+);
+
+/// The draw stages an update after Metal's render stages `stages` covers (`tracker::FenceUse`):
+/// those of the named stages and of every stage logically before them, which Vulkan's access
+/// scopes take only where the source mask names them (the module docs). The fragment stage is
+/// the last of every draw, and Metal's tile stage runs after the fragments before it, so either
+/// covers every draw stage (`None`); so does no stage. The vertex stage covers the vertex
+/// stages, the object stage the indirect arguments and the task stage, the mesh stage those and
+/// the mesh stage.
+fn after_stages_of(stages: RenderStages) -> Option<vk::PipelineStageFlags2> {
+    if stages.is_empty() || stages.intersects(RenderStages::FRAGMENT | RenderStages::TILE) {
+        return None;
+    }
+    let object = vk::PipelineStageFlags2::DRAW_INDIRECT | vk::PipelineStageFlags2::TASK_SHADER_EXT;
+    let mut draws = vk::PipelineStageFlags2::NONE;
+    if stages.contains(RenderStages::VERTEX) {
+        draws |= VERTEX_DRAW_STAGES;
+    }
+    if stages.contains(RenderStages::OBJECT) {
+        draws |= object;
+    }
+    if stages.contains(RenderStages::MESH) {
+        draws |= object | vk::PipelineStageFlags2::MESH_SHADER_EXT;
+    }
+    Some(draws)
+}
+
+/// The draw stages a wait before Metal's render stages `stages` covers (`tracker::FenceUse`):
+/// those of the named stages and of every stage logically after them, which Vulkan's access
+/// scopes take only where the destination mask names them (the module docs). The vertex, object
+/// and mesh stages are a draw's first, so a wait before one covers every draw stage (`None`), as
+/// does a wait before no stage; a wait before the fragment or the tile stage alone covers the
+/// fragments' stages (`render::FRAGMENT_DRAW_STAGES`; the tile stage's dispatches run outside the
+/// draws, which every wait covers).
+fn before_stages_of(stages: RenderStages) -> Option<vk::PipelineStageFlags2> {
+    let first = RenderStages::VERTEX | RenderStages::OBJECT | RenderStages::MESH;
+    match stages.is_empty() || stages.intersects(first) {
+        true => None,
+        false => Some(FRAGMENT_DRAW_STAGES),
     }
 }
 
@@ -198,38 +277,40 @@ const UP_TO_FRAGMENT: RenderStages = RenderStages::VERTEX
     .union(RenderStages::FRAGMENT);
 
 impl RenderCommandEncoder {
-    /// `updateFence:afterStages:`: the fence is updated after the encoder's draws. The update
-    /// follows every stage of the encoder's work, which covers `after_stages` (the module docs).
+    /// `updateFence:afterStages:`: the fence is updated after the encoder's draws' work in
+    /// `after_stages` and every stage before them (the module docs), and its work outside its
+    /// draws; Metal's `Tile` stage, or no stage, after all of its work.
     pub fn update_fence(&mut self, fence: &Fence, after_stages: RenderStages) -> Result<(), Error> {
         self.log(|_| RenderCall::UpdateFence(fence.clone(), after_stages));
-        // Every stage is ordered, a superset of the ones named.
-        let _ = after_stages;
         // The update follows the encoder's work, its later color groups' passes too, which
         // record in its core after the first group's: their encoders' calls change nothing
         // (`render/color_groups.rs`).
         if self.later_group_encoder() {
             return Ok(());
         }
-        self.core().update_fence("update_fence", fence)
+        self.core()
+            .update_fence("update_fence", fence, after_stages_of(after_stages))
     }
 
-    /// `waitForFence:beforeStages:`: the encoder's draws wait for the fence's last update before
-    /// the encoder in the queue's commit order, also after the encoder updated the fence, as the
-    /// compute encoder's do; every stage of the encoder waits, which covers `before_stages`.
+    /// `waitForFence:beforeStages:`: the encoder's draws' work in `before_stages` and every stage
+    /// after them waits for the fence's last update before the encoder in the queue's commit
+    /// order, also after the encoder updated the fence, as the compute encoder's does, and so
+    /// does its work outside its draws (the module docs); its draws' earlier stages may run
+    /// before the update. A wait before the vertex, object or mesh stage, or before no stage,
+    /// orders all of its work.
     pub fn wait_for_fence(
         &mut self,
         fence: &Fence,
         before_stages: RenderStages,
     ) -> Result<(), Error> {
         self.log(|_| RenderCall::WaitForFence(fence.clone(), before_stages));
-        // Every stage waits, a superset of the ones named.
-        let _ = before_stages;
         // All of the encoder's work waits, its later color groups' passes too
         // (`render/color_groups.rs`).
         if self.later_group_encoder() {
             return Ok(());
         }
-        self.core().wait_for_fence("wait_for_fence", fence)
+        self.core()
+            .wait_for_fence("wait_for_fence", fence, before_stages_of(before_stages))
     }
 
     /// `memoryBarrierWithScope:afterStages:beforeStages:`: the writes of the encoder's draws

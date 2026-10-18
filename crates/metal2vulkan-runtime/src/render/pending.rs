@@ -38,6 +38,7 @@ use crate::dynamic_state::ExtendedDynamicState;
 use crate::error::{vulkan, Error, FailedPipeline, FailedState};
 use crate::pipeline::{Pending, RawPipeline, RenderPipelineState};
 use crate::render_target;
+use crate::tracker::LegacyBarrier;
 use crate::visibility::Lent;
 use ash::vk;
 use metal2vulkan::cache::VariantKey;
@@ -80,6 +81,13 @@ pub(super) struct PendingDraw {
     /// The view mask of the storage barrier it records first
     /// (`render_target::between_storage_draws`), where it has one.
     pub(super) storage_barrier: Option<u32>,
+    /// The view mask and destination stages of the barrier from its instance's earlier
+    /// indirect argument reads it records first (`render_target::after_indirect_reads`), where it
+    /// has one.
+    pub(super) indirect_barrier: Option<(u32, vk::PipelineStageFlags)>,
+    /// The view mask and masks of the barrier from its instance's earlier writes before their
+    /// fragments it records first (`render_target::after_geometry_writes`), where it has one.
+    pub(super) geometry_barrier: Option<(u32, LegacyBarrier)>,
     /// The visibility query it counts in.
     pub(super) query: Option<Lent>,
     pub(super) recordings: Vec<OwnedRecording>,
@@ -150,6 +158,12 @@ impl PendingDraw {
         unsafe {
             if let Some(view_mask) = self.storage_barrier {
                 render_target::between_storage_draws(raw, cb, view_mask);
+            }
+            if let Some((view_mask, stages)) = self.indirect_barrier {
+                render_target::after_indirect_reads(raw, cb, view_mask, stages);
+            }
+            if let Some((view_mask, barrier)) = self.geometry_barrier {
+                render_target::after_geometry_writes(raw, cb, view_mask, barrier);
             }
             if let Some(query) = &self.query {
                 query.begin(raw, cb);

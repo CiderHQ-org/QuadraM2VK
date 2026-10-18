@@ -3,8 +3,8 @@
 //! `VkQueue`s, and the legacy masks.
 
 use crate::tracker::{
-    ordered, Access, Barrier, EncoderUses, Footprint, LegacyBarrier, Point, Summary, Tracker, Use,
-    UseRange, Wait, ENTRIES_PER_KEY,
+    ordered, Access, Barrier, EncoderUses, Footprint, GeometryWrites, IndirectReads, LegacyBarrier,
+    Point, Summary, Tracker, Use, UseRange, Wait, ENTRIES_PER_KEY,
 };
 use ash::vk;
 use std::ops::Range;
@@ -448,9 +448,9 @@ fn a_fence_wait_orders_after_the_last_update_in_commit_order() {
         &[Use::writes(5, false, bytes(0..64), copy_write())],
         None,
     );
-    first.update_fence(fence);
+    first.update_fence(fence, None);
     let mut second = EncoderUses::new(false);
-    second.wait_for_fence(fence);
+    second.wait_for_fence(fence, None);
     second.record(
         COMPUTE,
         &[Use::reads(5, false, bytes(0..64), shader_read())],
@@ -476,7 +476,7 @@ fn a_fence_wait_orders_after_the_last_update_in_commit_order() {
 fn a_fence_never_updated_orders_nothing() {
     let mut queue = Tracker::default();
     let mut waiting = EncoderUses::<Key>::new(false);
-    waiting.wait_for_fence(100);
+    waiting.wait_for_fence(100, None);
     waiting.record(COMPUTE, &[], None);
     assert_eq!(commit(&mut queue, &[waiting.finish()], 1), [None]);
 }
@@ -487,11 +487,11 @@ fn a_fence_wait_sees_only_the_latest_update() {
     let updating = |stages| {
         let mut uses = EncoderUses::<Key>::new(false);
         uses.record(stages, &[], None);
-        uses.update_fence(fence);
+        uses.update_fence(fence, None);
         uses.finish()
     };
     let mut waiting = EncoderUses::<Key>::new(false);
-    waiting.wait_for_fence(fence);
+    waiting.wait_for_fence(fence, None);
     waiting.record(FRAGMENT, &[], None);
     let mut queue = Tracker::default();
     let got = commit(
@@ -520,13 +520,13 @@ fn a_fence_passes_through_an_encoder_that_waits_and_updates() {
     let (first, second): (Key, Key) = (100, 101);
     let mut a = EncoderUses::<Key>::new(true);
     a.record(TRANSFER, &[], None);
-    a.update_fence(first);
+    a.update_fence(first, None);
     // No work of its own: it only waits for one fence and updates another.
     let mut b = EncoderUses::<Key>::new(false);
-    b.wait_for_fence(first);
-    b.update_fence(second);
+    b.wait_for_fence(first, None);
+    b.update_fence(second, None);
     let mut c = EncoderUses::<Key>::new(false);
-    c.wait_for_fence(second);
+    c.wait_for_fence(second, None);
     c.record(COMPUTE, &[], None);
     let mut queue = Tracker::default();
     let got = commit_each(&mut queue, &[a.finish(), b.finish(), c.finish()]);
@@ -545,13 +545,13 @@ fn a_wait_after_an_update_in_one_encoder_waits_for_the_update_before_it() {
     let fence: Key = 100;
     let mut first = EncoderUses::<Key>::new(false);
     first.record(TRANSFER, &[], None);
-    first.update_fence(fence);
+    first.update_fence(fence, None);
     let mut second = EncoderUses::<Key>::new(false);
-    second.update_fence(fence);
-    second.wait_for_fence(fence);
+    second.update_fence(fence, None);
+    second.wait_for_fence(fence, None);
     second.record(COMPUTE, &[], None);
     let mut third = EncoderUses::<Key>::new(false);
-    third.wait_for_fence(fence);
+    third.wait_for_fence(fence, None);
     third.record(FRAGMENT, &[], None);
     let mut queue = Tracker::default();
     let got = commit_each(
@@ -569,6 +569,75 @@ fn a_wait_after_an_update_in_one_encoder_waits_for_the_update_before_it() {
             vk::AccessFlags2::MEMORY_WRITE
         ))
     );
+}
+
+/// A render encoder's wait before the fragment stage alone (`fence.rs`) orders the draws'
+/// fragment stages and its work outside its draws (a copy before its pass) after the update, and
+/// leaves its draws' vertex stages out of the barrier, as an M3 Max's vertex function ran before
+/// the fence's update; a wait before every stage orders them all.
+#[test]
+fn a_fence_wait_before_the_fragment_stage_leaves_the_vertex_stages_out() {
+    use crate::render::{FRAGMENT_DRAW_STAGES, GEOMETRY_DRAW_STAGES};
+    let fence: Key = 100;
+    let pass = GEOMETRY_DRAW_STAGES | FRAGMENT_DRAW_STAGES;
+    let waits = |draws: Option<vk::PipelineStageFlags2>| {
+        let mut update = EncoderUses::<Key>::new(false);
+        update.record(COMPUTE, &[], None);
+        update.update_fence(fence, None);
+        let mut render = EncoderUses::<Key>::new(false);
+        render.wait_for_fence(fence, draws);
+        render.record(TRANSFER, &[], None);
+        render.record(pass, &[], None);
+        let mut queue = Tracker::default();
+        commit_each(&mut queue, &[update.finish(), render.finish()])[1]
+    };
+    let written = Access::new(COMPUTE, vk::AccessFlags2::MEMORY_WRITE);
+    let read_write = vk::AccessFlags2::MEMORY_READ | vk::AccessFlags2::MEMORY_WRITE;
+    assert_eq!(
+        waits(Some(FRAGMENT_DRAW_STAGES)),
+        barrier(
+            written,
+            Access::new(TRANSFER | FRAGMENT_DRAW_STAGES, read_write)
+        )
+    );
+    assert_eq!(
+        waits(None),
+        barrier(written, Access::new(TRANSFER | pass, read_write))
+    );
+}
+
+/// A render encoder's update after the vertex stage alone (`fence.rs`) covers its draws' vertex
+/// stages and its work outside its draws, not their fragment stages: a later wait's barrier does
+/// not wait for the fragments, as an M3 Max's later kernel ran before the pass's fragment function
+/// ended. Its source covers the stages of a fence the encoder waited for too.
+#[test]
+fn a_fence_update_after_the_vertex_stage_leaves_the_fragment_stages_out() {
+    use crate::render::{FRAGMENT_DRAW_STAGES, GEOMETRY_DRAW_STAGES};
+    let (earlier, fence): (Key, Key) = (99, 100);
+    let vertex = vk::PipelineStageFlags2::VERTEX_SHADER;
+    let pass = GEOMETRY_DRAW_STAGES | FRAGMENT_DRAW_STAGES;
+    let updates = |draws: Option<vk::PipelineStageFlags2>| {
+        let mut first = EncoderUses::<Key>::new(false);
+        first.record(TRANSFER, &[], None);
+        first.update_fence(earlier, None);
+        let mut render = EncoderUses::<Key>::new(false);
+        render.wait_for_fence(earlier, None);
+        render.record(pass, &[], None);
+        render.record(COMPUTE, &[], None);
+        render.update_fence(fence, draws);
+        let mut waiting = EncoderUses::<Key>::new(false);
+        waiting.wait_for_fence(fence, None);
+        waiting.record(COMPUTE, &[], None);
+        let mut queue = Tracker::default();
+        let got = commit_each(
+            &mut queue,
+            &[first.finish(), render.finish(), waiting.finish()],
+        );
+        got[2].map(|barrier| barrier.src)
+    };
+    let written = |stages| Some(Access::new(stages, vk::AccessFlags2::MEMORY_WRITE));
+    assert_eq!(updates(Some(vertex)), written(vertex | COMPUTE | TRANSFER));
+    assert_eq!(updates(None), written(pass | COMPUTE | TRANSFER));
 }
 
 #[test]
@@ -673,7 +742,7 @@ fn completed_submissions_retire() {
     let fence: Key = 100;
     let mut update = EncoderUses::<Key>::new(true);
     update.record(TRANSFER, &[writes(1, bytes(0..256), copy_write())], None);
-    update.update_fence(fence);
+    update.update_fence(fence, None);
     assert_eq!(commit(&mut queue, &[update.finish()], 1), [None]);
     // Not completed yet: still ordered.
     let read = || one(&[reads(1, bytes(0..256), shader_read())]);
@@ -686,7 +755,7 @@ fn completed_submissions_retire() {
     queue.completed(0, 1);
     assert_eq!(queue.entries(), 0);
     let mut wait = EncoderUses::<Key>::new(false);
-    wait.wait_for_fence(fence);
+    wait.wait_for_fence(fence, None);
     wait.record(COMPUTE, &[reads(1, bytes(0..256), shader_read())], None);
     assert_eq!(commit(&mut queue, &[wait.finish()], 2), [None]);
 }
@@ -874,10 +943,10 @@ fn random_encoder(next: &mut impl FnMut(u64) -> u64) -> Summary<Key> {
         uses.record(vk::PipelineStageFlags2::NONE, &command, barrier);
     }
     if next(4) == 0 {
-        uses.wait_for_fence(100 + next(2));
+        uses.wait_for_fence(100 + next(2), None);
     }
     if next(4) == 0 {
-        uses.update_fence(100 + next(2));
+        uses.update_fence(100 + next(2), None);
     }
     uses.finish()
 }
@@ -1027,9 +1096,9 @@ fn a_fence_updated_on_another_queue_is_a_wait() {
         &[Use::writes(5, false, bytes(0..64), copy_write())],
         None,
     );
-    update.update_fence(fence);
+    update.update_fence(fence, None);
     let mut waiting = EncoderUses::<Key>::new(false);
-    waiting.wait_for_fence(fence);
+    waiting.wait_for_fence(fence, None);
     waiting.record(
         COMPUTE,
         &[Use::reads(5, false, bytes(0..64), shader_read())],
@@ -1360,7 +1429,7 @@ fn a_joined_summary_orders_as_one_encoder() {
     joined.join(encoder(&commands[1..]));
     let whole = encoder(&commands);
     let mut fenced = EncoderUses::<Key>::new(true);
-    fenced.update_fence(9);
+    fenced.update_fence(9, None);
     joined.join(fenced.finish());
     assert_eq!(joined.uses(), whole.uses());
     let later = [one(&[
@@ -1374,7 +1443,7 @@ fn a_joined_summary_orders_as_one_encoder() {
     );
     // The joined fence update orders a later wait after every stage the joined work ran in.
     let mut waits = EncoderUses::<Key>::new(false);
-    waits.wait_for_fence(9);
+    waits.wait_for_fence(9, None);
     waits.record(FRAGMENT, &[], None);
     assert_eq!(
         commit(&mut a, &[waits.finish()], 2),
@@ -1421,15 +1490,15 @@ fn a_split_encoder_waits_in_its_first_part_and_updates_in_its_last() {
     let (first, second): (Key, Key) = (100, 101);
     let mut a = EncoderUses::<Key>::new(false);
     a.record(FRAGMENT, &[], None);
-    a.update_fence(first);
+    a.update_fence(first, None);
     let mut parted = EncoderUses::<Key>::new(false);
-    parted.wait_for_fence(first);
+    parted.wait_for_fence(first, None);
     parted.record(TRANSFER, &[], None);
     parted.split();
     parted.record(COMPUTE, &[], None);
-    parted.update_fence(second);
+    parted.update_fence(second, None);
     let mut c = EncoderUses::<Key>::new(false);
-    c.wait_for_fence(second);
+    c.wait_for_fence(second, None);
     c.record(COMPUTE, &[], None);
     let parts = parted.finish_parts();
     assert_eq!(parts.len(), 2);
@@ -1511,10 +1580,10 @@ fn fences_and_unknown_uses_order_batches_across_queues() {
         &[Use::writes(5, false, bytes(0..64), copy_write())],
         None,
     );
-    updating.update_fence(fence);
+    updating.update_fence(fence, None);
     let updating = footprint(&[updating.finish()]);
     let mut waiting = EncoderUses::new(true);
-    waiting.wait_for_fence(fence);
+    waiting.wait_for_fence(fence, None);
     let waiting = footprint(&[waiting.finish()]);
     assert!(ordered(Some(&updating), Some(&waiting)));
     assert!(ordered(Some(&waiting), Some(&updating)));
@@ -1527,4 +1596,99 @@ fn fences_and_unknown_uses_order_batches_across_queues() {
     assert!(!ordered(None, Some(&untracked)));
     assert!(!ordered(Some(&untracked), None));
     assert!(ordered::<Key>(None, None));
+}
+
+/// A draw's indirect argument reads meet a later draw's writes of the same bytes, of a tracked
+/// resource or an untracked one alike, in the later draw's write stages alone; its other reads,
+/// and writes elsewhere, meet nothing.
+#[test]
+fn a_draw_after_one_that_read_its_arguments_writes_them_in_its_write_stages() {
+    use vk::AccessFlags2 as A2;
+    use vk::PipelineStageFlags2 as S2;
+    let arguments = Access::new(S2::DRAW_INDIRECT, A2::INDIRECT_COMMAND_READ);
+    let vertex_write = Access::new(S2::VERTEX_SHADER, A2::SHADER_STORAGE_WRITE);
+    let fragment_write = Access::new(FRAGMENT, A2::SHADER_STORAGE_WRITE);
+    let mut known = IndirectReads::new();
+    known.add(&[
+        reads(1, bytes(0..20), arguments),
+        Use::reads(2, false, bytes(64..80), arguments),
+        reads(
+            3,
+            bytes(0..64),
+            Access::new(S2::VERTEX_SHADER, A2::SHADER_STORAGE_READ),
+        ),
+    ]);
+    let one = known.written_in(&[writes(1, bytes(0..8), vertex_write)]);
+    assert!(one == S2::VERTEX_SHADER);
+    let both = known.written_in(&[
+        Use::writes(2, false, bytes(72..76), fragment_write),
+        writes(1, bytes(16..20), vertex_write),
+    ]);
+    assert!(both == S2::VERTEX_SHADER | FRAGMENT);
+    assert!(known
+        .written_in(&[writes(1, bytes(20..64), vertex_write)])
+        .is_empty());
+    assert!(known
+        .written_in(&[writes(3, bytes(0..64), vertex_write)])
+        .is_empty());
+    assert!(known
+        .written_in(&[reads(1, bytes(0..20), arguments)])
+        .is_empty());
+    // Merged past the entries a resource keeps, the reads still meet every byte they read.
+    let mut many = IndirectReads::new();
+    for at in 0..=ENTRIES_PER_KEY as u64 {
+        many.add(&[reads(1, bytes(at * 64..at * 64 + 20), arguments)]);
+    }
+    for at in 0..=ENTRIES_PER_KEY as u64 {
+        let write = writes(1, bytes(at * 64 + 16..at * 64 + 20), vertex_write);
+        assert!(many.written_in(&[write]) == S2::VERTEX_SHADER);
+    }
+}
+
+/// A draw's writes before its fragments meet a later draw's fragment-shader reads and writes of
+/// the same bytes, of a tracked resource or an untracked one alike: the barrier runs from the
+/// writes' stages and access types to the fragment shader and the later accesses there. Reads
+/// and writes in other stages, other bytes, and the earlier draw's own fragment writes meet
+/// nothing.
+#[test]
+fn a_draw_s_fragments_after_one_that_wrote_before_its_fragments_wait_for_the_write() {
+    use vk::AccessFlags2 as A2;
+    use vk::PipelineStageFlags2 as S2;
+    let vertex_write = Access::new(S2::VERTEX_SHADER, A2::SHADER_STORAGE_WRITE);
+    let evaluation_write =
+        Access::new(S2::TESSELLATION_EVALUATION_SHADER, A2::SHADER_STORAGE_WRITE);
+    let fragment_read = Access::new(FRAGMENT, A2::SHADER_STORAGE_READ);
+    let fragment_write = Access::new(FRAGMENT, A2::SHADER_STORAGE_WRITE);
+    let vertex_read = Access::new(S2::VERTEX_SHADER, A2::SHADER_STORAGE_READ);
+    let mut known = GeometryWrites::new();
+    known.add(&[
+        writes(1, bytes(0..16), vertex_write),
+        Use::writes(2, false, bytes(64..80), evaluation_write),
+        writes(3, bytes(0..64), fragment_write),
+    ]);
+    let read = known.barrier_before(&[reads(1, bytes(8..12), fragment_read)]);
+    assert_eq!(read, barrier(vertex_write, fragment_read));
+    let both = known.barrier_before(&[
+        writes(1, bytes(0..4), fragment_write),
+        Use::reads(2, false, bytes(72..76), fragment_read),
+    ]);
+    assert_eq!(
+        both,
+        barrier(
+            vertex_write.union(evaluation_write),
+            Access::new(FRAGMENT, A2::SHADER_STORAGE_READ | A2::SHADER_STORAGE_WRITE),
+        )
+    );
+    assert_eq!(
+        known.barrier_before(&[reads(1, bytes(16..64), fragment_read)]),
+        None
+    );
+    assert_eq!(
+        known.barrier_before(&[reads(1, bytes(0..16), vertex_read)]),
+        None
+    );
+    assert_eq!(
+        known.barrier_before(&[reads(3, bytes(0..64), fragment_read)]),
+        None
+    );
 }

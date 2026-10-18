@@ -9,7 +9,9 @@
 //!
 //! Each is a [`Vk`]: the `ash::Device`, which it dereferences to, and the reads the commands of the
 //! device's queue family for encoders make, which the runtime's global memory barriers name in
-//! their destination (`tracker::Barrier::record`, `image_barrier::MemoryReads`).
+//! their destination (`tracker::Barrier::record`, `image_barrier::MemoryReads`), the push
+//! command where the device has it (`binding::push_descriptor_command`), and
+//! `vkSetDebugUtilsObjectNameEXT` where its instance reports messages (`pipeline/graphics.rs`).
 
 use crate::exit_guard::{self, Call};
 use crate::image_barrier::MemoryReads;
@@ -24,18 +26,24 @@ use std::ops::Deref;
 pub(crate) struct Vk {
     device: ash::Device,
     reads: MemoryReads,
+    object_name: Option<vk::PFN_vkSetDebugUtilsObjectNameEXT>,
 }
 
 impl Vk {
-    /// `device`'s functions, whose global memory barriers name `reads`: for the work the runtime
-    /// records before the device's functions are made (`prime.rs`).
-    pub(super) fn new(device: ash::Device, reads: MemoryReads) -> Vk {
-        Vk { device, reads }
+    /// its push command where it has one, and `object_name`, its naming of an object where its
+        object_name: Option<vk::PFN_vkSetDebugUtilsObjectNameEXT>,
+            object_name,
     }
 
     /// The reads a global memory barrier's destination names.
     pub(crate) fn reads(&self) -> MemoryReads {
         self.reads
+    }
+
+    /// `vkSetDebugUtilsObjectNameEXT`, where the device's instance reports messages: what names a
+    /// graphics pipeline for the layers' messages (`pipeline/graphics.rs`).
+    pub(crate) fn object_name(&self) -> Option<vk::PFN_vkSetDebugUtilsObjectNameEXT> {
+        self.object_name
     }
 }
 
@@ -60,7 +68,9 @@ pub(crate) struct Functions {
 
 impl Functions {
     /// The functions of `all`'s device, made from `instance`, whose global memory barriers name
-    /// `reads`.
+    /// `reads`, with `push_descriptor`, its push command where it has one, and `object_name`, its
+    /// naming of an object where its instance reports messages, whose commands go through
+    /// `recording`, its slot where it has one (`recorder`).
     ///
     /// # Safety
     ///
@@ -70,6 +80,7 @@ impl Functions {
         instance: &ash::Instance,
         all: ash::Device,
         reads: MemoryReads,
+        object_name: Option<vk::PFN_vkSetDebugUtilsObjectNameEXT>,
     ) -> Functions {
         let handle = all.handle();
         let get = instance.fp_v1_0().get_device_proc_addr;
@@ -94,6 +105,15 @@ impl Functions {
         };
         // SAFETY: as above: each pointer is the device's function of that name, or null.
         let sectioned = unsafe { ash::Device::load_with(load, handle) };
+        // The naming is no `ash::Device` function: its entry point, where the device has it.
+        if let (Some(at), Some(name)) = (
+            Call::ALL
+                .iter()
+                .position(|&call| call == Call::SetDebugUtilsObjectName),
+            object_name,
+        ) {
+            entry_points[at] = name as usize as u64;
+        }
         Functions {
             all: Vk::new(all, reads),
             sectioned: Vk::new(sectioned, reads),

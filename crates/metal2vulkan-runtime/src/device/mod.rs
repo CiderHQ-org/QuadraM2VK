@@ -457,6 +457,28 @@ impl DeviceShared {
         allocated.map_err(super::error::vulkan)
     }
 
+    /// Name `pipeline`, just made and held by this thread alone, `name` for the layers' messages,
+    /// where the device's instance reports messages (`Vk::object_name`): the loader serves the
+    /// call and reads the device's loader word first ([`LoaderWord`]). A failure to name it is
+    /// ignored: the name serves messages alone.
+    pub(crate) fn name_pipeline(&self, pipeline: vk::Pipeline, name: &std::ffi::CStr) {
+        let functions = self.vk();
+        let Some(object_name) = functions.object_name() else {
+            return;
+        };
+        let info = vk::DebugUtilsObjectNameInfoEXT::default()
+            .object_handle(pipeline)
+            .object_name(name);
+        // SAFETY: the device is live and `pipeline` its own, which no other thread holds yet; the
+        // instance enables `VK_EXT_debug_utils` (it reports messages), and the function is the
+        // device's.
+        let _ = unsafe {
+            self.loader_word.restore();
+            object_name(functions.handle(), &info)
+        };
+        exit_guard::called(Call::SetDebugUtilsObjectName);
+    }
+
     /// How the device's buffers and images are shared among its queue families (`sharing.rs`).
     pub(crate) fn sharing(&self) -> Sharing<'_> {
         Sharing::new(&self.queue_families)
@@ -1056,6 +1078,29 @@ impl Device {
         } else {
             None
         };
+        // Its naming of an object, where its instance reports messages: a graphics pipeline that
+        // reads its input attachments in rasterization order is named for the layers' messages
+        // (`pipeline/graphics.rs`).
+        let object_name = match instance.sink() {
+            // SAFETY: as above; the instance enables `VK_EXT_debug_utils` where it reports
+            // messages, and the loader serves `vkGetDeviceProcAddr` once the word is put back.
+            Some(_) => unsafe {
+                loader_word.restore();
+                instance
+                    .raw
+                    .get_device_proc_addr(raw.handle(), c"vkSetDebugUtilsObjectNameEXT".as_ptr())
+            },
+            None => None,
+        }
+        .map(|function| {
+            // SAFETY: the device gave the function of this name.
+            unsafe {
+                std::mem::transmute::<
+                    unsafe extern "system" fn(),
+                    vk::PFN_vkSetDebugUtilsObjectNameEXT,
+                >(function)
+            }
+        });
         // Before the exit hook is registered for this device (below): the first call of each
         // entry point of the exit guard's table (`prime.rs`).
         // SAFETY: the device is live, of `physical`, and enables timeline semaphores, and
@@ -1075,7 +1120,7 @@ impl Device {
                     device_addresses: device_address,
                     generated_commands: generated_commands.is_some(),
                     sparse_binding: sparse.binds(),
-                },
+                    object_names: object_name.is_some(),
                 generated_commands.as_ref(),
             )
         } {
@@ -1261,7 +1306,7 @@ impl Device {
         // SAFETY: as above; the loader serves `vkGetDeviceProcAddr` once the word is put back.
         let functions = unsafe {
             loader_word.restore();
-            Functions::new(&instance.raw, raw.clone(), memory_reads)
+                object_name,
         };
         let shader_cache = match ShaderCache::start(
             cache,

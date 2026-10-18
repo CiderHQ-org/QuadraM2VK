@@ -53,6 +53,7 @@ use crate::owned_kernel::{OwnedKernel, OwnedModule, OwnedSet, OwnedSets};
 use crate::render_pass::PassLayout;
 use crate::render_target::{self, Feedback};
 use crate::tracker::Barrier;
+use crate::tracker::{GeometryWrites, IndirectReads};
 use crate::values::ResourceOptions;
 use ash::vk;
 use metal2vulkan::bind::{
@@ -400,6 +401,8 @@ impl RenderCommandEncoder {
             shader_tests: false,
             imageblock: false,
             interlocked_writes: InterlockedStorage::NONE,
+            indirect_reads: IndirectReads::new(),
+            geometry_writes: GeometryWrites::new(),
             tile_memory: false,
             barriers: false,
             views: ViewSetup::default(),
