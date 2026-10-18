@@ -17,7 +17,7 @@ use super::ops::{self, BitcastPlan, CastKind};
 use crate::air::ir::{BinOp as AirBin, FloatPredicate, IntPredicate};
 use crate::device::DeviceProfile;
 use crate::pipeline::sym::{ResourceKind, ResourceSlot, Stage};
-use crate::spirv::builder::{FunctionBuilder, MaskForm, ModuleBuilder, ProductForm};
+use crate::spirv::builder::{FunctionBuilder, MaskForm, ModuleBuilder, ProductForm, QuantizeForm};
 use crate::spirv::error::BResult;
 use crate::spirv::ids::{FuncId, GlobalId, TypeId, Value};
 use crate::spirv::interp::{run, Buffer, Config, Resources};
@@ -382,6 +382,11 @@ fn wide_profile() -> DeviceProfile {
         })
         .expect("a committed profile with int64, float64, and float16")
 }
+
+/// The `half` roundings the blends' checks run under (`extended_range::blend::half_of`): the
+/// integer sequence every device answers alike, and the device's conversion under the 16-bit float
+/// controls, each checked against Metal's arithmetic.
+const HALF_FORMS: [QuantizeForm; 2] = [QuantizeForm::Integer, QuantizeForm::Controlled];
 
 /// One case: per operand, per lane, the held bits.
 type Case = Vec<Vec<u64>>;

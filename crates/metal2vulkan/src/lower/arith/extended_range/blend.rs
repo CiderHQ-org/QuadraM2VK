@@ -102,12 +102,13 @@ use super::{floats, per_lane_f, source_range, SRGB_SOURCE_RANGE};
 use crate::error::{Error, ExtendedRangeBlend, Feature, Unsupported};
 use crate::lower::arith::fma::{float_fma_exact, half_sum};
 use crate::lower::arith::legal::{FloatFmt, Form, Held};
+use crate::lower::arith::narrow;
 use crate::lower::arith::ops::{fsplat, splat, ty};
 use crate::lower::arith::texel_round::{f32_to_half, HalfRounding};
 use crate::metal::format::ExtendedRange;
 use crate::metal::{BlendFactor, BlendOperation, ColorWriteMask, PixelFormat};
 use crate::pipeline::lower_inputs::BlendEquation;
-use crate::spirv::builder::FunctionBuilder;
+use crate::spirv::builder::{FunctionBuilder, QuantizeForm};
 use crate::spirv::error::{BResult, BuildError, TypeRule};
 use crate::spirv::ids::Value;
 use crate::spirv::ir::{BinOp, ConvOp, GlslOp, UnOp};
@@ -1561,7 +1562,7 @@ impl<'a> Class<'a> {
             return fb.binary_no_contraction(BinOp::FSub, x, one);
         }
         let m = fb.binary(BinOp::FSub, x, one)?;
-        f32_to_half(fb, f, m, HalfRounding::NearestEven)
+        half_of(fb, f, m)
     }
 
     /// `h(1 - x)` of `half` `x`: `1 - x` is exact in `f32` but for `|x|` below `2^-13`, where its
@@ -1573,7 +1574,7 @@ impl<'a> Class<'a> {
             return fb.binary_no_contraction(BinOp::FSub, one, x);
         }
         let m = fb.binary(BinOp::FSub, one, x)?;
-        f32_to_half(fb, f, m, HalfRounding::NearestEven)
+        half_of(fb, f, m)
     }
 
     /// `x · y`: in `float` arithmetic rounded to `float` on its own, never fused into a sum, its
@@ -1648,7 +1649,7 @@ impl<'a> Class<'a> {
         match self.inputs.arith {
             // Every `float` operation here is rounded already.
             BlendArith::Float => Ok(x),
-            BlendArith::Half => f32_to_half(fb, self.lanes.floats(), x, HalfRounding::NearestEven),
+            BlendArith::Half => half_of(fb, self.lanes.floats(), x),
         }
     }
 
@@ -1674,7 +1675,7 @@ impl<'a> Class<'a> {
             }
             (false, false) => half_sum(fb, f.with(Held::Float(FloatFmt::Half)), a, b, c)?,
         };
-        f32_to_half(fb, f, s, HalfRounding::NearestEven)
+        half_of(fb, f, s)
     }
 
     /// `sign · operand`, and the factor, of `(sign, term)`.
@@ -2018,7 +2019,7 @@ pub fn blend(
     let (sf, s) = match b.float {
         true => (
             Some(clamped(fb, s, FLOAT_SOURCE_RANGE)?),
-            f32_to_half(fb, f, s, HalfRounding::NearestEven)?,
+            half_of(fb, f, s)?,
         ),
         false => (None, s),
     };
@@ -2105,13 +2106,13 @@ pub fn blend_half_float(
             let one = fsplat(fb, f, 1.0)?;
             match arith {
                 BlendArith::Half => {
-                    let h = f32_to_half(fb, f, c, HalfRounding::NearestEven)?;
+                    let h = half_of(fb, f, c)?;
                     // Under fast math the color channels' one minus reads the `f32`, alpha's
                     // its `half` (a color class beside `BlendColor` computes its own of the
                     // `half`).
                     let minus_of = fb.vector_shuffle(c, h, &[0, 1, 2, 7])?;
                     let m = fb.binary(BinOp::FSub, one, minus_of)?;
-                    let m = f32_to_half(fb, f, m, HalfRounding::NearestEven)?;
+                    let m = half_of(fb, f, m)?;
                     Some((h, m, h))
                 }
                 BlendArith::Float => {
@@ -2182,12 +2183,12 @@ fn clamped_blend(
             let c = fb.select(nan, zero, c)?;
             let c = fb.glsl(GlslOp::FClamp, &[c, zero, one])?;
             let c = match arith {
-                BlendArith::Half => f32_to_half(fb, f, c, HalfRounding::NearestEven)?,
+                BlendArith::Half => half_of(fb, f, c)?,
                 BlendArith::Float => c,
             };
             let m = fb.binary_no_contraction(BinOp::FSub, one, c)?;
             let m = match arith {
-                BlendArith::Half => f32_to_half(fb, f, m, HalfRounding::NearestEven)?,
+                BlendArith::Half => half_of(fb, f, m)?,
                 BlendArith::Float => m,
             };
             Some((c, m, c))
@@ -2222,6 +2223,7 @@ pub fn blend_packed16(
 ) -> BResult<Value> {
     let f = floats();
     let s = clamped(fb, s, (0.0, 1.0))?;
+    let s = half_of(fb, f, s)?;
     clamped_blend(fb, b, BlendArith::Half, (s, d), color)
 }
 
@@ -2229,27 +2231,89 @@ pub fn blend_packed16(
 /// image reads it, `c / 255` for each code `c`, Vulkan's conversion of a normalized fixed-point
 /// value) in `arith`: the code `c` (the lane times 255, rounded to the nearest integer, which any
 /// decode within half a code of `c / 255` gives) over 255, correctly rounded to `float`
-/// ([`div_exact`](crate::lower::arith::exact_division::div_exact)), and to `half` from that for
-/// `BlendArith::Half` (EV FB8-dec1-m3, the M3 Max under macOS 27.0.1: a fetch of every code reads
-/// `h(c / 255)` as a `half4` and `f(c / 255)` as a `float4`; the blend reads the same). Rounding
-/// the `float` rounds the quotient: `c / 255` repeats the byte `c` without end, which keeps its
-/// `half` at least `2^-9` of a `half`'s step from a midpoint, far beyond an `f32` step.
+/// ([`div_exact`](crate::lower::arith::exact_division::div_exact)) for `BlendArith::Float`, and to
+/// `half` for `BlendArith::Half` (the M3 Max under macOS 27.0.1: a fetch of every
+/// code reads `h(c / 255)` as a `half4` and `f(c / 255)` as a `float4`; the blend reads the same).
+/// The `half` takes no exact quotient: `c / 255` repeats the byte `c` without end, which keeps it
+/// at least `2^-9` of a `half`'s step from a `half` midpoint (at least `2^-20` of the value, every
+/// nonzero `c / 255` being a normal `half`), and `c` times the `f32` nearest `1 / 255`, one
+/// correctly rounded `OpFMul` (Vulkan's precision table), lies within `2^-23` of `c / 255`
+/// relatively (that constant's error and the product's rounding, `2^-24` each), so it rounds to
+/// the same `half` ([`half_of`]); every code is checked
+/// (`lower::arith::tests::blend8::a_code_s_half_is_its_product_s`).
 pub fn unorm8_tile_value(
     fb: &mut FunctionBuilder<'_>,
     texel: Value,
     arith: BlendArith,
 ) -> BResult<Value> {
     let f = floats();
-    let u = crate::lower::arith::narrow::u32_form(f);
-    let ut = ty(fb, u)?;
     let k255 = fsplat(fb, f, 255.0)?;
     let scaled = fb.binary(BinOp::FMul, texel, k255)?;
     let rounded = fb.glsl(GlslOp::RoundEven, &[scaled])?;
-    let code = fb.convert(ConvOp::ConvertFToU, rounded, ut)?;
-    let v = crate::lower::arith::exact_division::div_exact(fb, u, code, 255)?;
     match arith {
-        BlendArith::Float => Ok(v),
-        BlendArith::Half => f32_to_half(fb, f, v, HalfRounding::NearestEven),
+        BlendArith::Float => {
+            let u = crate::lower::arith::narrow::u32_form(f);
+            let ut = ty(fb, u)?;
+            let code = fb.convert(ConvOp::ConvertFToU, rounded, ut)?;
+            crate::lower::arith::exact_division::div_exact(fb, u, code, 255)
+        }
+        BlendArith::Half => {
+            let inverse = fsplat(fb, f, f64::from(1.0f32 / 255.0))?;
+            let v = fb.binary_no_contraction(BinOp::FMul, rounded, inverse)?;
+            half_of(fb, f, v)
+        }
+    }
+}
+
+/// Metal's 8-bit unorm write of `v` (a `vec4` of `f32`, the lanes [`blend_unorm8`] gives in
+/// `arith`): each lane's code (a NaN 0, clamped to `[0, 1]`, the exact product with 255 rounded to
+/// nearest, ties to even) as the `f32` `c` times the `f32` nearest `1 / 255`, which the device
+/// stores as `c`. In `half` arithmetic every lane is a `half` (each blended lane is rounded to one,
+/// and a kept lane is the output's `half` or the destination's), so its product with 255 is exact
+/// in `f32` (11 significand bits times 8) and `RoundEven` rounds it: a few vector instructions
+/// where the general rule ([`color_write::round`](crate::lower::arith::color_write::round), which
+/// a `float` lane takes) splits each lane's product exactly, about fourteen a lane; the two agree
+/// on every `half` and every NaN (`lower::arith::tests::blend8::a_half_s_code_is_metals`).
+pub fn unorm8_write(fb: &mut FunctionBuilder<'_>, arith: BlendArith, v: Value) -> BResult<Value> {
+    let f = floats();
+    match arith {
+        BlendArith::Float => {
+            let rule = Some(crate::pipeline::lower_inputs::ChannelWrite::Unorm { bits: 8 });
+            crate::lower::arith::color_write::round(fb, f, v, &[rule; 4], None)
+        }
+        BlendArith::Half => {
+            let zero = fsplat(fb, f, 0.0)?;
+            let one = fsplat(fb, f, 1.0)?;
+            let nan = fb.unary(UnOp::IsNan, v)?;
+            let v = fb.select(nan, zero, v)?;
+            let v = fb.glsl(GlslOp::FClamp, &[v, zero, one])?;
+            let k255 = fsplat(fb, f, 255.0)?;
+            let p = fb.binary_no_contraction(BinOp::FMul, v, k255)?;
+            let c = fb.glsl(GlslOp::RoundEven, &[p])?;
+            let inverse = fsplat(fb, f, f64::from(1.0f32 / 255.0))?;
+            fb.binary_no_contraction(BinOp::FMul, c, inverse)
+        }
+    }
+}
+
+/// `x` (`f32` lanes of form `f`) rounded to `half`, nearest even, half denormals kept, an infinity
+/// from 65520 up: each rounding of Metal's blend arithmetic. Where the module rounds to `half` by
+/// the device's conversion under the 16-bit float controls ([`QuantizeForm::Controlled`]: the
+/// profile has `shaderFloat16`, `RoundingModeRTE`, `DenormPreserve` and `SignedZeroInfNanPreserve`
+/// for 16 bits, and a driver that keeps the conversion and its widening, not one with
+/// `DriverWorkaround::HalfConversionPairFolded`; [`narrow::controlled_modes`]), that conversion
+/// and its widening ([`narrow::round`]): two instructions, Metal's `half(float)` by the Vulkan spec
+/// (conversions are correctly rounded, to nearest even under `RoundingModeRTE`, denormals kept
+/// under `DenormPreserve`, zero signs and infinities under `SignedZeroInfNanPreserve`), as the
+/// module's own `half` results round on such a profile (docs/FAST-PATHS.md's `half` rounding row:
+/// exact under either policy, no note). Elsewhere the integer sequence ([`f32_to_half`]), about
+/// fifty instructions, the same on every device. The two agree on every `x` but a NaN's bits,
+/// which the conversion leaves to the device: the blends clamp a NaN source to zero, and a 16-bit
+/// float blend stores every NaN as Metal's own.
+pub fn half_of(fb: &mut FunctionBuilder<'_>, f: Form, x: Value) -> BResult<Value> {
+    match fb.module().quantize_form() {
+        QuantizeForm::Controlled => narrow::round(fb, f.with(Held::Float(FloatFmt::Half)), x),
+        _ => f32_to_half(fb, f, x, HalfRounding::NearestEven),
     }
 }
 

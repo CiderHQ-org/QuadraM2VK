@@ -2610,9 +2610,7 @@ fn unorm8_blended(
         false => None,
     };
     let v = extended_range::blend::blend_unorm8(fb, &b, arith, (part, texel), constant)?;
-    let f4 = form.with(Held::Float(FloatFmt::F32));
-    let rule = Some(crate::pipeline::lower_inputs::ChannelWrite::Unorm { bits: 8 });
-    crate::lower::arith::color_write::round(fb, f4, v, &[rule; 4], None)
+    extended_range::blend::unorm8_write(fb, arith, v)
 }
 
 /// Output `part` of `form` (one to four `f32` lanes) as the four lanes Metal's blend reads: its
@@ -2748,22 +2746,12 @@ pub(super) fn blend_sources(
     second: Option<(Form, SValue)>,
 ) -> BResult<(SValue, Option<SValue>)> {
     let part = match form.float_fmt() {
-        Some(FloatFmt::F32) if !b.float => crate::lower::arith::texel_round::f32_to_half(
-            fb,
-            form,
-            part,
-            crate::lower::arith::texel_round::HalfRounding::NearestEven,
-        )?,
+        Some(FloatFmt::F32) if !b.float => extended_range::blend::half_of(fb, form, part)?,
         _ => part,
     };
     let s1 = match (b.reads_second(), second) {
         (true, Some((form, s1))) => Some(match form.float_fmt() {
-            Some(FloatFmt::F32) => crate::lower::arith::texel_round::f32_to_half(
-                fb,
-                form,
-                s1,
-                crate::lower::arith::texel_round::HalfRounding::NearestEven,
-            )?,
+            Some(FloatFmt::F32) => extended_range::blend::half_of(fb, form, s1)?,
             _ => s1,
         }),
         (true, None) => return Err(cx.fail("a blend of the second source without its output")),

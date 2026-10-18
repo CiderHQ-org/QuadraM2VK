@@ -291,5 +291,40 @@ fn a_packed_word_attachment_blend_stores_metals_words() {
             })
             .collect();
         let expected = words;
+        for q in HALF_FORMS {
+            check_accept(
+                &format!("the packed word blend, {what}, half by {q:?}"),
+                &[f4, int(32), u4],
+                int(32),
+                &|fb, x| {
+                    fb.module().set_quantize_form(q);
+                    let d = crate::lower::stage_io::word_color::decode(fb, word, x[1])?;
+                    let color = b.reads_constant().then_some(x[2]);
+                    let v = blend_packed16(fb, &b, (x[0], d), color)?;
+                    let w = crate::lower::stage_io::word_color::encode(fb, word, (f4, v), None)?;
+                    let u = Form {
+                        held: Held::Int {
+                            bits: 32,
+                            container: 32,
+                        },
+                        lanes: 1,
+                    };
+                    let keep = crate::lower::arith::ops::splat(fb, u, u64::from(kept))?;
+                    let write = crate::lower::arith::ops::splat(fb, u, u64::from(!kept))?;
+                    let old = fb.binary(crate::spirv::ir::BinOp::BitwiseAnd, x[1], keep)?;
+                    let new = fb.binary(crate::spirv::ir::BinOp::BitwiseAnd, w, write)?;
+                    fb.binary(crate::spirv::ir::BinOp::BitwiseOr, old, new)
+                },
+                &cases,
+                &|c| {
+                    let i = PIXELS
+                        .iter()
+                        .position(|(_, d)| u64::from(*d) == c[1][0])
+                        .expect("a pixel");
+                    Some(vec![u64::from(expected[i])])
+                },
+                &|g, w| g == w,
+            );
+        }
     }
 }

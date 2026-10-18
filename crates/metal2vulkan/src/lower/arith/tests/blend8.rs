@@ -1,5 +1,5 @@
 //! A fetched 8-bit unorm attachment's blend on the interpreter
-//! (`extended_range::blend::blend_unorm8`, then the 8-bit unorm rule of `arith::color_write`),
+//! (`extended_range::blend::blend_unorm8`, then its 8-bit unorm write, `unorm8_write`),
 //! of a `half4` or `float4` output, under fast math and without, against Metal's measured
 //! arithmetic. Metal clamps the output to `[0, 1]` (a NaN to 0), reads the destination's code `c`
 //! as `h(c / 255)` (`f(c / 255)` for a `float4` output) and the blend color clamped to `[0, 1]`
@@ -25,7 +25,9 @@
 //! FB8-sc1-m3 and FB8-ao1-m3).
 
 use super::*;
-use crate::lower::arith::extended_range::blend::{blend_unorm8, Blend, BlendArith, BlendMath};
+use crate::lower::arith::extended_range::blend::{
+    blend_unorm8, half_of, unorm8_tile_value, unorm8_write, Blend, BlendArith, BlendMath,
+};
 use crate::metal::{BlendFactor as F, BlendOperation as O, ColorWriteMask, PixelFormat};
 use crate::pipeline::lower_inputs::{BlendEquation, ChannelWrite};
 
@@ -120,6 +122,173 @@ fn texel(rng: &mut Rng, c: u32) -> u64 {
     u64::from(v.to_bits())
 }
 
+/// A destination code's `half`, `h(c / 255)`, is the `half` of `c` times the `f32` nearest
+/// `1 / 255` (`unorm8_tile_value`'s product): on the host for every code, and through the lowering
+/// under each `half` rounding for every code, read as the storage image may decode it (`c / 255`,
+/// and a unit in the last place off it either way).
+#[test]
+fn a_code_s_half_is_its_product_s() {
+    for c in 0..=255u32 {
+        let product = c as f32 * (1.0f32 / 255.0);
+        assert_eq!(
+            f64_to_f16(f64::from(product)),
+            f64_to_f16(f64::from(c) / 255.0),
+            "code {c}"
+        );
+    }
+    let f4 = vec(float(32), 4);
+    let mut cases: Vec<Case> = Vec::new();
+    for step in [-1i64, 0, 1] {
+        for k in 0..64u32 {
+            let lanes = (0..4)
+                .map(|l| {
+                    let c = 4 * k + l;
+                    let v = (c as f32 / 255.0).to_bits();
+                    let v = match (step, c) {
+                        (-1, 1..) => v - 1,
+                        (1, ..=254) => v + 1,
+                        _ => v,
+                    };
+                    u64::from(v)
+                })
+                .collect();
+            cases.push(vec![lanes]);
+        }
+    }
+    for q in HALF_FORMS {
+        check(
+            &format!("a destination code's half, half by {q:?}"),
+            &[f4],
+            f4,
+            &|fb, x| {
+                fb.module().set_quantize_form(q);
+                unorm8_tile_value(fb, x[0], BlendArith::Half)
+            },
+            &cases,
+            &|c| {
+                let lanes = c[0].iter().map(|&b| {
+                    let code = (f64::from(f32v(b)) * 255.0).round();
+                    u64::from((h(code / 255.0) as f32).to_bits())
+                });
+                Some(lanes.collect())
+            },
+            false,
+        );
+    }
+}
+
+/// `half_of` rounds to `half` as Metal does under each `half` rounding: to nearest even, half
+/// denormals kept, an infinity from 65520 up, the sign of a zero kept. Over every finite `half` of
+/// either sign: the `half` itself, the `f32`s beside it, the midpoint to the next `half` up in
+/// magnitude and the `f32`s beside that midpoint; and the infinities, `f32` denormals, and the
+/// edge of the infinity.
+#[test]
+fn half_of_rounds_as_metal_under_each_form() {
+    let f4 = vec(float(32), 4);
+    let mut inputs: Vec<f32> = Vec::new();
+    for bits in 0..0x7C00u16 {
+        for sign in [1.0f64, -1.0] {
+            let v = sign * f16_to_f64(bits);
+            let next = sign * f16_to_f64(bits + 1);
+            let v32 = v as f32;
+            let mid = ((v + next) / 2.0) as f32;
+            for x in [v32, mid] {
+                inputs.push(x);
+                inputs.push(f32::from_bits(x.to_bits().wrapping_add(1)));
+                if x.to_bits() & 0x7FFF_FFFF != 0 {
+                    inputs.push(f32::from_bits(x.to_bits() - 1));
+                }
+            }
+        }
+    }
+    let edges = [
+        f32::INFINITY,
+        f32::NEG_INFINITY,
+        f32::from_bits(1),
+        f32::from_bits(0x8000_0001),
+        f32::from_bits(0x007F_FFFF),
+        f32::from_bits(0x477F_EFFF),
+        65520.0,
+        -65520.0,
+        1.0e30,
+    ];
+    inputs.extend(edges);
+    while !inputs.len().is_multiple_of(4) {
+        inputs.push(0.0);
+    }
+    let cases: Vec<Case> = inputs
+        .chunks(4)
+        .map(|l| vec![l.iter().map(|x| u64::from(x.to_bits())).collect()])
+        .collect();
+    for q in HALF_FORMS {
+        check(
+            &format!("half_of, half by {q:?}"),
+            &[f4],
+            f4,
+            &|fb, x| {
+                fb.module().set_quantize_form(q);
+                half_of(fb, f4, x[0])
+            },
+            &cases,
+            &|c| {
+                let lanes = c[0].iter().map(|&b| {
+                    let x = f64::from(f32v(b));
+                    u64::from((f16_to_f64(f64_to_f16(x)) as f32).to_bits())
+                });
+                Some(lanes.collect())
+            },
+            false,
+        );
+    }
+}
+
+/// `unorm8_write` stores Metal's code of a `half` lane in `half` arithmetic, as the general rule
+/// (`color_write::round`'s 8-bit unorm rule) does: every `half` from `-2` to `2` (both zeros, every
+/// denormal), the infinities and a NaN, against the exact product with 255 rounded to nearest even
+/// after the clamp.
+#[test]
+fn a_half_s_code_is_metals() {
+    let f4 = vec(float(32), 4);
+    let mut inputs: Vec<f32> = (0..=0x4000u16)
+        .flat_map(|b| [f16_to_f64(b) as f32, -(f16_to_f64(b) as f32)])
+        .collect();
+    inputs.extend([f32::INFINITY, f32::NEG_INFINITY, f32::NAN, -f32::NAN]);
+    while !inputs.len().is_multiple_of(4) {
+        inputs.push(0.5);
+    }
+    let cases: Vec<Case> = inputs
+        .chunks(4)
+        .map(|l| vec![l.iter().map(|x| u64::from(x.to_bits())).collect()])
+        .collect();
+    let unorm = Some(ChannelWrite::Unorm { bits: 8 });
+    let reference = |c: &Case| {
+        let lanes = c[0].iter().map(|&b| {
+            let code = (clamp01(f64::from(f32v(b))) * 255.0).round_ties_even();
+            u64::from((code as f32 * (1.0f32 / 255.0)).to_bits())
+        });
+        Some(lanes.collect())
+    };
+    check(
+        "a half lane's code by its product",
+        &[f4],
+        f4,
+        &|fb, x| unorm8_write(fb, BlendArith::Half, x[0]),
+        &cases,
+        &reference,
+        // Either zero's sign: the device stores both as code 0.
+        true,
+    );
+    check(
+        "a half lane's code by the general rule",
+        &[f4],
+        f4,
+        &|fb, x| crate::lower::arith::color_write::round(fb, f4, x[0], &[unorm; 4], None),
+        &cases,
+        &reference,
+        true,
+    );
+}
+
 #[test]
 fn a_fetched_eight_bit_unorm_blend_stores_metals_code() {
     let f4 = vec(float(32), 4);
@@ -131,7 +300,6 @@ fn a_fetched_eight_bit_unorm_blend_stores_metals_code() {
         destination_alpha: F::OneMinusSourceAlpha,
         alpha_operation: O::Add,
     };
-    let unorm = Some(ChannelWrite::Unorm { bits: 8 });
     let one_over = f64::from(1.0f32 / 255.0);
     for arith in [BlendArith::Half, BlendArith::Float] {
         let float = arith == BlendArith::Float;
@@ -161,35 +329,39 @@ fn a_fetched_eight_bit_unorm_blend_stores_metals_code() {
                 let what = format!("{arith:?} {math:?} {pf:?}");
                 let b = Blend::unorm8(&over, pf, ColorWriteMask::ALL, (math, arith))
                     .unwrap_or_else(|e| panic!("{what}: {e:?}"));
-                check(
-                    &format!("the fetched 8-bit unorm blend, {what}"),
-                    &[f4, f4],
-                    f4,
-                    &|fb, x| {
-                        let v = blend_unorm8(fb, &b, arith, (x[0], x[1]), None)?;
-                        crate::lower::arith::color_write::round(fb, f4, v, &[unorm; 4], None)
-                    },
-                    &cases,
-                    &|c| {
-                        let a = f64::from(f32v(c[0][3]));
-                        Some(
-                            (0..4)
-                                .map(|l| {
-                                    let code = (f64::from(f32v(c[1][l])) * 255.0).round() as u32;
-                                    let s = f64::from(f32v(c[0][l]));
-                                    // A format without alpha stores no alpha: the blend
-                                    // leaves the lane the texel's.
-                                    let got = match (pf, l) {
-                                        (PixelFormat::R8Unorm, 3) => code,
-                                        _ => metal_code(arith, math, (s, a), code),
-                                    };
-                                    u64::from(((got as f32) * one_over as f32).to_bits())
-                                })
-                                .collect(),
-                        )
-                    },
-                    false,
-                );
+                for q in HALF_FORMS {
+                    check(
+                        &format!("the fetched 8-bit unorm blend, {what}, half by {q:?}"),
+                        &[f4, f4],
+                        f4,
+                        &|fb, x| {
+                            fb.module().set_quantize_form(q);
+                            let v = blend_unorm8(fb, &b, arith, (x[0], x[1]), None)?;
+                            unorm8_write(fb, arith, v)
+                        },
+                        &cases,
+                        &|c| {
+                            let a = f64::from(f32v(c[0][3]));
+                            Some(
+                                (0..4)
+                                    .map(|l| {
+                                        let code =
+                                            (f64::from(f32v(c[1][l])) * 255.0).round() as u32;
+                                        let s = f64::from(f32v(c[0][l]));
+                                        // A format without alpha stores no alpha: the blend
+                                        // leaves the lane the texel's.
+                                        let got = match (pf, l) {
+                                            (PixelFormat::R8Unorm, 3) => code,
+                                            _ => metal_code(arith, math, (s, a), code),
+                                        };
+                                        u64::from(((got as f32) * one_over as f32).to_bits())
+                                    })
+                                    .collect(),
+                            )
+                        },
+                        false,
+                    );
+                }
             }
         }
     }
@@ -294,7 +466,6 @@ struct Lane {
 fn the_factor_set_masks_and_blend_color_store_metals_code() {
     let f4 = vec(float(32), 4);
     let u4 = vec(int(32), 4);
-    let unorm = Some(ChannelWrite::Unorm { bits: 8 });
     let one_over = 1.0f32 / 255.0;
     let colors: [[f32; 4]; 2] = [[0.3, 0.6, 0.9, 0.45], [-0.25, 1.5, 0.321, 0.8]];
     let eq = |(fs, fd, op): (F, F, O), (sa, da, oa): (F, F, O)| BlendEquation {
@@ -427,45 +598,48 @@ fn the_factor_set_masks_and_blend_color_store_metals_code() {
                 let b = Blend::unorm8(&e, pf, mask, (math, arith))
                     .unwrap_or_else(|err| panic!("{what}: {err:?}"));
                 assert_eq!(b.reads_constant(), pf == PixelFormat::RGBA8Unorm, "{what}");
-                check(
-                    &format!("the fetched 8-bit unorm blend, {what}"),
-                    &[f4, f4, u4],
-                    f4,
-                    &|fb, x| {
-                        let color = b.reads_constant().then_some(x[2]);
-                        let v = blend_unorm8(fb, &b, arith, (x[0], x[1]), color)?;
-                        crate::lower::arith::color_write::round(fb, f4, v, &[unorm; 4], None)
-                    },
-                    &cases,
-                    &|c| {
-                        let code = |l: usize| (f64::from(f32v(c[1][l])) * 255.0).round() as u32;
-                        let read = |x: f64| rounded(arith, clamp01(x));
-                        let lane = |l: usize| Lane {
-                            s: read(f64::from(f32v(c[0][l]))),
-                            sa: read(f64::from(f32v(c[0][3]))),
-                            d: rounded(arith, f64::from(code(l)) / 255.0),
-                            da: rounded(arith, f64::from(code(3)) / 255.0),
-                            c: read(f64::from(f32v(c[2][l]))),
-                            ca: read(f64::from(f32v(c[2][3]))),
-                        };
-                        Some(
-                            (0..4)
-                                .map(|l| {
-                                    let form = if l < 3 { color_form } else { alpha_form };
-                                    let got = match form {
-                                        Some(form) => {
-                                            let v = form(arith, math, lane(l));
-                                            (clamp01(v) * 255.0 + 0.5).floor() as u32
-                                        }
-                                        None => code(l),
-                                    };
-                                    u64::from(((got as f32) * one_over).to_bits())
-                                })
-                                .collect(),
-                        )
-                    },
-                    false,
-                );
+                for q in HALF_FORMS {
+                    check(
+                        &format!("the fetched 8-bit unorm blend, {what}, half by {q:?}"),
+                        &[f4, f4, u4],
+                        f4,
+                        &|fb, x| {
+                            fb.module().set_quantize_form(q);
+                            let color = b.reads_constant().then_some(x[2]);
+                            let v = blend_unorm8(fb, &b, arith, (x[0], x[1]), color)?;
+                            unorm8_write(fb, arith, v)
+                        },
+                        &cases,
+                        &|c| {
+                            let code = |l: usize| (f64::from(f32v(c[1][l])) * 255.0).round() as u32;
+                            let read = |x: f64| rounded(arith, clamp01(x));
+                            let lane = |l: usize| Lane {
+                                s: read(f64::from(f32v(c[0][l]))),
+                                sa: read(f64::from(f32v(c[0][3]))),
+                                d: rounded(arith, f64::from(code(l)) / 255.0),
+                                da: rounded(arith, f64::from(code(3)) / 255.0),
+                                c: read(f64::from(f32v(c[2][l]))),
+                                ca: read(f64::from(f32v(c[2][3]))),
+                            };
+                            Some(
+                                (0..4)
+                                    .map(|l| {
+                                        let form = if l < 3 { color_form } else { alpha_form };
+                                        let got = match form {
+                                            Some(form) => {
+                                                let v = form(arith, math, lane(l));
+                                                (clamp01(v) * 255.0 + 0.5).floor() as u32
+                                            }
+                                            None => code(l),
+                                        };
+                                        u64::from(((got as f32) * one_over).to_bits())
+                                    })
+                                    .collect(),
+                            )
+                        },
+                        false,
+                    );
+                }
             }
         }
     }

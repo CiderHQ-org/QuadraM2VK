@@ -143,25 +143,30 @@ fn a_fetched_blend_constant_difference_is_metals() {
                 )
                 .unwrap_or_else(|e| panic!("{what}: {e:?}"));
                 assert!(b.fitted(), "{what}: {b:?}");
-                check(
-                    &format!("the fetched blend's {what}"),
-                    &[f4, f4, u4],
-                    f4,
-                    &|fb, x| blend_half_float(fb, &b, arith, (x[0], x[1]), Some(x[2])),
-                    &cases,
-                    &|c| {
-                        let bc: [f32; 4] = std::array::from_fn(|l| f32v(c[2][l]));
-                        Some(
-                            (0..4)
-                                .map(|l| {
-                                    let sd = (f32v(c[0][l]), f32v(c[1][l]));
-                                    metal(arith, (fs, fd, op), bc, l, sd)
-                                })
-                                .collect(),
-                        )
-                    },
-                    false,
-                );
+                for q in HALF_FORMS {
+                    check(
+                        &format!("the fetched blend's {what}, half by {q:?}"),
+                        &[f4, f4, u4],
+                        f4,
+                        &|fb, x| {
+                            fb.module().set_quantize_form(q);
+                            blend_half_float(fb, &b, arith, (x[0], x[1]), Some(x[2]))
+                        },
+                        &cases,
+                        &|c| {
+                            let bc: [f32; 4] = std::array::from_fn(|l| f32v(c[2][l]));
+                            Some(
+                                (0..4)
+                                    .map(|l| {
+                                        let sd = (f32v(c[0][l]), f32v(c[1][l]));
+                                        metal(arith, (fs, fd, op), bc, l, sd)
+                                    })
+                                    .collect(),
+                            )
+                        },
+                        false,
+                    );
+                }
             }
         }
     }
@@ -304,23 +309,31 @@ fn a_safe_blend_keeps_a_zero_factors_product() {
                     BlendMath::Rounded,
                 )
                 .unwrap_or_else(|e| panic!("{what}: {e:?}"));
-                check_accept(
-                    &format!("the safe blend's {what}"),
-                    &[f4, f4, u4],
-                    f4,
-                    &|fb, x| blend_half_float(fb, &b, arith, (x[0], x[1]), Some(x[2])),
-                    &cases,
-                    &|c| {
-                        let s: [f32; 4] = std::array::from_fn(|l| f32v(c[0][l]));
-                        let d: [f32; 4] = std::array::from_fn(|l| f32v(c[1][l]));
-                        Some(
-                            (0..4)
-                                .map(|l| metal_safe(arith, (fs, fd, op), bc, l, (s, d)))
-                                .collect(),
-                        )
-                    },
-                    &|got, want| got == want,
-                );
+                for q in HALF_FORMS {
+                    check_accept(
+                        &format!("the safe blend's {what}, half by {q:?}"),
+                        &[f4, f4, u4],
+                        f4,
+                        &|fb, x| {
+                            fb.module().set_quantize_form(q);
+                            blend_half_float(fb, &b, arith, (x[0], x[1]), Some(x[2]))
+                        },
+                        &cases,
+                        &|c| {
+                            let s: [f32; 4] = std::array::from_fn(|l| f32v(c[0][l]));
+                            let d: [f32; 4] = std::array::from_fn(|l| f32v(c[1][l]));
+                            Some(
+                                (0..4)
+                                    .map(|l| metal_safe(arith, (fs, fd, op), bc, l, (s, d)))
+                                    .collect(),
+                            )
+                        },
+                        &|got, want| {
+                            let nan = |w: u64| f32v(w).is_nan();
+                            got == want || (q == QuantizeForm::Controlled && nan(got) && nan(want))
+                        },
+                    );
+                }
             }
         }
     }
@@ -499,28 +512,33 @@ fn a_fast_blend_s_lone_term_takes_metal_s_zero() {
                 assert!(b.fitted(), "{what}: {b:?}");
                 // The channels the format stores: the store drops the others.
                 let stored = channels as usize;
-                check_accept(
-                    &format!("the fast blend's {what}"),
-                    &[f4, f4, u4],
-                    f4,
-                    &|fb, x| blend_half_float(fb, &b, arith, (x[0], x[1]), Some(x[2])),
-                    &cases,
-                    &|c| {
-                        let s: [f32; 4] = std::array::from_fn(|l| f32v(c[0][l]));
-                        let d: [f32; 4] = std::array::from_fn(|l| f32v(c[1][l]));
-                        let lanes = (0..4).map(|l| match l < stored {
-                            true => metal_fast_term(arith, (fs, fd, op), channels, l, (s, d))
-                                .map(|v| bits(v as f32)),
-                            // A lane the store drops: any answer.
-                            false => Some(u64::MAX),
-                        });
-                        lanes.collect()
-                    },
-                    &|got, want| {
-                        let nan = |w: u64| f32v(w).is_nan();
-                        want == u64::MAX || got == want || (nan(got) && nan(want))
-                    },
-                );
+                for q in HALF_FORMS {
+                    check_accept(
+                        &format!("the fast blend's {what}, half by {q:?}"),
+                        &[f4, f4, u4],
+                        f4,
+                        &|fb, x| {
+                            fb.module().set_quantize_form(q);
+                            blend_half_float(fb, &b, arith, (x[0], x[1]), Some(x[2]))
+                        },
+                        &cases,
+                        &|c| {
+                            let s: [f32; 4] = std::array::from_fn(|l| f32v(c[0][l]));
+                            let d: [f32; 4] = std::array::from_fn(|l| f32v(c[1][l]));
+                            let lanes = (0..4).map(|l| match l < stored {
+                                true => metal_fast_term(arith, (fs, fd, op), channels, l, (s, d))
+                                    .map(|v| bits(v as f32)),
+                                // A lane the store drops: any answer.
+                                false => Some(u64::MAX),
+                            });
+                            lanes.collect()
+                        },
+                        &|got, want| {
+                            let nan = |w: u64| f32v(w).is_nan();
+                            want == u64::MAX || got == want || (nan(got) && nan(want))
+                        },
+                    );
+                }
             }
         }
     }
