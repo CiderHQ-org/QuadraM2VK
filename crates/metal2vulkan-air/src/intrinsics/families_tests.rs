@@ -1205,6 +1205,77 @@ fn read_forms_are_chosen_by_the_declaration() {
     assert_eq!(roles(l), [R::Texture, R::Coord, R::Lod, R::Access]);
 }
 
+/// A 2D or 3D texture atomic's two forms: Xcode's AIR passes an offset after the coordinate (and
+/// layer), the AIR macOS 26.6's Metal on x86-64 hands its device omits it. The declaration picks
+/// the form; a 1D, 1D array or buffer atomic has one form, without an offset.
+#[test]
+fn atomic_forms_are_chosen_by_the_declaration() {
+    use TexRole as R;
+    let roles = |t: Texture| t.layout().positions().map(|(r, _)| r).collect::<Vec<_>>();
+    let texture = |name: &str, decl: &str| match declared_air(name, decl) {
+        AirIntrinsic::Texture(t) => t,
+        other => panic!("{name}: {other:?}"),
+    };
+    let fetch = "air.atomic_fetch_add_explicit_texture_2d.u.v4i32";
+    let current = texture(fetch, "v4i32 (p1, v2i32, v2i32, v4i32, i32, i32)");
+    let legacy = texture(fetch, "v4i32 (p1, v2i32, v4i32, i32, i32)");
+    assert_eq!((current.form, legacy.form), (Form::Current, Form::Legacy));
+    assert_eq!(
+        roles(legacy),
+        [R::Texture, R::Coord, R::Value, R::Order, R::Access]
+    );
+    let legacy_cases = [
+        (
+            "air.atomic_fetch_xor_explicit_texture_2d.s.v4i32",
+            "v4i32 (p1, v2i32, v4i32, i32, i32)",
+        ),
+        (
+            "air.atomic_fetch_min_explicit_texture_2d_array.u.v4i32",
+            "v4i32 (p1, v2i32, i32, v4i32, i32, i32)",
+        ),
+        (
+            "air.atomic_exchange_explicit_texture_3d.s.v4i32",
+            "v4i32 (p1, v3i32, v4i32, i32, i32)",
+        ),
+        (
+            "air.atomic_load_explicit_texture_2d.u.v4i32",
+            "v4i32 (p1, v2i32, i32, i32)",
+        ),
+        (
+            "air.atomic_store_explicit_texture_2d_array.s.v4i32",
+            "void (p1, v4i32, v2i32, i32, i32, i32)",
+        ),
+        (
+            "air.atomic_compare_exchange_weak_explicit_texture_2d.u.v4i32",
+            "i1 (p1, v2i32, p0, v4i32, i32, i32, i32)",
+        ),
+        (
+            "air.atomic_max_explicit_texture_2d.u.v4i64",
+            "void (p1, v2i32, v4i64, i32, i32)",
+        ),
+        (
+            "air.atomic_fetch_max_explicit_texture_2d.i16.u.v4i32",
+            "v4i32 (p1, v2i16, v4i32, i32, i32)",
+        ),
+    ];
+    for (name, decl) in legacy_cases {
+        let t = texture(name, decl);
+        assert_eq!(t.form, Form::Legacy, "{name}");
+        assert!(!roles(t).contains(&R::Offset), "{name}");
+    }
+    // One form where the shape has no offset: a 1D atomic declared with one more position is not
+    // a form of it.
+    let one_d = "air.atomic_fetch_add_explicit_texture_1d.u.v4i32";
+    assert_eq!(
+        texture(one_d, "v4i32 (p1, i32, v4i32, i32, i32)").form,
+        Form::Current
+    );
+    assert!(matches!(
+        declared(one_d, "v4i32 (p1, i32, i32, v4i32, i32, i32)"),
+        DeclClass::Mismatch
+    ));
+}
+
 #[test]
 fn texture_layouts_name_every_position() {
     use TexRole as R;

@@ -31,6 +31,9 @@
 //!   `void (tex, T value, coord, [layer], [offset], i32 order, i32 access)`; and
 //!   `compare_exchange_weak` `i1 (tex, coord, [layer], [offset], ptr expected, T desired,
 //!   i32 order, i32 failure order, i32 access)`, whose `expected` is a thread pointer to a `T`.
+//!   The **legacy** form of a 2D or 3D one (a `ulong` one's too) omits the offset position: the
+//!   AIR macOS 26.6's Metal on x86-64 hands its device for a library whose own declarations
+//!   pass the offset.
 //! - queries, null checks, fences, LOD queries, and the imageblock slice write as documented on
 //!   [`TexOp`].
 //!
@@ -193,12 +196,14 @@ pub struct Texel {
     pub sign: Option<Sign>,
 }
 
-/// The two operand forms of a texture read.
+/// The two operand forms of a texture read or a 2D or 3D texture atomic.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Form {
-    /// The current form (with a sampler and, where the shape has one, an offset position).
+    /// The current form (a read's with a sampler and, where the shape has one, an offset
+    /// position; an atomic's with its offset position).
     Current,
-    /// The older form without the sampler and offset positions.
+    /// The older form: a read's without the sampler and offset positions, an atomic's without
+    /// the offset position.
     Legacy,
 }
 
@@ -213,7 +218,8 @@ pub struct Texture {
     pub texel: Option<Texel>,
     /// `.i16`: 16-bit integer coordinates, offsets, layers, faces, levels, and sample indices.
     pub coord16: bool,
-    /// The operand form: a read's current or legacy form; `Current` for every other operation.
+    /// The operand form: a read's or a 2D or 3D atomic's current or legacy form; `Current` for
+    /// every other operation.
     pub form: Form,
     /// The access qualifier, for operations that carry one.
     pub access: Option<Access>,
@@ -612,8 +618,8 @@ fn num(elem: Elem, lanes: u32) -> Operand {
 }
 
 impl Texture {
-    /// Parse the part of a name after `air.`. Returns the current-form template; a read also
-    /// has a [`Form::Legacy`] alternative ([`Texture::alternative`]).
+    /// Parse the part of a name after `air.`. Returns the current-form template; a read and a 2D
+    /// or 3D atomic also have a [`Form::Legacy`] alternative ([`Texture::alternative`]).
     pub(super) fn parse(rest: &str) -> Option<Texture> {
         let (head, tail) = match rest.split_once('.') {
             Some((h, t)) => (h, Some(t)),
@@ -689,10 +695,15 @@ impl Texture {
         (t.valid() && ulong_stem == ulong_atomic).then_some(t)
     }
 
-    /// The other operand form a declaration of the same name may have (a read's legacy form).
+    /// The other operand form a declaration of the same name may have (a read's, or a 2D or 3D
+    /// atomic's, legacy form).
     pub(super) fn alternative(self) -> Option<Texture> {
-        let current_read = self.op == TexOp::Read && self.form == Form::Current;
-        current_read.then_some(Texture {
+        let legacy = match self.op {
+            TexOp::Read => true,
+            TexOp::Atomic(_) => matches!(self.image.dim, ImageDim::D2 | ImageDim::D3),
+            _ => false,
+        };
+        (legacy && self.form == Form::Current).then_some(Texture {
             form: Form::Legacy,
             ..self
         })
@@ -879,7 +890,8 @@ impl Texture {
                 l.push(R::Access, access);
             }
             TexOp::Atomic(op) => {
-                let has_offset = matches!(shape.dim, ImageDim::D2 | ImageDim::D3);
+                let has_offset =
+                    matches!(shape.dim, ImageDim::D2 | ImageDim::D3) && self.form == Form::Current;
                 l.push(R::Texture, tex);
                 // A store passes its value first (MSL `atomic_store(value, coord)`).
                 l.push_if(op == AtomicOp::Store, R::Value, texel);

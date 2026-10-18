@@ -13,7 +13,10 @@
 //!   texel against the image's size on every profile (Metal's out-of-bounds exchange fails and
 //!   leaves `expected`), and writes lane 0 back;
 //! - a result is Metal's `(old, 0, 0, 1)` and a compare-exchange writes lane 0 of `expected`
-//!   only (measured), so results and `expected` read past lane 0 lower.
+//!   only (measured), so results and `expected` read past lane 0 lower;
+//! - a 2D, 2D array or 3D atomic in the legacy form, without the offset position (the AIR
+//!   macOS 26.6's Metal on x86-64 hands its device), compiles as the same atomic with a zero
+//!   offset.
 //!
 //! Previously every kernel but the 2D `fetch_max` was refused `UnknownIntrinsic`, so these tests
 //! fail without it. A profile without a format's atomic feature refuses with the typed device gap,
@@ -389,4 +392,161 @@ fn every_lane_of_results_and_expected_lowers() {
         assert_eq!(metal_lanes(&a), 7, "{stem}");
     }
     assert!(compiled >= 18, "{compiled}");
+}
+
+/// The arguments of an argument or parameter list, split at the commas outside `()` and `<>`.
+fn split_args(list: &str) -> Vec<&str> {
+    let (mut out, mut depth, mut start) = (Vec::new(), 0i32, 0);
+    for (i, c) in list.char_indices() {
+        match c {
+            '(' | '<' => depth += 1,
+            ')' | '>' => depth -= 1,
+            ',' if depth == 0 => {
+                out.push(list[start..i].trim());
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    out.push(list[start..].trim());
+    out
+}
+
+/// `line` in the legacy atomic form when it declares or calls a 2D, 2D array or 3D texture
+/// atomic: the offset position dropped, with whether the line is the declaration. The dropped
+/// argument is checked to be the zero offset vector.
+fn legacy_atomic_line(line: &str) -> Option<(String, bool)> {
+    let at = line.find("@air.atomic_")?;
+    let name_len = line[at..].find('(')?;
+    let name = &line[at + "@air.atomic_".len()..at + name_len];
+    let (op, rest) = name.split_once("_explicit_texture_")?;
+    let shape = rest.split('.').next()?;
+    if !matches!(shape, "2d" | "2d_array" | "3d") {
+        return None;
+    }
+    // The offset follows the texture, a store's value, the coordinate and the layer.
+    let offset = 2 + usize::from(op == "store") + usize::from(shape == "2d_array");
+    let open = at + name_len;
+    let mut depth = 0;
+    let close = line[open..].char_indices().find_map(|(i, c)| {
+        depth += match c {
+            '(' => 1,
+            ')' => -1,
+            _ => 0,
+        };
+        (depth == 0).then_some(open + i)
+    })?;
+    let mut args = split_args(&line[open + 1..close]);
+    let dropped = args.remove(offset);
+    let declaration = line.starts_with("declare ");
+    assert!(
+        dropped.starts_with("<2 x i") || dropped.starts_with("<3 x i"),
+        "{name}: position {offset} is {dropped:?}, not an offset"
+    );
+    assert!(
+        declaration || dropped.ends_with("zeroinitializer"),
+        "{name}: the offset {dropped:?} is not zero"
+    );
+    let rewritten = format!(
+        "{}({}){}",
+        &line[..open],
+        args.join(", "),
+        &line[close + 1..]
+    );
+    Some((rewritten, declaration))
+}
+
+/// `text` with every 2D, 2D array and 3D texture atomic in the legacy form
+/// ([`legacy_atomic_line`]), and the number of declarations and calls rewritten.
+fn legacy_atomics(text: &str) -> (String, usize, usize) {
+    let (mut decls, mut calls) = (0, 0);
+    let mut out = String::with_capacity(text.len());
+    for line in text.lines() {
+        match legacy_atomic_line(line) {
+            Some((rewritten, declaration)) => {
+                if declaration {
+                    decls += 1;
+                } else {
+                    calls += 1;
+                }
+                out.push_str(&rewritten);
+            }
+            None => out.push_str(line),
+        }
+        out.push('\n');
+    }
+    (out, decls, calls)
+}
+
+/// A 2D, 2D array or 3D texture atomic in the legacy form, without the offset position (the AIR
+/// macOS 26.6's Metal on x86-64 hands its device), compiles as the same atomic with a zero
+/// offset: the owned atomic fixtures (every operation, `uint` and `int`, 16-bit coordinates,
+/// compare-exchange, store, `ulong` `min` and `max`) with every offset dropped compile on the same
+/// profiles, with the same strategies and the same image atomics. Without the legacy form such a
+/// declaration matches no layout of its name and is refused `UnknownIntrinsic`.
+#[test]
+fn legacy_texture_atomics_without_the_offset_compile_alike() {
+    use metal2vulkan_devtools::llvm_assemble_text;
+    let mut compiled = 0;
+    for (stem, entry) in [
+        ("unk_atomic_ops", "unk_atomic_ops"),
+        ("unk_atomic_lanes", "unk_atomic_lanes"),
+        ("unk_ulong_atomics", "unk_ulong_atomics"),
+        ("trh_texture_atomic", "trh_texture_atomic"),
+    ] {
+        let Some(current) = fixture(stem) else {
+            return;
+        };
+        let text = std::fs::read_to_string(engine_dir().join(format!("{stem}.ll"))).expect("read");
+        let (legacy_text, decls, calls) = legacy_atomics(&text);
+        assert!(
+            decls > 0 && calls >= decls,
+            "{stem}: {decls} declarations, {calls} calls"
+        );
+        let legacy = match llvm_assemble_text(&legacy_text) {
+            Ok(b) => b,
+            Err(AssembleError::Missing(why)) => {
+                eprintln!("SKIPPED: {why}");
+                return;
+            }
+            Err(AssembleError::Rejected(why)) => panic!("llvm-as rejected legacy {stem}: {why}"),
+        };
+        for (profile, p) in profiles() {
+            let what = format!("{profile}: legacy {stem}");
+            let a = artifact(&current, entry, &profile, &p);
+            let b = artifact(&legacy, entry, &profile, &p);
+            let (Some(a), Some(b)) = (a.as_ref(), b.as_ref()) else {
+                assert_eq!(a.is_some(), b.is_some(), "{what}");
+                continue;
+            };
+            compiled += 1;
+            let uses = |x: &FunctionArtifact| {
+                x.strategies
+                    .entries
+                    .iter()
+                    .map(|(k, u)| (k.clone(), u.uses))
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(uses(a), uses(b), "{what}: strategies");
+            for op in [
+                OP_IMAGE_TEXEL_POINTER,
+                OP_ATOMIC_LOAD,
+                OP_ATOMIC_EXCHANGE,
+                OP_ATOMIC_COMPARE_EXCHANGE,
+                OP_ATOMIC_I_ADD,
+                OP_ATOMIC_I_SUB,
+                OP_ATOMIC_S_MIN,
+                OP_ATOMIC_U_MIN,
+                OP_ATOMIC_S_MAX,
+                OP_ATOMIC_U_MAX,
+                OP_ATOMIC_AND,
+                OP_ATOMIC_OR,
+                OP_ATOMIC_XOR,
+            ] {
+                assert_eq!(count(a, op), count(b, op), "{what}: opcode {op}");
+            }
+            assert_eq!(image_formats(a), image_formats(b), "{what}");
+        }
+    }
+    assert!(compiled >= 12, "{compiled}");
 }
