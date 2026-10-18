@@ -274,7 +274,9 @@ use super::color_reformat::{self, Routing};
 use super::color_resolve::{self, ShaderResolves};
 use super::command_buffer::CommandBuffer;
 use super::deferred::Deferred;
-use super::degradation::{BoundFormats, Degradation, HandedToMetal, SplitCauses, WholePass};
+use super::degradation::{
+    BoundFormats, CompiledPipeline, Degradation, HandedToMetal, SplitCauses, WholePass,
+};
 use super::depth_stand_in::DepthStandIn;
 use super::depth_stencil::{DepthStencilState, FailingDraw};
 use super::depth_stencil_resolve::DrawnResolve;
@@ -9125,7 +9127,7 @@ impl RenderCommandEncoder {
             let formats = |slot| tested.iter().find(|(s, _)| *s == slot)?.1;
             let compiled = variant.pipeline();
             objects.announce_bound(
-                (&compiled.stages, Some(compiled)),
+                (&compiled.stages, CompiledPipeline::Render(compiled)),
                 [(specialization, Some(&formats as BoundFormats<'_>))],
             );
         }

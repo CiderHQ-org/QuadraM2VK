@@ -40,10 +40,12 @@
 //!   render pipeline states alike, but for a note the stage records only under some
 //!   specializations, announced where the runtime makes a `VkPipeline` whose specialization (the
 //!   bound formats' classes and samplers' words) takes it; a render pipeline's vertex simdgroups on
-//!   a driver that runs them without advertising the vertex stage, and the exact forms its
-//!   translation dropped to fit the device's compiler word bound, where the runtime makes a render
-//!   variant, before its shader modules (`pipeline/render.rs`, from the pipeline's requirements
-//!   and dependencies); a
+//!   a driver that runs them without advertising the vertex stage, where the runtime makes a
+//!   render variant, before its shader modules (`pipeline/render.rs`, from the pipeline's
+//!   requirements); the exact forms a pipeline's translation dropped to fit the device's compiler
+//!   word bound, where the runtime makes a variant of any pipeline state, before its shader modules
+//!   (`pipeline/render.rs` for a render or mesh render state, `pipeline/mod.rs` for a compute or
+//!   tile render state, from the pipeline's dependencies); a
 //!   render pass's degradations where its encoder ends (`render.rs`), from the pass's layout, its
 //!   render pass instances and the storage it kept; a rasterization-rate map that is not the
 //!   identity where the device makes it (`rate_map.rs`); a draw's use of an attachment's memory in
@@ -80,7 +82,7 @@ use metal2vulkan::cache::SpecializationKey;
 use metal2vulkan::device::{DriverFact, FunctionStorage, ResolvePolicy, VkProperty};
 use metal2vulkan::metal::PixelFormat;
 use metal2vulkan::pipeline::{
-    PrecisionNote, Reconvergence, RenderPipeline, SlotRef, SpecKey, StageModule,
+    ComputePipeline, PrecisionNote, Reconvergence, RenderPipeline, SlotRef, SpecKey, StageModule,
 };
 use metal2vulkan::vk::{ImageAspectFlags, ShaderStage};
 use std::collections::BTreeSet;
@@ -440,16 +442,17 @@ degradations! {
             "each draw runs a geometry stage of its topology class between the vertex and \
              fragment stages, which emits each primitive's vertices with the barycentric weights \
              or the first vertex's slice and viewport";
-        /// A render pipeline state whose largest stage module, under the consumer's exact forms,
-        /// exceeded the device's compiler word bound
+        /// A pipeline state (render, mesh render, tile render or compute) whose largest stage
+        /// module, under the consumer's exact forms, exceeded the device's compiler word bound
         /// ([`metal2vulkan::pipeline::RuntimeFact::ExactFormsOverCompilerLimit`];
         /// [`metal2vulkan::device::DriverWorkaround::RegisterAllocatorOverflowsLargeModules`],
         /// ANV's register allocator faults compiling a module past it), so the translation dropped
         /// the consumer's exact forms until it fit: native sampling first, then every
-        /// module-growing exact answer native. Announced where the runtime makes a render
-        /// variant whose pipeline the fit reduced, the base variant or another (`pipeline/
-        /// render.rs`, from the pipeline's dependencies), naming the forms dropped; the reduced
-        /// stages announce their own precision notes besides.
+        /// module-growing exact answer native. Announced where the runtime makes a variant whose
+        /// pipeline the fit reduced, the base variant or another (`pipeline/render.rs` for a
+        /// render or mesh render state, `pipeline/mod.rs` for a compute or tile render state, from
+        /// the pipeline's dependencies), naming the state's kind and the forms dropped; the
+        /// reduced stages announce their own precision notes besides.
         ExactFormsOverCompilerLimit = "exact-forms-over-compiler-limit", Precision,
             "the dropped exact forms' results can differ from Metal's as their notes' \
              documentation states, where the device's compiler would fault on the exact module";
@@ -2383,11 +2386,11 @@ pub(crate) struct Kinds([u64; WORDS]);
 
 impl Kinds {
     /// The kinds `stages` (a variant's) may announce where the variant or a `VkPipeline` of it is
-    /// made (`Device::degrade_stages`, `Device::degrade_specialized`), and those of a render
-    /// variant's `render` pipeline (`Device::degrade_render`): every note's, a specialized one's
-    /// under any specialization (a filter note's two-plane YCbCr kind among them), and each other
-    /// kind a stage's or the pipeline's records state.
-    pub(crate) fn of(stages: &[StageModule], render: Option<&RenderPipeline>) -> Kinds {
+    /// made (`Device::degrade_stages`, `Device::degrade_specialized`), and those of the variant's
+    /// `pipeline` (`Device::degrade_pipeline`): every note's, a specialized one's under any
+    /// specialization (a filter note's two-plane YCbCr kind among them), and each other kind a
+    /// stage's or the pipeline's records state.
+    pub(crate) fn of(stages: &[StageModule], pipeline: CompiledPipeline<'_>) -> Kinds {
         let mut kinds = Kinds::default();
         for stage in stages {
             let notes = stage.precision_notes.iter().copied();
@@ -2410,7 +2413,7 @@ impl Kinds {
                 kinds.add(Degradation::ImplementationDefinedReconvergence);
             }
         }
-        if let Some(render) = render {
+        if let CompiledPipeline::Render(render) = pipeline {
             if render
                 .requirements
                 .properties
@@ -2418,9 +2421,9 @@ impl Kinds {
             {
                 kinds.add(Degradation::UnadvertisedVertexSimdgroups);
             }
-            if dropped_exact_forms(&render.dependencies).is_some() {
-                kinds.add(Degradation::ExactFormsOverCompilerLimit);
-            }
+        }
+        if dropped_exact_forms(pipeline.dependencies()).is_some() {
+            kinds.add(Degradation::ExactFormsOverCompilerLimit);
         }
         kinds
     }
@@ -2431,7 +2434,57 @@ impl Kinds {
     }
 }
 
-/// The exact forms a render pipeline's translation dropped to fit the device's compiler word bound
+/// A variant's compiled pipeline, whose records beside its stages its making and binds announce
+/// (`Device::degrade_pipeline`): a render state's (vertex or mesh) or a compute state's (kernel or
+/// tile).
+#[derive(Clone, Copy)]
+pub(crate) enum CompiledPipeline<'a> {
+    Render(&'a RenderPipeline),
+    Kernel(&'a ComputePipeline),
+}
+
+impl<'a> CompiledPipeline<'a> {
+    /// The pipeline's runtime dependencies.
+    fn dependencies(self) -> &'a [metal2vulkan::pipeline::RuntimeDependency] {
+        match self {
+            CompiledPipeline::Render(p) => &p.dependencies,
+            CompiledPipeline::Kernel(p) => &p.dependencies,
+        }
+    }
+
+    /// The kind of pipeline state a notice of the pipeline names, from its structure: a render
+    /// pipeline with an object or mesh stage, or with the records of an emulated mesh, is a mesh
+    /// render pipeline state's; a compute pipeline of a tile function
+    /// (`RuntimeFact::TileFunction`) a tile render pipeline state's.
+    fn object(self) -> &'static str {
+        match self {
+            CompiledPipeline::Render(p) => {
+                let meshes = p.graphics.mesh_records.is_some()
+                    || p.stages.iter().any(|s| {
+                        s.stage == ShaderStage::TASK_EXT || s.stage == ShaderStage::MESH_EXT
+                    });
+                if meshes {
+                    "a mesh render pipeline state"
+                } else {
+                    "a render pipeline state"
+                }
+            }
+            CompiledPipeline::Kernel(p) => {
+                let tile = p
+                    .dependencies
+                    .iter()
+                    .any(|d| d.fact == metal2vulkan::pipeline::RuntimeFact::TileFunction);
+                if tile {
+                    "a tile render pipeline state"
+                } else {
+                    "a compute pipeline state"
+                }
+            }
+        }
+    }
+}
+
+/// The exact forms a pipeline's translation dropped to fit the device's compiler word bound
 /// (`RuntimeFact::ExactFormsOverCompilerLimit` among its `dependencies`), named; `None` where it
 /// dropped none.
 pub(crate) fn dropped_exact_forms(
@@ -2742,18 +2795,16 @@ impl Device {
     /// device's options ask for at every occurrence (`DeviceOptions::announce_each`), with the
     /// making's object and reason, in the order the making announces them (a memoized variant is
     /// made once, so its making alone would announce them once). `stages` are the variant's
-    /// stages, `render` a render variant's pipeline, and `specializations` the specializations and
+    /// stages, `pipeline` its compiled pipeline, and `specializations` the specializations and
     /// bound formats of the `VkPipeline`s the bind takes (`Device::degrade_specialized`).
     pub(crate) fn bound_notices(
         &self,
-        (stages, render): (&[StageModule], Option<&RenderPipeline>),
+        (stages, pipeline): (&[StageModule], CompiledPipeline<'_>),
         specializations: &[(&SpecializationKey, Option<BoundFormats<'_>>)],
     ) -> Vec<BoundNotice> {
         let notices = std::cell::RefCell::new(Vec::new());
         let at = Occurrence::Bound(&notices);
-        if let Some(render) = render {
-            self.degrade_render(render, at);
-        }
+        self.degrade_pipeline(pipeline, at);
         self.degrade_stages(stages, at);
         for (n, &(specialization, formats)) in specializations.iter().enumerate() {
             // A specialization the bind takes twice (a split dispatch's regions) announces once.
@@ -2907,17 +2958,18 @@ impl Device {
 }
 
 impl Device {
-    /// Announce, `at` its variant's making or a bind ([`Occurrence`]), what a render variant's
-    /// `pipeline` records beside its stages: requirements that hold a vertex function's subgroup
-    /// operations on a driver that runs them as Metal does without advertising the vertex stage
-    /// ([`Degradation::UnadvertisedVertexSimdgroups`]), and exact forms the translation dropped to
-    /// fit the device's compiler word bound ([`Degradation::ExactFormsOverCompilerLimit`]), for the
-    /// base variant and every other alike, each pipeline by its own records.
-    pub(super) fn degrade_render(&self, pipeline: &RenderPipeline, at: Occurrence<'_>) {
-        if let Some(dropped) = dropped_exact_forms(&pipeline.dependencies) {
+    /// Announce, `at` its variant's making or a bind ([`Occurrence`]), what a variant's `pipeline`
+    /// records beside its stages: exact forms the translation dropped to fit the device's compiler
+    /// word bound ([`Degradation::ExactFormsOverCompilerLimit`]), naming the pipeline state's kind
+    /// (render, mesh render, tile render or compute), and, for a render variant, requirements that
+    /// hold a vertex function's subgroup operations on a driver that runs them as Metal does
+    /// without advertising the vertex stage ([`Degradation::UnadvertisedVertexSimdgroups`]); for
+    /// the base variant and every other alike, each pipeline by its own records.
+    pub(super) fn degrade_pipeline(&self, pipeline: CompiledPipeline<'_>, at: Occurrence<'_>) {
+        if let Some(dropped) = dropped_exact_forms(pipeline.dependencies()) {
             self.degrade_at(at, Degradation::ExactFormsOverCompilerLimit, || {
                 (
-                    "a render pipeline state".to_owned(),
+                    pipeline.object().to_owned(),
                     format!(
                         "its largest stage module passed the device's compiler word bound, so its \
                          translation dropped {} to the device's answer",
@@ -2926,6 +2978,9 @@ impl Device {
                 )
             });
         }
+        let CompiledPipeline::Render(pipeline) = pipeline else {
+            return;
+        };
         if pipeline
             .requirements
             .properties

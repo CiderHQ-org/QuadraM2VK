@@ -58,8 +58,8 @@
 //! draws emulated on a device without `VK_EXT_mesh_shader` in `mesh_draws` ([`EMULATED_MESH`]),
 //! render pipeline states whose draws run a synthesized geometry stage in `barycentric_weights`
 //! ([`SYNTHESIZED_GEOMETRY`]), tessellated draws emulated on a device without
-//! `tessellationShader` in `patches` ([`EMULATED_TESSELLATION`]), render pipeline states whose
-//! exact forms a stage past the device's compiler word bound dropped here
+//! `tessellationShader` in `patches` ([`EMULATED_TESSELLATION`]), render and compute pipeline
+//! states whose exact forms a stage past the device's compiler word bound dropped here
 //! ([`EXACT_FORMS_OVER_LIMIT`]),
 //! vertex-stage reads in place of bytes a fragment stage of the pass wrote in `pass_start_reads`
 //! ([`IN_PLACE_VERTEX_READS`]) and a vertex stage's write of bytes one wrote there
@@ -638,19 +638,19 @@ fn moltenvk_argument_buffers_are_announced_where_unread_and_refused_off() {
     assert_eq!(off.take(), Vec::new(), "the validation layer reported");
 }
 
-/// The kind a render pipeline state takes where a stage of its translation, with the device's
-/// exact forms, is longer than the device's compiler word bound, and the translation dropped exact
+/// The kind a pipeline state takes where a stage of its translation, with the device's exact
+/// forms, is longer than the device's compiler word bound, and the translation dropped exact
 /// forms to fit it ([`exact_forms_past_the_compiler_bound_are_announced_exactly_there`]).
 const EXACT_FORMS_OVER_LIMIT: [Degradation; 1] = [Degradation::ExactFormsOverCompilerLimit];
 
-/// A render pipeline state announces [`EXACT_FORMS_OVER_LIMIT`] exactly where a stage of its
-/// translation with the lane's exact forms (`runtime_lane::validated_options`) is longer than the
-/// device's compiler word bound (`DeviceProfile::module_word_bound`: ANV's, `None` elsewhere). No
-/// owned render fixture's stage reaches ANV's bound, so no venue announces it today; each checks
-/// the rule on its own device, with the owned `runtime_examples` render pipeline. The runtime's own
-/// test `a_variant_fitted_while_its_base_was_not_still_announces` takes the announcement of a
-/// fitted variant, and the translator's
-/// `a_module_over_the_compiler_bound_drops_its_exact_forms_to_fit` the fit.
+/// A render pipeline state, and a compute pipeline state, announces [`EXACT_FORMS_OVER_LIMIT`]
+/// exactly where a stage of its translation with the lane's exact forms
+/// (`runtime_lane::validated_options`) is longer than the device's compiler word bound
+/// (`DeviceProfile::module_word_bound`: ANV's, `None` elsewhere). No owned fixture's stage reaches
+/// ANV's bound, so no venue announces it today; each checks the rule on its own device, with the
+/// owned `runtime_examples` render pipeline and kernel. The runtime's own tests
+/// (`fitted_variant_notice`) take the announcement of a fitted variant of every kind of state,
+/// and the translator's (`pipeline::compile::fit`) the fit of every kind of pipeline.
 #[test]
 fn exact_forms_past_the_compiler_bound_are_announced_exactly_there() {
     on_device(|device, messages| {
@@ -671,6 +671,25 @@ fn exact_forms_past_the_compiler_bound_are_announced_exactly_there() {
         descriptor.color_attachments[0] =
             Some(ColorAttachmentDescriptor::new(PixelFormat::RGBA8Unorm));
         let compile = device.compile_device();
+        let bound = compile.profile().module_word_bound();
+        // The notices a state's creation made, against whether its longest stage passes the bound.
+        let check = |what: &str, longest: usize| {
+            let past = bound.is_some_and(|bound| longest > bound as usize);
+            let announced = counts(&messages.take_notices())
+                .get(&Degradation::ExactFormsOverCompilerLimit)
+                .copied()
+                .unwrap_or(0);
+            eprintln!(
+                "{}: {what}: longest stage {longest} words, compiler word bound {bound:?}",
+                device.name()
+            );
+            assert_eq!(
+                announced,
+                usize::from(past),
+                "{what}: {:?} exactly past the bound",
+                EXACT_FORMS_OVER_LIMIT
+            );
+        };
         let compiled = compile
             .compile_render_pipeline(&descriptor, &Budget::standard())
             .unwrap();
@@ -680,25 +699,22 @@ fn exact_forms_past_the_compiler_bound_are_announced_exactly_there() {
             .map(|stage| stage.spirv.len())
             .max()
             .unwrap_or(0);
-        let bound = compile.profile().module_word_bound();
-        let past = bound.is_some_and(|bound| longest > bound as usize);
         let _state = device
             .new_render_pipeline_state(&descriptor, &PipelineOptions::default())
             .unwrap();
-        let announced = counts(&messages.take_notices())
-            .get(&Degradation::ExactFormsOverCompilerLimit)
-            .copied()
-            .unwrap_or(0);
-        eprintln!(
-            "{}: longest stage {longest} words, compiler word bound {bound:?}",
-            device.name()
-        );
-        assert_eq!(
-            announced,
-            usize::from(past),
-            "{:?} exactly past the bound",
-            EXACT_FORMS_OVER_LIMIT
-        );
+        check("render", longest);
+        let kernel =
+            ComputePipelineDescriptor::new(StageSource::Function(function("scale_and_offset")));
+        let longest = compile
+            .compile_compute_pipeline(&kernel, &Budget::standard())
+            .unwrap()
+            .stage
+            .spirv
+            .len();
+        let _state = device
+            .new_compute_pipeline_state(&kernel, &PipelineOptions::default())
+            .unwrap();
+        check("compute", longest);
     });
 }
 

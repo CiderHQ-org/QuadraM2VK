@@ -763,9 +763,9 @@ pub enum RuntimeFact {
         static_bytes: u32,
         payload: Option<u32>,
     },
-    /// The render pipeline was retranslated with some of the consumer's exact forms dropped to
-    /// native, because its largest stage module exceeded the device's compiler word bound and that
-    /// driver faults compiling a module past it
+    /// The pipeline (render, mesh render, compute or tile render) was retranslated with some of the
+    /// consumer's exact forms dropped to native, because its largest stage module exceeded the
+    /// device's compiler word bound and that driver faults compiling a module past it
     /// ([`DriverWorkaround::RegisterAllocatorOverflowsLargeModules`](crate::device::DriverWorkaround::RegisterAllocatorOverflowsLargeModules):
     /// ANV's register allocator). Each `true` field is an exact form the pipeline would carry under
     /// the consumer's policy that the fitting translation gave up to fit the bound (`sampling`

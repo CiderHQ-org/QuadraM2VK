@@ -182,8 +182,12 @@ impl DeviceProfile {
     /// The stage-module word count a pipeline's largest stage must fit for this device, where its
     /// driver faults compiling a module past it
     /// ([`DriverWorkaround::RegisterAllocatorOverflowsLargeModules`]); `None` where no such bound
-    /// is measured. A compile over the bound retranslates with the consumer's exact forms dropped
-    /// to fit ([`Device::fit_render_variant`](crate::device::Device::fit_render_variant)).
+    /// is measured. A compile of any pipeline kind over the bound retranslates with the consumer's
+    /// exact forms dropped to fit
+    /// ([`Device::fit_render_variant`](crate::device::Device::fit_render_variant),
+    /// [`fit_mesh_variant`](crate::device::Device::fit_mesh_variant),
+    /// [`fit_compute_pipeline`](crate::device::Device::fit_compute_pipeline),
+    /// [`fit_tile_pipeline`](crate::device::Device::fit_tile_pipeline)).
     pub fn module_word_bound(&self) -> Option<u32> {
         self.fields
             .workarounds

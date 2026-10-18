@@ -52,7 +52,7 @@ use super::{compile_error, stand_in, PipelineOptions, PIPELINES, PLANS, VARIANTS
 use crate::argument_table::AtBindViews;
 use crate::binary_archive::{self, Used};
 use crate::color_reformat::Routing;
-use crate::degradation::{BoundFormats, Degradation, Occurrence};
+use crate::degradation::{BoundFormats, CompiledPipeline, Degradation, Occurrence};
 use crate::device::{device_error, lock};
 use crate::error::{internal, invalid, ArchivedPipeline, Error, Problem, RuntimeGap};
 use crate::render_pass::MAX_COLOR_ATTACHMENTS;
@@ -2297,7 +2297,7 @@ impl RenderVariant {
             Remembered::Compiled(pipeline) => pipeline,
         };
         // Before the variant's shader modules, whose creation the layer reports.
-        device.degrade_render(&pipeline, Occurrence::Made);
+        device.degrade_pipeline(CompiledPipeline::Render(&pipeline), Occurrence::Made);
         // Where the creation log is on, the stages' SPIR-V it names hashed on a thread of its
         // own while the objects are made: the hash its first line reads, off the creation's path.
         let (objects, kept) = std::thread::scope(|scope| {
@@ -2316,7 +2316,7 @@ impl RenderVariant {
                 Compiled::Render(pipeline.key),
                 &pipeline.layout,
                 &pipeline.stages,
-                Some(&*pipeline),
+                CompiledPipeline::Render(&pipeline),
             )
         })?;
         let stages = handle_stages(&pipeline.layout, every_render_stage());

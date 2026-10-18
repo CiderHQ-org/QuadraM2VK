@@ -786,13 +786,17 @@ assert_eq!(linked, pipeline);
   `compile_function_with_report` also returns a `CompileReport` of what the compile cost.
 - A render pipeline's stages compile under inputs that a decode of its functions learns.
   `render_pipeline_key` returns `RenderPipelineKeys`: each stage's function key, and the inputs to
-  compile a missing stage under. `compile_render_variant` holds a pipeline of `Function` stages to
-  the device's compiler word bound (`DeviceProfile::module_word_bound`, ANV's) itself; one linked
-  from `Compiled` stages it cannot translate again. A caller who compiles stages ahead must pass
-  the linked pipeline, with the descriptor of its functions, to `device.fit_render_variant(
-  &descriptor, &variant, &budget, pipeline)`, or its module goes to the driver unreduced: the call
-  translates the functions again with the policy's exact forms dropped where the largest stage
-  passes the bound (`exact-forms-over-compiler-limit`), under the same key.
+  compile a missing stage under. Each pipeline kind's compile (`compile_render_variant`,
+  `compile_mesh_variant`, `compile_compute_pipeline`, `compile_tile_pipeline`) holds a pipeline of
+  `Function` stages to the device's compiler word bound (`DeviceProfile::module_word_bound`,
+  ANV's) itself; one linked from `Compiled` stages it cannot translate again. A caller who
+  compiles stages ahead must pass the linked pipeline, with the descriptor of its functions, to
+  the kind's fit, or its module goes to the driver unreduced: `device.fit_render_variant(
+  &descriptor, &variant, &budget, pipeline)`, `fit_mesh_variant` likewise, and
+  `fit_compute_pipeline(&descriptor, &inputs, &budget, pipeline)` or `fit_tile_pipeline` with the
+  `LoweringInputs` the kernel or tile function was compiled under. The call translates the
+  functions again with the policy's exact forms dropped where the largest stage passes the bound
+  (`exact-forms-over-compiler-limit`), under the same key.
 - A key names an artifact by its inputs and versions; a content digest names it by what it says.
   `pipeline.content_digest()` hashes everything but the key and profile, and `plan.content_digest()`
   (with `serde`) everything a plan states. A cache of driver objects keyed on the digest survives a
@@ -1131,13 +1135,14 @@ fast forms record, and each `PrecisionNote`'s rustdoc states its bound.
   its topology class between the vertex and fragment stages, which emits each primitive's vertices
   with the barycentric weights or the first vertex's slice and viewport.
 - `metal2vulkan-degrade-exact-forms-over-compiler-limit` (precision). `ExactFormsOverCompilerLimit`:
-  A render pipeline state whose largest stage module, under the consumer's exact forms, exceeded the
-  device's compiler word bound (`RuntimeFact::ExactFormsOverCompilerLimit`;
+  A pipeline state (render, mesh render, tile render or compute) whose largest stage module, under
+  the consumer's exact forms, exceeded the device's compiler word bound
+  (`RuntimeFact::ExactFormsOverCompilerLimit`;
   `DriverWorkaround::RegisterAllocatorOverflowsLargeModules`, ANV's register allocator faults
   compiling a module past it), so the translation dropped those forms until it fit: native sampling
-  first, then every module-growing exact answer native. Announced where the runtime makes a render
-  variant whose pipeline the fit reduced, the base variant or another, naming the forms dropped; the
-  reduced stages announce their own precision notes besides.
+  first, then every module-growing exact answer native. Announced where the runtime makes a variant
+  whose pipeline the fit reduced, the base variant or another, naming the state's kind and the
+  forms dropped; the reduced stages announce their own precision notes besides.
   Cost: the dropped exact forms' results can differ from Metal's as their notes' documentation
   states, where the device's compiler would fault on the exact module.
 - `metal2vulkan-degrade-landed-visibility-results` (performance). `LandedVisibilityResults`:

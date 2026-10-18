@@ -48,6 +48,7 @@ use super::binding;
 use super::blit::reads;
 use super::buffer::Buffer;
 use super::command_buffer::CommandBuffer;
+use super::degradation::CompiledPipeline;
 use super::encoder::{EncoderCore, RecordedSegment};
 use super::error::{internal, vulkan, Error};
 use super::executed_commands::RecordsRead;
@@ -498,7 +499,7 @@ fn record_total(
             &device,
             &replay.pipeline_layout,
             std::slice::from_ref(&p.variant.pipeline().stage),
-            None,
+            CompiledPipeline::Kernel(p.variant.pipeline()),
         )?);
         pipelines.push(made.indirect_bindable_pipeline(region)?);
         objects.push(made);
@@ -681,7 +682,10 @@ fn record_total(
     for (p, made) in prepared.iter().zip(&objects) {
         if let [region] = p.commands.regions.as_slice() {
             made.announce_bound(
-                (std::slice::from_ref(&p.variant.pipeline().stage), None),
+                (
+                    std::slice::from_ref(&p.variant.pipeline().stage),
+                    CompiledPipeline::Kernel(p.variant.pipeline()),
+                ),
                 [(&region.specialization, None)],
             );
         }

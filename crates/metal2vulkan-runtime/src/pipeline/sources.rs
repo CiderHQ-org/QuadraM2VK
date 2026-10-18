@@ -116,10 +116,13 @@ impl<'a> Sources<'a> {
     /// The compute pipeline of `descriptor`, a compute or tile descriptor whose kernel or tile
     /// function is compiled: the variant of it the memo knows live, or the pipeline found or
     /// linked now under `budget` (`compile_compute_pipeline` or `compile_tile_pipeline`, each
-    /// under its own key). A refusal is the compile layer's.
+    /// under its own key) and held to the device's compiler word bound from `functions`, the same
+    /// descriptor holding the function, compiled under `inputs` ([`Kernel::fit`]). A refusal is
+    /// the compile layer's.
     pub(crate) fn kernel(
         &self,
         descriptor: &Kernel,
+        (functions, inputs): (&Kernel, &LoweringInputs),
         budget: &Budget,
     ) -> Result<Remembered<ComputePipeline, Variant>, metal2vulkan::error::Error> {
         let compile = self.device.compile_device();
@@ -147,6 +150,10 @@ impl<'a> Sources<'a> {
                                 compile.compile_tile_pipeline(descriptor, budget)?
                             }
                         };
+                        // Held to the driver's compiler word bound, translated again from the
+                        // function where its module passes it; it keeps its key, so the cache
+                        // stores and finds it as compiled.
+                        let pipeline = functions.fit(compile, inputs, budget, pipeline)?;
                         let bytes = cache.store_compute_pipeline(compile, &pipeline);
                         (pipeline, bytes)
                     }

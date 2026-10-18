@@ -24,10 +24,6 @@
 
 use crate::budget::{Budget, Meter};
 use crate::cache::VariantKey;
-use crate::device::policy::{
-    DevicePolicy, FloatMathsPolicy, HalfBlendPolicy, HalfRoundingPolicy, NanMinMaxPolicy,
-    RoundingOrderPolicy, SamplingPolicy, TexelConversionPolicy, YCbCrFilterPolicy,
-};
 use crate::device::requirements::{Requirements, VkExtension, VkFeature, VkLimit, VkProperty};
 use crate::device::{mechanism, Device, DeviceProfile};
 use crate::error::{
@@ -220,12 +216,19 @@ impl Device {
     /// call stack was sized for another depth (`RuntimeFact::CallStackDepth`) is
     /// `InvalidDescriptor(MaxCallStackDepth)`. A stage-input attribute whose buffer has no layout,
     /// read or not, is `InvalidDescriptor(StageInputLayout)`, where Metal stops at an assertion.
+    /// A `Function` kernel's pipeline is held to the device's compiler word bound
+    /// ([`Device::fit_compute_pipeline`]).
     pub fn compile_compute_pipeline(
         &self,
         d: &ComputePipelineDescriptor,
         b: &Budget,
     ) -> Result<ComputePipeline, Error> {
-        guarded(|| self.compute_pipeline(d, &mut Meter::new(b)))
+        guarded(|| {
+            let inputs = kernel_inputs(d);
+            let first = self.compute_pipeline(d, &inputs, &mut Meter::new(b))?;
+            let bound = self.profile().module_word_bound();
+            self.fit_compute_within(d, &inputs, b, first, bound)
+        })
     }
 
     /// The key of the tile render pipeline `d` (no decode).
@@ -255,13 +258,19 @@ impl Device {
     /// `InvalidDescriptor(ColorAttachment)`. A multisampled pass (`raster_sample_count` above 1) is
     /// `Unsupported{TileShading, NotImplemented}`: what its imageblock's samples are is not read.
     /// The tile function's recursion is sized for `d`'s `maxCallStackDepth` as a compute kernel's
-    /// is.
+    /// is. A `Function` tile function's pipeline is held to the device's compiler word bound
+    /// ([`Device::fit_tile_pipeline`]).
     pub fn compile_tile_pipeline(
         &self,
         d: &TileRenderPipelineDescriptor,
         b: &Budget,
     ) -> Result<ComputePipeline, Error> {
-        guarded(|| self.tile_pipeline(d, &mut Meter::new(b)))
+        guarded(|| {
+            let inputs = tile_inputs(d);
+            let first = self.tile_pipeline(d, &inputs, &mut Meter::new(b))?;
+            let bound = self.profile().module_word_bound();
+            self.fit_tile_within(d, &inputs, b, first, bound)
+        })
     }
 
     /// The keys of the render pipeline `d`, with the lowering inputs of each `Function` stage. A
@@ -415,7 +424,8 @@ impl Device {
     /// compiled under the same inputs; link refuses a vertex stage compiled under another
     /// projection. Each stage's recursion is sized for `d`'s `maxVertexCallStackDepth` or
     /// `maxFragmentCallStackDepth`, as a compute kernel's is for its pipeline's; a `Compiled` stage
-    /// sized for another depth is `InvalidDescriptor(MaxCallStackDepth)`.
+    /// sized for another depth is `InvalidDescriptor(MaxCallStackDepth)`. A pipeline of `Function`
+    /// stages is held to the device's compiler word bound ([`Device::fit_render_variant`]).
     pub fn compile_render_variant(
         &self,
         d: &RenderPipelineDescriptor,
@@ -424,73 +434,7 @@ impl Device {
     ) -> Result<RenderPipeline, Error> {
         guarded(|| {
             let first = self.render_pipeline(d, v, &mut Meter::new(b))?;
-            self.fit_within(d, v, b, first, self.profile().module_word_bound())
-        })
-    }
-
-    /// `pipeline`, [`Device::compile_render_variant`]'s compile of `d` under `v` (whose stages may
-    /// be `Compiled`), held to the device's compiler word bound
-    /// ([`DeviceProfile::module_word_bound`]): where the driver faults compiling a module past it
-    /// and `pipeline`'s largest stage passes it, `d`'s stages translated again with the device
-    /// policy's exact forms dropped until the largest fits, in at most two steps (native sampling,
-    /// then every exact answer that grows a module native), recording the forms dropped
-    /// (`RuntimeFact::ExactFormsOverCompilerLimit`) and keeping `pipeline`'s key and profile
-    /// fingerprint, so a cache finds it where it would find `pipeline`. The stages carry the
-    /// reduced forms' own precision notes. `pipeline` itself where the device has no bound, it
-    /// fits, or a stage of `d` is `Compiled` (only a `Function` stage can be translated again):
-    /// a caller that compiled its stages ahead must pass the descriptor of their functions here,
-    /// or the module goes to the driver unreduced.
-    pub fn fit_render_variant(
-        &self,
-        d: &RenderPipelineDescriptor,
-        v: &VariantKey,
-        b: &Budget,
-        pipeline: RenderPipeline,
-    ) -> Result<RenderPipeline, Error> {
-        guarded(|| self.fit_within(d, v, b, pipeline, self.profile().module_word_bound()))
-    }
-
-    /// [`Device::fit_render_variant`] under `bound` in place of the device's own: a test pins a
-    /// low bound without a device that carries the workaround.
-    pub(crate) fn fit_within(
-        &self,
-        d: &RenderPipelineDescriptor,
-        v: &VariantKey,
-        b: &Budget,
-        pipeline: RenderPipeline,
-        bound: Option<u32>,
-    ) -> Result<RenderPipeline, Error> {
-        let translatable = matches!(d.vertex, StageSource::Function(_))
-            && !matches!(d.fragment, Some(StageSource::Compiled(_)));
-        let Some(bound) = bound.filter(|&w| translatable && largest_stage_words(&pipeline) > w)
-        else {
-            return Ok(pipeline);
-        };
-        let base = *self.policy();
-        let mut best: Option<RenderPipeline> = None;
-        for step in [ReducedForms::NativeSampling, ReducedForms::AllNative] {
-            let policy = step.of(base);
-            if policy == base {
-                continue;
-            }
-            // The lowering reads the profile, never the policy, and `Device::new` is the profile's
-            // one producer: the description kept, the policy reduced.
-            let device = Device::new(self.description().clone(), policy)?;
-            let mut reduced = device.render_pipeline(d, v, &mut Meter::new(b))?;
-            record_dropped_forms(&mut reduced, base, &policy, device.profile());
-            let fits = largest_stage_words(&reduced) <= bound;
-            best = Some(reduced);
-            if fits {
-                break;
-            }
-        }
-        Ok(match best {
-            Some(mut reduced) => {
-                reduced.key = pipeline.key;
-                reduced.profile = pipeline.profile;
-                reduced
-            }
-            None => pipeline,
+            self.fit_render_within(d, v, b, first, self.profile().module_word_bound())
         })
     }
 
@@ -518,17 +462,21 @@ impl Device {
     /// Compile the mesh render pipeline `d` under the variant `v` a plan of it asked for
     /// (`BindingPlan::variant`) and budget `b`, as [`Device::compile_mesh_pipeline`] does: each
     /// `Function` stage under [`VariantKey::lowering_inputs`] of its stage, the fragment function's
-    /// for the mesh function's outputs.
+    /// for the mesh function's outputs. A pipeline of `Function` stages is held to the device's
+    /// compiler word bound ([`Device::fit_mesh_variant`]).
     pub fn compile_mesh_variant(
         &self,
         d: &MeshPipelineDescriptor,
         v: &VariantKey,
         b: &Budget,
     ) -> Result<RenderPipeline, Error> {
-        guarded(|| self.mesh_pipeline(d, v, &mut Meter::new(b)))
+        guarded(|| {
+            let first = self.mesh_pipeline(d, v, &mut Meter::new(b))?;
+            self.fit_mesh_within(d, v, b, first, self.profile().module_word_bound())
+        })
     }
 
-    /// [`Device::compile_mesh_variant`] with the caller's meter.
+    /// [`Device::compile_mesh_variant`] with the caller's meter, unfitted.
     pub(crate) fn mesh_pipeline(
         &self,
         d: &MeshPipelineDescriptor,
@@ -687,10 +635,13 @@ impl Device {
         }
     }
 
-    /// [`Device::compile_compute_pipeline`] with the caller's meter (tests count its work).
+    /// [`Device::compile_compute_pipeline`] with the caller's meter (tests count its work),
+    /// unfitted, a `Function` kernel compiled under `inputs` (`d`'s own, `kernel_inputs`, or a
+    /// fit's).
     pub(crate) fn compute_pipeline(
         &self,
         d: &ComputePipelineDescriptor,
+        inputs: &LoweringInputs,
         m: &mut Meter,
     ) -> Result<ComputePipeline, Error> {
         let p = self.profile();
@@ -698,7 +649,7 @@ impl Device {
         if let Some(stage_input) = &d.stage_input {
             stage_input.check_layouts()?;
         }
-        let kernel = self.stage(&d.kernel, InputsFrom::Given(&kernel_inputs(d)), m)?;
+        let kernel = self.stage(&d.kernel, InputsFrom::Given(inputs), m)?;
         let a = kernel.artifact();
         check_stage_in(a, d)?;
         check_call_stack(a, d.max_call_stack_depth)?;
@@ -724,17 +675,19 @@ impl Device {
         })
     }
 
-    /// [`Device::compile_tile_pipeline`] with the caller's meter.
+    /// [`Device::compile_tile_pipeline`] with the caller's meter, unfitted, a `Function` tile
+    /// function compiled under `inputs` (`d`'s own, `tile_inputs`, or a fit's).
     pub(crate) fn tile_pipeline(
         &self,
         d: &TileRenderPipelineDescriptor,
+        inputs: &LoweringInputs,
         m: &mut Meter,
     ) -> Result<ComputePipeline, Error> {
         if d.raster_sample_count > 1 {
             return Err(Unsupported::not_implemented(Feature::TileShading).into());
         }
         let p = self.profile();
-        let kernel = self.stage(&d.tile, InputsFrom::Given(&tile_inputs(d)), m)?;
+        let kernel = self.stage(&d.tile, InputsFrom::Given(inputs), m)?;
         let a = kernel.artifact();
         if a.interface.stage != Stage::Kernel || !a.facts.contains(&RuntimeFact::TileFunction) {
             return Err(Error::InvalidDescriptor(DescriptorError::StageMismatch {
@@ -771,9 +724,9 @@ impl Device {
         })
     }
 
-    /// [`Device::compile_render_variant`] with the caller's meter. A variant of one of the
-    /// pipeline's color groups (`VariantKey::color_group`) compiles and links as the pipeline of
-    /// its group's attachments (`color_group`), its key's choices of colors naming the group's.
+    /// [`Device::compile_render_variant`] with the caller's meter, unfitted. A variant of one of
+    /// the pipeline's color groups (`VariantKey::color_group`) compiles and links as the pipeline
+    /// of its group's attachments (`color_group`), its key's choices of colors naming the group's.
     pub(crate) fn render_pipeline(
         &self,
         d: &RenderPipelineDescriptor,
@@ -1286,75 +1239,6 @@ fn invariant(detail: &str) -> Error {
         InternalKind::Invariant,
         detail.to_owned(),
     ))
-}
-
-/// The word count of a render pipeline's largest stage module: what a device's compiler word bound
-/// holds ([`DeviceProfile::module_word_bound`]). A pipeline with no stage counts as 0.
-fn largest_stage_words(pipeline: &RenderPipeline) -> u32 {
-    pipeline
-        .stages
-        .iter()
-        .map(|s| u32::try_from(s.spirv.len()).unwrap_or(u32::MAX))
-        .max()
-        .unwrap_or(0)
-}
-
-/// A step of the compiler-word-bound fallback: the exact forms to drop from the consumer's policy.
-/// `NativeSampling` drops exact sampling, the single largest exact form, with Metal's filter of a
-/// two-plane YCbCr texture (`YCbCrFilterPolicy::Exact`, reported with it); `AllNative` drops every
-/// module-growing exact answer (the fast default's forms). Neither touches the policy's other
-/// choices (pointer and handle domains, containment, isolation, framebuffer fetch, the 8-bit
-#[derive(Clone, Copy)]
-enum ReducedForms {
-    NativeSampling,
-    AllNative,
-}
-
-impl ReducedForms {
-    /// `base` with this step's exact forms set to their native, module-smaller answers.
-    fn of(self, base: DevicePolicy) -> DevicePolicy {
-        let sampled = DevicePolicy {
-            sampling: SamplingPolicy::NativeDevice,
-            ycbcr_filter: YCbCrFilterPolicy::Device,
-            ..base
-        };
-        match self {
-            ReducedForms::NativeSampling => sampled,
-            ReducedForms::AllNative => DevicePolicy {
-                float_maths: FloatMathsPolicy::Native,
-                texel_conversion: TexelConversionPolicy::Device,
-                half_rounding: HalfRoundingPolicy::Native,
-                nan_and_min_max: NanMinMaxPolicy::Native,
-                rounding_order: RoundingOrderPolicy::Native,
-                half_blend: HalfBlendPolicy::Device,
-                ..sampled
-            },
-        }
-    }
-}
-
-/// Record on `pipeline` which of the consumer's exact forms the fallback dropped to fit the bound:
-/// each field of [`RuntimeFact::ExactFormsOverCompilerLimit`] is set where `base`'s form differs
-/// from the reduced `policy`'s. The consumer announces it once per device.
-fn record_dropped_forms(
-    pipeline: &mut RenderPipeline,
-    base: DevicePolicy,
-    policy: &DevicePolicy,
-    reduced: &DeviceProfile,
-) {
-    let fact = RuntimeFact::ExactFormsOverCompilerLimit {
-        sampling: base.sampling != policy.sampling || base.ycbcr_filter != policy.ycbcr_filter,
-        float_maths: base.float_maths != policy.float_maths,
-        texel_conversion: base.texel_conversion != policy.texel_conversion,
-        half_rounding: base.half_rounding != policy.half_rounding,
-        nan_and_min_max: base.nan_and_min_max != policy.nan_and_min_max,
-        rounding_order: base.rounding_order != policy.rounding_order,
-        half_blend: base.half_blend != policy.half_blend,
-    };
-    pipeline.dependencies.push(RuntimeDependency {
-        fact,
-        mechanism: mechanism(&fact, reduced),
-    });
 }
 
 /// The lowering inputs a `Function` kernel of compute pipeline `d` compiles under: its

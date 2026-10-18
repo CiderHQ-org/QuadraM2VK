@@ -20,7 +20,7 @@ use super::shared_layouts::{settle_layouts, shared_layout, SharedLayout};
 use super::RegionKey;
 use crate::binding::{Info, SetWrite};
 use crate::degradation::{
-    tested_slots_of, BoundFormats, BoundNotice, Kinds, Occurrence, TestedFormats,
+    tested_slots_of, BoundFormats, BoundNotice, CompiledPipeline, Kinds, Occurrence, TestedFormats,
 };
 use crate::descriptor_arena::{DescriptorArena, SetNeeds};
 use crate::device::{lock, DeviceShared};
@@ -526,14 +526,15 @@ impl VariantObjects {
     /// guarantees. Once they are made, the device announces what the stages record: their
     /// precision notes (but those a specialization decides, announced with each `VkPipeline`), and
     /// reconvergence that is not Metal's (`degradation.rs`), but the kinds it announces at every
-    /// occurrence, which each bind announces (`announce_bound`); what a render variant's `render`
-    /// pipeline records beside its stages counts among its kinds (`Device::degrade_render`).
+    /// occurrence, which each bind announces (`announce_bound`); what the variant's `pipeline`
+    /// records beside its stages counts among its kinds (`Device::degrade_pipeline`).
     pub(crate) fn create(
         device: &Device,
         layout: &PipelineLayout,
         stages: &[StageModule],
-        render: Option<&RenderPipeline>,
+        pipeline: CompiledPipeline<'_>,
     ) -> Result<VariantObjects, Error> {
+        let push_set_zero = pushes_set_zero(device, layout, stages, pipeline);
         let set_needs = needs_of(layout, push_set_zero)?;
         // One sampler per binding that bakes one, in the layout's order: the live set of the same
         // samplers where it holds one, else one made now (`sampler_set`).
@@ -570,7 +571,7 @@ impl VariantObjects {
                 .collect(),
             heap_layout: layout.sets.get(1).cloned(),
             heap: Mutex::new(None),
-            kinds: Kinds::of(stages, render),
+            kinds: Kinds::of(stages, pipeline),
             tested: tested_slots_of(stages),
             bound: Mutex::new(None),
             keep: None,
@@ -604,8 +605,9 @@ impl VariantObjects {
         compiled: Compiled,
         layout: &PipelineLayout,
         stages: &[StageModule],
-        render: Option<&RenderPipeline>,
+        pipeline: CompiledPipeline<'_>,
     ) -> Result<(VariantObjects, Vec<(Place, RawPipeline)>), Error> {
+        let push_set_zero = pushes_set_zero(device, layout, stages, pipeline);
         let set_needs = needs_of(layout, push_set_zero)?;
         let shared = device.shared();
         let back = lock(&shared.kept).take(shared, compiled);
@@ -619,7 +621,7 @@ impl VariantObjects {
         // And the device's graphics pipeline libraries nothing holds now.
         settle_libraries(device);
         let Some(back) = back else {
-            let mut objects = VariantObjects::create(device, layout, stages, render)?;
+            let mut objects = VariantObjects::create(device, layout, stages, pipeline)?;
             objects.keep = Some(Instance::new(compiled));
             return Ok((objects, Vec::new()));
         };
@@ -645,7 +647,7 @@ impl VariantObjects {
                 .collect(),
             heap_layout: layout.sets.get(1).cloned(),
             heap: Mutex::new(None),
-            kinds: Kinds::of(stages, render),
+            kinds: Kinds::of(stages, pipeline),
             tested: tested_slots_of(stages),
             bound: Mutex::new(None),
             keep: Some(instance),
@@ -682,7 +684,7 @@ impl VariantObjects {
     /// Announce, at a dispatch's or draw's bind of the variant, the notices its making announces
     /// whose kinds the device's options ask for at every occurrence (`DeviceOptions::
     /// announce_each`), on the calling thread, with the making's object and reason
-    /// (`Device::bound_notices`): `stages` are the variant's, `render` a render variant's pipeline,
+    /// (`Device::bound_notices`): `stages` are the variant's, `pipeline` its compiled pipeline,
     /// and `specializations` the specializations and bound formats of the `VkPipeline`s the bind
     /// takes. Its kinds are tested first (`Device::binds_each`), so a variant none of whose kinds
     /// is asked for costs an AND a word. The notices are made once and announced at each bind
@@ -690,7 +692,7 @@ impl VariantObjects {
     /// they are a function of those alone, the variant's stages and pipeline fixed.
     pub(crate) fn announce_bound<'a>(
         &self,
-        (stages, render): (&[StageModule], Option<&RenderPipeline>),
+        (stages, pipeline): (&[StageModule], CompiledPipeline<'_>),
         specializations: impl IntoIterator<Item = (&'a SpecializationKey, Option<BoundFormats<'a>>)>,
     ) {
         let device = &self.device;
@@ -705,7 +707,7 @@ impl VariantObjects {
                 None => {
                     device.shared().counts.bound_notices_made();
                     let notices: Arc<[BoundNotice]> = device
-                        .bound_notices((stages, render), &specializations)
+                        .bound_notices((stages, pipeline), &specializations)
                         .into();
                     let made_for = specializations
                         .iter()
@@ -1074,15 +1076,21 @@ const PUSHED_TYPES: [vk::DescriptorType; 9] = [
 /// and the variant binds set 0 at one bind point: a render variant of no compute stage at the
 /// graphics bind point, its draws' (`render::Recording`), where one that emulates a mesh or
 /// tessellation stage dispatches with set 0 too; a kernel's variant, of compute stages alone
+/// (a `CompiledPipeline::Kernel`), at the compute bind point, its dispatches' and tile
+/// dispatches' (`pending_dispatch::Recording`, `render::tile_dispatch`).
 fn pushes_set_zero(
     device: &Device,
     layout: &PipelineLayout,
     stages: &[StageModule],
+    pipeline: CompiledPipeline<'_>,
 ) -> bool {
     let compute = |stage: &StageModule| {
         let flags: vk::ShaderStageFlags = stage.stage.into();
         flags.contains(vk::ShaderStageFlags::COMPUTE)
     };
+    let one_point = match pipeline {
+        CompiledPipeline::Render(_) => !stages.iter().any(compute),
+        CompiledPipeline::Kernel(_) => !stages.is_empty() && stages.iter().all(compute),
     };
     device.shared().push_descriptor.is_some()
         && layout.push_descriptor_eligible

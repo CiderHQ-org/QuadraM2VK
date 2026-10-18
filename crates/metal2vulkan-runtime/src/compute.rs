@@ -50,7 +50,7 @@ use super::binding;
 use super::buffer::Buffer;
 use super::command_buffer::CommandBuffer;
 use super::deferred::Deferred;
-use super::degradation::{BoundFormats, Degradation};
+use super::degradation::{BoundFormats, CompiledPipeline, Degradation};
 use super::device::Device;
 use super::encoder::{EncoderCore, Replayed};
 use super::error::{internal, invalid, Error, Problem, RuntimeGap};
@@ -1806,7 +1806,10 @@ fn record(
     }
     device.degrade_cross_class(&plan.diagnostics, formats);
     objects.announce_bound(
-        (std::slice::from_ref(&variant.pipeline().stage), None),
+        (
+            std::slice::from_ref(&variant.pipeline().stage),
+            CompiledPipeline::Kernel(variant.pipeline()),
+        ),
         regions
             .iter()
             .map(|region| (&region.specialization, Some(formats))),

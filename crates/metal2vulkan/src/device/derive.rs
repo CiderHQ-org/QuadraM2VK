@@ -55,8 +55,8 @@ struct DeviceInner {
     /// runtime's heap sizes read; not a profile field, as above.
     allocation: AllocationLimits,
     /// The description the device was made from, kept so a compile over a device's compiler word
-    /// bound can rebuild the device under a reduced policy (`Device::fit_render_variant`); not
-    /// a profile field, as above.
+    /// bound can rebuild the device under a reduced policy (`Device::fit_render_variant` and the
+    /// other kinds' fits); not a profile field, as above.
     description: DeviceDescription,
 }
 
@@ -157,7 +157,8 @@ impl Device {
     }
 
     /// The description the device was made from, for a compile that rebuilds the device under a
-    /// reduced policy to fit a compiler word bound (`Device::fit_render_variant`).
+    /// reduced policy to fit a compiler word bound (`Device::fit_render_variant` and the other
+    /// kinds' fits).
     pub(crate) fn description(&self) -> &DeviceDescription {
         &self.0.description
     }

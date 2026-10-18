@@ -99,6 +99,7 @@ use super::values::Size;
 use super::Device;
 use crate::argument_table::AtBindViews;
 use crate::binary_archive::Used;
+use crate::degradation::{CompiledPipeline, Occurrence};
 use crate::residency::handle_stages;
 use crate::resource_ids::{
     function_name, number, pipeline_placement, Holder, IdHold, IdPlacement, IdSpace, Numbered,
@@ -368,6 +369,27 @@ impl Kernel {
             }
         }
         inputs
+    }
+
+    /// `pipeline`, this descriptor's compile with its kernel or tile function compiled under
+    /// `inputs` ([`Kernel::inputs`]), held to the device's compiler word bound
+    /// (`fit_compute_pipeline`, `fit_tile_pipeline`): translated again from the function this
+    /// descriptor holds, with the exact forms dropped, where its module passes the bound.
+    fn fit(
+        &self,
+        compile: &metal2vulkan::device::Device,
+        inputs: &metal2vulkan::pipeline::LoweringInputs,
+        budget: &metal2vulkan::Budget,
+        pipeline: ComputePipeline,
+    ) -> Result<ComputePipeline, metal2vulkan::error::Error> {
+        match self {
+            Kernel::Compute(descriptor) => {
+                compile.fit_compute_pipeline(descriptor, inputs, budget, pipeline)
+            }
+            Kernel::Tile(descriptor) => {
+                compile.fit_tile_pipeline(descriptor, inputs, budget, pipeline)
+            }
+        }
     }
 }
 
@@ -1270,7 +1292,8 @@ impl Variant {
     /// the variant of it the memo knows live, or the pipeline `sources` give, each stage found or
     /// compiled under one budget. The function compiles under the descriptor's stage input
     /// descriptor or color attachment formats ([`Kernel::inputs`]), and the pipeline under its
-    /// other fields. A refusal is the compile layer's.
+    /// other fields, held to the device's compiler word bound from `descriptor`, which holds the
+    /// function ([`Kernel::fit`]). A refusal is the compile layer's.
     fn compiled(
         sources: &Sources<'_>,
         function: &FunctionDescriptor,
@@ -1284,6 +1307,7 @@ impl Variant {
         let compiled = sources.function(function, &inputs, (&function_key, None), &budget)?;
         sources.kernel(
             &descriptor.with_stage(StageSource::Compiled(compiled)),
+            (descriptor, &inputs),
             &budget,
         )
     }
@@ -1300,12 +1324,14 @@ impl Variant {
             Remembered::Live(variant) => Arc::clone(&variant.pipeline),
             Remembered::Compiled(pipeline) => pipeline,
         };
+        // Before the variant's shader modules, as a render variant's.
+        device.degrade_pipeline(CompiledPipeline::Kernel(&pipeline), Occurrence::Made);
         let (objects, kept) = VariantObjects::kept_or_create(
             device,
             kept::Compiled::Compute(pipeline.key),
             &pipeline.layout,
             std::slice::from_ref(&pipeline.stage),
-            None,
+            CompiledPipeline::Kernel(&pipeline),
         )?;
         let variant = Arc::new(Variant {
             key,

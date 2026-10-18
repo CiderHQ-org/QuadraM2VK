@@ -105,6 +105,7 @@ use crate::blit::TRANSFER;
 use crate::buffer::Buffer;
 use crate::clear_reach;
 use crate::command_buffer::CommandBuffer;
+use crate::degradation::{BoundFormats, CompiledPipeline};
 use crate::device::functions::Vk;
 use crate::encoder::EncoderCore;
 use crate::error::{internal, invalid, Error, Problem, RuntimeGap};
@@ -1285,7 +1286,10 @@ impl RenderCommandEncoder {
             let formats = |slot| tested.iter().find(|(s, _)| *s == slot)?.1;
             let formats: BoundFormats<'_> = &formats;
             objects.announce_bound(
-                (std::slice::from_ref(&variant.pipeline().stage), None),
+                (
+                    std::slice::from_ref(&variant.pipeline().stage),
+                    CompiledPipeline::Kernel(variant.pipeline()),
+                ),
                 commands
                     .regions
                     .iter()
