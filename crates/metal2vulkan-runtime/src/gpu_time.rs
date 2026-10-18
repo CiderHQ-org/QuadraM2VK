@@ -66,21 +66,27 @@
 //!   refused as on a device that writes none, and the device announces it once
 //!   (`Degradation::UntimedCommandBuffer`).
 //!   Waiting for a slot instead could wait for work that needs the program to go on.
-//! - **Calibrated where the device can.** With `VK_KHR_calibrated_timestamps` (or its
-//!   `VK_EXT_` form) and a host time domain the runtime can read (`CLOCK_MONOTONIC_RAW` or
-//!   `CLOCK_MONOTONIC`), a pair of GPU and host readings taken at the commit places each
-//!   timestamp on the host's clock, within the pair's stated deviation: Metal's answer. A domain
-//!   that is not the host's clock is moved onto it by reading both clocks at once (MoltenVK's
-//!   `CLOCK_MONOTONIC_RAW` is macOS's, which counts sleep; Metal's does not). A pair is read again
-//!   while each reading halves the deviation the one before it stated, [`READINGS`] at most, and
-//!   the one of the smallest places the times ([`least_deviation`]). The specification leaves
-//!   that to the application, which "can choose to re-issue the timestamp calibration call
-//!   pursuing a lower deviation value" (`vkGetCalibratedTimestampsKHR`). A reading's two values
-//!   may stand as far apart as it states. On an Iris Xe (ANV, Mesa 26.2.4, i915), the first
-//!   reading after the GPU idled 100 ms stated 165 us at the median, and the device's timestamp
-//!   in it was read that much after its host time: placed by it, every GPU time came 156 us early
-//!   at the median (105 to 193 us over 200 readings). The reading after it stated 7.6 us and
-//!   agreed with the next ones within 0.4 us.
+//! - **Calibrated where the device can.** With `VK_KHR_calibrated_timestamps` (or its `VK_EXT_`
+//!   form) and a host time domain the runtime can read (`CLOCK_MONOTONIC_RAW` or
+//!   `CLOCK_MONOTONIC`), a pair of GPU and host readings taken as the command buffer completes (on
+//!   the completion turn's thread, before its times are placed) places each timestamp on the host's
+//!   clock, within the pair's stated deviation: Metal's answer. Never at the commit: a reading of
+//!   the GPU's clock waits for a GPU powered down to wake, which on an RTX 5080 Laptop GPU in
+//!   NVIDIA's runtime D3 (driver 615.71.09) held the committing thread 973 to 977 ms after 20 s
+//!   idle, where Metal's commit returns at once; the GPU that just completed the work is awake. A
+//!   domain that is not the host's clock is moved onto it by reading both clocks at once
+//!   (MoltenVK's `CLOCK_MONOTONIC_RAW` is macOS's, which counts sleep; Metal's does not). A pair is
+//!   read again while each reading halves the deviation the one before it stated, and while the
+//!   smallest so far states more than [`SETTLED`], [`READINGS`] at most, and the one of the
+//!   smallest places the times ([`least_deviation`]). The specification leaves that to the
+//!   application, which "can choose to re-issue the timestamp calibration call pursuing a lower
+//!   deviation value" (`vkGetCalibratedTimestampsKHR`). A reading's two values may stand as far
+//!   apart as it states. On an Iris Xe (ANV, Mesa 26.2.4, i915), the first reading after the GPU
+//!   idled 100 ms stated 165 us at the median, and the device's timestamp in it was read that much
+//!   after its host time: placed by it, every GPU time came 156 us early at the median (105 to 193
+//!   us over 200 readings). The reading after it stated 7.6 us and agreed with the next ones within
+//!   0.4 us. A thread preempted between a reading's two values states the time it lost: on an RX
+//!   7900 XTX (RADV) under a full parallel suite, two readings in turn stated about 70 us each.
 //! - **Checked against the command buffer's life.** A time the pair places is the GPU's, and the
 //!   GPU ran the work between the first batch's submission (the kernel start) and the moment the
 //!   completion turn saw it complete. A pair that places the start before that start, or the
@@ -172,6 +178,12 @@ pub(crate) const REFRESH: Duration = Duration::from_millis(100);
 
 /// The most readings one calibration pair takes ([`least_deviation`]).
 pub(crate) const READINGS: u32 = 4;
+
+/// The deviation, in nanoseconds, above which a pair reads again even where its readings stopped
+/// falling ([`least_deviation`]): 20 us, the error validation holds calibrated GPU times to
+/// (`runtime_lane::gpu_times`), above the 4 to 7.6 us of a settled reading on the devices
+/// measured.
+pub(crate) const SETTLED: u64 = 20_000;
 
 /// How far apart, in parts per million of the time since a pair, the GPU's clock and the host's
 /// may drift before a placed time counts as disagreeing with the command buffer's life (the module
@@ -332,9 +344,9 @@ pub(crate) enum Placement {
 }
 
 /// Of the readings `read` gives, the one of the smallest deviation, and how many `read` was
-/// called for: one more while the latest halved the deviation the one before it stated,
-/// [`READINGS`] at most (the module docs). `None` where the first fails; a later failure ends
-/// them.
+/// called for: one more while the latest halved the deviation the one before it stated, or while
+/// the smallest so far states more than [`SETTLED`], [`READINGS`] at most (the module docs).
+/// `None` where the first fails; a later failure ends them.
 pub(crate) fn least_deviation(mut read: impl FnMut() -> Option<Reading>) -> Option<(Reading, u32)> {
     let mut least = read()?;
     let mut previous = least.deviation;
@@ -347,7 +359,7 @@ pub(crate) fn least_deviation(mut read: impl FnMut() -> Option<Reading>) -> Opti
         if next.deviation < least.deviation {
             least = next;
         }
-        if next.deviation.saturating_mul(2) > previous {
+        if next.deviation.saturating_mul(2) > previous && least.deviation <= SETTLED {
             break;
         }
         previous = next.deviation;

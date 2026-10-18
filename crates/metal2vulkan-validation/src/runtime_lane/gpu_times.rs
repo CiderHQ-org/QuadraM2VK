@@ -13,13 +13,13 @@
 //!
 //! The created device enables calibrated timestamps where listed: where it can calibrate (the
 //! device's own domain and a monotonic host one), it announces nothing, and the calibration pairs
-//! that placed the times stated deviations within [`SLACK`], each read at least twice; elsewhere
-//! it announces `Degradation::UncalibratedGpuTimes` once. So does a calibrating device whose pairs
-//! placed a command buffer's times outside its life (`WorkCounts::calibration_disagreements`,
-//! printed): its timestamps count on another clock than the one it calibrates, as a Radeon 780M's
-//! after two MODE2 GPU resets, 65 s ahead, and those command buffers are timed by their
-//! completion. The adopted device names no calibrated timestamps, so it times every command
-//! buffer by its completion on every venue.
+//! that placed the times stated deviations within [`SLACK`], each the least of two to four
+//! readings; elsewhere it announces `Degradation::UncalibratedGpuTimes` once. So does a calibrating
+//! device whose pairs placed a command buffer's times outside its life
+//! (`WorkCounts::calibration_disagreements`, printed): its timestamps count on another clock than
+//! the one it calibrates, as a Radeon 780M's after two MODE2 GPU resets, 65 s ahead, and those
+//! command buffers are timed by their completion. The adopted device names no calibrated
+//! timestamps, so it times every command buffer by its completion on every venue.
 //!
 //! A further test holds [`IN_FLIGHT`] command buffers in flight at once, more than Metal keeps
 //! counter sample buffers live, and times each: the device's first timestamp pool serves them
@@ -381,11 +381,12 @@ fn command_buffers_are_timed_in_the_hosts_time_base() {
     );
 }
 
-/// On a `device` that calibrates: the calibration pairs that placed its command buffers' times
-/// stated deviations within [`SLACK`] (`WorkCounts::calibration_deviation_most`), each pair read
-/// at least twice (`WorkCounts::calibration_readings`). Its first pair is taken with its GPU idle:
-/// on an Iris Xe (ANV, i915), the first reading then stated 165 us at the median and placed every
-/// time 156 us early, the next 7.6 us (`gpu_time.rs`).
+/// On a `device` that calibrates: the calibration pairs that placed its command buffers' times,
+/// each the reading of the smallest deviation of two to four (`WorkCounts::calibration_readings`),
+/// stated deviations within [`SLACK`] (`WorkCounts::calibration_deviation_most`): on an Iris Xe
+/// (ANV, i915), the first reading after the GPU idled stated 165 us at the median and placed every
+/// time 156 us early, the next 7.6 us; a reading of a thread preempted inside it states the time
+/// it lost, and the pair reads again (`gpu_time.rs`).
 fn calibrated_within_slack(device: &Device) {
     let counts = device.work_counts();
     let (pairs, readings, most, disagreed) = (
@@ -402,7 +403,10 @@ fn calibrated_within_slack(device: &Device) {
         most as f64 / 1e3
     );
     assert!(pairs > 0, "no calibration pair taken");
-    assert!(readings >= 2 * pairs, "a pair read once");
+    assert!(
+        (2 * pairs..=4 * pairs).contains(&readings),
+        "{readings} readings of {pairs} pairs: two to four each"
+    );
     assert!(
         most as f64 <= SLACK * 1e9,
         "a calibration pair's deviation {most} ns, beyond the slack"

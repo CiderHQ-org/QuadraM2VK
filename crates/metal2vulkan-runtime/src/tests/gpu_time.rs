@@ -62,9 +62,12 @@ fn a_pair_places_timestamps_on_the_hosts_clock_either_side_of_it() {
 }
 
 /// A calibration pair is read again while each reading halves the deviation the one before it
-/// stated, `READINGS` (4) at most, and the reading of the smallest deviation is kept: the Iris Xe's
-/// first reading after an idle GPU (165 us) is followed by one of 7.6 us, kept, and one more that
-/// halves nothing. A failed reading ends them, the least so far kept; a failed first is none.
+/// stated, and while the smallest so far states more than `SETTLED` (20 us), `READINGS` (4) at
+/// most, and the reading of the smallest deviation is kept: the Iris Xe's first reading after an
+/// idle GPU (165 us) is followed by one of 7.6 us, kept, and one more that halves nothing.
+/// Readings a preempted thread widened (about 70 us each in turn on an RX 7900 XTX under a full
+/// parallel suite) go on though they halve nothing, until one settles, or keep the least of four.
+/// A failed reading ends them, the least so far kept; a failed first is none.
 #[test]
 fn a_pair_is_the_reading_of_the_least_deviation() {
     let least = |deviations: &[Option<u64>]| {
@@ -86,11 +89,31 @@ fn a_pair_is_the_reading_of_the_least_deviation() {
     );
     assert_eq!(least(&[Some(7_600), Some(7_500)]), Some((1, 7_500, 2)));
     assert_eq!(least(&[Some(7_500), Some(7_600)]), Some((0, 7_500, 2)));
-    assert_eq!(least(&[Some(100_000), Some(60_000)]), Some((1, 60_000, 2)));
+    assert_eq!(least(&[Some(30_000), Some(20_000)]), Some((1, 20_000, 2)));
     assert_eq!(
         least(&[Some(100), Some(40), Some(15), Some(6), Some(1)]),
         Some((3, 6, 4))
     );
+    // Wide readings that halve nothing: read again until one settles, four at most.
+    assert_eq!(
+        least(&[Some(70_100), Some(69_500), Some(6_000), Some(5_000)]),
+        Some((3, 5_000, 4))
+    );
+    assert_eq!(
+        least(&[
+            Some(70_100),
+            Some(69_500),
+            Some(80_000),
+            Some(65_000),
+            Some(1)
+        ]),
+        Some((3, 65_000, 4))
+    );
+    assert_eq!(
+        least(&[Some(90_000), Some(40_000), Some(60_000), Some(50_000)]),
+        Some((1, 40_000, 4))
+    );
+    assert_eq!(least(&[Some(100_000), Some(60_000)]), Some((1, 60_000, 3)));
     assert_eq!(least(&[Some(100), None, Some(1)]), Some((0, 100, 2)));
     assert_eq!(least(&[None, Some(1)]), None);
 }

@@ -2034,7 +2034,8 @@ pub struct WorkCounts {
     /// clock (one a commit at most every 100 ms, on a device with calibrated timestamps).
     pub calibrations: u64,
     /// The `vkGetCalibratedTimestampsKHR` calls those pairs took: each pair is read again while
-    /// each reading halves the deviation the one before it stated, four readings at most.
+    /// each reading halves the deviation the one before it stated, and while the smallest so far
+    /// states more than 20 us, four readings at most.
     pub calibration_readings: u64,
     /// The largest deviation, in nanoseconds, of the pairs taken: how far apart the GPU and host
     /// values of the pair that placed the times may stand, as its call stated.
