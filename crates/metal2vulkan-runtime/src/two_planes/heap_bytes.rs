@@ -38,6 +38,7 @@
 use super::super::blit::{reads, BlitCommandEncoder, TRANSFER};
 use super::super::blit_plan::ImageCopyRegion;
 use super::super::copy_plan::ImageRegion;
+use super::super::device::functions::Vk;
 use super::super::error::{internal, Error};
 use super::super::owned_kernel::{OwnedModule, OwnedSets};
 use super::super::resource::ResourceKey;
@@ -84,7 +85,7 @@ impl Staged {
     /// its buffer, and the staged bytes inside `scratch` from `at`.
     pub(super) unsafe fn record(
         &self,
-        device: &ash::Device,
+        device: &Vk,
         command_buffer: vk::CommandBuffer,
         scratch: vk::Buffer,
         at: u64,

@@ -363,7 +363,7 @@ use metal2vulkan::pipeline::{
     StorageAttachmentView,
 };
 use pass_start_reads::{PassStartReads, PassStartTables};
-use pass_steps::{InstanceSteps, PassSteps, StagedDispatch};
+use pass_steps::{InstanceSteps, PassSteps, StagedDispatch, StagedRows};
 use pending::{OwnedRecording, PendingDraw};
 use shadows::InstanceShadows;
 use std::collections::{BTreeMap, BTreeSet};
@@ -4808,6 +4808,10 @@ impl RenderCommandEncoder {
             later_resolves,
             clear_values,
             render_area,
+            staged_rows: StagedRows {
+                device: device.clone(),
+                sets: Default::default(),
+            },
         };
         // An inline first instance's steps before it go before the pass, into the command buffer
         // before the pass's, as the end records them before the pass's first instance; the

@@ -528,6 +528,7 @@ const SCARCE_POOLS: DriverFact = DriverFact::TimestampPoolsAreCounterSampleBuffe
 const ONE_OF_METALS: DriverFact = DriverFact::DontCareStoreIsOneOfMetals;
 const COPY_BACK: DriverFact = DriverFact::ShadowCopyBackDispatchFaster;
 const COPY_IN: DriverFact = DriverFact::ShadowCopyInDispatchFaster;
+const ROWS: DriverFact = DriverFact::RowCopiesDispatchFaster;
 const LINEAR_UNINITIALIZED: DriverFact = DriverFact::LinearTilingFeaturesUninitialized;
 const STALL: DriverFact = DriverFact::SemaphoreOperationsStallSubmits;
 const SAMPLED_HIZ: DriverFact = DriverFact::SampledDepthKeepsHiZ;
@@ -557,6 +558,8 @@ const INTERLOCK_ORDER: DriverFact = DriverFact::InterlockOrdersDraws;
 /// lavapipe; `DONT_CARE` keeps one of Metal's two answers on the 780M, the RPL-S and the RPL-P; a
 /// shadow's copy back runs faster as a dispatch on the RPL-S and the RPL-P, and a merged shadow's
 /// copy in with its keep on the RPL-S alone, and a copy of rows
+/// there and on the RTX 5080 Laptop GPU; on the RPL-S and the RPL-P a sampled depth keeps its
+/// hierarchical depth and a multisampled one renders faster out of `GENERAL`; MoltenVK reads its
 /// linear-tiling attachment features uninitialized; NVIDIA's stalls a submission per thousand
 /// semaphore operations on the RTX 5080 Laptop GPU; pointer imports follow their address on the
 /// 780M, the RPL-P and lavapipe 26.0.8; the RPL-P's interlock orders consecutive draws. Every other
@@ -617,6 +620,7 @@ fn the_committed_profiles_drivers_have_their_facts() {
                 BC7,
                 ONE_OF_METALS,
                 COPY_BACK,
+                ROWS,
                 SAMPLED_HIZ,
                 MSAA_DEPTH,
                 FOLLOWS,
@@ -625,8 +629,17 @@ fn the_committed_profiles_drivers_have_their_facts() {
         ),
         (
             "intel-uhd770-rpls-anv",
+            vec![
+                ZERO,
+                HIDE,
+                HOST,
+                FETCH,
+                SPARSE_WAIT,
+                ONE_OF_METALS,
                 COPY_BACK,
                 COPY_IN,
+                ROWS,
+            ],
         ),
         (
             "moltenvk-m3",
@@ -682,7 +695,9 @@ fn the_committed_profiles_drivers_have_their_facts() {
         ("nvidia-rtx50-linux", vec![PLANES]),
         (
             "nvidia-rtx5080-laptop",
-            vec![ZERO, DENORMALS, FETCH, SPLIT, PLANES, BC6H, BC7, STALL],
+            vec![
+                ZERO, DENORMALS, FETCH, SPLIT, PLANES, BC6H, BC7, ROWS, STALL,
+            ],
         ),
     ]
     .into_iter()

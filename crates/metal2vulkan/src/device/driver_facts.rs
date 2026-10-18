@@ -1371,6 +1371,26 @@ pub enum DriverFact {
     /// in the runtime): the same bytes either way, as Vulkan states a compatible view reads and
     /// stores a texel's bits unchanged.
     ShadowCopyInDispatchFaster,
+    /// A cost fact (the module docs): the driver records each region of a `vkCmdCopyBuffer` as an
+    /// operation of its own, so a copy of equal rows between two buffers whose rows lie apart costs
+    /// the recording CPU and the GPU more than one compute dispatch that stores the rows' words.
+    /// Measured on ANV, Mesa 26.2.4 (`row_copies::row_copies_cost` in the validation crate's runtime
+    /// lane, one copy a frame of 2 to 1080 rows of 7680 bytes into rows 8192 bytes apart, two rounds
+    /// each, CPU time the replaying and encoding threads' together): on the Iris Xe of RPL-P, 1080
+    /// rows took 3.1-3.3 ms of CPU and 5.3-7.8 ms of GPU time as regions against 0.28-0.40 ms and
+    /// 1.13 ms as the dispatch, 16 rows 0.24-0.27 ms and 97-100 us against 0.12-0.17 ms and 30 us,
+    /// and 2 rows the same CPU time and 21.9 us against 14.8 us; on the UHD 770 of RPL-S, 1080 rows
+    /// 0.77-0.83 ms and 3.3-5.3 ms against 0.04-0.11 ms and 0.59-0.91 ms, and 2 rows the same CPU
+    /// time and 8.8-14.2 us against 3.1-4.3 us. ANV's per-region cost, so its row names no GPU: it
+    /// holds on each measured identity of ANV at the release. NVIDIA's 615.71.09 on the RTX 5080
+    /// Laptop GPU, the GPU its row names (the same probe, two rounds each): 1080 rows took
+    /// 0.19-0.21 ms of CPU and 2.03-2.05 ms of GPU time as regions against 0.12-0.13 ms and
+    /// 0.42-0.43 ms as the dispatch, 16 rows 34-40 us of GPU time against 13 us, and 2 rows the
+    /// same CPU time and 9.1-9.8 us against 8.7-8.8 us. On a driver with it a copy of two or more
+    /// such rows is the dispatch (`row_copies.rs` in the runtime): the same bytes either way.
+    /// Measured no faster, so not listed: RADV, Mesa 26.2.4 on the Radeon 780M and the Radeon RX
+    /// 7900 XTX, where at 1080 rows the dispatch took 5% and 3% more GPU time.
+    RowCopiesDispatchFaster,
     /// The driver answers a format's linear-tiling attachment features from memory it has not
     /// yet initialized, so they differ between instances of one process: MoltenVK 1.4.1 builds
     /// its format table in `MVKPhysicalDevice`'s member initializers, where
@@ -2440,6 +2460,22 @@ pub(crate) const MEASURED: &[Measured<DriverFact>] = &[
         device: Some(INTEL_UHD_770_RPL_S),
         first: mesa(26, 2, 4),
         last: mesa(26, 2, 4),
+    },
+    Measured {
+        fact: DriverFact::RowCopiesDispatchFaster,
+        driver: DriverId::INTEL_OPEN_SOURCE_MESA,
+        vendor: Some(INTEL_VENDOR_ID),
+        device: None,
+        first: mesa(26, 2, 4),
+        last: mesa(26, 2, 4),
+    },
+    Measured {
+        fact: DriverFact::RowCopiesDispatchFaster,
+        driver: DriverId::NVIDIA_PROPRIETARY,
+        vendor: Some(NVIDIA_VENDOR_ID),
+        device: Some(NVIDIA_RTX_5080_LAPTOP),
+        first: nvidia(615, 71, 9),
+        last: nvidia(615, 71, 9),
     },
     Measured {
         fact: DriverFact::SampledDepthKeepsHiZ,

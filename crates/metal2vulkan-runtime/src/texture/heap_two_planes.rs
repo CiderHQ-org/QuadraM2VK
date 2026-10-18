@@ -34,7 +34,8 @@
 use super::super::buffer::Buffer;
 use super::super::error::{internal, Error};
 use super::super::owned_kernel::{OwnedKernel, OwnedModule, OwnedSets};
-use super::super::shadow::ShadowStaging;
+use super::super::row_copies::RowCopies;
+use super::super::shadow::{self, ShadowStaging};
 use super::super::tracker::Barrier;
 use super::super::values::{CpuCacheMode, HazardTrackingMode, ResourceOptions, StorageMode};
 use super::super::Device;
@@ -282,12 +283,13 @@ impl HeapPlaneCopies {
     }
 
     /// Record the move of the texture's `image` from `bytes` (the heap's `VkBuffer`) through
-    /// `staging` (`into`), or back.
+    /// `staging` (`into`), or back, its rows back by `back` (`shadow::record_back`).
     ///
     /// # Safety
     ///
     /// `command_buffer` is recording, outside a render pass; the image, the buffers and the
-    /// sets are live until it completes, and the image rests in `GENERAL`.
+    /// sets are live until it completes, and the image rests in `GENERAL`; `back` is the copy's
+    /// `ShadowCopy::staged_back`, over `bytes`.
     pub(crate) unsafe fn record(
         &self,
         device: &Vk,
@@ -295,6 +297,7 @@ impl HeapPlaneCopies {
         image: vk::Image,
         (bytes, staging): (vk::Buffer, &ShadowStaging),
         into: bool,
+        back: Option<&RowCopies>,
     ) {
         let (step, set) = match into {
             true => (&self.moves[0], self.sets.sets[0]),
@@ -343,7 +346,7 @@ impl HeapPlaneCopies {
                     &self.regions,
                 );
             } else {
-                device.cmd_copy_buffer(command_buffer, staging.raw(), bytes, &staging.back);
+                shadow::record_back(device, command_buffer, (staging, bytes), back);
             }
         }
     }

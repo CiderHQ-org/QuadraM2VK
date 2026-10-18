@@ -94,6 +94,7 @@ fn modules() -> Vec<Build> {
         predication_step_module,
         replay_preprocess_module,
         rotate_texels_module,
+        rows_copy_module,
         shadow_merge_module,
         tile_reach_module,
         tiled_texels_module,

@@ -157,6 +157,7 @@ pub(crate) mod rate_map;
 pub(crate) mod replay;
 pub(crate) mod resident;
 pub(crate) mod rotate_texels;
+pub(crate) mod rows_copy;
 pub(crate) mod sample_interleave;
 pub(crate) mod sample_planes;
 pub(crate) mod shadow_copy_back;
@@ -278,6 +279,7 @@ pub use plane_copy::{plane_copy_module, PlaneCopyModule, PlaneRows};
 pub use plane_words::{plane_words_module, PlaneWordsModule};
 pub use pvrtc_decode::{pvrtc_decode_module, PvrtcDecode};
 pub use rotate_texels::{rotate_texels_module, RotateTexelsModule};
+pub use rows_copy::{rows_copy_module, RowsCopyModule};
 pub use sample_interleave::{
     interleave_merge_modules, interleave_split_module, InterleaveMergeModules,
     InterleaveSplitModule,

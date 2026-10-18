@@ -172,6 +172,7 @@ mod resource;
 mod resource_ids;
 mod retained;
 mod rotated;
+mod row_copies;
 mod sample_copy;
 mod sample_interleave;
 mod sample_planes;
@@ -328,7 +329,6 @@ pub use values::{
 };
 pub use view_plan::ViewProblem;
 pub use visibility::{VisibilityProblem, VisibilityResultMode};
-#[doc(hidden)]
-pub use work_counts::WorkCounts;
+pub use work_counts::{CopySite, WorkCounts};
 pub use wrapped_buffer::{VkBufferMemory, WrappedBufferProblem};
 pub use ycbcr::{IoSurfaceYCbCr, SurfaceYCbCrMatrix};

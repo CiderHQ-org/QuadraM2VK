@@ -145,6 +145,7 @@ use super::buffer::{Buffer, CallerMemory, WeakBuffer};
 use super::error::{Error, RuntimeGap};
 use super::resource::ResourceKey;
 use super::rotated::{RotatedCopies, Turn};
+use super::row_copies::RowCopies;
 use super::shadow_copy_back::{CopyBack, WordView};
 use super::shadow_merge::{ScratchSpares, ShadowMerge};
 use super::texture::heap_tiled::HeapTiledCopies;
@@ -966,6 +967,70 @@ impl ShadowCopy {
         ]
     }
 
+    /// The copy of rows that moves this copy back's rows from its staging buffer into the
+    /// buffer's bytes, made on `device` over the buffer's `VkBuffer` now (`row_copies.rs`): a
+    /// copy back through a staging buffer, of a texture over a buffer's bytes, a texture
+    /// buffer's, a rotated texture's, or a heap's two-plane or tiled texture's. `None` for any
+    /// other copy.
+    pub(super) fn staged_back(&self, device: &Device) -> Option<RowCopies> {
+        let (ShadowSource::Bytes { buffer, target, .. }, Step::Back) =
+            (&self.copies.source, &self.step)
+        else {
+            return None;
+        };
+        let staging = match target {
+            ShadowTarget::Image {
+                staging: Some(staging),
+                ..
+            }
+            | ShadowTarget::Buffer(staging)
+            | ShadowTarget::Rotated { staging, .. }
+            | ShadowTarget::Planes { staging, .. }
+            | ShadowTarget::Tiled { staging, .. } => staging,
+            ShadowTarget::Image { staging: None, .. } => return None,
+        };
+        let back = staging.back.clone();
+        Some(RowCopies::new(device, staging.raw(), buffer.raw(), back))
+    }
+
+    /// The copy's stages where its staged rows go back by `back` ([`staged_back`]): with the
+    /// compute stage where they dispatch.
+    ///
+    /// [`staged_back`]: Self::staged_back
+    pub(super) fn stages_with(&self, back: Option<&RowCopies>) -> vk::PipelineStageFlags2 {
+        match back {
+            Some(rows) if rows.dispatched() => self.stages() | rows.stages(),
+            _ => self.stages(),
+        }
+    }
+
+    /// The copy's uses where its staged rows go back by `back` ([`staged_back`]): where they
+    /// dispatch, the write of the buffer's bytes is the dispatch's, and so is the read of a
+    /// texture buffer's staging buffer, its shadow; an image's shadow is read by its copy into
+    /// the staging buffer.
+    ///
+    /// [`staged_back`]: Self::staged_back
+    pub(super) fn uses_with(&self, back: Option<&RowCopies>) -> Vec<Use<ResourceKey>> {
+        let mut uses = self.uses();
+        let (Some(rows), Step::Back, ShadowSource::Bytes { target, .. }) =
+            (back, &self.step, &self.copies.source)
+        else {
+            return uses;
+        };
+        if !rows.dispatched() {
+            return uses;
+        }
+        let shadow_read = matches!(target, ShadowTarget::Buffer(_));
+        for used in &mut uses {
+            if !used.write.is_empty() {
+                used.write = rows.write();
+            } else if shadow_read && !used.read.is_empty() {
+                used.read = rows.read();
+            }
+        }
+        uses
+    }
+
     /// The stages the copy runs in: a rotated texture's copies dispatch the rotation kernel, a
     /// heap's two-plane texture's the two-plane kernel, a tiled heap texture's the tiled texel
     /// kernel (its keep too), and a keep that dispatches the copy back's kernel
@@ -1059,7 +1124,8 @@ impl ShadowCopy {
         }
     }
 
-    /// Record the copy into `command_buffer`.
+    /// Record the copy into `command_buffer`, its staged rows back (where it has them) by `back`
+    /// ([`staged_back`](Self::staged_back)).
     ///
     /// # Safety
     ///
@@ -1067,6 +1133,12 @@ impl ShadowCopy {
     /// after what precedes it; the buffer and the shadow are live until it completes, and an
     /// image is in the `GENERAL` layout; `back` is this copy's `staged_back`, over the buffer's
     /// `VkBuffer` as it is now.
+    pub(super) unsafe fn record(
+        &self,
+        device: &Vk,
+        command_buffer: vk::CommandBuffer,
+        back: Option<&RowCopies>,
+    ) {
         let c = &self.copies;
         let into_shadow = match &self.step {
             Step::Into => true,
@@ -1224,7 +1296,14 @@ impl ShadowCopy {
                 };
                 // SAFETY: the caller's contract, which the turn's record takes.
                 unsafe {
-                    turn.record(device, command_buffer, *image, (buffer, staging), turned);
+                    turn.record(
+                        device,
+                        command_buffer,
+                        *image,
+                        (buffer, staging),
+                        turned,
+                        back,
+                    );
                 }
                 return;
             }
@@ -1242,6 +1321,7 @@ impl ShadowCopy {
                         *image,
                         (buffer, staging),
                         into_shadow,
+                        back,
                     );
                 }
                 return;
@@ -1259,6 +1339,7 @@ impl ShadowCopy {
                         *image,
                         (buffer, staging),
                         into_shadow,
+                        back,
                     );
                 }
                 return;
@@ -1275,12 +1356,7 @@ impl ShadowCopy {
                             &[staging.into],
                         );
                     } else {
-                        device.cmd_copy_buffer(
-                            command_buffer,
-                            staging.raw(),
-                            buffer,
-                            &staging.back,
-                        );
+                        record_back(device, command_buffer, (staging, buffer), back);
                     }
                 }
                 return;
@@ -1312,7 +1388,7 @@ impl ShadowCopy {
                 );
                 if let Some(staging) = staging {
                     Barrier::everything().record(device, command_buffer);
-                    device.cmd_copy_buffer(command_buffer, texels, buffer, &staging.back);
+                    record_back(device, command_buffer, (staging, buffer), back);
                 }
             }
         }
@@ -1353,6 +1429,32 @@ pub(super) fn part_of(
     })
 }
 
+/// Record the rows of `staging` back into `buffer`: by `back` where the caller made it
+/// ([`ShadowCopy::staged_back`]), else as one copy of every row. Rotated textures' and heap
+/// textures' copies back end so too (`rotated.rs`, `texture/heap_two_planes.rs`,
+/// `texture/heap_tiled.rs`).
+///
+/// # Safety
+///
+/// As [`ShadowCopy::record`], after a barrier from the staging buffer's writes.
+pub(super) unsafe fn record_back(
+    device: &Vk,
+    command_buffer: vk::CommandBuffer,
+    (staging, buffer): (&ShadowStaging, vk::Buffer),
+    back: Option<&RowCopies>,
+) {
+    // SAFETY: the caller's contract; the rows lie in the staging buffer and the buffer's bytes
+    // (planned when the texture was made), and the staging buffer lives with the texture.
+    unsafe {
+        match back {
+            Some(rows) => rows.record(device, command_buffer),
+            None => device.cmd_copy_buffer(command_buffer, staging.raw(), buffer, &staging.back),
+        }
+    }
+}
+
+/// The one region of `regions`, a shadow's of another image, where it is one level and one slice
+/// of a 2D image: the texels a rectangle of the texture's own names.
 fn one_image_copy(regions: &[vk::ImageCopy]) -> Option<&vk::ImageCopy> {
     match regions {
         [region] if region.src_subresource.layer_count == 1 && region.extent.depth == 1 => {

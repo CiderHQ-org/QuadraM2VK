@@ -413,10 +413,14 @@ fn passes_store_load_and_resolve_rotated_textures_as_metal_turns_them() {
                 twins += usize::from(rotation != 0);
                 // Cleared and drawn over everything.
                 let before = bytes_of(&plane);
+                let counts = device.work_counts();
                 lane.pass(&texture, LoadAction::Clear, false, &source, (w, h));
                 // A rotated texture's rows go back out of its staging buffer as a copy of rows
                 // (`row_copies.rs`): rows that lie one after another as one region, which takes no
                 // dispatch; rows that lie apart as one dispatch where the device runs it faster.
+                let (dispatched, copies) = super::row_copies::copies_since(&device, &counts);
+                if rotation != 0 {
+                    assert!(copies > 0, "{what}: no copy of rows");
                     let regions = device.work_counts().row_copy_regions - counts.row_copy_regions;
                     match bpr == sw * TEXEL {
                         true => assert_eq!(
@@ -430,6 +434,7 @@ fn passes_store_load_and_resolve_rotated_textures_as_metal_turns_them() {
                             "{what}: dispatched copies of rows"
                         ),
                     }
+                }
                 let want = expected(rotation, (w, h), bpr, (w, h), &before, |_, _| [0; 4]);
                 if let Some(at) = first_difference(&bytes_of(&plane), &want, bpr) {
                     panic!("{what}, a clear and a full draw: {at}");

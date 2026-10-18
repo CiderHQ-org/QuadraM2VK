@@ -75,6 +75,7 @@ use super::capture::CapturedReach;
 use crate::buffer_texture::Texels;
 use crate::clear_reach::{DrawnTiles, PassReach};
 use crate::degradation::Degradation;
+use crate::device::functions::Vk;
 use crate::device::Device;
 use crate::encoder::EncoderCore;
 use crate::error::{internal, Error};
@@ -203,7 +204,7 @@ impl<'a> TileReach<'a> {
 /// `bytes / 4` words, and a captured mask's bytes are `bytes` of a live buffer, written before a
 /// barrier the command buffer recorded already.
 unsafe fn record_mask(
-    raw: &ash::Device,
+    raw: &Vk,
     command_buffer: vk::CommandBuffer,
     (buffer, offset, bytes): (vk::Buffer, u64, u64),
     mask: &Mask,
@@ -787,7 +788,7 @@ impl Copies {
     /// which are live until it completes, and an image rests in `GENERAL`.
     unsafe fn to_scratch(
         &self,
-        raw: &ash::Device,
+        raw: &Vk,
         command_buffer: vk::CommandBuffer,
         scratch: vk::Buffer,
         b: usize,
@@ -816,7 +817,7 @@ impl Copies {
     /// As [`to_scratch`](Self::to_scratch).
     unsafe fn back(
         &self,
-        raw: &ash::Device,
+        raw: &Vk,
         command_buffer: vk::CommandBuffer,
         scratch: vk::Buffer,
         b: usize,

@@ -45,7 +45,8 @@
 use super::buffer::Buffer;
 use super::error::{internal, Error, RuntimeGap};
 use super::owned_kernel::{OwnedKernel, OwnedModule, OwnedSets};
-use super::shadow::ShadowStaging;
+use super::row_copies::RowCopies;
+use super::shadow::{self, ShadowStaging};
 use super::tracker::Barrier;
 use super::values::{CpuCacheMode, HazardTrackingMode, ResourceOptions, StorageMode};
 use super::Device;
@@ -297,12 +298,13 @@ impl RotatedCopies {
     }
 
     /// Record the `turn` of the frame's `image` from `bytes` (the plane's `VkBuffer`) through
-    /// `staging`, into the frame or back.
+    /// `staging`, into the frame or back, its rows back by `back` (`shadow::record_back`).
     ///
     /// # Safety
     ///
     /// `command_buffer` is recording, outside a render pass; the image, the buffers and the
-    /// sets are live until it completes, and the image rests in `GENERAL`.
+    /// sets are live until it completes, and the image rests in `GENERAL`; `back` is the copy's
+    /// `ShadowCopy::staged_back`, over `bytes`.
     pub(super) unsafe fn record(
         &self,
         device: &Vk,
@@ -310,6 +312,7 @@ impl RotatedCopies {
         image: vk::Image,
         (bytes, staging): (vk::Buffer, &ShadowStaging),
         turn: Turn,
+        back: Option<&RowCopies>,
     ) {
         let into = turn != Turn::Store;
         let (step, shape, set) = match turn {
@@ -360,7 +363,7 @@ impl RotatedCopies {
                     &self.regions,
                 );
             } else {
-                device.cmd_copy_buffer(command_buffer, staging.raw(), bytes, &staging.back);
+                shadow::record_back(device, command_buffer, (staging, bytes), back);
             }
         }
     }

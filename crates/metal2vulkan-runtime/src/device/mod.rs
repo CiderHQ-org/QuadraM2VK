@@ -1263,7 +1263,13 @@ impl Device {
             prime::prime(
                 &instance.raw,
                 physical,
-                &Vk::new(raw.clone(), memory_reads),
+                &Vk::new(
+                    raw.clone(),
+                    memory_reads,
+                    push_descriptor,
+                    object_name,
+                    Default::default(),
+                ),
                 &loader_word,
                 queue_family,
                 &queues,

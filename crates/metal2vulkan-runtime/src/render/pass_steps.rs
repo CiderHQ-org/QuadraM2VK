@@ -10,7 +10,8 @@
 //! - **Before each instance**: after a memory barrier, the colors over a buffer's bytes that
 //!   render through copied stand-ins merged back and copied in again, or copied back
 //!   (`linear_merge.rs`); after the first, the shadowed textures' copies into it, each before a
-//!   barrier to what follows (`render/shadows.rs`); its sample planes' steps (`sample_planes.rs`);
+//!   barrier to what follows (`render/shadows.rs`, their rows back out of a staging buffer a copy
+//!   of rows, [`StagedRows`]); its sample planes' steps (`sample_planes.rs`);
 //!   where its draws test the stencil in the shader, the shadow's filling (`shadow_stencil.rs`),
 //!   and where they test the depth there, the depth stand-in's (`depth_stand_in.rs`); where its
 //!   draws first hold an extended-range color's `half` shadow, the shadow's setting
@@ -37,14 +38,19 @@ use super::Before;
 use crate::attachment_stand_in::StandInCopies;
 use crate::depth_stand_in::StandInCopies as DepthStandInCopies;
 use crate::device::functions::Vk;
+use crate::device::lock;
+use crate::owned_kernel::OwnedSets;
 use crate::pipeline::RawPipeline;
 use crate::render_target::{self, ClearValues, FramebufferObject, MovedImage, RenderPassObject};
 use crate::resolve::ResolveSource;
+use crate::row_copies::RowCopies;
 use crate::sample_planes::PlanesCommands;
 use crate::shadow::ShadowCopy;
 use crate::shadow_stencil::ShadowCopies;
 use crate::tracker::Barrier;
+use crate::Device;
 use ash::vk;
+use std::sync::{Arc, Mutex};
 
 /// What one render pass instance records before and after it, past its draws.
 pub(super) struct InstanceSteps {
@@ -81,6 +87,19 @@ pub(super) struct StagedDispatch {
     pub(super) copies: Vec<ShadowCopy>,
 }
 
+/// The copies of rows that move the shadowed textures' staged rows back into their buffers'
+/// bytes in the steps (`ShadowCopy::staged_back`, `row_copies.rs`), each made on `device` as its
+/// copy records, over its buffer's `VkBuffer` as the copy reads it (a buffer over host pages a
+/// rebind moves has another by the time a pass that records later records). Each between
+/// barriers from everything before it and to everything after it, whose scopes take a dispatch's
+/// accesses as well as a copy's, so the pass's uses name the copies' as copies
+/// (`ShadowCopy::uses`). `sets` holds the sets of those that bind one of their own, with the
+/// steps, until the command buffer completes.
+pub(super) struct StagedRows {
+    pub(super) device: Device,
+    pub(super) sets: Mutex<Vec<OwnedSets>>,
+}
+
 /// The steps around a pass's render pass instances (the module docs), planned as the encoder
 /// ends. They hold the objects they record until the command buffer completes: the encoder
 /// retains them, or the pass that records later does.
@@ -112,6 +131,7 @@ pub(super) struct PassSteps {
     pub(super) later_resolves: Vec<(RenderPassObject, FramebufferObject)>,
     pub(super) clear_values: ClearValues,
     pub(super) render_area: vk::Rect2D,
+    pub(super) staged_rows: StagedRows,
 }
 
 impl PassSteps {
@@ -136,7 +156,7 @@ impl PassSteps {
             }
             let texels = index.checked_sub(1).and_then(|i| self.texel_copies.get(i));
             for copy in texels.into_iter().flatten() {
-                copy.record(raw, command_buffer);
+                self.copy(raw, command_buffer, copy);
                 Barrier::everything().record(raw, command_buffer);
             }
             if let Some(planes) = &self.planes {
@@ -300,12 +320,29 @@ impl PassSteps {
                 // dispatch begins with another.
                 for copy in &staged.copies {
                     Barrier::everything().record(raw, command_buffer);
-                    copy.record(raw, command_buffer);
+                    self.copy(raw, command_buffer, copy);
                 }
                 staged
                     .dispatch
                     .record(raw, command_buffer, &staged.staging, pipelines);
             }
+        }
+    }
+
+    /// Record a shadowed texture's `copy`, its staged rows back as a copy of rows made now
+    /// ([`StagedRows`]).
+    ///
+    /// # Safety
+    ///
+    /// As for [`PassSteps::before`], between a barrier from everything before and one to
+    /// everything after.
+    unsafe fn copy(&self, raw: &Vk, command_buffer: vk::CommandBuffer, copy: &ShadowCopy) {
+        let rows = copy.staged_back(&self.staged_rows.device);
+        // SAFETY: the caller's contract; the rows are the copy's own, made just now over its
+        // buffer's `VkBuffer`.
+        unsafe { copy.record(raw, command_buffer, rows.as_ref()) };
+        if let Some(sets) = rows.and_then(RowCopies::retained) {
+            lock(&self.staged_rows.sets).push(sets);
         }
     }
 

@@ -70,6 +70,9 @@ pub(super) enum OwnedModule {
     /// back faster so (`shadow_copy_back.rs`). Its shadow's unsigned-integer view is its sampled
     /// image.
     ShadowCopyBack(ShadowTexelView),
+    /// `bind::rows_copy_module`: many equal rows of words copied from one buffer into another by
+    /// a dispatch, in place of a copy's region per row (`row_copies.rs`).
+    RowsCopy,
     /// `bind::shadow_merge_image_module` of one view of a texel (`ShadowTexelView`): a shadowed
     /// texture's writes merged into its buffer's bytes, reading its shadow's texels through its
     /// unsigned-integer view, its sampled image (`shadow_merge.rs`).
@@ -162,9 +165,11 @@ impl OwnedModule {
         }
     }
 
+    /// Whether the module's set 0 is pushed on `device` ([`OwnedKernel::pushed`]): the rows
     /// copy's and a shadowed texture's copies' and merges', on a device with
     /// `VK_KHR_push_descriptor`, so their commands make no pool on the encoding thread
     /// (`row_copies.rs`, `shadow_copy_back.rs`, `shadow_copy_in.rs`, `shadow_merge.rs`).
+    fn pushed(self, device: &Device) -> bool {
         matches!(
             self,
             OwnedModule::RowsCopy
@@ -173,6 +178,8 @@ impl OwnedModule {
                 | OwnedModule::ShadowMerge
                 | OwnedModule::ShadowMergeImage(_)
         ) && device.shared().vk().push_descriptor().is_some()
+    }
+
     /// The module's storage-image bindings, which come after its sampled images.
     fn storage_images(self) -> u32 {
         match self {
@@ -241,6 +248,12 @@ impl OwnedModule {
                         .map_err(Error::Compile)?;
                 let push_bytes = metal2vulkan::bind::ShadowCopyBackModule::PUSH_BYTES;
                 Ok((module.spirv.to_vec(), 1, push_bytes))
+            }
+            OwnedModule::RowsCopy => {
+                let module = metal2vulkan::bind::rows_copy_module(device.compile_device())
+                    .map_err(Error::Compile)?;
+                let push_bytes = metal2vulkan::bind::RowsCopyModule::PUSH_BYTES;
+                Ok((module.spirv.to_vec(), 2, push_bytes))
             }
             OwnedModule::ShadowMergeImage(view) => {
                 let module =
@@ -382,6 +395,9 @@ pub(super) struct OwnedKernel {
     pub(super) storage_images: u32,
     /// Storage-buffer bindings of set 0, after the images.
     pub(super) buffers: u32,
+    /// Whether set 0's layout is a push descriptor set's: its dispatches push their descriptors
+    /// (`vkCmdPushDescriptorSetKHR`) in place of a set from a pool.
+    pub(super) pushed: bool,
 }
 
 impl OwnedKernel {
@@ -418,6 +434,7 @@ pub(super) struct OwnedKernels {
     plane_copy: Option<OwnedKernel>,
     index_rewrites: HashMap<(RewriteProgram, RewritePhase), OwnedKernel>,
     rotate_texels: Option<OwnedKernel>,
+    rows_copy: Option<OwnedKernel>,
     ycbcr_converts: HashMap<YCbCrOutput, OwnedKernel>,
     two_plane_texels: Option<OwnedKernel>,
     plane_bytes_copy: Option<OwnedKernel>,
@@ -450,6 +467,7 @@ impl OwnedKernels {
             self.plane_words,
             self.plane_copy,
             self.rotate_texels,
+            self.rows_copy,
             self.two_plane_texels,
             self.plane_bytes_copy,
             self.ycbcr_write,
@@ -572,6 +590,7 @@ impl OwnedKernels {
             OwnedModule::PlaneWords => &mut self.plane_words,
             OwnedModule::PlaneCopy => &mut self.plane_copy,
             OwnedModule::RotateTexels => &mut self.rotate_texels,
+            OwnedModule::RowsCopy => &mut self.rows_copy,
 
             OwnedModule::TwoPlaneTexels => &mut self.two_plane_texels,
             OwnedModule::PlaneBytesCopy => &mut self.plane_bytes_copy,
@@ -598,20 +617,20 @@ impl Device {
         }
         let (spirv, buffers, push_bytes) = which.build(self)?;
         let bindings = (which.images(), which.storage_images(), buffers);
-        let kernel = make(self, &spirv, bindings, push_bytes)?;
+        let kernel = make(self, &spirv, bindings, (push_bytes, which.pushed(self)))?;
         kernels.put(which, kernel);
         Ok(kernel)
     }
 }
 
 /// The objects of a kernel of `spirv` (entry point `main`) with `images` sampled images, then
-/// `storage_images` storage images and then `buffers` storage buffers in set 0, and `push_bytes`
-/// of `COMPUTE` push constants.
+/// `storage_images` storage images and then `buffers` storage buffers in set 0, a push descriptor
+/// set's where `pushed`, and `push_bytes` of `COMPUTE` push constants.
 fn make(
     device: &Device,
     spirv: &[u32],
     (images, storage_images, buffers): (u32, u32, u32),
-    push_bytes: u32,
+    (push_bytes, pushed): (u32, bool),
 ) -> Result<OwnedKernel, Error> {
     let shared = device.shared();
     let raw = shared.vk();
@@ -623,6 +642,7 @@ fn make(
         images,
         storage_images,
         buffers,
+        pushed,
     };
     let made = (|| {
         let info = vk::ShaderModuleCreateInfo::default().code(spirv);
@@ -638,7 +658,10 @@ fn make(
                         .stage_flags(vk::ShaderStageFlags::COMPUTE)
                 })
                 .collect();
-        let info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);
+        let mut info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);
+        if pushed {
+            info = info.flags(vk::DescriptorSetLayoutCreateFlags::PUSH_DESCRIPTOR_KHR);
+        }
         // SAFETY: `info` and its array are live for the call.
         kernel.set_layout =
             unsafe { raw.create_descriptor_set_layout(&info, None) }.map_err(vulkan)?;
@@ -667,6 +690,7 @@ fn make(
                     storage_images,
                     buffers,
                     push_bytes,
+                    pushed,
                 )),
                 |cache| {
                     // SAFETY: every pointer in `info` outlives the call; the pipeline cache is the

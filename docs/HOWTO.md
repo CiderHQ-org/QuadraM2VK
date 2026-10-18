@@ -246,6 +246,28 @@ subresource bound for that attachment"; lavapipe writes back the bytes its 4-tex
 past a row, a signaling NaN's bits quieted) may write, where Metal leaves them as the program writes
 them.
 
+A blit that names a texture over a buffer runs on the buffers' bytes, a region per row where its
+rows lie apart, and a buffer-texture copy in a layout Vulkan cannot state moves its rows through a
+staging buffer, as does a shadow's copy back where its texels start off their alignment (and a
+rotated texture's, and a heap's two-plane or tiled texture's), whether an encoder records it or a
+render pass between two of its instances. A driver may record each region as an operation of its
+own: on ANV the 1080 rows of a 1920-texel `BGRA8Unorm` texture took 3.1-3.3 ms of CPU and 5.3-7.8 ms
+of GPU on the Iris Xe of RPL-P. Where the device is measured to run it faster
+(`DriverFact::RowCopiesDispatchFaster`: ANV, there 0.3-0.4 ms and 1.1 ms, and NVIDIA's on the RTX
+5080 Laptop GPU, where 1080 rows took 2.0 ms of GPU as regions and 0.4 ms as one dispatch), a copy
+of 2 rows or more, each the same whole number of 4-byte words and the same distance after the one
+before, is one compute dispatch that writes the same bytes and no byte between the rows.
+`WorkCounts::row_copies`, `row_copy_regions`, `row_copy_regions_most` and `row_copies_dispatched`
+count these copies, their regions, the most in one, and those dispatched. `WorkCounts::copy_sites`
+names the places in the runtime that recorded copy commands, each with its calls, their regions and
+the most in one.
+
+A driver's recording CPU for one region of a copy between buffers may grow with its size at some
+sizes: on ANV's UHD 770 one region of 8,294,411 bytes took 28-40 ms, one of 8,294,400 bytes
+0.006-0.035 ms. So every region over 16 KiB whose size is no multiple of 4 KiB is recorded as two,
+its bytes up to the last whole multiple of 4 KiB and the rest, whichever part of the runtime
+records it (`WorkCounts::copy_regions_split`): among them a two-plane YCbCr texture's planes copied
+into its staging buffer, and a staged texture's bytes and rows.
 
 ## 7. Check the integration
 

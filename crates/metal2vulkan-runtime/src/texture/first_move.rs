@@ -1417,7 +1417,7 @@ impl Taken<'_> {
     /// one of the resources, on the same `VkQueue` or waited for.
     pub(crate) unsafe fn record(
         &self,
-        device: &ash::Device,
+        device: &Vk,
         command_buffer: vk::CommandBuffer,
         family: vk::QueueFlags,
     ) {

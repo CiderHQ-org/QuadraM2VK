@@ -503,7 +503,7 @@ impl CopySteps {
     /// # Safety
     ///
     /// `command_buffer` is recording outside a render pass, and only one encoder records it.
-    unsafe fn copy(&self, raw: &ash::Device, command_buffer: vk::CommandBuffer) {
+    unsafe fn copy(&self, raw: &Vk, command_buffer: vk::CommandBuffer) {
         // SAFETY: as the caller states; both buffers are live until the command buffer completes
         // (the encoder holds the Metal buffer, and the command buffer the new one), and the
         // region lies in both: the Metal buffer's length from the offset, and the new buffer's

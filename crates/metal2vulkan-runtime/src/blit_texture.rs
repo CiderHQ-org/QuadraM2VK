@@ -54,7 +54,7 @@
 //! - **Not yet:** a depth or stencil view of another format of its texture, other than the
 //!   stencil view `X32Stencil8` of `Depth32FloatStencil8`, is refused `NotImplemented`.
 
-use super::blit::{reads, writes, BlitCommandEncoder, TRANSFER};
+use super::blit::{reads, reads_by, writes, writes_by, BlitCommandEncoder, TRANSFER};
 use super::blit_plan::{
     plan_block_order_copy, plan_buffer_copy, plan_levels_copy, plan_region_copy, plan_rows_copy,
     plan_whole_copy, texel_layout, texel_rows, BufferCopyPlan, BufferImageRegion, BufferLayout,
@@ -75,6 +75,7 @@ use super::mipmap_plan::{leaves_as_is, not_implemented, plan_mipmaps, MipmapPlan
 use super::nan_clear;
 use super::pvrtc::{image_block_extent, image_buffer_region, image_region, is_pvrtc};
 use super::replay::{BlitCall, BufferToTexture, TextureToBuffer, TextureToTexture};
+use super::row_copies::RowCopies;
 use super::sample_copy;
 use super::sample_interleave;
 use super::sample_planes;
@@ -850,14 +851,18 @@ impl BlitCommandEncoder {
                     };
                     staging.rows.iter().map(|r| buffer_copy(&back(r))).collect()
                 };
+                let (src, dst) = if into_texture {
+                    (raw_buffer, through)
+                } else {
+                    (through, raw_buffer)
+                };
+                let device = self.core().device().clone();
+                let rows = RowCopies::new(&device, src, dst, rows);
                 let move_rows = |device: &Vk, raw: vk::CommandBuffer| {
-                    let (src, dst) = if into_texture {
-                        (raw_buffer, through)
-                    } else {
-                        (through, raw_buffer)
-                    };
-                    // SAFETY: as below; the rows lie in both buffers (checked by the plan).
-                    unsafe { device.cmd_copy_buffer(raw, src, dst, &rows) };
+                    // SAFETY: as below; the rows lie in both buffers (checked by the plan), the
+                    // staging buffer is another buffer, and the rows written are disjoint (out of
+                    // the texture, `later_rows_win`).
+                    unsafe { rows.record(device, raw) };
                 };
                 let copy_image = |device: &Vk, raw: vk::CommandBuffer| {
                     // SAFETY: the encoder's command buffer is recording; the scratch buffer and
@@ -892,13 +897,25 @@ impl BlitCommandEncoder {
                         }
                     }
                 };
+                let span = plan.span.clone();
                 if into_texture {
-                    self.command(&[buffer_use, writes(&scratch, whole.clone())], move_rows)?;
+                    let uses = [
+                        reads_by(buffer, span, rows.read()),
+                        writes_by(&scratch, whole.clone(), rows.write()),
+                    ];
+                    self.command_in(rows.stages(), &uses, move_rows)?;
                     self.command(&[reads(&scratch, whole), image_use], copy_image)?;
                 } else {
                     let uses = [image_use, writes(&scratch, whole.clone())];
                     self.command_reading(&uses, &fresh_reads, copy_image)?;
-                    self.command(&[reads(&scratch, whole), buffer_use], move_rows)?;
+                    let uses = [
+                        reads_by(&scratch, whole, rows.read()),
+                        writes_by(buffer, span, rows.write()),
+                    ];
+                    self.command_in(rows.stages(), &uses, move_rows)?;
+                }
+                if let Some(sets) = rows.retained() {
+                    self.core().retain(sets);
                 }
                 self.core().retain(scratch);
                 let (offset, format) = (plan.span.start, texture.pixel_format());
@@ -1595,6 +1612,7 @@ impl BlitCommandEncoder {
         // Read as a blit's (`host_residency.rs`): the command buffer holds the imports.
         let (src, src_base) = self.core().blit_at(source, 0)?;
         let (dst, dst_base) = self.core().blit_at(destination, 0)?;
+        let device = self.core().device().clone();
         // One buffer's bytes, or two no-copy buffers' made over the same bytes, which lie in one
         // import (`host_aliases.rs`): one `VkBuffer` from one byte 0.
         if (src, src_base) == (dst, dst_base) && copy.meets() {
@@ -1619,16 +1637,29 @@ impl BlitCommandEncoder {
                 });
                 packed += row.size;
             }
-            let [read, write] = uses;
-            self.command(&[read, writes(&scratch, 0..length)], |device, raw| {
+            let into = RowCopies::new(&device, src, through, into);
+            let uses = [
+                reads_by(source, copy.src_span.clone(), into.read()),
+                writes_by(&scratch, 0..length, into.write()),
+            ];
+            self.command_in(into.stages(), &uses, |device, raw| {
                 // SAFETY: the encoder's command buffer is recording; the buffers are live and
-                // retained until it completes, and the rows lie inside them.
-                unsafe { device.cmd_copy_buffer(raw, src, through, &into) };
+                // retained until it completes, the rows lie inside them, and the scratch buffer
+                // is another buffer.
+                unsafe { into.record(device, raw) };
             })?;
-            self.command(&[reads(&scratch, 0..length), write], |device, raw| {
+            let out_of = RowCopies::new(&device, through, dst, out_of);
+            let uses = [
+                reads_by(&scratch, 0..length, out_of.read()),
+                writes_by(destination, copy.dst_span.clone(), out_of.write()),
+            ];
+            self.command_in(out_of.stages(), &uses, |device, raw| {
                 // SAFETY: as above.
-                unsafe { device.cmd_copy_buffer(raw, through, dst, &out_of) };
+                unsafe { out_of.record(device, raw) };
             })?;
+            for sets in [into.retained(), out_of.retained()].into_iter().flatten() {
+                self.core().retain(sets);
+            }
             self.core().retain(scratch);
             let (from, to) = (copy.src_span.clone(), copy.dst_span.clone());
             self.core()
@@ -1651,12 +1682,21 @@ impl BlitCommandEncoder {
                     size: row.size,
                 })
                 .collect();
-            self.command(&uses, |device, raw| {
+            let rows = RowCopies::new(&device, src, dst, regions);
+            let uses = [
+                reads_by(source, copy.src_span.clone(), rows.read()),
+                writes_by(destination, copy.dst_span.clone(), rows.write()),
+            ];
+            self.command_in(rows.stages(), &uses, |device, raw| {
                 // SAFETY: the encoder's command buffer is recording; the buffers are live and
-                // retained until it completes, the rows lie inside them, and in one buffer no
-                // source row meets a destination row.
-                unsafe { device.cmd_copy_buffer(raw, src, dst, &regions) };
+                // retained until it completes, the rows lie inside them, the destination rows are
+                // disjoint (`RowsCopy::new`), and in one buffer no source row meets a destination
+                // row.
+                unsafe { rows.record(device, raw) };
             })?;
+            if let Some(sets) = rows.retained() {
+                self.core().retain(sets);
+            }
         }
         self.core().retain(source.clone());
         if source != destination {

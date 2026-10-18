@@ -13,7 +13,10 @@ use super::recorder::{CommandsReplayed, ReplayCounts};
 use super::shadow::{Backing, CopyCause, Lost, ShadowCopy, ShadowSource};
 use super::Device;
 use ash::vk;
+use std::panic::Location;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
+
 /// The texels of a texture over an IOSurface's plane from which its shadow's copies in count
 /// apart (`WorkCounts::shadow_texels_first_copied_in_large_surfaces`,
 /// `shadow_texels_recopied_in_large_surfaces`): 2^20, which a 1920x1080 framebuffer's exceed.
@@ -244,6 +247,10 @@ pub(crate) struct Counters {
     shadow_merge_copies_dispatched: AtomicU64,
     shadow_merge_scratches_reused: AtomicU64,
     shadow_merge_scratches_zeroed: AtomicU64,
+    row_copies: AtomicU64,
+    row_copy_regions: AtomicU64,
+    row_copy_regions_most: AtomicU64,
+    row_copies_dispatched: AtomicU64,
     shadow_merges_fetched: AtomicU64,
     shadow_attachment_passes: AtomicU64,
     shadow_attachment_textures: AtomicU64,
@@ -1578,6 +1585,19 @@ impl Counters {
             .fetch_add(1, Ordering::Relaxed);
     }
 
+    /// An encoder recorded a copy of `regions` rows between two buffers (`row_copies.rs`), as one
+    /// dispatch where `dispatched`.
+    pub(crate) fn row_copy(&self, regions: usize, dispatched: bool) {
+        let regions = regions as u64;
+        self.row_copies.fetch_add(1, Ordering::Relaxed);
+        self.row_copy_regions.fetch_add(regions, Ordering::Relaxed);
+        self.row_copy_regions_most
+            .fetch_max(regions, Ordering::Relaxed);
+        if dispatched {
+            self.row_copies_dispatched.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
     /// An encoder planned `n` keeps and merges of shadowed textures whose copies of the shadow
     /// into the merge's scratch are dispatches (`shadow_merge.rs`, `ShadowMerge::dispatches`).
     pub(crate) fn shadow_merge_copies_dispatched(&self, n: usize) {
@@ -1835,6 +1855,82 @@ impl Counters {
     }
 }
 
+/// How many places [`WorkCounts::copy_sites`] holds.
+pub(crate) const COPY_SITES: usize = 32;
+
+/// The places in the runtime that recorded copy commands through a device's functions
+/// (`device/functions.rs`), each with what it recorded: the first [`COPY_SITES`] they met; a
+/// place past them goes uncounted. With the `vkCmdCopyBuffer` regions those functions split.
+#[derive(Default)]
+pub(crate) struct CopySites(Mutex<Vec<CopySite>>, AtomicU64);
+
+impl CopySites {
+    /// Count a call of `command` of `regions` regions made at `at`.
+    pub(crate) fn count(&self, command: &'static str, at: &Location<'static>, regions: usize) {
+        let regions = regions as u64;
+        let (file, line) = (at.file(), at.line());
+        let mut sites = lock(&self.0);
+        let same =
+            |site: &CopySite| site.line == line && site.command == command && site.file == file;
+        match sites.iter().position(same) {
+            Some(at) => {
+                let site = &mut sites[at];
+                site.calls += 1;
+                site.regions += regions;
+                site.most = site.most.max(regions);
+            }
+            None if sites.len() < COPY_SITES => sites.push(CopySite {
+                command,
+                file,
+                line,
+                calls: 1,
+                regions,
+                most: regions,
+            }),
+            None => {}
+        }
+    }
+
+    /// Count `regions` regions split in two (`device/functions.rs`).
+    pub(crate) fn split(&self, regions: usize) {
+        self.1.fetch_add(regions as u64, Ordering::Relaxed);
+    }
+
+    /// The regions split so far.
+    pub(crate) fn regions_split(&self) -> u64 {
+        self.1.load(Ordering::Relaxed)
+    }
+
+    /// The places so far, in the order they were met, then empty entries.
+    pub(crate) fn read(&self) -> [CopySite; COPY_SITES] {
+        let mut read = [CopySite::default(); COPY_SITES];
+        for (into, site) in read.iter_mut().zip(lock(&self.0).iter()) {
+            *into = *site;
+        }
+        read
+    }
+}
+
+/// A place in the runtime that recorded copy commands, and what it recorded there
+/// (`WorkCounts::copy_sites`), for the lanes and benches: no Metal counterpart, not part of the
+/// API.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CopySite {
+    /// The command: `vkCmdCopyBuffer`, `vkCmdCopyBufferToImage`, `vkCmdCopyImageToBuffer` or
+    /// `vkCmdCopyImage`; empty in an entry no place took.
+    pub command: &'static str,
+    /// The runtime's source file that called it.
+    pub file: &'static str,
+    /// The line there.
+    pub line: u32,
+    /// The calls made there.
+    pub calls: u64,
+    /// Their regions.
+    pub regions: u64,
+    /// The most regions one of them had.
+    pub most: u64,
+}
+
 /// What a device's commit path did so far (`Device::work_counts`), for the lanes: not part of the
 /// API.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -1853,6 +1949,17 @@ pub struct WorkCounts {
     /// The commands their replays called, by kind, on whichever thread replayed them
     /// (`recorder`): one per call made into a `VkCommandBuffer`, the begins and ends among them.
     pub commands_replayed: CommandsReplayed,
+    /// The places in the runtime that recorded `vkCmdCopyBuffer`, `vkCmdCopyBufferToImage`,
+    /// `vkCmdCopyImageToBuffer` and `vkCmdCopyImage` through the device's functions, as encoders
+    /// and the runtime's own work recorded them (whichever thread replays them later): the first
+    /// 32 places met, each with its calls, their regions and the most regions one had. What
+    /// names the copy behind a recorder's time on a driver that records each region as an
+    /// operation of its own (`row_copies.rs`).
+    pub copy_sites: [CopySite; 32],
+    /// The `vkCmdCopyBuffer` regions over 16 KiB whose size is no multiple of 4 KiB that the
+    /// device's functions recorded as two, the bytes up to the last whole multiple of 4 KiB and
+    /// the rest (`device/functions.rs`), as a driver may record such a region slowly (ANV).
+    pub copy_regions_split: u64,
     /// Spare `VkCommandPool`s command buffers took, made by earlier ones. The pool is not reset
     /// where the command buffer that gave it back completed and ended every command buffer of it
     /// it was handed: each is reset as it is begun again.
@@ -2900,6 +3007,19 @@ pub struct WorkCounts {
     /// through a copy or of rows that start or end inside a word. A cut merge's copies write
     /// every byte its kernel reads, so its scratch is not zeroed.
     pub shadow_merge_scratches_zeroed: u64,
+    /// Copies of rows of bytes between two buffers (`row_copies.rs`): a blit between a buffer and
+    /// a texture over a buffer or between two textures over buffers, and a buffer-texture copy's
+    /// rows through its staging buffer. Each is one `vkCmdCopyBuffer` of a region per row (rows
+    /// contiguous in both buffers one region), or one dispatch.
+    pub row_copies: u64,
+    /// The regions of those copies.
+    pub row_copy_regions: u64,
+    /// The most regions of one of them.
+    pub row_copy_regions_most: u64,
+    /// Of `row_copies`, those recorded as one compute dispatch that stores the same bytes, on a
+    /// device that runs it faster (`DriverFact::RowCopiesDispatchFaster`): at least 2 equal rows
+    /// of 4-byte words, each the same distance after the one before.
+    pub row_copies_dispatched: u64,
     /// The merges of shadowed textures that fetch the texels after the commands from the shadow
     /// through its unsigned-integer view, comparing them with the kept texels, in place of a copy
     /// of them into the scratch (`shadow_merge.rs`): a cut merge whose shadow has the view.
@@ -3103,6 +3223,8 @@ impl Device {
             command_buffers_replayed: replays.by_recorder,
             command_buffers_replayed_inline: replays.by_submitter,
             commands_replayed: replays.commands,
+            copy_sites: self.shared().vk().copy_sites(),
+            copy_regions_split: self.shared().vk().copy_regions_split(),
             spare_command_pools_taken: counters.spare_command_pools_taken.load(Ordering::Relaxed),
             spare_command_pools_reset: counters.spare_command_pools_reset.load(Ordering::Relaxed),
             live_tables_uploaded: counters.live_tables_uploaded.load(Ordering::Relaxed),
@@ -3501,6 +3623,10 @@ impl Device {
             shadow_merge_scratches_zeroed: counters
                 .shadow_merge_scratches_zeroed
                 .load(Ordering::Relaxed),
+            row_copies: counters.row_copies.load(Ordering::Relaxed),
+            row_copy_regions: counters.row_copy_regions.load(Ordering::Relaxed),
+            row_copy_regions_most: counters.row_copy_regions_most.load(Ordering::Relaxed),
+            row_copies_dispatched: counters.row_copies_dispatched.load(Ordering::Relaxed),
             shadow_merges_fetched: counters.shadow_merges_fetched.load(Ordering::Relaxed),
             shadow_attachment_passes: counters.shadow_attachment_passes.load(Ordering::Relaxed),
             shadow_attachment_textures: counters.shadow_attachment_textures.load(Ordering::Relaxed),

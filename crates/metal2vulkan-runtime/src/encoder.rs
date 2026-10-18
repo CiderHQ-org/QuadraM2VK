@@ -41,6 +41,7 @@ use super::replay::Replay;
 use super::residency::Residency;
 use super::resource::ResourceKey;
 use super::retained::Retained;
+use super::row_copies::RowCopies;
 use super::shadow::{CopyCause, ShadowCopy, ShadowSync, ShadowUse, Step, Within};
 use super::shadow_copy_in::CopyIn;
 use super::shadow_merge::ShadowMerge;
@@ -1103,26 +1104,37 @@ impl EncoderCore {
             }
             // A shadow takes the view a dispatch reads on a device that dispatches alone.
             let dispatched = copy.dispatched(&device);
+            let rows = match dispatched {
+                Some(_) => None,
+                None => copy.staged_back(&device),
+            };
             let (stages, uses) = match &dispatched {
                 Some(_) => (
                     vk::PipelineStageFlags2::COMPUTE_SHADER,
                     copy.dispatched_uses(),
                 ),
-                None => (copy.stages(), copy.uses()),
+                None => (
+                    copy.stages_with(rows.as_ref()),
+                    copy.uses_with(rows.as_ref()),
+                ),
             };
             let record = |device: &Vk, raw: vk::CommandBuffer| match &dispatched {
                 // SAFETY: the encoder's command buffer is recording outside a render pass; its
                 // commands retain the shadowed textures (and their views) and the dispatch until
                 // it completes, and every image rests in the `GENERAL` layout.
                 Some(back) => unsafe { back.record(device, raw) },
-                // SAFETY: as above.
-                None => unsafe { copy.record(device, raw) },
+                // SAFETY: as above; the rows are the copy's own, made just now.
+                None => unsafe { copy.record(device, raw, rows.as_ref()) },
             };
             self.shadow_command(&mut run, (stages, &uses, copy.writes_truth()), record);
             if let Some(back) = dispatched {
                 device.shared().counts.shadow_copy_back_dispatched();
                 self.retain(back);
             }
+            if let Some(sets) = rows.and_then(RowCopies::retained) {
+                self.retain(sets);
+            }
+        }
         if run.recorded() {
             self.barrier(Barrier::everything());
         }
@@ -1180,7 +1192,8 @@ impl EncoderCore {
         let raw = device.shared().vk();
         let mut run = ShadowRun::after_barrier();
         for copy in copies {
-            let uses = copy.uses();
+            let rows = copy.staged_back(&device);
+            let uses = copy.uses_with(rows.as_ref());
             if self.skips(uses.iter().map(|used| used.key)) {
                 continue;
             }
@@ -1189,15 +1202,21 @@ impl EncoderCore {
             let before = run.before(tracked, copy.writes_truth());
             // SAFETY: the held command buffer is recording outside a render pass instance (the
             // caller ended the one before), and only this encoder records it; its commands retain
-            // the shadowed textures (and their views) until it completes, and every image rests
-            // in the `GENERAL` layout.
+            // the shadowed textures (and their views) and the rows' set until it completes, and
+            // every image rests in the `GENERAL` layout.
             unsafe {
                 if before {
                     Barrier::everything().record(raw, held);
                 }
+                copy.record(raw, held, rows.as_ref());
             }
+            let stages = copy.stages_with(rows.as_ref());
             self.uses.record(stages, tracked, None);
             self.touch(&uses);
+            if let Some(sets) = rows.and_then(RowCopies::retained) {
+                self.retain(sets);
+            }
+        }
         if run.recorded() {
             // SAFETY: as above.
             unsafe { Barrier::everything().record(raw, held) };

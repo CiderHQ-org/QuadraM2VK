@@ -78,15 +78,32 @@ pub(super) const TRANSFER: vk::PipelineStageFlags2 = vk::PipelineStageFlags2::TR
 
 /// A blit command's read of `range` of `buffer`.
 pub(super) fn reads(buffer: &Buffer, range: Range<u64>) -> Use<ResourceKey> {
-    let (identity, range) = buffer.tracked(range);
-    let read = Access::new(TRANSFER, vk::AccessFlags2::TRANSFER_READ);
-    Use::reads(identity.key, identity.tracked, UseRange::Bytes(range), read)
+    reads_by(
+        buffer,
+        range,
+        Access::new(TRANSFER, vk::AccessFlags2::TRANSFER_READ),
+    )
 }
 
 /// A blit command's write of `range` of `buffer`.
 pub(super) fn writes(buffer: &Buffer, range: Range<u64>) -> Use<ResourceKey> {
+    writes_by(
+        buffer,
+        range,
+        Access::new(TRANSFER, vk::AccessFlags2::TRANSFER_WRITE),
+    )
+}
+
+/// A blit command's read of `range` of `buffer` as `read` (a copy of rows that dispatches reads
+/// in a shader, `row_copies.rs`).
+pub(super) fn reads_by(buffer: &Buffer, range: Range<u64>, read: Access) -> Use<ResourceKey> {
     let (identity, range) = buffer.tracked(range);
-    let write = Access::new(TRANSFER, vk::AccessFlags2::TRANSFER_WRITE);
+    Use::reads(identity.key, identity.tracked, UseRange::Bytes(range), read)
+}
+
+/// A blit command's write of `range` of `buffer` as `write` ([`reads_by`]).
+pub(super) fn writes_by(buffer: &Buffer, range: Range<u64>, write: Access) -> Use<ResourceKey> {
+    let (identity, range) = buffer.tracked(range);
     Use::writes(
         identity.key,
         identity.tracked,

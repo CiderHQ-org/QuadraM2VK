@@ -614,6 +614,8 @@ surface! {
         enum ShadowTexelView E;
         fn shadow_copy_in_module;
         struct ShadowCopyInModule N;
+        fn rows_copy_module;
+        struct RowsCopyModule N;
         fn shadow_merge_module;
         struct ShadowMergeModule N;
         fn shadow_merge_image_module;
