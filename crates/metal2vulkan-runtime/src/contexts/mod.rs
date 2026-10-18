@@ -4,14 +4,11 @@
 //! - **What a context runs.** In its queue's order, each command buffer's transitions: to
 //!   `Scheduled` with its scheduled handlers, and to `Completed` (or `Error`) with its completed
 //!   handlers and the release of what it retained. The scheduler posts them ([`Contexts::post`]),
-//!   and so does a completion turn, but for a transition that runs none of the program's code,
-//!   which the turn runs itself where the context runs on no thread and holds only such
-//!   transitions, in order after them ([`Contexts::run_here`], `command_buffer/completion.rs`);
-//!   neither runs a handler. (A transition to `Scheduled` waits for its command buffer's
-//!   submission handlers, which the thread that submitted its last batch runs.) A release the
-//!   scheduler's thread hands off (`Device::let_go_elsewhere`) runs in a context of its own,
-//!   behind no queue's handlers.
-//! - **Metal's order** (measured on an M4, macOS 27.0.1, EV `RT4-metal-order`): while one of a
+//!   and so does a completion turn, but for a transition that runs none of the program's code: the
+//!   turn runs such a transition to `Completed` itself where the context runs on no thread and
+//!   for its command buffer's submission handlers, which the thread that took its last batch for
+//!   its queue runs.) A release the scheduler's thread hands off (`Device::let_go_elsewhere`) runs
+//!   in a context of its own, behind no queue's handlers.
 //!   queue's handlers blocks, the queue's later transitions wait, even of a command buffer whose
 //!   work already ran; another queue's transitions and handlers go on, on another thread. Metal
 //!   ran 256 queues' handlers blocked at once, on 256 threads, and reached no limit.

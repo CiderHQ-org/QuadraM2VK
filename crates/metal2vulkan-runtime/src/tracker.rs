@@ -29,6 +29,12 @@
 //! image outside them, which the plan orders as any other. An access after one of the same
 //! `VkQueue` needs a [`Barrier`]: one global memory barrier, everything in `src` before everything
 //! in `dst`, which orders buffer and image memory alike; Vulkan's submission order on one
+//! `VkQueue` makes it cover the earlier batches of every logical queue there. A tracker that
+//! orders batches by their ends ([`Tracker::by_ends`], `batch_order.rs`) plans none after an
+//! access of an earlier batch of the same `VkQueue`: every batch there ends with
+//! [`Barrier::to_all`], every write before every access of every later command, which submission
+//! order makes cover the later batches of every logical queue (an execution dependency on every
+//! stage, so a write after an earlier batch's read is ordered too). An access after one
 //! of another `VkQueue` needs a [`Wait`] of its batch for that queue's timeline semaphore at the
 //! earlier batch's [`Point`]: the signal makes the earlier writes available and the wait makes
 //! them visible to the waiting stages of this batch and of every later one of its queue. That
@@ -343,6 +349,26 @@ impl Barrier {
             dst: Access::new(
                 vk::PipelineStageFlags2::HOST,
                 vk::AccessFlags2::HOST_READ | vk::AccessFlags2::HOST_WRITE,
+            ),
+        }
+    }
+
+    /// The end of every batch where batches are ordered by their ends (`batch_order.rs`):
+    /// [`to_host`](Barrier::to_host)'s, and every earlier command before every access of every
+    /// later command of its `VkQueue`, so later batches there need no barrier from its accesses
+    /// ([`Tracker`]'s module docs).
+    pub(super) fn to_all() -> Barrier {
+        Barrier {
+            src: Access::new(
+                vk::PipelineStageFlags2::ALL_COMMANDS,
+                vk::AccessFlags2::MEMORY_WRITE,
+            ),
+            dst: Access::new(
+                vk::PipelineStageFlags2::HOST | vk::PipelineStageFlags2::ALL_COMMANDS,
+                vk::AccessFlags2::HOST_READ
+                    | vk::AccessFlags2::HOST_WRITE
+                    | vk::AccessFlags2::MEMORY_READ
+                    | vk::AccessFlags2::MEMORY_WRITE,
             ),
         }
     }
@@ -747,19 +773,23 @@ impl Entry {
         entry
     }
 
-    /// What a use at `at` of this entry's range needs ordered before it.
-    fn depend(&self, read: Access, write: Access, at: Point, needs: &mut Needs) {
+    /// What a use at `at` of this entry's range needs ordered before it, where the accesses of
+    /// its queue's batches below `since` are ordered by their ends (0 where none is).
+    fn depend(&self, read: Access, write: Access, (at, since): (Point, u64), needs: &mut Needs) {
         if !read.is_empty() {
-            self.after_writes(read, at, needs);
+            self.after_writes(read, (at, since), needs);
         }
         if !write.is_empty() {
-            self.after_writes(write, at, needs);
+            self.after_writes(write, (at, since), needs);
             for reads in self.reads.iter() {
                 if reads.at.queue == at.queue {
-                    needs.barrier.add(
-                        Access::new(reads.stages, vk::AccessFlags2::NONE),
-                        Access::new(write.stages, vk::AccessFlags2::NONE),
-                    );
+                    // Reads of a batch ordered by its end need nothing.
+                    if reads.at.value >= since {
+                        needs.barrier.add(
+                            Access::new(reads.stages, vk::AccessFlags2::NONE),
+                            Access::new(write.stages, vk::AccessFlags2::NONE),
+                        );
+                    }
                 } else {
                     add_wait(
                         &mut needs.waits,
@@ -774,11 +804,12 @@ impl Entry {
     }
 
     /// What `access` at `at` needs after the last writes: a barrier from a write of its own
-    /// queue not yet visible to it, and a wait for a write of another queue not yet waited for.
-    fn after_writes(&self, access: Access, at: Point, needs: &mut Needs) {
+    /// queue not yet visible to it (a write of a batch below `since` its batch's end made
+    /// visible), and a wait for a write of another queue not yet waited for.
+    fn after_writes(&self, access: Access, (at, since): (Point, u64), needs: &mut Needs) {
         for writer in self.writers.iter() {
             if writer.at.queue == at.queue {
-                if !writer.visible.covers(access) {
+                if writer.at.value >= since && !writer.visible.covers(access) {
                     needs.barrier.add(self.write, access);
                 }
             } else if !writer.waited_by(at.queue).contains(access.stages) {
@@ -891,13 +922,13 @@ impl<S: Eq + Hash, H: BuildHasher> Entries<S> for HashMap<S, Vec<Entry>, H> {
 }
 
 /// What the uses (sorted by key, one per key and range) at `at` need after the accesses in
-/// `state`.
-fn depend<S>(state: &impl Entries<S>, uses: &[Use<S>], at: Point) -> Needs {
+/// `state`, those of its queue's batches below `since` ordered by their ends.
+fn depend<S>(state: &impl Entries<S>, uses: &[Use<S>], (at, since): (Point, u64)) -> Needs {
     let mut needs = Needs::default();
     for used in uses {
         for entry in state.of(&used.key).into_iter().flatten() {
             if entry.range.overlaps(&used.range) {
-                entry.depend(used.read, used.write, at, &mut needs);
+                entry.depend(used.read, used.write, (at, since), &mut needs);
             }
         }
     }
@@ -1091,7 +1122,7 @@ impl<K: Copy + Ord + Hash> EncoderUses<K> {
             return None;
         }
         // One encoder runs on one queue: its commands need barriers, never waits.
-        depend(&self.inside, &inside_uses(uses), Point::default())
+        depend(&self.inside, &inside_uses(uses), (Point::default(), 0))
             .barrier
             .needed()
     }
@@ -1802,6 +1833,9 @@ pub(super) struct Tracker<K> {
     /// Lists a plan applied before gave back, cleared, for the next plans to fill
     /// ([`Spares`]).
     spares: Spares<K>,
+    /// Every batch ends with [`Barrier::to_all`], so the accesses of earlier batches of a
+    /// `VkQueue` need no barrier there ([`Tracker::by_ends`]).
+    by_ends: bool,
 }
 
 /// A resource or a fence an applied plan touched ([`Tracker::touched`]).
@@ -1870,6 +1904,7 @@ impl<K> Default for Tracker<K> {
             completed: Vec::new(),
             touched: Vec::new(),
             spares: Spares::default(),
+            by_ends: false,
         }
     }
 }
@@ -1985,6 +2020,26 @@ impl<K> Plan<K> {
     }
 }
 
+impl<K> Tracker<K> {
+    /// A tracker of a device whose batches each end with [`Barrier::to_all`] (`batch_order.rs`):
+    /// it plans no barrier after an access of an earlier batch of the same `VkQueue`.
+    pub(super) fn by_ends() -> Tracker<K> {
+        Tracker {
+            by_ends: true,
+            ..Tracker::default()
+        }
+    }
+
+    /// The value below which the batches of `at`'s queue are ordered by their ends: `at`'s own
+    /// where every batch ends with [`Barrier::to_all`], else 0.
+    fn since(&self, at: Point) -> u64 {
+        match self.by_ends {
+            true => at.value,
+            false => 0,
+        }
+    }
+}
+
 impl<K: Copy + Ord + Hash> Tracker<K> {
     /// Every batch of `queue` through timeline value `value` completed, and the host saw it: the
     /// state forgets what they did. Only the resources and fences those batches touched are looked
@@ -2043,6 +2098,7 @@ impl<K: Copy + Ord + Hash> Tracker<K> {
     where
         K: 'a,
     {
+        let since = self.since(at);
         let spares = &mut self.spares;
         let PlanLists {
             barriers,
@@ -2073,13 +2129,16 @@ impl<K: Copy + Ord + Hash> Tracker<K> {
                     // The stages the call names wait, and the encoder's work outside its draws.
                     let stages = wait.covered(summary.stages);
                     if update.at.queue == at.queue {
-                        barrier.add(
-                            Access::new(update.stages, vk::AccessFlags2::MEMORY_WRITE),
-                            Access::new(
-                                summary.stages,
-                                vk::AccessFlags2::MEMORY_READ | vk::AccessFlags2::MEMORY_WRITE,
-                            ),
-                        );
+                        // An update of a batch ordered by its end needs nothing.
+                        if update.at.value >= since {
+                            barrier.add(
+                                Access::new(update.stages, vk::AccessFlags2::MEMORY_WRITE),
+                                Access::new(
+                                    stages,
+                                    vk::AccessFlags2::MEMORY_READ | vk::AccessFlags2::MEMORY_WRITE,
+                                ),
+                            );
+                        }
                     } else {
                         add_wait(
                             &mut plan.waits,
@@ -2103,8 +2162,8 @@ impl<K: Copy + Ord + Hash> Tracker<K> {
                 }
             }
             let needs = match alone {
-                true => depend(&self.resources, &summary.uses, at),
-                false => depend(&plan.resources, &summary.uses, at),
+                true => depend(&self.resources, &summary.uses, (at, since)),
+                false => depend(&plan.resources, &summary.uses, (at, since)),
             };
             barrier.add(needs.barrier.src, needs.barrier.dst);
             for wait in needs.waits {

@@ -241,6 +241,10 @@ pub(super) struct DeviceShared {
     /// submissions stall on semaphore operations (`DriverFact::SemaphoreOperationsStallSubmits`,
     /// `command_buffer/submit.rs`).
     pub(super) completed_by_barrier: bool,
+    /// Each batch ends with `Barrier::to_all`, so a later batch of its `VkQueue` plans no barrier
+    /// for its accesses, and a batch's start timestamp is written at the bottom of the pipe
+    /// (`batch_order.rs`).
+    pub(crate) by_ends: bool,
     /// The last sparse binding of a no-copy buffer's dma-bufs (`dma_buf.rs`) the host has not
     /// seen complete: the internal timeline and the value it signals, which every later
     /// submission that may use the buffer waits for (`submit.rs`).
@@ -672,6 +676,10 @@ pub(super) struct QueueSlot {
     /// The value of the last batch submitted here: what the exit hook waits for on a device
     /// whose queues run in this process ([`exit_guard::InProcess`]).
     submitted: AtomicU64,
+    /// The value of the submission before the last that signalled the timeline here: while it is
+    /// not seen complete, two or more submissions here are in flight
+    /// ([`pending_beyond_one`](Self::pending_beyond_one)).
+    submitted_before: AtomicU64,
 }
 
 impl QueueSlot {
@@ -694,9 +702,23 @@ impl QueueSlot {
     }
 
     /// A batch signalling `value` was submitted here, inside its section of the exit guard: the
-    /// hook, which waits for that section, sees it.
+    /// hook, which waits for that section, sees it. Submissions here are made under the queue's
+    /// lock, so the last two values move together.
     pub(super) fn submitted(&self, value: u64) {
-        self.submitted.fetch_max(value, Ordering::AcqRel);
+        let before = self.submitted.fetch_max(value, Ordering::AcqRel);
+        if before < value {
+            self.submitted_before.store(before, Ordering::Release);
+        }
+    }
+
+    /// Where two or more submissions that signalled the timeline here are not seen complete, the
+    /// value of the one before the last, whose completion leaves one in flight: each submission
+    /// signals a higher value, and the timeline completes them in order
+    /// (`command_buffer/group.rs`). Read without the queue's lock, so a submission made meanwhile
+    /// is seen or not.
+    pub(super) fn pending_beyond_one(&self) -> Option<u64> {
+        let before = self.submitted_before.load(Ordering::Acquire);
+        (self.completed_value() < before).then_some(before)
     }
 
     /// The value of the last batch submitted here; 0 before the first.
@@ -998,9 +1020,13 @@ impl Device {
                 }
             }
         }
+        // Each batch ends with a barrier that orders all its commands before every later one of
+        // its queue, where the driver runs a queue's submissions one after another anyway
+        // (`batch_order.rs`).
+        let by_ends = crate::batch_order::by_ends(compile.policy(), description.driver_id);
         let threads = Contexts::start(THREADS).and_then(|contexts| {
             match Completion::start(queue_places.len()) {
-                Ok(completion) => match Scheduler::start(queue_places.len()) {
+                Ok(completion) => match Scheduler::start(queue_places.len(), by_ends) {
                     Ok(scheduler) => Ok((contexts, completion, scheduler)),
                     Err(error) => {
                         completion.stop();
@@ -1050,6 +1076,7 @@ impl Device {
                     timeline,
                     completed: AtomicU64::new(0),
                     submitted: AtomicU64::new(0),
+                    submitted_before: AtomicU64::new(0),
                 }
             })
             .collect();
@@ -1435,6 +1462,7 @@ impl Device {
             internal_done: OwnTimeline::default(),
             staging_done: OwnTimeline::default(),
             completed_by_barrier,
+            by_ends,
             bound_at: Mutex::new(None),
             staging,
             scheduler,

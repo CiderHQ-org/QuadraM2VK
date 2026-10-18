@@ -19,7 +19,13 @@
 //!   thread, without its own lock or the command buffer's, it then runs the check of each
 //!   submission that begins in the batch, and again of each that a host step of the batch
 //!   recorded commands for (what they reach is known only then), then submits the batch in its
-//!   order.
+//!   order. Where the scheduler groups batches (`CompletionPolicy::Grouped` on a driver that
+//!   merges submissions, `group.rs`), it runs the checks of up to three batches right behind a
+//!   head that goes with the head's, in commit order, each once its batch is otherwise ready and
+//!   its events' values reached on the device or by the host, none committed after another
+//!   queue's batch: so they go to the driver together. Such a check runs before the previous
+//!   batch's `vkQueueSubmit`, in the pass that submits its own batch, where alone it runs after
+//!   it. `CompletionPolicy::Exact` checks each head alone.
 //! - **Stricter than Metal: the re-check after a host step.** Metal checks a submission once,
 //!   with what it knows as it submits it, and cannot know what the commands the GPU writes into
 //!   an indirect command buffer reach before they run (an earlier encoder of the same submission

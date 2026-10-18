@@ -68,17 +68,17 @@
 //!   every light queue's burst of the queue storm (`runtime_lane::queue_storms`) into its tail.
 //!   While its waiter makes a turn, a queue's next batch waits for that turn to end before its wait
 //!   begins; its fence and value stay signaled meanwhile.
-//! - **Published once a host wait returned for it** ([`seen`]). The host sees a batch's writes
-//!   once the batch completed: its last command buffer makes them available to the host
-//!   (`Barrier::to_host`), before its signal in submission order, and the host's reads come after
-//!   a host wait for that signal. Vulkan orders host operations after a signal only through a
-//!   wait: "signal operations happening before host operations that wait on them"
-//!   system-synchronize-with them (the memory model), and a fence's "execution dependency is
-//!   defined by waiting for a fence to become signaled, either via `vkWaitForFences` or by
-//!   polling on `vkGetFenceStatus`". It gives `vkGetSemaphoreCounterValue` no such dependency (its
-//!   value "may immediately be out of date"). So a value the read shows past the one a wait
-//!   returned for (later batches that completed meanwhile, or the front's after a wait that ran
-//!   out) is waited for in turn, a wait that returns at once ("If the condition is satisfied when
+//! - **Published once a host wait returned for it** ([`seen`]). The host sees a batch's writes once
+//!   the batch completed: its last command buffer makes them available to the host
+//!   (`Barrier::to_host`, or `Barrier::to_all`), before its signal in submission order, and the
+//!   host's reads come after a host wait for that signal. Vulkan orders host operations after a
+//!   signal only through a wait: "signal operations happening before host operations that wait on
+//!   them" system-synchronize-with them (the memory model), and a fence's "execution dependency is
+//!   defined by waiting for a fence to become signaled, either via `vkWaitForFences` or by polling
+//!   on `vkGetFenceStatus`". It gives `vkGetSemaphoreCounterValue` no such dependency (its value
+//!   "may immediately be out of date"). So a value the read shows past the one a wait returned for
+//!   (later batches that completed meanwhile, or the front's after a wait that ran out) is waited
+//!   for in turn, a wait that returns at once ("If the condition is satisfied when
 //!   `vkWaitSemaphores` is called, then `vkWaitSemaphores` returns immediately"), before it is
 //!   published: one call more, and only where the read ran ahead.
 //! - **Waits are bounded.** A waiter waits at most [`WAIT_SLICE`] at a time, so a stop is seen

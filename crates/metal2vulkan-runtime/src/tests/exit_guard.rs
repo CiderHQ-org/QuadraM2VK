@@ -1060,7 +1060,7 @@ fn the_threads_that_take_command_buffers_to_their_handlers_run_at_the_user_inter
                     let _ = note.send((name, qos_class_self()));
                 }));
             });
-            let scheduler = Scheduler::start(1).unwrap();
+            let scheduler = Scheduler::start(1, false).unwrap();
             let completion = Completion::start(2).unwrap();
             // The pool's first thread runs an item that blocks; another queue's item then starts
             // a thread of its own.
@@ -1219,7 +1219,7 @@ fn the_threads_that_take_command_buffers_to_their_handlers_run_with_the_utilizat
                     let _ = note.send((name, with_child()));
                 }));
             });
-            let scheduler = Scheduler::start(1).unwrap();
+            let scheduler = Scheduler::start(1, false).unwrap();
             let completion = Completion::start(2).unwrap();
             // The pool's first thread runs an item that blocks; another queue's item then starts
             // a thread of its own.

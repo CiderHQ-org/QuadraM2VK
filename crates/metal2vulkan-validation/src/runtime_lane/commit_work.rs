@@ -35,12 +35,13 @@
 //!   Previously a pool given back past the spares (or that made more than 64 command buffers) was
 //!   destroyed as its command buffer completed, where NVIDIA 615.71.09's `vkDestroyCommandPool`
 //!   intermittently never returned.
-//! - **The end in the work.** A batch that signals no event ends in its last command buffer: the
-//!   barrier to the host (and a timed command buffer's end timestamp) go there as the batch
-//!   ends, and its submission holds no end of its own (`WorkCounts::finales_folded`); before, each
-//!   batch's end was a command buffer of its own, about 9 us of GPU time on an Iris Xe. A batch
-//!   that signals an event keeps its end apart (`WorkCounts::finales_apart`). The host reads what
-//!   either wrote once it completed.
+//! - **The end in the work.** A batch ends in its last command buffer: the barrier to the host
+//!   (and a timed command buffer's end timestamp) go there as the batch ends, and its submission
+//!   holds no end of its own (`WorkCounts::finales_folded`), an event's signal included; before,
+//!   each batch's end was a command buffer of its own, about 9 us of GPU time on an Iris Xe. Only
+//!   an event's signal that waits for another `VkQueue`'s earlier one, still pending, keeps an
+//!   end apart, after that wait (`WorkCounts::finales_apart`). The host reads what either wrote
+//!   once it completed.
 //! - **Completed work, waited for.** A batch's submission waits for each timeline whose
 //!   completed value the host saw move since a batch of its `VkQueue` last waited for it, each
 //!   queue's and the device's own (`WorkCounts::completed_waits`), which makes what completed
@@ -51,6 +52,15 @@
 //!   semaphore operations (`DriverFact::SemaphoreOperationsStallSubmits`) each still begins with
 //!   that command buffer and waits for nothing completed. Copies read what completed fills on
 //!   another command queue and a host copy into a texture wrote.
+//! - **Batches of one queue, ordered by their ends** (`BatchOrderPolicy::Ends`, on a driver
+//!   measured to run a queue's submissions one after another: [`orders_by_ends`]). Every batch
+//!   ends with a barrier from every write to the host's accesses and to every later command of
+//!   its `VkQueue`, so a batch there plans no barrier from an earlier batch's accesses, still in
+//!   flight or not: a chain of command buffers on one command queue, each copying what the one
+//!   before wrote while a long fill ahead of them runs, each begins with no command buffer of
+//!   barriers (`WorkCounts::bare_starts`), and the last reads the first's fill. Under
+//!   `BatchOrderPolicy::Exact`, and on any other driver, each but the first begins with one that
+//!   orders it after the batch before, and reads the same bytes.
 //! - **Addressable buffers**. The program's buffers take their device addresses from their memory
 //!   blocks, so making them makes no buffer with the device-address usage beyond a new block's;
 //!   before, each was one, which MoltenVK made resident one by one in every encoder whose pipeline
@@ -58,9 +68,10 @@
 
 use super::degrade_notices::{on_device, on_device_with};
 use super::{bound_buffers, encode_case, pipeline_state, public_case, CaseResources, WAIT};
-use metal2vulkan::device::DriverFact;
+use metal2vulkan::device::{BatchOrderPolicy, DriverFact};
 use metal2vulkan::error::RuntimeDriverDefect;
 use metal2vulkan::metal::{PixelFormat, TextureUsage};
+use metal2vulkan::vk::DriverId;
 use metal2vulkan_runtime::{
     BlitOption, Buffer, CommandBuffer, CommandBufferStatus, CommandQueue, Device, EventRef, Origin,
     Region, ResourceOptions, Size, TextureDescriptor,
@@ -302,10 +313,13 @@ fn bytes(buffer: &Buffer) -> Vec<u8> {
     unsafe { std::slice::from_raw_parts(contents.as_ptr(), buffer.length() as usize) }.to_vec()
 }
 
-/// A fill's batch ends in the fill's own command buffer, and one that signals an event in a
-/// command buffer of its own (the module docs): the host reads each fill once it completed.
+/// A fill's batch ends in the fill's own command buffer, one that signals an event too (the
+/// module docs): the host reads each fill once it completed. A fill on a second queue that signals
+/// the next value of an event a first queue's fill signalled just before ends once, in its work
+/// or, where its signal waits for the first's still pending on another `VkQueue`, apart; the
+/// event reaches the second value.
 #[test]
-fn a_batch_ends_in_its_last_command_buffer_unless_it_signals_an_event() {
+fn a_batch_ends_in_its_last_command_buffer() {
     on_device(|device, _| {
         let queue = device.new_command_queue().unwrap();
         let buffer = device.new_buffer(4096, ResourceOptions::shared()).unwrap();
@@ -334,10 +348,45 @@ fn a_batch_ends_in_its_last_command_buffer_unless_it_signals_an_event() {
         assert_eq!(filled(0x11, None), (1, 0), "a fill");
         assert_eq!(
             filled(0x22, Some(1)),
-            (0, 1),
+            (1, 0),
             "a fill that signals an event"
         );
         assert_eq!(filled(0x33, None), (1, 0), "a fill after it");
+        // Across two queues, the second's signal right after the first's.
+        let other = device.new_command_queue().unwrap();
+        let event = device.new_shared_event().unwrap();
+        let large = device
+            .new_buffer(64 << 20, ResourceOptions::private())
+            .unwrap();
+        let before = device.work_counts();
+        let signalled: Vec<CommandBuffer> = [(&queue, &large, 1), (&other, &buffer, 2)]
+            .into_iter()
+            .map(|(on, target, value)| {
+                let command_buffer = on.command_buffer().unwrap();
+                let mut blit = command_buffer.blit_command_encoder().unwrap();
+                blit.fill_buffer(target, 0..target.length(), 0x44).unwrap();
+                blit.end_encoding().unwrap();
+                command_buffer
+                    .encode_signal_event(EventRef::from(&event), value)
+                    .unwrap();
+                command_buffer.commit().unwrap();
+                command_buffer
+            })
+            .collect();
+        for command_buffer in &signalled {
+            command_buffer.wait_until_completed_for(WAIT).unwrap();
+            assert_eq!(command_buffer.status(), CommandBufferStatus::Completed);
+        }
+        let after = device.work_counts();
+        assert!(bytes(&buffer).iter().all(|&b| b == 0x44), "the second fill");
+        assert!(
+            event.wait_until_signaled_value(2, WAIT),
+            "{}",
+            event.signaled_value()
+        );
+        let ends = (after.finales_folded - before.finales_folded)
+            + (after.finales_apart - before.finales_apart);
+        assert_eq!(ends, 2, "one end each");
     });
 }
 
@@ -444,6 +493,125 @@ fn batches_with_nothing_planned_wait_for_completed_work_instead_of_a_barrier() {
                 &bytes(&read)[..texels.len()],
                 &texels[..],
                 "the texture's bytes"
+            );
+        },
+    );
+}
+
+/// Whether a device of the driver orders its batches by their ends under `batch_order`: the
+/// runtime's table of drivers measured to run a queue's submissions one after another
+/// (`batch_order.rs`).
+pub(super) fn orders_by_ends(device: &Device, batch_order: BatchOrderPolicy) -> bool {
+    batch_order == BatchOrderPolicy::Ends
+        && matches!(
+            device.properties().description.driver_id,
+            Some(
+                DriverId::INTEL_OPEN_SOURCE_MESA
+                    | DriverId::MESA_RADV
+                    | DriverId::NVIDIA_PROPRIETARY
+            )
+        )
+}
+
+/// Under the default, on a device made with `gpu_times_from_host` (so no start timestamp is
+/// written before a batch's work): a long fill, waiting for a shared event, then a chain of
+/// command buffers on the same command queue, each copying what the one before wrote, the first
+/// copying the long one's last fill; the host raises the event once all are committed, so none
+/// is complete as the next is planned. Where the device orders batches by their ends, every batch
+/// begins with no command buffer of barriers, as the end of the batch before orders it (the
+/// module docs), and the chain's last copy reads the long one's fill. Elsewhere
+/// [`batches_of_one_queue_in_the_exact_form_begin_with_their_barriers`]'s.
+#[test]
+fn batches_of_one_queue_ordered_by_their_ends_begin_with_no_barrier() {
+    chained_batches(BatchOrderPolicy::Ends);
+}
+
+/// The same under `BatchOrderPolicy::Exact`: each batch of the chain begins with a command buffer
+/// of barriers for the copy before it, still in flight, and the last reads the same bytes.
+#[test]
+fn batches_of_one_queue_in_the_exact_form_begin_with_their_barriers() {
+    chained_batches(BatchOrderPolicy::Exact);
+}
+
+/// The two tests above under `batch_order`. Where the driver's submissions stall on semaphore
+/// operations (`DriverFact::SemaphoreOperationsStallSubmits`), every batch begins with its command
+/// buffer of barriers under either.
+fn chained_batches(batch_order: BatchOrderPolicy) {
+    const CHAIN: usize = 8;
+    const LONG_FILLS: u64 = 64;
+    on_device_with(
+        |options| {
+            options.gpu_times_from_host = true;
+            options.policy.batch_order = batch_order;
+        },
+        |device, _| {
+            let by_barrier = device
+                .properties()
+                .driver_facts
+                .contains(&DriverFact::SemaphoreOperationsStallSubmits);
+            let by_ends = orders_by_ends(device, batch_order);
+            let queue = device.new_command_queue().unwrap();
+            let scratch = device
+                .new_buffer(16 << 20, ResourceOptions::private())
+                .unwrap();
+            let links: Vec<Buffer> = (0..CHAIN)
+                .map(|_| device.new_buffer(4096, ResourceOptions::private()).unwrap())
+                .collect();
+            let read = device.new_buffer(4096, ResourceOptions::shared()).unwrap();
+            // Each buffer's first work, completed.
+            for buffer in links.iter().chain([&scratch, &read]) {
+                finish(&fill(&queue, buffer));
+            }
+            let before = device.work_counts();
+            let event = device.new_shared_event().unwrap();
+            let long = queue.command_buffer().unwrap();
+            long.encode_wait_for_event(EventRef::from(&event), 1)
+                .unwrap();
+            let mut blit = long.blit_command_encoder().unwrap();
+            for round in 0..LONG_FILLS {
+                blit.fill_buffer(&scratch, 0..scratch.length(), round as u8)
+                    .unwrap();
+            }
+            blit.fill_buffer(&links[0], 0..4096, 0xc3).unwrap();
+            blit.end_encoding().unwrap();
+            long.commit().unwrap();
+            let chain: Vec<CommandBuffer> = (1..CHAIN)
+                .map(|at| (&links[at - 1], &links[at]))
+                .chain([(&links[CHAIN - 1], &read)])
+                .map(|(from, to)| {
+                    let command_buffer = queue.command_buffer().unwrap();
+                    let mut blit = command_buffer.blit_command_encoder().unwrap();
+                    blit.copy_from_buffer_to_buffer(from, 0, to, 0, 4096)
+                        .unwrap();
+                    blit.end_encoding().unwrap();
+                    command_buffer.commit().unwrap();
+                    command_buffer
+                })
+                .collect();
+            event.set_signaled_value(1);
+            for command_buffer in chain.iter().chain([&long]) {
+                command_buffer.wait_until_completed_for(WAIT).unwrap();
+                assert_eq!(command_buffer.status(), CommandBufferStatus::Completed);
+            }
+            let after = device.work_counts();
+            let bare = after.bare_starts - before.bare_starts;
+            eprintln!(
+                "CHAINED-BATCHES {} {batch_order:?}: {bare} bare starts of {} batches",
+                device.name(),
+                CHAIN + 1,
+            );
+            // The long fill begins bare under either: what it depends on completed. Each copy
+            // behind it plans a barrier for the copy before it, in flight, unless batches are
+            // ordered by their ends.
+            let expected = match (by_barrier, by_ends) {
+                (true, _) => 0,
+                (false, true) => CHAIN as u64 + 1,
+                (false, false) => 1,
+            };
+            assert_eq!(bare, expected, "bare starts");
+            assert!(
+                bytes(&read).iter().all(|&byte| byte == 0xc3),
+                "the long fill's bytes through the chain"
             );
         },
     );

@@ -24,12 +24,12 @@
 //!   close a cycle of such waits, or leave its device's pool with no thread that is not blocked
 //!   so (`contexts::block`).
 //!
-//! A submission handler (a runtime extension, Metal has none) runs on the thread that submitted its
-//! command buffer's last batch, and that command buffer's transition to `Scheduled`, with every
-//! later transition of its queue, waits for it. On the scheduler thread, the device's later
-//! submissions wait for it too. So any wait there for what has not happened (a command buffer's
-//! scheduling or completion, a slot of a full queue no uncommitted command buffer holds) is refused
-//! at once (`DeadlockCause::SubmissionHandler`); one for what happened returns.
+//! A submission handler (a runtime extension, Metal has none) runs on the thread that took its
+//! command buffer's last batch for its queue, and that command buffer's transition to `Scheduled`,
+//! with every later transition of its queue, waits for it. On the scheduler thread, the device's
+//! later submissions wait for it too. So any wait there for what has not happened (a command
+//! buffer's scheduling or completion, a slot of a full queue no uncommitted command buffer holds)
+//! is refused at once (`DeadlockCause::SubmissionHandler`); one for what happened returns.
 
 use crate::error::DeadlockCause;
 use std::cell::Cell;
@@ -43,7 +43,7 @@ pub(crate) enum Step {
     CompletedHandlers,
     /// The release of what it retained (a no-copy buffer's deallocator may run here).
     Release,
-    /// Its submission handlers, on the thread that submitted its last batch (the scheduler's,
+    /// Its submission handlers, on the thread that took its last batch (the scheduler's,
     /// or a committing one, which may be a handler thread): its transition to `Scheduled`, and
     /// so every later transition of its queue, waits for them.
     SubmissionHandlers,

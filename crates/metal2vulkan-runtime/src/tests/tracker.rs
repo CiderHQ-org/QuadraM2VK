@@ -1087,6 +1087,108 @@ fn logical_queues_on_one_vk_queue_order_by_barriers() {
     assert_eq!(waits, []);
 }
 
+/// Where every batch ends with [`Barrier::to_all`] (`batch_order.rs`), every write before every
+/// access of every later command of its `VkQueue`, whichever logical queue committed it (logical
+/// queues sharing a `VkQueue` share its submission order), a later batch there needs no barrier
+/// from an earlier one's writes, reads or fence updates. Inside a batch the encoders still order
+/// among themselves, and a batch of another `VkQueue` still waits.
+#[test]
+fn batches_of_one_vk_queue_ordered_by_their_ends_need_no_barrier_between_them() {
+    let fence: Key = 100;
+    let mut update = EncoderUses::<Key>::new(true);
+    update.record(TRANSFER, &[writes(1, bytes(0..256), copy_write())], None);
+    update.update_fence(fence, None);
+    let mut waiting = EncoderUses::<Key>::new(false);
+    waiting.wait_for_fence(fence, None);
+    waiting.record(COMPUTE, &[], None);
+    let mut queue = Tracker::by_ends();
+    assert_eq!(commit(&mut queue, &[update.finish()], 1), [None]);
+    // A read after the write, a write after the read, a wait for the fence.
+    let read = one(&[reads(1, bytes(0..256), shader_read())]);
+    assert_eq!(commit(&mut queue, std::slice::from_ref(&read), 2), [None]);
+    let write = one(&[writes(1, bytes(0..256), shader_write())]);
+    assert_eq!(commit(&mut queue, std::slice::from_ref(&write), 3), [None]);
+    assert_eq!(commit(&mut queue, &[waiting.finish()], 4), [None]);
+    // A read and a write after it in one batch: an execution dependency between them alone.
+    let copy = one(&[writes(1, bytes(0..256), copy_write())]);
+    assert_eq!(
+        commit(&mut queue, &[read, copy], 5),
+        [
+            None,
+            barrier(
+                Access::new(COMPUTE, NO_ACCESS),
+                Access::new(TRANSFER, NO_ACCESS)
+            )
+        ]
+    );
+    // Another `VkQueue` waits for the last write.
+    let (barriers, waits) = submit(
+        &mut queue,
+        &[one(&[reads(1, bytes(0..256), copy_read())])],
+        on(1, 1),
+    );
+    assert_eq!(barriers, [None]);
+    assert_eq!(waits, [wait(at(5), TRANSFER)]);
+}
+
+/// The same batches in the exact form plan a barrier for each dependency on an earlier batch of
+/// the `VkQueue`, as within one.
+#[test]
+fn batches_of_one_vk_queue_in_the_exact_form_order_by_barriers() {
+    let mut queue = Tracker::default();
+    assert_eq!(
+        commit(
+            &mut queue,
+            &[one(&[writes(1, bytes(0..256), copy_write())])],
+            1
+        ),
+        [None]
+    );
+    let read = one(&[reads(1, bytes(0..256), shader_read())]);
+    assert_eq!(
+        commit(&mut queue, std::slice::from_ref(&read), 2),
+        [barrier(copy_write(), shader_read())]
+    );
+    assert_eq!(
+        commit(
+            &mut queue,
+            &[one(&[writes(1, bytes(0..256), shader_write())])],
+            3
+        ),
+        // After the read, and after the copy's write, which the read's barrier made visible to
+        // reads alone.
+        [barrier(
+            Access::new(TRANSFER | COMPUTE, vk::AccessFlags2::TRANSFER_WRITE),
+            shader_write()
+        )]
+    );
+}
+
+/// Merged entries ordered by their batches' ends: a write over the merged reads of earlier
+/// batches needs nothing on their `VkQueue`, and one on another waits for them at their latest.
+#[test]
+fn merged_entries_ordered_by_their_ends_still_order_another_queue() {
+    let mut queue = Tracker::by_ends();
+    for serial in 0..1000u64 {
+        let start = serial % 120;
+        let got = commit(
+            &mut queue,
+            &[one(&[reads(1, bytes(start..start + 8), copy_read())])],
+            serial + 1,
+        );
+        assert_eq!(got, [None]);
+        assert!(queue.entries() <= ENTRIES_PER_KEY);
+    }
+    let write = one(&[writes(1, bytes(32..48), shader_write())]);
+    assert_eq!(
+        commit(&mut queue, std::slice::from_ref(&write), 1001),
+        [None]
+    );
+    let (barriers, waits) = submit(&mut queue, &[write], on(1, 1));
+    assert_eq!(barriers, [None]);
+    assert_eq!(waits, [wait(at(1001), COMPUTE)]);
+}
+
 #[test]
 fn a_fence_updated_on_another_queue_is_a_wait() {
     let fence: Key = 100;
@@ -1313,6 +1415,19 @@ fn the_command_buffer_barriers_keep_their_masks() {
             src_access: vk::AccessFlags::MEMORY_WRITE,
             dst_stages: vk::PipelineStageFlags::HOST,
             dst_access: vk::AccessFlags::HOST_READ | vk::AccessFlags::HOST_WRITE,
+        }
+    );
+    let all = Barrier::to_all().legacy();
+    assert_eq!(
+        all,
+        LegacyBarrier {
+            src_stages: vk::PipelineStageFlags::ALL_COMMANDS,
+            src_access: vk::AccessFlags::MEMORY_WRITE,
+            dst_stages: vk::PipelineStageFlags::HOST | vk::PipelineStageFlags::ALL_COMMANDS,
+            dst_access: vk::AccessFlags::HOST_READ
+                | vk::AccessFlags::HOST_WRITE
+                | vk::AccessFlags::MEMORY_READ
+                | vk::AccessFlags::MEMORY_WRITE,
         }
     );
 }

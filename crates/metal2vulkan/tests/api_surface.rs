@@ -231,7 +231,9 @@ surface! {
         enum HalfBlendPolicy N;
         enum DecodedTexelsPolicy N;
         enum HeapCompressionPolicy N;
+        enum CompletionPolicy N;
         enum TileStorePolicy N;
+        enum BatchOrderPolicy N;
         struct DeviceProfile O;
         struct SpirvValidation N;
         struct EnabledCaps N;

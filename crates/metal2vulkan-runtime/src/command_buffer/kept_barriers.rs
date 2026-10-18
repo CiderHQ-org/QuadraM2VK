@@ -2,20 +2,20 @@
 //!
 //! A batch with encoders submits a command buffer of barriers before each encoder the tracker
 //! planned a barrier for (before its first, whatever was planned, where the driver's submissions
-//! stall on semaphore operations: `Barrier::after_completed`, `submit.rs`), and, where its end
-//! did not go into its last encoder's command buffer, one after its last (`Barrier::to_host`;
-//! `submit.rs`): batch after batch, the same few lists of barriers. A timed command buffer's
-//! first batch also resets its slot of the device's timestamp
-//! pools and writes the start timestamp first, in a command buffer before its first encoder (of
-//! the barrier planned for it, or of none), and its last batch writes the end timestamp in its
-//! end (`gpu_time.rs`). Each list's command buffer is recorded once, kept by the scheduler, and
+//! stall on semaphore operations: `Barrier::after_completed`, `submit.rs`), and, where its end did
+//! not go into its last encoder's command buffer, one after its last (`Barrier::to_host`, or
+//! `Barrier::to_all`: `batch_order.rs`; `submit.rs`): batch after batch, the same few lists of
+//! barriers. A timed command buffer's first batch also resets its slot of the device's timestamp
+//! pools and writes the start timestamp first, in a command buffer before its first encoder (of the
+//! barrier planned for it, or of none), and its last batch writes the end timestamp in its end
+//! (`gpu_time.rs`). Each list's command buffer is recorded once, kept by the scheduler, and
 //! submitted again by a later batch once the batch that last carried it completed, its queue's
 //! timeline at that batch's value as the host saw it: the same commands, in the same place of the
 //! same submission, and no command buffer begun for them as a batch is submitted. ANV clears a
 //! command buffer's state as its pool resets it and again as it begins it (Mesa 26.2.4,
-//! `anv_cmd_state_init`, 62,776 bytes), and packs the standard sample pattern at each primary
-//! one's begin where `VK_EXT_sample_locations` is enabled (`genX(BeginCommandBuffer)`): on ms01's
-//! Iris Xe those begins were 53% of the scheduler thread's user time, two a command buffer.
+//! `anv_cmd_state_init`, 62,776 bytes), and packs the standard sample pattern at each primary one's
+//! begin where `VK_EXT_sample_locations` is enabled (`genX(BeginCommandBuffer)`): on ms01's Iris Xe
+//! those begins were 53% of the scheduler thread's user time, two a command buffer.
 //!
 //! - **Never pending twice.** A kept command buffer is recorded without
 //!   `VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT` and goes to one batch at a time: ANV chains a
@@ -84,8 +84,9 @@ pub(crate) struct KeptBarriers {
 
 /// The timestamps a barrier command buffer writes into a timed command buffer's slot of the
 /// device's timestamp pools (`gpu_time::Slot`): with `start`, the slot reset before its barriers
-/// and the start timestamp before them at the top of the pipe, or with `after` after them at the
-/// bottom of the pipe; with `end`, the end timestamp after them.
+/// and the start timestamp before them at the top of the pipe (the bottom where batches are
+/// ordered by their ends: `batch_order.rs`), or with `after` after them at the bottom of the pipe;
+/// with `end`, the end timestamp after them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct SlotStamps {
     /// The slot's timestamp pool.
@@ -369,8 +370,8 @@ impl KeptBarriers {
                     exit_guard::called(Call::CmdResetQueryPool);
                 }
                 if !stamps.after {
-                    let top = vk::PipelineStageFlags::TOP_OF_PIPE;
-                    raw.cmd_write_timestamp(buffer, top, stamps.queries, stamps.first);
+                    let stage = crate::batch_order::start_stage(shared.by_ends);
+                    raw.cmd_write_timestamp(buffer, stage, stamps.queries, stamps.first);
                     exit_guard::called(Call::CmdWriteTimestamp);
                 }
             }

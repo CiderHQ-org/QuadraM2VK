@@ -1656,6 +1656,25 @@ degradations! {
             "the deallocator runs once every command buffer that may still reach the pages \
              (through a texture over them, or a table of the live buffers it holds) lets go of \
              them, where Metal's runs at the release; the pages stay mapped until then";
+        /// Batches of command buffers committed on one queue that the scheduler found ready
+        /// together, or held while two or more earlier submissions of their queue ran, went to the
+        /// driver in one `vkQueueSubmit`, only the last signalling its queue's timeline and their
+        /// events (`CompletionPolicy::Grouped`, the default, on a driver whose queue
+        /// merges a submission that signals nothing into the next one: Mesa's drivers;
+        /// `command_buffer/group.rs`): one kernel submission for up to four batches. Announced
+        /// once per device, on the scheduler's thread, as the first such submission is made,
+        /// whatever `DeviceOptions::announce_each` says: no program call or host step meets it.
+        GroupedCompletion = "grouped-completion", Precision,
+            "each command buffer of the submission but the last is seen complete (its status, \
+             completed handlers and waits), and the event values it signals are reached, once \
+             the last completed, late by the GPU time of the batches after it, at most three, \
+             never early and in commit order, and a submission held while earlier ones of its \
+             queue ran late besides by any gap between the last of those and its own start on \
+             the GPU, at most a completion turn's reaction and its vkQueueSubmit; and the \
+             submission checks of the batches behind \
+             a queue's next one run with its own, before the batch before them is submitted; \
+             their commands, barriers and GPU times are unchanged; CompletionPolicy::Exact \
+             submits and checks each batch alone";
         /// In a build without debug assertions, a notice announced where the runtime's rule
         /// announces none ([`DegradeNotice::misplaced`] names its kind and [`NoticePlace`]):
         /// inside a pipeline pool's piece, or, for a kind announced at every occurrence, outside

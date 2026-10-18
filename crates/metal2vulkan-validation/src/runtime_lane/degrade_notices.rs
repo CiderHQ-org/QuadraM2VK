@@ -108,6 +108,8 @@
 //! over a buffer they do not store through the image its texture keeps in `kept_buffer_bytes`
 //! ([`KEPT_BYTES`]), the device's
 //! first sparse texture on a driver whose first sparse resource waits for every queue's work in
+//! `first_use` ([`FIRST_SPARSE`]), command buffers a submission of several batches completes
+//! counts of draws writing several colors on a driver that counts each sample once per color in
 //! `color_groups` ([`PER_COLOR_COUNTS`]), passes that load and draw a signed normalized attachment
 //! holding a minimum code, or an `RGB9E5Float` one holding an unnormalized word, in
 //! `snorm_tile_store` ([`SNORM_MINIMUM`], [`SHARED_EXPONENT`]),
@@ -163,6 +165,7 @@ use super::format_copies::MEMMOVES;
 use super::fragment_imageblocks::FRAGMENT_IMAGEBLOCKS;
 use super::framebuffer_fetch::{FETCHES, PLANES, SHADER_DEPTH, STORAGE_FORMS};
 use super::fresh_contents::FRESH_PATTERNS;
+use super::grouped_submissions::GROUPED;
 use super::heap_layouts::HEAP_LAYOUTS;
 use super::heap_metal_sizes::{PAST_METAL_SIZES, UNMODELLED_SIZES};
 use super::heap_textures::{ALIASES, APART, COMPRESSED, OPTIMIZED};
@@ -551,6 +554,7 @@ fn every_kind_has_a_site_a_lane_test_takes() {
         &SYNTHESIZED_GEOMETRY,
         &EMULATED_TESSELLATION,
         &EXACT_FORMS_OVER_LIMIT,
+        &GROUPED,
     ];
     for kind in lists.into_iter().flatten().copied().chain(stage_kinds) {
         assert!(listed.insert(kind), "{kind:?} is listed twice");

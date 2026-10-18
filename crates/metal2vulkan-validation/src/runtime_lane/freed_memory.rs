@@ -66,6 +66,10 @@ fn a_buffer_released_behind_work_that_reads_device_addresses_fails_none_of_it() 
             long.commit().unwrap();
             behind.commit().unwrap();
             let deadline = Instant::now() + WAIT;
+            // Scheduled once the CPU finished scheduling it (`kernelEndTime`): submitted, or,
+            // under `CompletionPolicy::Grouped` on a driver that merges submissions, held for one
+            // with later batches; a driver with the defect (MoltenVK) merges none. Its kernel
+            // start is stored as scheduling begins, before its batch is replayed and submitted.
             while behind.kernel_end_time() == 0.0 {
                 assert!(
                     Instant::now() < deadline,

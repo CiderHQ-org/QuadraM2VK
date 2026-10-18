@@ -222,8 +222,9 @@ Calls Metal does not have, for a consumer that emulates a Metal device:
   encoders Metal would still run and keeping its signals, as a consumer measured on an M3 Max.
 - `CommandBuffer::set_submission_check` runs a check as the command buffer is submitted, and fails
   it as Metal fails a submission.
-- `CommandBuffer::add_submission_handler` is called when the command buffer's last batch is
-  submitted; `add_executed_commands_handler` each time an execution's indirect records are read.
+- `CommandBuffer::add_submission_handler` is called when the runtime takes the command buffer's
+  last batch for its queue (submits it, or holds it for one kernel submission with later ones);
+  `add_executed_commands_handler` each time an execution's indirect records are read.
 - `RenderCommandEncoder::set_color_resolve_target`, `set_depth_resolve_target` and
   `set_stencil_resolve_target` change where a pass resolves until it ends (the last target set
   wins), as Metal's private calls do.

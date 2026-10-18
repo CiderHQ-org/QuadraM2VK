@@ -58,12 +58,13 @@
 //! and its queue's command buffers in order (Metal's overlaps counted and printed; the runtime's
 //! none).
 
+use super::commit_work::orders_by_ends;
 use super::degrade_notices::{assert_once, counts, FROM_HOST, GPU_TIMES, UNTIMED};
 use super::presenting::Adopted;
 use super::{validated_device, validated_device_with, Messages, ScratchCache};
 use crate::gpu::TEST_DEVICE;
 use ash::vk;
-use metal2vulkan::device::DriverFact;
+use metal2vulkan::device::{BatchOrderPolicy, DriverFact};
 use metal2vulkan::error::{Feature, RuntimeDriverDefect};
 use metal2vulkan_runtime::{
     host_time, CommandBuffer, CommandQueue, Degradation, Device, Error, EventRef, ResourceOptions,
@@ -511,13 +512,34 @@ fn command_buffers_one_after_another_are_each_timed_on_their_own() {
 /// M3 Max under macOS 27.0.1: 0.5 to 0.9 us after it, 10 of 10). Where the first encoder writes
 /// the start ([`starts_in_the_first_encoder`]), every first started in its fill's command buffer
 /// and at least one second did not (`WorkCounts::prefixed_starts`, printed); elsewhere none did.
-/// The validation layer reported nothing.
+/// The validation layer reported nothing. Under `BatchOrderPolicy::Exact`; the default's is
+/// [`a_start_behind_work_of_batches_ordered_by_their_ends_follows_it`].
 #[test]
 fn a_start_behind_a_planned_barrier_follows_the_work_before_it() {
+    start_behind_work(BatchOrderPolicy::Exact);
+}
+
+/// The same under the default. Where the device orders batches by their ends (the runtime's
+/// `batch_order.rs`), the second plans no barrier for the first's writes, as the first's end
+/// orders it, and its fill's own command buffer writes its start at the bottom of the pipe, once
+/// every command before it completed: every first and every second started in its fill's command
+/// buffer where the first encoder writes the start, and each second no earlier than the first
+/// ended. Elsewhere as under `BatchOrderPolicy::Exact`.
+#[test]
+fn a_start_behind_work_of_batches_ordered_by_their_ends_follows_it() {
+    start_behind_work(BatchOrderPolicy::Ends);
+}
+
+/// The two tests above under `batch_order`.
+fn start_behind_work(batch_order: BatchOrderPolicy) {
     let cache = ScratchCache::new().unwrap();
     let messages = Messages::default();
     {
-        let device = validated_device(TEST_DEVICE, &messages, cache.path()).unwrap();
+        let device = validated_device_with(TEST_DEVICE, &messages, cache.path(), |options| {
+            options.policy.batch_order = batch_order;
+        })
+        .unwrap();
+        let by_ends = orders_by_ends(&device, batch_order);
         let venue = Venue::of(&device);
         if venue.bits == 0 || from_host_by_driver(&device) {
             eprintln!(
@@ -587,13 +609,18 @@ fn a_start_behind_a_planned_barrier_follows_the_work_before_it() {
         let after_rounds = device.work_counts();
         let prefixed = after_rounds.prefixed_starts - before_rounds.prefixed_starts;
         eprintln!(
-            "runtime gpu times: {}: {BEHIND_ROUNDS} pairs, the second behind the first: {prefixed} \
-             started by their fill's own command buffer",
+            "runtime gpu times: {} {batch_order:?}: {BEHIND_ROUNDS} pairs, the second behind the \
+             first: {prefixed} started by their fill's own command buffer",
             device.name()
         );
-        match starts_in_the_first_encoder(&device) {
-            false => assert_eq!(prefixed, 0),
-            true => assert!(
+        match (starts_in_the_first_encoder(&device), by_ends) {
+            (false, _) => assert_eq!(prefixed, 0),
+            (true, true) => assert_eq!(
+                prefixed,
+                2 * BEHIND_ROUNDS as u64,
+                "started by their fill's command buffer: every first and every second"
+            ),
+            (true, false) => assert!(
                 (BEHIND_ROUNDS as u64..2 * BEHIND_ROUNDS as u64).contains(&prefixed),
                 "{prefixed} started by their fill's command buffer: every first, and not every \
                  second"

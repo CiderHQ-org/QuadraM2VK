@@ -3,6 +3,19 @@
 //! and `error` reads wait for no GPU work and for no submission in progress.
 //!
 //! GPU busy work is committed first (`first_use::Busy`, released by the test), then on the same
+//! queue one blit encoder of fills of distinct words, whose submission replays its deferred command
+//! buffer (`recorder`) between its kernel start and its kernel end; its fills are doubled until
+//! that span is at least [`LONG_SUBMISSION`]. One thread reads the two kernel times over and over,
+//! from the commit until [`BEHIND_BUSY`] after the submission, while the fills wait behind the busy
+//! work, and another reads `status` and `error` over the same time, each between a read of the
+//! kernel start and a read of the kernel end. The submission may come only as the busy work drains:
+//! where no kernel end was read [`HELD_READS`] after the commit, the reading thread releases the
+//! busy work, and the reads go on until the submission, however late. The claim is structural: each
+//! thread's reads land inside the submission, some answering between a kernel start and no kernel
+//! end yet, where a read that waited for the submission returns only after its kernel end. And each
+//! read is timed: at most one in a thousand of each thread's takes [`SLOW_READ`] or more, a bound a
+//! host that preempts the reading thread now and then keeps, which no longest read is on a loaded
+//! Mac (`PROPERTY-READS`).
 //!
 //! And `status` reads `Completed` before anything else shows the completion, as Metal's does: in
 //! the command buffer's completed handler, once its `wait_until_completed` returned, and in the
@@ -11,6 +24,9 @@
 
 use super::first_use::{release, Busy};
 use super::host_memory::{no_copy, not_importable, on_device, Mapping, GUEST_PAGE};
+use metal2vulkan_runtime::{
+    Buffer, CommandBuffer, CommandBufferStatus, Deallocator, ResourceOptions,
+};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -29,6 +45,12 @@ const LONG_SUBMISSION: Duration = Duration::from_millis(40);
 /// How long the reads go on once the command buffer is submitted, its work behind the busy work.
 const BEHIND_BUSY: Duration = Duration::from_millis(100);
 
+/// How long after the commit the reads go on with the busy work held where no kernel end was read
+/// by then; the reading thread then releases it. On the Radeon 780M (RADV) beside the full suite,
+/// the fills' kernel end came 1007.5 ms after their kernel start, once the test released the busy
+/// work after a second of reads; alone, and as six copies at once, they were submitted 3 to 80 ms
+/// after their commit.
+const HELD_READS: Duration = Duration::from_millis(100);
 
 /// A slow read: a quarter of [`LONG_SUBMISSION`]. On the M3 Max beside the full suite, a reading
 /// thread's longest reads took 20 to 54 ms each round, of over a million reads, the thread
@@ -50,6 +72,9 @@ struct Reads {
     inside: usize,
     /// When, after the commit, a read first answered a kernel end (the kernel times' thread).
     submitted: Option<Duration>,
+    /// The kernel times' thread released the busy work, no kernel end read [`HELD_READS`] after
+    /// the commit.
+    released: bool,
 }
 
 impl Reads {
@@ -69,6 +94,9 @@ impl Reads {
 }
 
 /// Read `command_buffer`'s kernel times over and over from `committed` on, until [`BEHIND_BUSY`]
+/// after a read first answered its kernel end, or [`WAIT`] after `committed` where none did;
+/// releasing the busy work of `words` where none did [`HELD_READS`] after `committed`.
+fn read(command_buffer: &CommandBuffer, committed: Instant, words: &Buffer) -> Reads {
     let mut reads = Reads::default();
     loop {
         let before = Instant::now();
@@ -83,6 +111,11 @@ impl Reads {
         let since = after.duration_since(committed);
         match reads.submitted {
             None if end != 0.0 => reads.submitted = Some(since),
+            None if since >= WAIT => return reads,
+            None if since >= HELD_READS && !reads.released => {
+                release(words);
+                reads.released = true;
+            }
             Some(submitted) if since >= submitted + BEHIND_BUSY => return reads,
             _ => {}
         }
@@ -90,8 +123,11 @@ impl Reads {
 }
 
 /// Read `command_buffer`'s `status` and `error` over and over, each pair between a read of the
+/// kernel start and one of the kernel end, until `done`, or until [`WAIT`] and [`BEHIND_BUSY`]
+/// after `committed`.
 fn read_status(command_buffer: &CommandBuffer, committed: Instant, done: &AtomicBool) -> Reads {
     let mut reads = Reads::default();
+    while !done.load(Ordering::Acquire) && committed.elapsed() < WAIT + BEHIND_BUSY {
         let start = command_buffer.kernel_start_time();
         let before = Instant::now();
         let _ = command_buffer.status();
@@ -131,6 +167,7 @@ fn property_reads_wait_for_no_submission_and_no_busy_work() {
             let done = AtomicBool::new(false);
             let (reads, status) = std::thread::scope(|scope| {
                 let reader = scope.spawn(|| {
+                    let reads = read(&command_buffer, committed, &words);
                     done.store(true, Ordering::Release);
                     reads
                 });
@@ -149,8 +186,12 @@ fn property_reads_wait_for_no_submission_and_no_busy_work() {
             let ms = |d: Duration| d.as_secs_f64() * 1e3;
             eprintln!(
                 "PROPERTY-READS {name}: {fills} fills, kernel span {:.1} ms, submitted {:?} after \
+                 the commit (the busy work released first: {}); {} kernel time reads, {} inside \
+                 the submission, {} slow, the longest {:.3} ms; {} status and error reads, {} \
+                 inside, {} slow, the longest {:.3} ms",
                 ms(span),
                 reads.submitted,
+                reads.released,
                 reads.count,
                 reads.inside,
                 reads.slow,
@@ -162,6 +203,7 @@ fn property_reads_wait_for_no_submission_and_no_busy_work() {
             );
             assert!(
                 reads.submitted.is_some(),
+                "the fills were not submitted within {WAIT:?} of their commit: {reads:?}"
             );
             if span < LONG_SUBMISSION && fills < MOST_FILLS {
                 fills *= 2;

@@ -5,6 +5,7 @@
 //! resident one by one on MoltenVK; and the completion waits that missed their wake, which a test
 //! holds to none. Not part of the API.
 
+use super::command_buffer::GroupEnd;
 use super::degradation::Degradation;
 use super::device::lock;
 use super::Device;
@@ -89,7 +90,17 @@ pub(crate) struct Counters {
     stamped_buffers_reused: AtomicU64,
     finales_folded: AtomicU64,
     finales_apart: AtomicU64,
+    grouped_submissions: AtomicU64,
+    batches_grouped: AtomicU64,
+    /// By `GroupEnd`, in its order.
+    group_ends: [AtomicU64; 7],
+    /// Batches submitted, by how many earlier batches of their `VkQueue` were pending then: none,
+    /// one, two or three, four or more.
+    batches_by_pending: [AtomicU64; 4],
+    groups_kept_pending: AtomicU64,
+    groups_sent_for_waits: AtomicU64,
     completed_waits: AtomicU64,
+    event_waits_met: AtomicU64,
     bare_starts: AtomicU64,
     prefixed_starts: AtomicU64,
     unrun_instances_ended: AtomicU64,
@@ -607,10 +618,54 @@ impl Counters {
         self.finales_apart.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// One `vkQueueSubmit` submitted `batches` batches, more than one, only the last signalling
+    /// (`command_buffer/group.rs`).
+    pub(crate) fn batches_grouped(&self, batches: usize) {
+        self.grouped_submissions.fetch_add(1, Ordering::Relaxed);
+        (self.batches_grouped).fetch_add(batches as u64, Ordering::Relaxed);
+    }
+
+    /// A batch was submitted, or held in a group, while `pending` earlier batches of its
+    /// `VkQueue` were submitted or held and not seen complete (`command_buffer/submit.rs`).
+    pub(crate) fn batch_submitted_behind(&self, pending: u64) {
+        let bucket = match pending {
+            0 => 0,
+            1 => 1,
+            2 | 3 => 2,
+            _ => 3,
+        };
+        self.batches_by_pending[bucket].fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A group of batches held for one kernel submission went, sent by `end`
+    /// (`command_buffer/group.rs`).
+    pub(crate) fn group_ended(&self, end: GroupEnd) {
+        self.group_ends[end as usize].fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A group of batches stayed held past the pass that found no batch ready, for the work its
+    /// `VkQueue` still ran (`command_buffer/group.rs`); once per group.
+    pub(crate) fn group_kept_pending(&self) {
+        self.groups_kept_pending.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Such a group went at once because a thread waits for one of its command buffers.
+    pub(crate) fn group_sent_for_wait(&self) {
+        self.groups_sent_for_waits.fetch_add(1, Ordering::Relaxed);
+    }
+
     /// A batch with work was submitted waiting for `waits` timelines at values the host saw them
     /// reach (`command_buffer/submit.rs`).
     pub(crate) fn completed_waited(&self, waits: usize) {
         self.completed_waits
+            .fetch_add(waits as u64, Ordering::Relaxed);
+    }
+
+    /// A batch went (submitted, or held in a group) with `waits` of its event waits for values
+    /// the scheduler found reached as it took the batch, so it waits for none of them
+    /// (`scheduler/mod.rs`).
+    pub(crate) fn event_waits_met(&self, waits: usize) {
+        self.event_waits_met
             .fetch_add(waits as u64, Ordering::Relaxed);
     }
 
@@ -1568,15 +1623,70 @@ pub struct WorkCounts {
     /// command buffer's last batch its end timestamp) recorded into their last command buffer as
     /// they ended, the end's own command buffer saved (`command_buffer/submit.rs`).
     pub finales_folded: u64,
-    /// Batches with work submitted with their end in a command buffer of its own: one that
-    /// signals an event, leaves its submission a segment or sparse update, names a texture over
-    /// the caller's image that moves between layouts, or whose last command buffer does not go
-    /// to the queue as recorded.
+    /// Batches with work submitted with their end in a command buffer of its own: one whose
+    /// event signal waits for another `VkQueue`'s earlier one, leaves its submission a segment or
+    /// sparse update, names a texture over the caller's image that moves between layouts, or
+    /// whose last command buffer does not go to the queue as recorded.
     pub finales_apart: u64,
+    /// `vkQueueSubmit` calls that submitted more than one batch, of command buffers committed on
+    /// one queue and found ready together, only the last signalling its queue's timeline
+    /// (`CompletionPolicy::Grouped`, `command_buffer/group.rs`): one kernel submission for them all
+    /// on Mesa's drivers.
+    pub grouped_submissions: u64,
+    /// The batches those calls submitted.
+    pub batches_grouped: u64,
+    /// Groups of batches held for one kernel submission (`CompletionPolicy::Grouped`) that went
+    /// holding the most they may (four), each group counted once by what sent it; with the six
+    /// fields after this one, every group. Their spread says why a device's groups hold fewer.
+    pub group_ends_full: u64,
+    /// Groups that went before a batch that waits for an event value a batch they held signals,
+    /// which only the group's end meets, or in the call of a batch that waits for anything else
+    /// not seen complete, submitted after them: a batch with a wait leads a group, never joins one.
+    pub group_ends_wait: u64,
+    /// Groups that went before a batch that may not wait in one (it signals a binary semaphore,
+    /// takes a fence, binds a sparse update, or moves bytes that wait for every submission) or
+    /// is of another `VkQueue`.
+    pub group_ends_apart: u64,
+    /// Groups that went in the call of a batch that could join but did first work or names a
+    /// texture over the caller's image, submitted last.
+    pub group_ends_first_work: u64,
+    /// Groups that went when the scheduler found no batch left to submit.
+    pub group_ends_drained: u64,
+    /// Groups that went when the scheduler found no batch ready, with submission checks or host
+    /// steps left for its thread to run.
+    pub group_ends_checks: u64,
+    /// Groups that went when the scheduler found no batch ready, the rest held for events'
+    /// values, host steps' gates, binary semaphores or texture decodes.
+    pub group_ends_held: u64,
+    /// Batches submitted (each held in a group counted as it is held) while no earlier batch of
+    /// their `VkQueue` was pending: every one submitted before them the host had seen complete
+    /// (their queue's timeline at their values). With the three fields after this one, every
+    /// batch, by how far its queue's work ran behind its submission.
+    pub batches_with_none_pending: u64,
+    /// Batches submitted while one earlier batch of their `VkQueue` was pending.
+    pub batches_with_one_pending: u64,
+    /// Batches submitted while two or three earlier batches of their `VkQueue` were pending.
+    pub batches_with_two_or_three_pending: u64,
+    /// Batches submitted while four or more earlier batches of their `VkQueue` were pending.
+    pub batches_with_four_or_more_pending: u64,
+    /// Groups of batches held for one kernel submission that stayed held past the pass that found
+    /// no batch ready, while two or more earlier submissions of their `VkQueue` were not seen
+    /// complete, until one was left or the group filled (`command_buffer/group.rs`); each group
+    /// counted once, then by what sent it among the group ends.
+    pub groups_kept_pending: u64,
+    /// Of those, the groups that went at once because a thread began to wait for one of their
+    /// command buffers' completion (`CommandBuffer::wait_until_completed`).
+    pub groups_sent_for_waits: u64,
     /// The waits batches with work made for timelines at values the host had seen them reach,
     /// which make what completed work wrote visible to them: one per timeline whose completed
     /// value moved since a batch of the same `VkQueue` last waited for it.
     pub completed_waits: u64,
+    /// Event waits (`encode_wait_for_event`) for values the scheduler found reached as it took
+    /// their batch, submitting it or holding it in a group (`scheduler/mod.rs`): by a signal
+    /// seen complete, or the host's. Their batch waits for none of them, so it may join a group
+    /// (`CompletionPolicy::Grouped`) as a batch with no wait does; the others' waits make it lead
+    /// one or go alone (`group_ends_wait`).
+    pub event_waits_met: u64,
     /// Batches with work submitted with no command buffer of barriers before their first
     /// encoder: nothing planned before it, and no start timestamp to write there (none, or one
     /// its first encoder wrote, `WorkCounts::prefixed_starts`).
@@ -1998,6 +2108,8 @@ impl Device {
     #[doc(hidden)]
     pub fn work_counts(&self) -> WorkCounts {
         let counters = &self.shared().counts;
+        let group_end = |end: GroupEnd| counters.group_ends[end as usize].load(Ordering::Relaxed);
+        let pending = |bucket: usize| counters.batches_by_pending[bucket].load(Ordering::Relaxed);
         let begun =
             |what: Begun| counters.command_buffers_begun_by[what as usize].load(Ordering::Relaxed);
         let (allocated, census, (parked, waiting), (made, freed)) = {
@@ -2123,7 +2235,23 @@ impl Device {
             stamped_buffers_reused: counters.stamped_buffers_reused.load(Ordering::Relaxed),
             finales_folded: counters.finales_folded.load(Ordering::Relaxed),
             finales_apart: counters.finales_apart.load(Ordering::Relaxed),
+            grouped_submissions: counters.grouped_submissions.load(Ordering::Relaxed),
+            batches_grouped: counters.batches_grouped.load(Ordering::Relaxed),
+            group_ends_full: group_end(GroupEnd::Full),
+            group_ends_wait: group_end(GroupEnd::Wait),
+            group_ends_apart: group_end(GroupEnd::Apart),
+            group_ends_first_work: group_end(GroupEnd::FirstWork),
+            group_ends_drained: group_end(GroupEnd::Drained),
+            group_ends_checks: group_end(GroupEnd::Checks),
+            group_ends_held: group_end(GroupEnd::Held),
+            batches_with_none_pending: pending(0),
+            batches_with_one_pending: pending(1),
+            batches_with_two_or_three_pending: pending(2),
+            batches_with_four_or_more_pending: pending(3),
+            groups_kept_pending: counters.groups_kept_pending.load(Ordering::Relaxed),
+            groups_sent_for_waits: counters.groups_sent_for_waits.load(Ordering::Relaxed),
             completed_waits: counters.completed_waits.load(Ordering::Relaxed),
+            event_waits_met: counters.event_waits_met.load(Ordering::Relaxed),
             bare_starts: counters.bare_starts.load(Ordering::Relaxed),
             prefixed_starts: counters.prefixed_starts.load(Ordering::Relaxed),
             unrun_instances_ended: counters.unrun_instances_ended.load(Ordering::Relaxed),

@@ -256,6 +256,43 @@ impl<B> Order<B> {
         })
     }
 
+    /// Each line's head not `behind`, then the batches after it, at most `count` of them, up to
+    /// the first committed after a batch another line holds, to update in place: `visit` takes
+    /// each, told whether it is the head, and answers whether to go on along its line. No batch
+    /// it reaches waits behind another line's ([`is_behind`](Self::is_behind)): every batch
+    /// committed before it is its line's.
+    pub(crate) fn leading_mut(
+        &mut self,
+        behind: &[u64],
+        count: usize,
+        mut visit: impl FnMut(&mut B, bool) -> bool,
+    ) {
+        let firsts: Vec<u64> = (self.lines.iter())
+            .map(|(_, line)| line.front().map_or(u64::MAX, |(sequence, _)| *sequence))
+            .collect();
+        for (at, (_, line)) in self.lines.iter_mut().enumerate() {
+            if line
+                .front()
+                .is_none_or(|(sequence, _)| behind.contains(sequence))
+            {
+                continue;
+            }
+            let before = (firsts.iter().enumerate())
+                .filter(|&(other, _)| other != at)
+                .map(|(_, &first)| first)
+                .min()
+                .unwrap_or(u64::MAX);
+            for (position, (sequence, batch)) in line.iter_mut().take(1 + count).enumerate() {
+                if position > 0 && *sequence > before {
+                    break;
+                }
+                if !visit(batch, position == 0) {
+                    break;
+                }
+            }
+        }
+    }
+
     /// Drop the batches at the head of `queue`'s line while `drop` holds (the rest of a command
     /// buffer that failed), and give them back.
     pub(crate) fn drop_head(&mut self, queue: u64, mut drop: impl FnMut(&B) -> bool) -> Vec<B> {

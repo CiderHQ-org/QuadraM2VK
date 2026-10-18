@@ -29,14 +29,13 @@
 //!   at creation); each `VkQueue` signals its own timeline semaphore with every batch, which is
 //!   the [`Point`] the tracker and the completion turns know the batch by.
 //! - **Scheduled.** A command buffer is scheduled once its last batch is submitted (its every
-//!   wait was satisfied): this thread posts its transition to `Scheduled` to its queue's context ([`contexts`](super::contexts)), which
-//!   runs its scheduled handlers. No submission runs a scheduled handler, so none holds back a
-//!   submission.
+//!   wait was satisfied), or held in a group (below): this thread posts its transition to
+//!   `Scheduled` to its queue's context
 //! - **Submission handlers** (a runtime extension). This thread runs a command buffer's
-//!   submission handlers once it submitted its last batch, in submission order among the command
-//!   buffers its passes submitted, once it let go of the lock and before it lets go of the command
-//!   buffers, before its next pass, which they hold back. The command buffer's transition to
-//!   `Scheduled` waits for them.
+//!   submission handlers once it submitted its last batch, or held it in a group (below), in
+//!   submission order among the command buffers its passes took so, once it let go of the lock
+//!   and before it lets go of the command buffers, before its next pass, which they hold back.
+//!   The command buffer's transition to `Scheduled` waits for them.
 //! - **Host steps**. A batch that executes commands the GPU may write
 //!   (`CommandBufferShared::needs_host_step`) is held, once otherwise ready, until every
 //!   `VkQueue` completed what was submitted to it by then (its gate, a snapshot of the queues'
@@ -52,8 +51,25 @@
 //!   submitted GPU signal reaches is held for until that signal landed, as Metal submits (and
 //!   checks) only then. A completion turn sees each finished batch's event signals before it
 //!   wakes the thread, as for a gate. A command buffer without a check costs one flag per batch.
+//! - **Grouped submissions** (`command_buffer/group.rs`). Under `CompletionPolicy::Grouped`, on a
+//!   driver whose queue merges a submission that signals nothing into the next (Mesa's), a pass
+//!   holds up to four ready batches of one `VkQueue` that signal nothing but its timeline, after
+//!   their first work, and submits them in one `vkQueueSubmit` whose last batch alone signals: one
+//!   kernel submission where there were four. Each held batch is tracked and its queue's value
+//!   applied as it is held, and its command buffer scheduled where it ends it, its submission
+//!   handlers run first (a switch of storage forms riding on it waits for the group); the group
+//!   goes once it holds four, with or before a batch that cannot join, or when the pass runs out of
+//!   ready batches, unless two or more earlier submissions of its `VkQueue` are not seen complete
+//!   and no head waits for the GPU: then it stays held until one is left (a completion turn wakes
+//!   the thread for it), it fills, a later batch sends it, or a thread waits for one of its command
+//!   buffers (`Group::keeps`). The submission checks of up to three batches right behind a line's
+//!   head that goes run with the head's ([`check_heads`]), so a line of checked batches is found
+//!   ready together.
 //! - **Waits are bounded.** The thread wakes on a commit or a host signal, and at least every
 //!   [`WAIT_SLICE`], so a stop is seen promptly.
+//!   head at its gate, its checks waiting for a GPU signal to land, or a group kept, leaves what
+//!   it waits for: each `VkQueue`'s value to complete, each event value to be reached. A
+//!   completion turn wakes
 //! - **Exit.** Each submission is a section of the exit guard ([`exit_guard`]); once the process
 //!   is exiting, the thread ends, and what it holds stays held.
 //! - **Let go without the lock.** A submitted batch's hold of its command buffer goes after the
@@ -76,8 +92,9 @@ use super::command_buffer::gate::Hold;
 use super::command_buffer::kept_barriers::KeptBarriers;
 use super::command_buffer::BatchLists;
 use super::command_buffer::CommandBufferShared;
+use super::command_buffer::{Group, GroupEnd, Submitting, GROUP_BATCHES};
 use super::device::lock;
-use super::error::{Error, MemoryKind};
+use super::error::{CommandBufferError, Error, MemoryKind};
 use super::event::EventShared;
 use super::event_timeline::WaitFor;
 use super::exit_guard;
@@ -98,6 +115,15 @@ use std::time::Duration;
 /// How long the thread sleeps at most without looking for work.
 const WAIT_SLICE: Duration = Duration::from_millis(100);
 
+
+    /// The group held waits for `VkQueue` `queue`, of `queues`, to complete `value`
+    /// (`Group::keeps`): a gate of no other queue's value.
+    fn gate_on(&self, queue: usize, value: u64, queues: usize) {
+        let mut list = lock(&self.list);
+        list.queues = queues;
+        (list.gates).extend((0..queues).map(|at| if at == queue { value } else { 0 }));
+        self.any.store(true, Ordering::SeqCst);
+    }
 /// One device's scheduler thread.
 pub(crate) struct Scheduler {
     shared: Arc<SchedulerShared>,
@@ -145,6 +171,13 @@ pub(crate) struct State {
     /// The lists each batch's submission fills and empties, with their room
     /// (`command_buffer/submit.rs`).
     pub(crate) lists: BatchLists,
+    /// The batches held for one kernel submission on one `VkQueue` (`command_buffer/group.rs`),
+    /// submitted before the pass ends, or kept past it while that queue runs earlier work
+    /// (`Group::keeps`).
+    pub(crate) group: Group,
+    /// Those batches as the order held them, with their logical queues, in order.
+    grouped: Vec<(u64, Held)>,
+}
 }
 
 /// A commit not yet taken into the order: the command buffer, its logical queue, its batches.
@@ -199,13 +232,17 @@ pub(crate) struct BatchSync {
 }
 
 impl Scheduler {
-    /// Start the thread of a device with `queues` `VkQueue`s; refused when the host cannot start
+    /// Start the thread of a device with `queues` `VkQueue`s, whose batches each end with
+    /// `Barrier::to_all` where `by_ends` (`batch_order.rs`); refused when the host cannot start
     /// one.
-    pub(crate) fn start(queues: usize) -> Result<Scheduler, Error> {
+    pub(crate) fn start(queues: usize, by_ends: bool) -> Result<Scheduler, Error> {
         let shared = Arc::new(SchedulerShared {
             inbox: Inbox::new(State {
                 order: Order::default(),
-                tracker: Tracker::default(),
+                tracker: match by_ends {
+                    true => Tracker::by_ends(),
+                    false => Tracker::default(),
+                },
                 values: vec![0; queues],
                 waited: vec![vec![0; queues + 2]; queues],
                 binary: BinarySignals::default(),
@@ -215,6 +252,8 @@ impl Scheduler {
                 untracked_decodes: 0,
                 kept: KeptBarriers::default(),
                 lists: BatchLists::default(),
+                group: Group::default(),
+                grouped: Vec::new(),
             }),
             wake: Condvar::new(),
             gated: AtomicBool::new(false),
@@ -270,10 +309,12 @@ impl Scheduler {
     }
 
     /// Whether every batch committed so far was submitted: none is held for an event, a binary
-    /// semaphore, a host step or a check, or waits in the inbox (`texture/storage_form.rs`).
+    /// semaphore, a host step, a check or a group, or waits in the inbox
+    /// (`texture/storage_form.rs`).
     pub(crate) fn holds_none(&self) -> bool {
         let inbox = &self.shared.inbox;
-        lock(inbox.state()).order.is_empty() && !inbox.holds_commits()
+        let state = lock(inbox.state());
+        state.order.is_empty() && state.grouped.is_empty() && !inbox.holds_commits()
     }
 
     /// A CPU decode into the decoded twin of the resource `key` was queued: every batch whose
@@ -517,19 +558,22 @@ fn pass(
 /// it.
 type Spent = Vec<Hold<CommandBufferShared>>;
 
-/// Submit every batch that is ready, in order, until none is; each submission is a section of
-/// the exit guard. A batch is published (or its failure posted) only after its section ended, so
-/// the exit hook's registration at the section's end comes before anything the program can
-/// learn of it (`exit_guard`). A batch's events are let go of before its command buffer
-/// (`gate`), whose holds go to `spent`, for the caller to drop without the lock. A batch whose
-/// host step may run now goes to `left` as a step (once), for the caller to record without the
-/// lock; `gated` says whether one still waits at its gate. A batch whose submission checks may run
-/// now goes to `left` as a check (once), for the caller to run without the lock. A command buffer whose
-/// last batch was submitted, or that failed, and on which a fetched target's storage form rides
-/// (`texture/storage_form.rs`) is settled and goes to `settled`, for the caller to announce
-/// without the lock ([`settle`]). A command buffer whose last batch was submitted with
-/// submission handlers goes to `handlers`, in submission order, for the caller to run them
-/// without the lock ([`run_submission_handlers`]). `Err` once the process is exiting.
+/// Submit every batch that is ready, in order, until none is; each submission is a section of the
+/// exit guard. A batch is published (or its failure posted) only after its section ended, so the
+/// exit hook's registration at the section's end comes before anything the program can learn of it
+/// (`exit_guard`). A batch's events are let go of before its command buffer (`gate`), whose holds
+/// go to `spent`, for the caller to drop without the lock. A batch whose host step may run now goes
+/// to `left` as a step (once), for the caller to record without the lock; `awaits` holds what the
+/// heads still waiting at their gates wait for. A batch whose submission checks may run now goes to
+/// `left` as a check (once), for the caller to run without the lock; `awaits` holds the GPU signals
+/// those still waiting to land wait for. A command buffer whose last batch was submitted, or that
+/// failed, and on which a fetched target's storage form rides (`texture/storage_form.rs`) is
+/// settled and goes to `settled`, for the caller to announce without the lock ([`settle`]). A
+/// command buffer whose last batch was submitted, or held in a group (`command_buffer/group.rs`),
+/// with submission handlers goes to `handlers`, in that order, for the caller to run them without
+/// the lock ([`run_submission_handlers`]). Once it let go of [`PASS_SUBMISSIONS`] batches' holds,
+/// it stops where no batch is held for a group, answering `More(true)`, for the caller to let go of
+/// them and pass again. `Err` once the process is exiting.
 fn submit_ready(
     state: &mut State,
     (spent, settled): (&mut Spent, &mut Settled),
@@ -585,22 +629,76 @@ fn submit_ready(
             event_waits(held)
         });
         let Some((queue, sequence, held, waits)) = next else {
+            // The batches held go before the pass ends, unless they stay held while their
+            // `VkQueue` runs two or more earlier submissions and no head waits for the GPU
+            // (`Group::keeps`): a completion turn wakes the thread once one is left, a commit or
+            // a waiter for one of their command buffers sooner. Their submission makes no batch
+            // ready: none of them signals a binary semaphore, and their events' signals counted
+            // as submitted as they were held.
+            drop(busy);
             if !waiting && !landing {
-                gated.store(false, Ordering::SeqCst);
+                if let Some(value) = state.group.keeps() {
+                    awaits.gate_on(state.group.queue(), value, state.values.len());
+                    return Ok(More(false));
+                }
+            }
+            let end = match (state.order.is_empty(), left.is_empty()) {
+                (true, _) => GroupEnd::Drained,
+                (false, false) => GroupEnd::Checks,
+                (false, true) => GroupEnd::Held,
+            };
+            submit_group(state, (spent, settled), handlers, end)?;
+            if !waiting && !landing {
             }
             return Ok(());
         };
         let submitted = held
             .buffer
-            .submit_batch(held.index, held.last, &waits, state)
-            .transpose();
-        // A rebind marked it since it was found ready: back at its place, which it keeps, until
-        // the rebind encoded its encoders again (`command_buffer/reencode.rs`), which wakes the
-        // thread.
-        let Some(submitted) = submitted else {
-            drop(busy);
-            state.order.put_back(queue, sequence, held);
-            continue;
+            .submit_batch(held.index, held.last, &waits, state);
+        // Its waits for values found reached go: it waits for none of them.
+        if matches!(
+            submitted,
+            Ok(Submitting::Submitted(_) | Submitting::Grouped)
+        ) {
+            let met = held.waits.len() - waits.len();
+            if met > 0 {
+                held.buffer.device().shared().counts.event_waits_met(met);
+            }
+        }
+        let submitted = match submitted {
+            Ok(Submitting::Submitted(submission)) => Ok(submission),
+            Err(error) => Err(error),
+            // A rebind marked it since it was found ready: back at its place, which it keeps,
+            // until the rebind encoded its encoders again (`command_buffer/reencode.rs`), which
+            // wakes the thread.
+            Ok(Submitting::Later) => {
+                drop(busy);
+                state.order.put_back(queue, sequence, held);
+                continue;
+            }
+            // The batches held go first: back at its place, then looked for again.
+            Ok(Submitting::AfterGroup(end)) => {
+                drop(busy);
+                state.order.put_back(queue, sequence, held);
+                submit_group(state, (spent, settled), handlers, end)?;
+                continue;
+            }
+            // Held for one kernel submission with the batches after it: published once that is
+            // made (`command_buffer/group.rs`), at once where the group is full.
+            Ok(Submitting::Grouped) => {
+                drop(busy);
+                // Scheduled as it is held, out of the section, its submission handlers run first
+                // (`group.rs`).
+                if state.group.schedule_held() {
+                    handlers.push(held.buffer.hold());
+                }
+                held.buffer.held_in_group();
+                state.grouped.push((queue, held));
+                if state.group.full() {
+                    submit_group(state, (spent, settled), handlers, GroupEnd::Full)?;
+                }
+                continue;
+            }
         };
         let Held {
             buffer,
@@ -612,6 +710,11 @@ fn submit_ready(
         } = held;
         drop(events);
         drop(busy);
+        // Where batches were held, they went first, in this batch's `vkQueueSubmit` (first work it
+        // took sent it at once).
+        if let Some(outcome) = state.group.take_outcome() {
+            settle_group(state, outcome, (spent, settled), handlers);
+        }
         match submitted {
             Ok(submission) => {
                 state.binary.submitted(&binary_needs, &binary_signals);
@@ -647,6 +750,104 @@ fn submit_ready(
 /// The process is exiting ([`exit_guard`]): the thread submits no more.
 struct Exiting;
 
+/// Submit the batches held for one kernel submission (`command_buffer/group.rs`), sent by `end`
+/// (counted), a section of the exit guard, then publish them, or fail their command buffers
+/// ([`settle_group`]). `Err` once the process is exiting: they stay held.
+fn submit_group(
+    state: &mut State,
+    (spent, settled): (&mut Spent, &mut Settled),
+    handlers: &mut Handlers,
+    end: GroupEnd,
+) -> Result<(), Exiting> {
+    let Some(device) = (state.grouped.first()).map(|(_, held)| held.buffer.device().clone()) else {
+        return Ok(());
+    };
+    let busy = exit_guard::enter().ok_or(Exiting)?;
+    device.shared().counts.group_ended(end);
+    let queue = state.group.queue();
+    let State { group, waited, .. } = &mut *state;
+    // The call's own result is a batch's submitted after the group, of which there is none.
+    let _ = group.submit(&device, &mut waited[queue], None);
+    drop(busy);
+    if let Some(outcome) = state.group.take_outcome() {
+        settle_group(state, outcome, (spent, settled), handlers);
+    }
+    Ok(())
+}
+
+/// Publish the batches held for a kernel submission that was made, in order, as [`submit_ready`]
+/// publishes one; or, where it failed, fail each one's command buffer, once, and drop the rest of
+/// its batches, as a batch whose submission failed. Their holds go to `spent`.
+fn settle_group(
+    state: &mut State,
+    outcome: Result<(), CommandBufferError>,
+    (spent, settled): (&mut Spent, &mut Settled),
+    handlers: &mut Handlers,
+) {
+    let State {
+        order,
+        binary,
+        values,
+        grouped,
+        group,
+        ..
+    } = state;
+    match outcome {
+        Ok(()) => {
+            for ((_, held), submission) in grouped.drain(..).zip(group.made()) {
+                let Held {
+                    buffer,
+                    last,
+                    waits: events,
+                    binary_needs,
+                    binary_signals,
+                    ..
+                } = held;
+                drop(events);
+                binary.submitted(&binary_needs, &binary_signals);
+                if submission.runs_handlers() {
+                    handlers.push(buffer.hold());
+                }
+                buffer.left_group();
+                buffer.publish(submission);
+                if last && buffer.settle_storage_forms() {
+                    settled.push(buffer.hold());
+                }
+                spent.push(buffer);
+            }
+        }
+        Err(error) => {
+            let mut failed: Vec<Hold<CommandBufferShared>> = Vec::new();
+            for (queue, held) in grouped.drain(..) {
+                let Held {
+                    buffer,
+                    waits: events,
+                    binary_needs,
+                    ..
+                } = held;
+                drop(events);
+                binary.dropped(&binary_needs);
+                buffer.left_group();
+                if !failed.iter().any(|done| done.same(&buffer)) {
+                    // The rest of the command buffer never runs (dropped here, before it can
+                    // finish).
+                    let rest = order.drop_head(queue, |next| next.buffer.same(&buffer));
+                    for held in &rest {
+                        binary.dropped(&held.binary_needs);
+                    }
+                    spent.extend(rest.into_iter().map(|held| held.buffer));
+                    buffer.failed(error, values);
+                    if buffer.settle_storage_forms() {
+                        settled.push(buffer.hold());
+                    }
+                    failed.push(buffer.hold());
+                }
+                spent.push(buffer);
+            }
+        }
+    }
+}
+
 /// Whether `held` may read a texture of `decodes`: its footprint names one, or it has none it can
 /// know before its submission (sparse work, a segment whose uses its host step finds).
 fn reads_decoding(held: &Held, decodes: &BTreeMap<ResourceKey, usize>) -> bool {
@@ -676,8 +877,8 @@ fn settle(settled: &mut Settled) {
 /// The command buffers whose storage forms the scheduler settled, to end without its lock.
 type Settled = Vec<Hold<CommandBufferShared>>;
 
-/// The command buffers whose last batch a pass submitted with submission handlers, in
-/// submission order, for the submitting thread to run without the lock.
+/// The command buffers whose last batch a pass submitted or held in a group with submission
+/// handlers, in that order, for the submitting thread to run without the lock.
 type Handlers = Vec<Hold<CommandBufferShared>>;
 
 /// Run the submission handlers of `handlers`' command buffers on this thread, which holds none of
@@ -698,42 +899,58 @@ type Work = (Hold<CommandBufferShared>, usize);
 /// ready (its binary semaphores' signals submitted, its events' values reached, its host step
 /// recorded, not `behind` an earlier commit) and waits for its checks: once every value it waits
 /// for was reached on the device or by the host, not only by a submitted GPU signal (or the device
-/// is lost), it goes to `left` as a check, unless there already. `gated` is set before the events
-/// are read again, as [`Scheduler::completions`] says. Whether a head still waits for a GPU signal
-/// to land.
-fn check_heads(
-    state: &mut State,
-    behind: &[u64],
-    left: &mut Left<Work>,
-    gated: &AtomicBool,
-) -> bool {
+///
+/// Where the line's batches may go in one kernel submission (`command_buffer/group.rs`), the
+/// batches right behind a head that goes (its checks in `left` or none due, otherwise ready, its
+/// events' values reached on the device or by the host) are looked at too, at most
+/// [`GROUP_BATCHES`] less one and none committed after another line's batch
+/// ([`Order::leading_mut`]), each that goes taking its checks to `left` likewise: so the next pass
+/// finds them ready together. Each check still runs in commit order before its own batch's
+/// submission, within the pass before it, where a head's alone runs after the batch before it
+/// was submitted.
     let State { order, binary, .. } = state;
     let mut landing = false;
-    for held in order.heads_mut(behind) {
-        if !held.checked
-            || !binary.ready(&held.binary_needs)
-            || (held.segments && held.buffer.needs_host_step(held.index))
-            || !held.buffer.needs_check(held.index)
-            || left.holds(Kind::Check, |(buffer, index)| {
+    order.leading_mut(behind, GROUP_BATCHES - 1, |held, head| {
+        let otherwise_ready = binary.ready(&held.binary_needs)
+            && !(held.segments && held.buffer.needs_host_step(held.index));
+        let due = held.checked
+            && held.buffer.needs_check(held.index)
+            && !left.holds(Kind::Check, |(buffer, index)| {
                 buffer.same(&held.buffer) && *index == held.index
-            })
-        {
-            continue;
+            });
+        // Whether it goes as far as its checks know: the batches after it may be checked now.
+        let goes = |held: &Held| {
+            otherwise_ready
+                && held.buffer.groups()
+                && event_waits(held).is_some_and(|waits| waits.is_empty())
+        };
+        if !head {
+            if !goes(held) {
+                return false;
+            }
+            if due {
+                left.push(Kind::Check, (held.buffer.hold(), held.index));
+            }
+            return true;
+        }
+        if !held.checked || !otherwise_ready || !due {
+            return !due && goes(held);
         }
         match event_waits(held) {
-            None => continue,
+            None => return false,
             Some(waits) if !waits.is_empty() && !held.buffer.device().is_lost() => {
                 gated.store(true, Ordering::SeqCst);
                 fence(Ordering::SeqCst);
                 if event_waits(held).is_some_and(|waits| !waits.is_empty()) {
                     landing = true;
-                    continue;
+                    return false;
                 }
             }
             Some(_) => {}
         }
         left.push(Kind::Check, (held.buffer.hold(), held.index));
-    }
+        goes(held)
+    });
     landing
 }
 

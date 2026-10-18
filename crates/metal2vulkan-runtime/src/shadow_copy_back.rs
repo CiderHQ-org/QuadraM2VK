@@ -25,7 +25,8 @@
 //! of the buffer's bytes in `COMPUTE_SHADER`, which the encoder's tracker orders as any command's
 //! (after a pass's `COLOR_ATTACHMENT_OUTPUT` writes; before the buffer's next use). Before the
 //! host reads the bytes, the command buffer's last barrier makes every write available to the
-//! host (`tracker::Barrier::to_host`, `ALL_COMMANDS`/`MEMORY_WRITE` to `HOST`/`HOST_READ`).
+//! host (`tracker::Barrier::to_host`, `ALL_COMMANDS`/`MEMORY_WRITE` to `HOST`/`HOST_READ`, or
+//! `Barrier::to_all`, which adds every later command of its `VkQueue`: `batch_order.rs`).
 //!
 //! **Where the copy stays.** A device without the fact, a texel of another width, a texture of
 //! more levels or slices, bytes copied through a staging buffer, a region past the device's

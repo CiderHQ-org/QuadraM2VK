@@ -167,6 +167,10 @@ pub(super) fn over_host(device: &Device, host: &Host, runs: &Arc<AtomicUsize>) -
     }
 }
 
+/// A command buffer of `queue`'s that fills `target` [`FILLS`] times, committed, once its batch's
+/// `vkQueueSubmit` was made (a kernel submission counted, `WorkCounts::queue_submissions`; its
+/// kernel times are no such sign, as `freed_memory.rs`'s `filling` says): the work the blit waits
+/// behind.
 pub(super) fn busy(queue: &CommandQueue, target: &Buffer) -> CommandBuffer {
     let command_buffer = queue.command_buffer().unwrap();
     let mut blit = command_buffer.blit_command_encoder().unwrap();
@@ -174,8 +178,10 @@ pub(super) fn busy(queue: &CommandQueue, target: &Buffer) -> CommandBuffer {
         blit.fill_buffer(target, 0..FILLED, value as u8).unwrap();
     }
     blit.end_encoding().unwrap();
+    let before = queue.device().work_counts().queue_submissions;
     command_buffer.commit().unwrap();
     let deadline = Instant::now() + WAIT;
+    while queue.device().work_counts().queue_submissions == before {
         assert!(Instant::now() < deadline, "the batch was never submitted");
         std::thread::yield_now();
     }

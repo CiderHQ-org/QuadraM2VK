@@ -3,10 +3,12 @@
 
 use crate::device::profile::{FramebufferFetchPolicy, GuestIsolation, HandleDomain, PointerDomain};
 
-/// Policy inputs of `Device::new`. Every field but `padded_reads` can change emitted code, so the
-/// profile carries it (containment as the encoding it selects) and its fingerprint covers it;
-/// `padded_reads` is the runtime's alone (how it makes a texture over a buffer), and no profile
-/// carries it.
+/// `completion`, `tile_store`, `resolve` and `batch_order` can change emitted code, so the profile
+/// carries it (containment as the encoding it selects) and its fingerprint covers it; those six
+/// are the runtime's alone (the texels of a carried texture's decoded twin, a heap's compressed
+/// texture's image, when the host sees a command buffer complete, what a render pass's load leaves
+/// in the texels its draws do not write, how a multisampled color attachment resolves, and how a
+/// batch begins after the earlier ones of its queue), and no profile carries them.
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -67,12 +69,22 @@ pub struct DevicePolicy {
     /// default) or one the driver keeps uncompressed in the heap's bytes. The runtime's choice
     /// alone: no emitted code changes.
     pub heap_compression: HeapCompressionPolicy,
+    /// Whether command buffers committed on one `VkQueue` that the runtime's scheduler finds ready
+    /// together go to the driver in one kernel submission, each seen complete once the last of
+    /// them completed (the default, on a driver that merges such submissions), or each in a
+    /// submission of its own, seen complete at its own end. The runtime's choice alone: no
     /// emitted code changes.
+    pub completion: CompletionPolicy,
     /// Whether a render pass that loads a signed normalized or `RGB9E5Float` color attachment and
     /// draws keeps the texels its draws do not write as the device's load and store leave them
     /// (the default), or as Metal's tile store writes them back in the tiles a draw reaches. The
     /// runtime's choice alone: no emitted code changes.
     pub tile_store: TileStorePolicy,
+    /// Whether a batch of command buffers on one `VkQueue` begins after the batches before it
+    /// there by their ends (the default, on a driver measured to run no two kernel submissions of
+    /// one queue side by side), or by a barrier for each access that depends on theirs. The
+    /// runtime's choice alone: no emitted code changes.
+    pub batch_order: BatchOrderPolicy,
 }
 
 impl DevicePolicy {
@@ -81,8 +93,8 @@ impl DevicePolicy {
     /// emulation runs, native device sampling (a two-plane YCbCr texture's samples among them),
     /// native device maths, the device's own texel
     /// conversions, native half rounding, the device's NaN and minimum and maximum, the device's
-    /// rounding order, the device's blend of a `half` output into a 16-bit float attachment, and
-    /// an image over a texture's padded rows where the texture only reads.
+    /// attachment, the device's resolve of a multisampled color attachment, and batches of one
+    /// queue ordered by their ends where the driver runs them one after another.
     pub const UNTRUSTED: DevicePolicy = DevicePolicy {
         pointer_domain: PointerDomain::ResidentTable,
         handle_domain: HandleDomain::Table,
@@ -100,7 +112,9 @@ impl DevicePolicy {
         half_blend: HalfBlendPolicy::Device,
         decoded_texels: DecodedTexelsPolicy::Compact,
         heap_compression: HeapCompressionPolicy::Compressed,
+        completion: CompletionPolicy::Grouped,
         tile_store: TileStorePolicy::Device,
+        batch_order: BatchOrderPolicy::Ends,
     };
 
     /// This policy with Metal's answer wherever the choices offer it: its maths functions,
@@ -110,6 +124,9 @@ impl DevicePolicy {
     /// ([`RoundingOrderPolicy::Exact`]), its 16-bit float blend of a `half` output
     /// ([`HalfBlendPolicy::Exact`]), its filter of a two-plane YCbCr texture
     /// as written ([`HeapCompressionPolicy::Uncompressed`]), each command buffer seen complete
+    /// store leaves them ([`TileStorePolicy::Exact`]), its multisample color resolve
+    /// ([`ResolvePolicy::Exact`]), and each batch ordered after the earlier ones of its queue by
+    /// the accesses it depends on alone ([`BatchOrderPolicy::Exact`]). Sampling and every other
     /// field are kept.
     pub const fn exact_answers(self) -> DevicePolicy {
         DevicePolicy {
@@ -122,7 +139,9 @@ impl DevicePolicy {
             half_blend: HalfBlendPolicy::Exact,
             decoded_texels: DecodedTexelsPolicy::Exact,
             heap_compression: HeapCompressionPolicy::Uncompressed,
+            completion: CompletionPolicy::Exact,
             tile_store: TileStorePolicy::Exact,
+            batch_order: BatchOrderPolicy::Exact,
             ..self
         }
     }
@@ -451,6 +470,36 @@ pub enum HeapCompressionPolicy {
     Uncompressed,
 }
 
+/// When the host sees a command buffer complete, on a driver that merges a submission signalling
+/// nothing into the next one in the same `vkQueueSubmit` (Mesa's common queue,
+/// `vk_queue_submits_merge`: ANV, RADV, lavapipe, NVK, Turnip and the other Mesa drivers of a kernel
+/// submission), where each kernel submission costs CPU time for every `VkDeviceMemory` of the
+/// device (ANV on i915 lists each in every execbuffer). Elsewhere every command buffer goes in a
+/// submission of its own under either value. The runtime's choice alone: no emitted code changes.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum CompletionPolicy {
+    /// Up to four batches of command buffers on one `VkQueue` that the scheduler finds ready
+    /// together, none of which signals a binary semaphore, takes a fence, moves the caller's
+    /// images or does first work, and none but the first of which waits for anything not seen
+    /// complete, go in one `vkQueueSubmit`, and only the last signals, the queue's timeline and
+    /// every event they signal (the default): one kernel submission for all of them. The commands,
+    /// their barriers and their GPU times are unchanged; each but the last is seen complete (its
+    /// status, handlers and waits) once the last completed, and an event's values they signal are
+    /// reached then, late by the GPU time of the batches after it, never early and in commit
+    /// order. The submission checks of up to three batches right behind a queue's next batch run
+    /// with its own, in commit order, so checked command buffers are found ready together: such a
+    /// check runs before the previous batch's submission rather than after it. Announced
+    /// `grouped-completion` at the first such submission.
+    #[default]
+    Grouped,
+    /// Each batch in a submission of its own that signals its own values, so each command buffer
+    /// is seen complete, and its event signals land, at its own end, as Metal's are; each batch's
+    /// submission checks run once the batch before it was submitted.
+    Exact,
+}
+
 /// What a render pass that loads a single-sampled color attachment of a signed normalized format
 /// (`R8Snorm`, `RG8Snorm`, `RGBA8Snorm`, `R16Snorm`, `RG16Snorm`, `RGBA16Snorm`) or of
 /// `RGB9E5Float`, stores it and draws leaves in the texels its draws do not write. An Apple GPU
@@ -478,4 +527,28 @@ pub enum TileStorePolicy {
     /// [`Device`](Self::Device).
     Exact,
 }
+
+/// How a batch of command buffers on one `VkQueue` (the work the runtime submits for a command
+/// buffer between its event waits and signals) begins after the earlier batches there. Metal
+/// orders a command buffer after the earlier ones of its queue only where its work depends on
+/// theirs, so an independent one may run beside the one before it; it writes its `GPUStartTime`
+/// as its work begins. The runtime's choice alone: no emitted code changes.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum BatchOrderPolicy {
+    /// By their ends (the default) on a driver measured to run no two kernel submissions of one
+    /// queue side by side, with or without a barrier between them, where it runs the same work
+    /// recorded in one command buffer side by side (ANV, RADV and NVIDIA's driver): every batch
+    /// ends with a barrier that orders all its commands before every command after it on its
+    /// queue, so a later batch plans no barrier for the accesses of earlier ones, and its first
+    /// encoder's GPU start time is written once the work before it ended, at the bottom of the
+    /// pipe. Each batch then still starts once the one before it ended, as those drivers start it
+    /// anyway. On any other driver, as [`Exact`](Self::Exact).
+    #[default]
+    Ends,
+    /// A barrier at a batch's start for each access that depends on an earlier batch's, as for
+    /// the accesses within a batch, and its first encoder's GPU start time written as it begins,
+    /// at the top of the pipe, where the driver may run it beside the batch before it.
+    Exact,
 }

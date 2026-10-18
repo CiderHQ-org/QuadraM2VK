@@ -10,8 +10,8 @@
 //!   names after an image barrier whose destination stage is `ALL_COMMANDS` ("all read accesses ...
 //!   valid where it is used"), and [`ImageDst::Every`] names exactly that. The host reaches no
 //!   image's memory: it moves texels by copies, and a heap buffer's bytes reach the host through
-//!   the global barrier that ends every batch (`tracker::Barrier::to_host`) or an internal
-//!   submission (`texture::transfer_barrier`), which no image barrier stands for.
+//!   the global barrier that ends every batch (`tracker::Barrier::to_host` or `to_all`) or an
+//!   internal submission (`texture::transfer_barrier`), which no image barrier stands for.
 //! - **The recording family's reads.** `ALL_COMMANDS` stands for the stages the recording queue
 //!   family supports, and an access mask may name only accesses those stages make
 //!   (VUID-vkCmdPipelineBarrier-pImageMemoryBarriers-02820). So [`ImageDst::Every`] is the reads

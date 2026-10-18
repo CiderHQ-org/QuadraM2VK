@@ -103,6 +103,18 @@ compile does. `DevicePolicy::default()` is `DevicePolicy::UNTRUSTED`:
   `tile_store = TileStorePolicy::Exact`, which `exact_answers()` selects, rewrites them before
   the pass as Metal's store leaves them, through the extended-range attachments' load pass. On
   MoltenVK the pass is a Metal pass and stores them as Metal's under either value.
+- **Batches of a queue ordered by their ends** (`BatchOrderPolicy::Ends`, the runtime's choice; no
+  pipeline differs). On ANV, RADV and NVIDIA's driver, each measured to start no kernel submission
+  of a `VkQueue` before the one before it completed, each batch of command buffers ends with a
+  barrier ordering its work before every later command of its `VkQueue`: a batch that depends on
+  an earlier one there begins with no barrier of its own, and a command buffer's GPU start is
+  taken once the work before it completed, which is when such a driver starts it. Nothing is
+  announced: on those drivers the work's order, its results and its GPU times are the same under
+  either value. `batch_order = BatchOrderPolicy::Exact`, which `exact_answers()` selects, orders
+  each batch after the earlier ones of its queue only by its work's dependencies on theirs, as
+  Metal does (an M3 Max starts an independent command buffer committed behind running work while
+  that work runs), and takes a command buffer's GPU start as its work begins. Every other driver
+  takes that form under either value.
 
 Loops run as written: no execution bound is translated in.
 
@@ -1326,7 +1338,9 @@ fast forms record, and each `PrecisionNote`'s rustdoc states its bound.
   the texture's own image before its store action was known, the pass executes render commands,
   or the device copies no image of the format) does the pass render in place, announced so. Cost:
   the attachment's texels after the pass are each its earlier texel or the one the pass rendered,
-  both Metal's answers, but not always the one Metal's tiler keeps.
+  both Metal's answers, but not always the one Metal's tiler keeps. Within Metal's contract:
+  `MTLStoreAction.dontCare` lets the GPU leave arbitrary data ("You need to assume that GPU
+  discarded the texture's contents").
 - `metal2vulkan-degrade-dont-care-load-tiles` (precision). `DontCareLoadTiles`: An attachment loaded
   with `DontCare` and stored, in a pass that draws, is cleared before the draws to zero (a color) or
   its clear value (depth, stencil) over the render area and the tiles past it a clear reaches, where
@@ -1966,6 +1980,21 @@ fast forms record, and each `PrecisionNote`'s rustdoc states its bound.
   it is freed: not announced.
   Cost: the deallocator runs once every such command buffer lets go of the pages, or those batches
   complete, where Metal's runs at the release; the pages stay mapped until then.
+- `metal2vulkan-degrade-grouped-completion` (precision). `GroupedCompletion`: Batches of command
+  buffers committed on one queue that the scheduler found ready together, or held while two or more
+  earlier submissions of their queue ran, went to the driver in one `vkQueueSubmit`, only the last
+  signalling its queue's timeline and their events (`CompletionPolicy::Grouped`, the default, on a
+  driver whose queue merges a submission that signals nothing into the next one: Mesa's drivers):
+  one kernel submission for up to four batches, where each kernel submission costs CPU time for
+  every `VkDeviceMemory` of the device. Announced once per device, on the scheduler's thread. Cost:
+  each command buffer of the submission but the last is seen complete (its status, completed
+  handlers and waits), and the event values it signals are reached, once the last completed, late by
+  the GPU time of the batches after it, at most three, never early and in commit order, and a
+  submission held while earlier ones of its queue ran late besides by any gap between the last of
+  those and its own start on the GPU, at most a completion turn's reaction and its vkQueueSubmit;
+  and the submission checks of the batches behind a queue's next one run with its own, before the
+  batch before them is submitted; their commands, barriers and GPU times are unchanged;
+  `CompletionPolicy::Exact` submits and checks each batch alone.
 - `metal2vulkan-degrade-misplaced-notice` (performance). `MisplacedNotice`: In a build without debug
   assertions, a notice announced where the runtime's rule announces none (`DegradeNotice::misplaced`
   names its kind and `NoticePlace`): inside a pipeline pool's piece, or, for a kind announced at

@@ -128,8 +128,13 @@ fn unused(device: &Device, host: &Host, runs: &Arc<Runs>) -> Option<crate::Buffe
     }
 }
 
-/// A command buffer of `queue`'s that fills `target` [`FILLS`] times, committed, once its batch
-/// was submitted.
+/// A command buffer of `queue`'s that fills `target` [`FILLS`] times, committed, once its batch's
+/// `vkQueueSubmit` was made: a kernel submission counted (`WorkCounts::queue_submissions`, counted
+/// under the parking gate's read lock that the store of the batch's value holds too, so a block's
+/// note after it sees the value). Its kernel times are no such sign: the scheduler stores its
+/// start as it begins the batch, before replaying and submitting it, and under
+/// `CompletionPolicy::Grouped` its end as it holds the batch for a kernel submission with later
+/// ones.
 fn filling(queue: &CommandQueue, target: &crate::Buffer) -> CommandBuffer {
     let command_buffer = queue.command_buffer().unwrap();
     let mut blit = command_buffer.blit_command_encoder().unwrap();
@@ -137,9 +142,10 @@ fn filling(queue: &CommandQueue, target: &crate::Buffer) -> CommandBuffer {
         blit.fill_buffer(target, 0..FILLED, value as u8).unwrap();
     }
     blit.end_encoding().unwrap();
+    let before = queue.device().work_counts().queue_submissions;
     command_buffer.commit().unwrap();
     let deadline = Instant::now() + WAIT;
-    while command_buffer.kernel_start_time() == 0.0 {
+    while queue.device().work_counts().queue_submissions == before {
         assert!(Instant::now() < deadline, "the batch was never submitted");
         std::thread::yield_now();
     }

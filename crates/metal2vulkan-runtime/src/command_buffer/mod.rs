@@ -14,11 +14,8 @@
 //! `Completed` or `Error`. The transitions after `Committed` run in the queue's serial context on
 //! the device's handler threads ([`contexts`](super::contexts)), in the queue's order: to
 //! `Scheduled` once its last batch is submitted (every wait of it satisfied), with its scheduled
-//! handlers; to `Completed` once its work completed, with its completed handlers and the release
-//! of what it retained. As on Metal, a queue's command buffer whose work completed stays
-//! `Committed` while an earlier transition of its queue, a handler, still runs. Its submission
-//! handlers (a runtime extension) run before its transition to `Scheduled`, on the thread that
-//! submitted its last batch, which the transition waits for.
+//! thread that took its last batch for its queue (submitted it, or held it for one kernel
+//! submission with later batches: `group.rs`), which the transition waits for.
 //!
 //! Encoders write their commands' own data (tables, neutral buffers) into the command buffer's
 //! upload arena ([`upload`](super::upload)), and the execution status words its commands share; the
@@ -31,6 +28,7 @@ pub(super) mod completion;
 pub(super) mod fences;
 mod first_submission;
 pub(super) mod gate;
+mod group;
 pub(super) mod kept_barriers;
 pub(super) mod own;
 mod reencode;
@@ -39,7 +37,8 @@ mod submit;
 
 pub(super) use completion::Completion;
 pub(super) use first_submission::NotedTable;
-pub(super) use submit::BatchLists;
+pub(super) use group::{Group, GroupEnd, GROUP_BATCHES};
+pub(super) use submit::{BatchLists, Submitting};
 
 use super::contexts::{self, Run};
 use super::deferred::{Deferred, Prepared};
@@ -76,7 +75,7 @@ use super::sparse::encoder::SparseUpdate;
 use super::sparse::indirect::{self, ReadFailure};
 use super::texture::storage_form::Riding;
 use super::texture::Texture;
-use super::tracker::{Barrier, Footprint};
+use super::tracker::Footprint;
 use super::upload::{Upload, Uploads};
 use super::used_resources::{EncoderKind, EncoderRecord, Reached, ReadRecord};
 use super::values::CommandBufferStatus;
@@ -100,7 +99,7 @@ use own::{
 use std::any::Any;
 use std::collections::{BTreeSet, HashSet, VecDeque};
 use std::ops::Range;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -182,6 +181,9 @@ pub(super) struct CommandBufferShared {
     /// here: no lock is taken first at a commit (on Apple's hosts a mutex allocates at its first
     /// lock).
     error: OnceLock<CommandBufferError>,
+    /// Whether a batch of it is held in the scheduler's group, and whether a thread waits for its
+    /// completion: a group kept past a pass goes at once once one does (`group.rs`).
+    group_hold: AtomicU8,
 }
 
 /// The word [`CommandBufferShared::status`] holds for `status`: its raw value.
@@ -423,9 +425,10 @@ pub(super) struct State {
     batches: Batches<Arc<EventShared>, vk::Semaphore>,
     scheduled: VecDeque<Handler>,
     /// Its submission handlers ([`CommandBuffer::add_submission_handler`]): run on the thread
-    /// that submits its last batch, before its transition to `Scheduled`.
+    /// that takes its last batch for its queue (submits it, or holds it in a group), before its
+    /// transition to `Scheduled`.
     submission: VecDeque<Handler>,
-    /// The thread that submitted its last batch has its submission handlers to run, or the
+    /// The thread that took its last batch has its submission handlers to run, or the
     /// switch of storage forms riding on it to end (`texture/storage_form.rs`): its transition to
     /// `Scheduled` waits until it did.
     submitting: bool,
@@ -1006,13 +1009,18 @@ impl State {
             .unwrap_or(batches.len() - 1)
     }
 
-    /// Whether batch `index`'s end may go into its last `VkCommandBuffer` (`submit.rs`): it
-    /// signals no event (whose kept signal may need the end after a wait for another queue's),
-    /// and its parts leave no segment or sparse update for its submission (whose recordings go
-    /// among or after the parts' own), and name no texture over the caller's image that moves
-    /// between layouts (whose move back its submission plans before the end).
+    /// Whether batch `index`'s end may go into its last `VkCommandBuffer` (`submit.rs`): its
+    /// parts leave no segment or sparse update for its submission (whose recordings go among or
+    /// after the parts' own), nor its last part a write into an ASTC carrier (whose second twin's
+    /// decode its submission may record after it, `texture/decoded_twin.rs`), and name no texture
+    /// over the caller's image that moves between layouts (whose move back its submission plans
+    /// before the end). An event's kept signal that waits for another queue's still goes after
+    /// that wait, in an end of its own at the submission (`submit.rs`).
     fn may_fold(&self, device: &Device, index: usize) -> bool {
         let parts = &self.recorded[self.batch_range(index)];
+        parts
+            .iter()
+            .all(|part| part.segments.is_empty() && part.sparse.is_empty())
             && parts.last().is_none_or(|part| part.twin_writes.is_empty())
             && device
                 .shared()
@@ -1380,6 +1388,7 @@ impl CommandBuffer {
             kernel: KernelTimes::default(),
             status: AtomicU8::new(status_word(CommandBufferStatus::NotEnqueued)),
             error: OnceLock::new(),
+            group_hold: AtomicU8::new(0),
         }))
     }
 
@@ -1482,11 +1491,15 @@ impl CommandBuffer {
         Ok(())
     }
 
-    /// Call `handler` once the command buffer's last batch reached its `VkQueue`, on the thread
-    /// that submitted it, before the command buffer becomes `Scheduled`: a runtime extension, no
-    /// Metal call (docs/API.md, "A command buffer's submission handlers"). Metal submits on its
-    /// own thread and tells a program of it only through `Scheduled` (EV SUB-sched1-m4); a
-    /// program that models what Metal does as it submits takes that point here.
+    /// Call `handler` once the runtime took the command buffer's last batch for its `VkQueue`,
+    /// on the thread that took it, before the command buffer becomes `Scheduled`: a runtime
+    /// extension, no Metal call (docs/API.md, "A command buffer's submission handlers"). The
+    /// batch is taken where it is submitted, or held for one kernel submission with the batches
+    /// committed after it (`CompletionPolicy::Grouped`, on a driver that merges submissions): its
+    /// commands and its place in its queue's order are fixed then, so nothing committed later on
+    /// the queue runs before it. Metal submits on its own thread and tells a program of it only
+    /// through `Scheduled`; a program that models what Metal does as it
+    /// submits takes that point here.
     ///
     /// - **The thread.** The device's scheduler thread, which makes every submission: `commit`
     ///   returns at once, as Metal's does, and submits nothing itself. It runs with no lock of the
@@ -1495,10 +1508,11 @@ impl CommandBuffer {
     ///   before [`wait_until_scheduled`](Self::wait_until_scheduled) returns, before its
     ///   scheduled handlers run, and before it can complete. The GPU may run the work meanwhile:
     ///   a value of an event its work signals can rise before they ran.
-    /// - **Never** for a command buffer that fails before its last batch is submitted (a
-    ///   submission or host step that fails, a lost device); they are dropped with it. A command
-    ///   buffer committed as failed ([`commit_failed`](Self::commit_failed)) submits its batches
-    ///   and runs them.
+    /// - **Never** for a command buffer that fails before its last batch is taken (a submission
+    ///   or host step that fails, a lost device); they are dropped with it. One whose last batch
+    ///   was held ran them, and fails from `Scheduled` where the group's submission fails. A
+    ///   command buffer committed as failed ([`commit_failed`](Self::commit_failed)) submits its
+    ///   batches and runs them.
     /// - **Keep it short.** It holds back its command buffer's scheduling and the device's other
     ///   submissions, among them those of a commit made meanwhile, which the thread takes in only
     ///   after its handlers (`scheduler/inbox.rs`). A wait in it
@@ -2040,7 +2054,9 @@ impl CommandBuffer {
     }
 
     /// `kernelEndTime`: the host time at which the device's scheduler finished submitting the
-    /// command buffer's work to Vulkan (it is then `Scheduled`); 0 before.
+    /// command buffer's work to Vulkan, or held its last batch for one kernel submission with
+    /// later ones (`CompletionPolicy::Grouped`); it is then `Scheduled`; 0 before. Like Metal's,
+    /// the read waits for no submission in progress and no GPU work.
     pub fn kernel_end_time(&self) -> f64 {
         gpu_time::seconds(self.0.kernel.end())
     }
@@ -2183,7 +2199,9 @@ impl CommandBuffer {
     }
 
     /// `waitUntilCompleted`: block until the command buffer completed or failed and its
-    /// completed handlers ran. It returns on device loss (the status is then `Error`).
+    /// completed handlers ran. It returns on device loss (the status is then `Error`). Where a
+    /// batch of it is held for one kernel submission with later ones while its queue's earlier
+    /// work runs (`CompletionPolicy::Grouped`), the wait sends it at once.
     ///
     /// It returns only once the runtime's threads let go of the command buffer, and of what they
     /// held to make what its work waited for (a pipeline made on the device's pool, a texture's
@@ -2226,6 +2244,7 @@ impl CommandBuffer {
             Answer::Wait => None,
             Answer::Block(from) => Some(contexts::block(from, self.0.context())?),
         };
+        self.0.waits_for_completion();
         self.0.gate.wait()?;
         self.trailed(None)
             .map_err(|_| DeadlockCause::Exiting.into())
@@ -2244,6 +2263,7 @@ impl CommandBuffer {
                 Some(contexts::block(from, self.0.context()).map_err(|_| TimedOut)?)
             }
         };
+        self.0.waits_for_completion();
         self.0.gate.wait_until(deadline)?;
         self.trailed(Some(deadline)).map_err(|_| TimedOut)
     }
@@ -2561,7 +2581,7 @@ impl CommandBufferShared {
             // lock; the slot's queries were reset by the batch's start, before it in submission
             // order (`submit.rs`).
             unsafe {
-                Barrier::to_host().record(device, raw);
+                crate::batch_order::end(self.device.shared().by_ends).record(device, raw);
                 if let Some((queries, first)) = stamp {
                     let bottom = vk::PipelineStageFlags::BOTTOM_OF_PIPE;
                     device.cmd_write_timestamp(raw, bottom, queries, first + 1);
@@ -2728,11 +2748,13 @@ impl CommandBufferShared {
         true
     }
 
-    /// Where the device writes timestamps into slots of three queries and `raw`, just begun, is
-    /// the first `VkCommandBuffer` of the command buffer's first encoder, which opens its first
-    /// batch: take the slot now, and write the start into its third query as `raw`'s first
-    /// commands, the reset of the end and of that query, then the timestamp at the top of the pipe
-    /// (`gpu_time.rs`). The first batch's submission decides which start is read (`submit.rs`).
+    /// Where the device writes timestamps into slots of three queries and `raw`, just begun, is the
+    /// first `VkCommandBuffer` of the command buffer's first encoder, which opens its first batch:
+    /// take the slot now, and write the start into its third query as `raw`'s first commands, the
+    /// reset of the end and of that query (where the device does not reset the slot on the host as
+    /// it takes it), then the timestamp at the top of the pipe (the bottom where batches are
+    /// ordered by their ends: `batch_order.rs`; `gpu_time.rs`). The first batch's submission
+    /// decides which start is read (`submit.rs`).
     fn open_start(&self, state: &mut State, raw: vk::CommandBuffer) {
         let timing = &self.device.shared().timing;
         let first_batch = match state.batches.all() {
@@ -2764,6 +2786,8 @@ impl CommandBufferShared {
                 device.cmd_reset_query_pool(raw, queries, prefix - 1, 2);
                 exit_guard::called(Call::CmdResetQueryPool);
             }
+            let stage = crate::batch_order::start_stage(self.device.shared().by_ends);
+            device.cmd_write_timestamp(raw, stage, queries, prefix);
             exit_guard::called(Call::CmdWriteTimestamp);
         }
         state.prefix = Some(raw);
@@ -2873,8 +2897,8 @@ impl CommandBufferShared {
         });
     }
 
-    /// The scheduler submitted the last batch: in the queue's context, once the submitting
-    /// thread ran its submission handlers, become `Scheduled`, then run the scheduled handlers on
+    /// The scheduler submitted the last batch, or held it in a group (`group.rs`): in the queue's
+    /// context, once the submitting thread ran its submission handlers, become `Scheduled`, then run the scheduled handlers on
     /// this thread, in the order added, then let `wait_until_scheduled` return. Metal's status
     /// reads `Scheduled` just before its first scheduled handler starts, and its wait returns
     /// once the last returned (EV SUB-sched1-m4: an M4, macOS 27.0.1).
@@ -2911,9 +2935,10 @@ impl CommandBufferShared {
         self.changed.notify_all();
     }
 
-    /// Its last batch was submitted on this thread, which holds no lock of the runtime's: run
-    /// its submission handlers here, in the order added, then let its transition to `Scheduled`
-    /// run ([`CommandBuffer::add_submission_handler`]).
+
+    /// Its last batch was submitted, or held in a group, on this thread, which holds no lock of
+    /// the runtime's: run its submission handlers here, in the order added, then let its
+    /// transition to `Scheduled` run ([`CommandBuffer::add_submission_handler`]).
     pub(crate) fn run_submission_handlers(self: &Arc<Self>) {
         let buffer = CommandBuffer(Arc::clone(self));
         {
@@ -2935,7 +2960,9 @@ impl CommandBufferShared {
     /// submitted value in `values`, and, where a command buffer ends at a fence
     /// ([`fences::ends_at_fence`]), at one submitted after it, as a command buffer whose last
     /// batch was submitted finishes; at the value alone when the queue takes no such fence (a
-    /// lost device). Its submission and scheduled handlers never run; they are dropped with it.
+    /// lost device). Its submission and scheduled handlers never run; they are dropped with it,
+    /// unless it became `Scheduled` as its last batch was held in a group (`group.rs`), which
+    /// then fails from `Scheduled`.
     pub(crate) fn failed(self: &Arc<Self>, error: CommandBufferError, values: &[u64]) {
         let vk_queue = self.queue.vk_queue();
         lock(&self.state).failure = Some(error);
@@ -2984,10 +3011,8 @@ impl CommandBufferShared {
         }
     }
 
-    /// The command buffer's last batch is submitted: post its transition to `Scheduled` to its
-    /// queue's context: [`plain`](Transition::plain) where it has no scheduled handler (none is
-    /// added after the commit) and waits for no submission handler.
-    pub(crate) fn post_scheduled(self: &Arc<Self>) {
+    /// The command buffer's last batch is submitted, or held in a group (`group.rs`), on the
+    /// scheduler's thread under its lock: its transition to `Scheduled` runs here where it is [`plain`](Transition::plain) (it has no
         let plain = {
             let state = lock(&self.state);
             state.scheduled.is_empty() && !state.submitting

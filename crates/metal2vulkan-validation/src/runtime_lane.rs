@@ -422,6 +422,8 @@ mod global_builtins;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
 mod gpu_times;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
+mod grouped_submissions;
+#[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
 mod guarded_effects;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
 mod half_output_blends;

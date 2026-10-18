@@ -356,12 +356,117 @@ fn a_checked_command_buffer_committed_during_a_submission_is_submitted_promptly(
         completed(&[&first, &submitting, &left]);
         let after = left.kernel_end_time() - free;
         assert!(
-            after < PROMPTLY.as_secs_f64(),
-            "submitted {after:.4} s after the VkQueue was free, on {}",
-            device.name()
+            device.name(),
+            left.kernel_end_time() - left.kernel_start_time()
         );
         // In commit order: each copied the number the one before it filled.
         let ran = read_buffer(&seen, 0, 12).unwrap();
         assert_eq!(ran, [0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2]);
+    });
+}
+
+/// How many rounds [`checked_commits_during_submissions_are_taken_up_promptly`] runs.
+const ROUNDS: usize = 40;
+
+/// run, as the consumer's queue gives every command buffer.
+    let command_buffer = numbered(queue, tracked, seen, number);
+    command_buffer
+        .add_submission_handler(Box::new(|_: &CommandBuffer| {}))
+        .unwrap();
+    command_buffer
+}
+
+/// What one round of [`checked_commits_during_submissions_are_taken_up_promptly`] saw of the two
+#[derive(Debug)]
+struct Round {
+    /// How long after the `VkQueue` was free the scheduler's thread took up each (its kernel
+    taken_up: [f64; 2],
+    /// How long each one's own submission took, from its kernel start to its kernel end.
+    submissions: [f64; 2],
+    /// The thread's sleeps that ended at their time limit between the `VkQueue`'s release and the
+    /// later kernel start.
+    slept: u64,
+}
+
+/// One round of [`checked_commits_during_submissions_are_taken_up_promptly`].
+fn taken_up(device: &Device, queue: &CommandQueue) -> Round {
+    let tracked = buffer_with(device, &[0; 4]).unwrap();
+    let seen = buffer_with(device, &[0xff; 16]).unwrap();
+    let left = [
+    ];
+    // The scheduler's thread checks and submits it, then sleeps afresh, its pass over.
+    first.commit().unwrap();
+    first.wait_until_scheduled().unwrap();
+    std::thread::sleep(Duration::from_millis(5));
+    let (held, holding) = mpsc::channel();
+    let (release, released) = mpsc::channel::<()>();
+    let holder = {
+        let queue = queue.clone();
+        std::thread::spawn(move || {
+            // SAFETY: the closure keeps no handle and calls nothing of the runtime's; it waits
+            // only for this round's release.
+            unsafe {
+                queue.with_vk_queue(|_, _| {
+                    held.send(()).unwrap();
+                    let _ = released.recv_timeout(WAIT);
+                })
+            }
+        })
+    };
+    holding.recv_timeout(WAIT).unwrap();
+    submitting.commit().unwrap();
+    // The scheduler thread's pass runs the check, then waits for the `VkQueue` under the
+    // scheduler's lock.
+    std::thread::sleep(Duration::from_millis(20));
+    for command_buffer in &left {
+        command_buffer.commit().unwrap();
+    }
+    let slices = || device.work_counts().scheduler_sleep_slices;
+    let before = slices();
+    let free = host_time();
+    release.send(()).unwrap();
+    holder.join().unwrap();
+    // Read the thread's sleeps as soon as the later one is taken up: a sleep that ended at its
+    // limit takes 100 ms, and these reads take microseconds.
+    let deadline = std::time::Instant::now() + WAIT;
+    while left[1].kernel_start_time() == 0.0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the later command buffer was not taken up"
+        );
+        std::hint::spin_loop();
+    }
+    let slept = slices() - before;
+    completed(&[&first, &submitting, &left[0], &left[1]]);
+    // In commit order: each copied the number the one before it filled.
+    let ran = read_buffer(&seen, 0, 16).unwrap();
+    assert_eq!(ran, [0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3]);
+    Round {
+        submissions: (left.each_ref()).map(|c| c.kernel_end_time() - c.kernel_start_time()),
+        slept,
+    }
+}
+
+/// [`ROUNDS`] times, every command buffer carrying a submission handler and a check (as the
+/// consumer's queue gives every one), and two committed while the scheduler's thread waits for
+/// the `VkQueue` to submit another: each time, the thread takes up both (runs their checks and
+#[test]
+fn checked_commits_during_submissions_are_taken_up_promptly() {
+    on_device(|device, _| {
+        let queue = device.new_command_queue().unwrap();
+        let rounds: Vec<_> = (0..ROUNDS).map(|_| taken_up(device, &queue)).collect();
+        let most =
+            |of: fn(&Round) -> [f64; 2]| (rounds.iter().flat_map(of)).fold(f64::MIN, f64::max);
+        let slept: u64 = rounds.iter().map(|round| round.slept).sum();
+        eprintln!(
+            "TAKEN-UP {}: {ROUNDS} rounds, taken up at most {:.3} ms after the VkQueue was free, \
+            device.name(),
+        );
+        for (number, round) in rounds.iter().enumerate() {
+            assert!(
+                "round {number} on {}: {round:?}",
+                device.name()
+            );
+        }
     });
 }

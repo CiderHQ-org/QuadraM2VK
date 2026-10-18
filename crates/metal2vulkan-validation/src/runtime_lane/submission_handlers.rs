@@ -2,12 +2,13 @@
 //! extension) and of `wait_until_scheduled`'s answer, on the device the cfg selects, under the
 //! validation layer.
 //!
-//! A submission handler runs once the command buffer's last batch reached its `VkQueue`, on the
+//! A submission handler runs once the scheduler took the command buffer's last batch for its
+//! `VkQueue` (submitted it, or held it for one kernel submission with later ones), on the
 //! device's scheduler thread, which makes every submission (`commit` returns at once and submits
 //! nothing), before the command buffer is `Scheduled`: once the commit is taken in where its waits
 //! are met, once an event the host raised releases it, and once another command buffer's GPU signal
 //! that releases it is submitted. Never for a command buffer that fails before its last batch is
-//! submitted.
+//! taken.
 //!
 //! Metal's answers (EV SUB-sched1-m4: an M4, macOS 27.0.1): `commit` returns before the command
 //! buffer is scheduled, on Metal's own thread; its status reads `Scheduled` just before its first
