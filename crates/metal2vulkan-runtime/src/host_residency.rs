@@ -22,6 +22,8 @@
 //!     process's devices keep at most ([`kept_fds_limit`]); an import past them is made as any
 //!     other and stays imported;
 //!   - of its pages' pointer, on a driver whose pointer imports follow their address
+//!     (`DriverFact::PointerImportsFollowTheirAddress`: ANV on i915, RADV, lavapipe): there the
+//!     kept import reads, at each submission, the pages mapped at its pointer then, as an import
 //!     again at the same pointer does, so releasing it changes nothing a command reads. Elsewhere
 //!     a pointer import stays imported: the driver may keep the pages it was made over, as
 //!     Metal's buffer does, and an import again would read those a remap put there since.

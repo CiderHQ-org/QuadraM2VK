@@ -3,6 +3,13 @@
 //!
 //! The memory is guest RAM as QEMU's `memory-backend-memfd,share=on` makes it, a sealed `memfd`
 //! mapped shared, imported by its pointer (`HostMemory::new`), as ANV, NVIDIA and lavapipe import
+//! it; on a device that refuses that pointer (RADV, which imports the `memfd`'s dma-bufs,
+//! `tests/host_residency.rs`), private anonymous pages, which RADV imports by their pointer. Where
+//! the driver's pointer imports follow their address
+//! (`DriverFact::PointerImportsFollowTheirAddress`: ANV on i915, RADV, lavapipe), the device
+//! releases such an import while idle and imports it again at the same pointer at its next blit.
+//! The tests release imports at once through the crate's hook (`Device::release_idle_host_imports`)
+//! and check:
 //! - that a kept import reads the pages a remap put at its address, which is the fact itself, on
 //!   a device with it; on any other the test prints the pages it read, a measurement of the
 //!   driver;
@@ -15,6 +22,8 @@
 //! - that a buffer whose Metal address was handed out stays imported.
 //!
 //! A device whose driver is not measured with the fact keeps every pointer import: the hook
+//! releases none, and each test says so and passes. Where the device refuses the pointers of both
+//! kinds of pages each test says so and passes without running.
 //!
 //! A device test: compiled only under the validation crate's GPU safety cfgs (`m2v_gpu`,
 //! `m2v_cpu_icd`), on Linux, on the kind of device the cfg selects.
@@ -25,6 +34,7 @@ use super::host_residency::{
 use crate::{Buffer, Device, Error, HostMemory, ResourceOptions};
 use metal2vulkan::device::DriverFact;
 use metal2vulkan::error::Feature;
+use std::ptr::NonNull;
 
 /// Whether `device`'s driver is measured to have its pointer imports follow their address, so
 /// that the device releases them while idle.
@@ -39,9 +49,175 @@ fn on_device(test: impl FnOnce(&Device)) {
     test(&device);
 }
 
-        }
+/// The pages a test's no-copy buffer lies over (the module docs).
+enum Pages {
+    /// Guest RAM's view, its file twice the view's length: a remap maps the file's second half
+    /// over the view.
+    Shared(Ram),
+    /// Private anonymous pages: a remap maps fresh ones over them.
+    Private { at: NonNull<u8>, len: usize },
 }
 
+impl Pages {
+    /// Guest RAM's view of `len` bytes.
+    fn shared(len: usize) -> Pages {
+        Pages::Shared(Ram::new(2 * len, 0, len))
+    }
+
+    /// `len` bytes of private anonymous pages.
+    fn private(len: usize) -> Pages {
+        // SAFETY: a new private mapping, the object's until dropped.
+        let at = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                len,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                -1,
+                0,
+            )
+        };
+        assert_ne!(at, libc::MAP_FAILED, "mmap of private pages");
+        Pages::Private {
+            at: NonNull::new(at.cast()).unwrap(),
+            len,
+        }
+    }
+
+    /// The pages' address `offset` bytes in.
+    fn pointer(&self, offset: usize) -> NonNull<u8> {
+        match self {
+            Pages::Shared(ram) => ram.pointer(offset),
+            Pages::Private { at, len } => {
+                assert!(offset < *len);
+                // SAFETY: inside the mapping.
+                unsafe { NonNull::new_unchecked(at.as_ptr().add(offset)) }
+            }
+        }
+    }
+
+    /// Write `bytes` at `offset`: guest RAM's into its file, not through the view; private pages'
+    /// through their mapping.
+    fn write(&self, offset: usize, bytes: &[u8]) {
+        match self {
+            Pages::Shared(ram) => ram.write_file(offset, bytes),
+            Pages::Private { len, .. } => {
+                assert!(offset + bytes.len() <= *len);
+                // SAFETY: inside the mapping; each test orders the CPU's and the GPU's accesses.
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        bytes.as_ptr(),
+                        self.pointer(offset).as_ptr(),
+                        bytes.len(),
+                    )
+                };
+            }
+        }
+    }
+
+    /// The bytes at the pages' addresses.
+    fn view(&self) -> Vec<u8> {
+        match self {
+            Pages::Shared(ram) => ram.view(),
+            // SAFETY: the mapping's bytes; each test orders the CPU's and the GPU's accesses.
+            Pages::Private { at, len } => unsafe {
+                std::slice::from_raw_parts(at.as_ptr(), *len).to_vec()
+            },
+        }
+    }
+
+    /// Other pages holding `bytes` mapped over the pages' addresses (`mmap` with `MAP_FIXED`), as a
+    /// guest remaps its RAM there: guest RAM's file's second half, or fresh private pages.
+    fn remap(&self, bytes: &[u8]) {
+        match self {
+            Pages::Shared(ram) => {
+                ram.write_file(bytes.len(), bytes);
+                ram.remap(bytes.len());
+            }
+            Pages::Private { at, len } => {
+                assert_eq!(bytes.len(), *len);
+                // SAFETY: the mapping's own range, mapped again.
+                let mapped = unsafe {
+                    libc::mmap(
+                        at.as_ptr().cast(),
+                        *len,
+                        libc::PROT_READ | libc::PROT_WRITE,
+                        libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_FIXED,
+                        -1,
+                        0,
+                    )
+                };
+                assert_eq!(mapped, at.as_ptr().cast(), "mmap over the private pages");
+                self.write(0, bytes);
+            }
+        }
+    }
+
+    fn kind(&self) -> &'static str {
+        match self {
+            Pages::Shared(_) => "a shared memfd's pages",
+            Pages::Private { .. } => "private anonymous pages",
+        }
+    }
+}
+
+impl Drop for Pages {
+    fn drop(&mut self) {
+        if let Pages::Private { at, len } = self {
+            // SAFETY: the mapping is this object's, and no buffer uses it any more (each test
+            // drops its buffer first).
+            unsafe { libc::munmap(at.as_ptr().cast(), *len) };
+        }
+    }
+}
+
+/// A no-copy buffer over `bytes.len()` bytes of new pages holding `bytes`, imported by its
+/// pointer: guest RAM's view, or, where the device refuses its pointer, private anonymous pages
+/// (the module docs). `None`, printed, where the device refuses both, which a device with the fact
+/// never does. The buffer drops before the pages.
+fn no_copy(test: &str, device: &Device, bytes: &[u8]) -> Option<(Pages, Buffer)> {
+    let mut refused = Vec::new();
+    for pages in [Pages::shared(bytes.len()), Pages::private(bytes.len())] {
+        pages.write(0, bytes);
+        let before = device.work_counts().host_imports_live;
+        // SAFETY: each test's pages outlive its buffer.
+        let made = unsafe {
+            device.new_buffer_with_bytes_no_copy(
+                HostMemory::new(pages.pointer(0)),
+                bytes.len() as u64,
+                ResourceOptions::default(),
+                None,
+            )
+        };
+        match made {
+            Ok(buffer) => {
+                let imported = device.work_counts().host_imports_live - before;
+                assert_eq!(imported, 1, "{test}: one import of the pointer");
+                eprintln!("{test}: on {}: over {}", device.name(), pages.kind());
+                return Some((pages, buffer));
+            }
+            Err(Error::Unsupported(unsupported)) if unsupported.feature == Feature::HostMemory => {
+                refused.push(format!("{}: {unsupported:?}", pages.kind()));
+            }
+            Err(error) => panic!("{test}: new_buffer_with_bytes_no_copy: {error:?}"),
+        }
+    }
+    assert!(
+        !follows(device),
+        "{test}: the pointers refused: {refused:?}"
+    );
+    eprintln!(
+        "{test}: on {}: the device refuses the pointers: {refused:?}",
+        device.name()
+    );
+    None
+}
+
+/// A no-copy buffer over 2 pages, read by a blit; then other pages mapped over its addresses and
+/// the device told (`Device::host_range_remapped`). On a device whose driver's pointer imports
+/// follow their address the next blit of the buffer, its import kept all along, reads the new
+/// pages (Metal's buffer keeps the pages it was made over). On any other the test prints which it
+/// read.
 #[test]
 fn a_kept_pointer_import_reads_the_pages_a_remap_put_at_its_address() {
     const TEST: &str = "pointer import remap";
@@ -51,20 +227,28 @@ fn a_kept_pointer_import_reads_the_pages_a_remap_put_at_its_address() {
         let queue = device.new_command_queue().unwrap();
         let old = counting(len, 13);
         let new = counting(len, 131);
+        let Some((pages, buffer)) = no_copy(TEST, device, &old) else {
             return;
         };
         assert!(read(&queue, &buffer, len) == old, "{TEST}");
 
+        pages.remap(&new);
+        device.host_range_remapped(pages.pointer(0), len as u64);
+        assert!(pages.view() == new, "{TEST}: the CPU's view");
         let bytes = read(&queue, &buffer, len);
+        let read_of = match bytes {
             _ if bytes == new => "the new pages",
             _ if bytes == old => "the pages it was made over",
             _ => "neither",
         };
         eprintln!(
+            "POINTER-REMAP {TEST}: on {} (the fact {}), over {}: the kept import read {read_of}",
             device.name(),
             follows(device),
+            pages.kind(),
         );
         if follows(device) {
+            assert!(bytes == new, "{TEST}: the kept import read {read_of}");
             assert_eq!(residency(&device.work_counts()).0, 0, "{TEST}: no release");
         }
         drop(buffer);
@@ -75,6 +259,8 @@ fn a_kept_pointer_import_reads_the_pages_a_remap_put_at_its_address() {
 /// imports follow their address:
 /// - read by a blit, its import released: the device's live host imports fall by one, no
 ///   descriptor is kept, and the hook releases it no further while released;
+/// - the CPU's writes made while it is released, through `contents` and through guest RAM's file
+///   (or the private pages' mapping), read by the next blit, which imports it again;
 /// - released again, a GPU fill lands in the pages;
 /// - released again, its Metal address handed out imports it again at once and for good, and the
 ///   hook releases it no more.
@@ -88,6 +274,7 @@ fn an_idle_pointer_import_is_released_and_imported_again_at_its_next_blit() {
         let len = 4 * page;
         let queue = device.new_command_queue().unwrap();
         let first = counting(len, 7);
+        let Some((pages, buffer)) = no_copy(TEST, device, &first) else {
             return;
         };
         assert!(read(&queue, &buffer, len) == first, "{TEST}");
@@ -111,10 +298,13 @@ fn an_idle_pointer_import_is_released_and_imported_again_at_its_next_blit() {
             "{TEST}: released twice"
         );
 
+        // The CPU writes while it is released: half through `contents`, half through the file
+        // (or the private pages' mapping).
         let second = counting(len, 59);
         let contents = buffer.contents().unwrap();
         // SAFETY: the buffer's own bytes, which no command reads now.
         unsafe { std::ptr::copy_nonoverlapping(second.as_ptr(), contents.as_ptr(), len / 2) };
+        pages.write(len / 2, &second[len / 2..]);
         let (bytes, importing) = gpu_read(&queue, &buffer, len);
         assert!(bytes == second, "{TEST}: the bytes written while released");
         let (bytes, imported) = gpu_read(&queue, &buffer, len);
@@ -128,6 +318,7 @@ fn an_idle_pointer_import_is_released_and_imported_again_at_its_next_blit() {
         gpu_fill(&queue, &buffer, page as u64..3 * page as u64, 0x6d);
         let mut filled = second.clone();
         filled[page..3 * page].fill(0x6d);
+        assert!(pages.view() == filled, "{TEST}: the GPU's fill");
         let counts = device.work_counts();
         assert_eq!(residency(&counts), (2, 2, 1, 0), "{TEST}: filled");
 
@@ -149,6 +340,10 @@ fn an_idle_pointer_import_is_released_and_imported_again_at_its_next_blit() {
     });
 }
 
+/// A no-copy buffer over 2 pages, imported by its pointer on a device whose driver's pointer
+/// imports follow their address, read by a blit and its import released; then other pages mapped
+/// over its addresses and the device told. The next blit imports it again at its pointer and reads
+/// the new pages: what the kept import reads
 /// (`a_kept_pointer_import_reads_the_pages_a_remap_put_at_its_address`), so the release changed
 /// nothing a command reads.
 #[test]
@@ -164,11 +359,14 @@ fn a_released_pointer_import_reads_after_a_remap_what_the_kept_one_would() {
         let queue = device.new_command_queue().unwrap();
         let old = counting(len, 13);
         let new = counting(len, 131);
+        let Some((pages, buffer)) = no_copy(TEST, device, &old) else {
             return;
         };
         assert!(read(&queue, &buffer, len) == old, "{TEST}");
         release(TEST, device, 1);
 
+        pages.remap(&new);
+        device.host_range_remapped(pages.pointer(0), len as u64);
         assert!(
             read(&queue, &buffer, len) == new,
             "{TEST}: the released import"

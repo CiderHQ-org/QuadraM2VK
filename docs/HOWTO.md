@@ -203,6 +203,9 @@ released:
   A blit whose released buffer the device cannot import again (out of memory) is refused.
 - An import of the pointer, on a driver whose pointer imports follow their address
   (`DriverFact::PointerImportsFollowTheirAddress`: ANV, Mesa 26.2.4 on the Iris Xe of Raptor
+  submission, the pages mapped at its pointer then, so the new import at the same pointer reads
+  what the kept one would. A blit whose released buffer the device cannot import again is refused,
+  typed as the first import would be. Elsewhere a pointer import stays imported.
 
 A buffer stays imported for good once its Metal address is handed out (`gpu_address`, a binding, an
 argument buffer or table, an indirect command buffer, `use_resource`), its `VkBuffer` is read, a
@@ -237,6 +240,9 @@ For a claim about behavior, follow [VALIDATION.md](VALIDATION.md): a synthetic r
 the golden output hashes where output must not move, and an authored case run on Metal and Vulkan
 where it should.
 
+A host note: RADV under Ubuntu 26.04's stock kernel 7.0.0-38 with linux-firmware 20260319
+sometimes loses a GPU write into a newly made buffer under heavy multi-process GPU memory churn
+(about 1 in 10^4 to 10^5, with no error); kernel 7.2.6 with linux-firmware 20260916 loses none.
 
 A host note: on a laptop whose NVIDIA GPU powers down when idle (the driver's runtime D3, shown in
 `/proc/driver/nvidia/gpus/*/power`), the first GPU work after about 15 seconds idle waits about

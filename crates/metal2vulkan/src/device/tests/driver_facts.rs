@@ -582,7 +582,16 @@ fn the_committed_profiles_drivers_have_their_facts() {
     let expected: BTreeMap<String, Vec<DriverFact>> = [
         (
             "amd-780m-radv",
-            vec![ZERO, FETCH, SPLIT, COLOR_BLOCKS, BC6H, BC7, ONE_OF_METALS],
+            vec![
+                ZERO,
+                FETCH,
+                SPLIT,
+                COLOR_BLOCKS,
+                BC6H,
+                BC7,
+                ONE_OF_METALS,
+                FOLLOWS,
+            ],
         ),
         (
             "gate-lavapipe",

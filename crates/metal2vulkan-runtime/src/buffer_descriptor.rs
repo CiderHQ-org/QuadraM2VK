@@ -326,6 +326,7 @@ impl Device {
     /// imports, and stay ordered with each other as before. Their pages are those their imports
     /// read: an import of dma-bufs keeps the pages it was made over, as Metal's buffer does, and so
     /// does an import of the pointer on a driver that keeps them; on a driver whose pointer imports
+    /// follow their address (`DriverFact::PointerImportsFollowTheirAddress`: ANV on i915, RADV,
     /// lavapipe), an import of the pointer reads the pages mapped there at each submission, the new
     /// ones from the remap on (`docs/FAST-PATHS.md`, known gaps). Not a Metal call: Metal needs
     /// none. A `length` of 0 tells nothing.

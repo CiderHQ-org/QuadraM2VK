@@ -1477,6 +1477,19 @@ pub enum DriverFact {
     /// wired when it was made. ANV on i915 imports a pointer as a userptr object, whose pages the
     /// kernel gets again at the next execbuffer once a remap invalidated them (Linux 7.2.9's
     /// `i915_gem_object_userptr_submit_init`, or at its first execbuffer, before which nothing was
+    /// pinned); RADV imports it as an amdgpu userptr object, whose pages the kernel gets again in
+    /// each command submission once a remap invalidated them (Linux 7.2.9's
+    /// `amdgpu_cs_parser_bos`, through `amdgpu_ttm_tt_get_user_pages`), and refuses a shared
+    /// `memfd`'s pointer where it imports private anonymous pages'; lavapipe reads the memory
+    /// through the pointer itself (`lvp_AllocateMemory`'s `LVP_DEVICE_MEMORY_TYPE_USER_PTR`). On a
+    /// driver with it a no-copy buffer's own pointer import is released while idle and imported
+    /// again at the same pointer at its next blit, which reads the pages the kept import would
+    /// read (`host_residency.rs` in the runtime): on ANV on i915 every execbuffer lists every
+    /// memory of the device, an import of a pointer costing about 0.16 us of the kernel's time in
+    /// each, and on RADV amdgpu gets every page of each live pointer import again in each
+    /// submission: about 0.5 us an import and 29 ns a 4 KiB page on the RX 7900 XTX under Linux
+    /// 7.0.0, about a quarter of that a page on the Radeon 780M under Linux 7.2.9. Elsewhere such
+    /// an import stays imported, as the driver may keep the pages it was made over.
     PointerImportsFollowTheirAddress,
 }
 
@@ -1911,6 +1924,15 @@ const DYNAMIC_RESTART_WARNING: DriverDiagnostic = DriverDiagnostic {
 /// the next copy read `0xbb`; a page of `0xa2` imported and replaced by one of `0xb2` before any
 /// submission, the first copy read `0xb2`. lavapipe (`MESA_LLVMPIPE`) from Mesa 26.0.8 through
 /// 26.2.4 by construction, read in both releases' `lvp_AllocateMemory`, which binds an import's
+/// buffers at the host pointer. RADV, Mesa 26.2.4 on the Radeon 780M under Linux 7.2.9's amdgpu,
+/// measured through the runtime (2026-10-17): a no-copy buffer over two fresh anonymous private
+/// pages, read by a blit; fresh anonymous pages mapped over the address with `MAP_FIXED` and
+/// `Device::host_range_remapped` told, the next blit read the new pages, and the newer ones after a
+/// second remap; remapped between the buffer's making and its first submission, the first blit
+/// read the new pages. Not listed: RADV, Mesa 26.0.8 on the RX 7900 XTX and the Radeon 780M under
+/// Linux 7.0.0, which answered the same, but are unmeasured identities (`MEASURED_DEVICES`).
+/// `tests::pointer_residency` in the runtime checks it on a device with it. Every other driver is
+/// unmeasured, and keeps its pointer imports.
 pub(crate) const MEASURED: &[Measured<DriverFact>] = &[
     Measured {
         fact: DriverFact::RobustIndexFetchReadsZero,
@@ -2421,6 +2443,14 @@ pub(crate) const MEASURED: &[Measured<DriverFact>] = &[
         driver: DriverId::INTEL_OPEN_SOURCE_MESA,
         vendor: Some(INTEL_VENDOR_ID),
         device: Some(INTEL_IRIS_XE_RPL_P),
+        first: mesa(26, 2, 4),
+        last: mesa(26, 2, 4),
+    },
+    Measured {
+        fact: DriverFact::PointerImportsFollowTheirAddress,
+        driver: DriverId::MESA_RADV,
+        vendor: Some(AMD_VENDOR_ID),
+        device: Some(AMD_RADEON_780M),
         first: mesa(26, 2, 4),
         last: mesa(26, 2, 4),
     },
