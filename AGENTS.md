@@ -60,7 +60,7 @@ These override anything below.
   chains, AIR's metadata ABI), never from a function, type, variable or shader name. Dispatching on
   the stable `air.*` and `llvm.*` intrinsic families is allowed; prefer a structural test when one
   exists. A name-keyed branch that passes one shader while failing identically shaped others is a
-  defect. No behavior keyed to an app, a shader hash, an earlier session or a corpus census.
+  defect. No behavior keyed to an app, a shader hash or a corpus census.
 - **Honest FALLBACK.** Unsupported input returns a typed `Err` (the command line prints
   `FALLBACK`). Never emit wrong-but-valid SPIR-V to silence a gate.
 - **Scope is the device's.** Refuse only what the device truly lacks; implement or exactly
