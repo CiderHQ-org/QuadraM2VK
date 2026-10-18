@@ -379,6 +379,11 @@ pub(super) struct DeviceShared {
     /// The command pools and descriptor pools command buffers that completed gave back, for the
     /// next to take (`spares.rs`).
     pub(super) spares: Spares,
+    /// The bind states its ended render encoders left, which the next ones start from
+    /// (`live_bind.rs`).
+    pub(super) live_binds: crate::live_bind::SpareLiveBinds,
+    /// The bind memos its ended render encoders left, which the next ones take (`binding.rs`).
+    pub(super) bind_memos: crate::binding::SpareBindMemos,
     /// Counts of its commit path's work, for the lanes (`work_counts.rs`).
     pub(super) counts: super::work_counts::Counters,
     /// Where the driver fails pending work as memory a device-address buffer lay in is freed,
@@ -1393,6 +1398,8 @@ impl Device {
             host_copies,
             sparse,
             spares: Spares::default(),
+            live_binds: Default::default(),
+            bind_memos: Default::default(),
             counts: Default::default(),
             parking: parking.map_or_else(OnceLock::new, OnceLock::from),
             uncommitted: Arc::default(),

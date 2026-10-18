@@ -39,7 +39,7 @@ pub(super) const SAMPLED: &str =
 
 /// Sixteen fragments of each pixel update a word of a buffer their argument buffer points to, in
 /// a raster order group.
-const ORDERED: &str =
+pub(super) const ORDERED: &str =
     "sixteen-overlapping-triangles-update-a-raster-ordered-argument-buffer-member";
 
 /// Run `test` on a validated device of the lane, then fail on any validation message.
@@ -128,9 +128,15 @@ impl Members {
     }
 }
 
-/// Draw `case` on `device` once, with its fragment function's argument buffers' members made
-/// resident in `stages`: its color target 0 and the members, once the command buffer completed.
-fn draw(device: &Device, case: &PublicRender, stages: RenderStages) -> (Texture, Members) {
+/// Draw `case` on `device` `times` times in one encoder, with its fragment function's argument
+/// buffers' members made resident in `stages`: its color target 0 and the members, once the
+/// command buffer completed.
+fn draw(
+    device: &Device,
+    case: &PublicRender,
+    stages: RenderStages,
+    times: usize,
+) -> (Texture, Members) {
     let render = &case.render;
     let fragment = render.fragment.as_ref().expect("a fragment case");
     let members = Members::of(device, fragment);
@@ -185,15 +191,17 @@ fn draw(device: &Device, case: &PublicRender, stages: RenderStages) -> (Texture,
     let &Assembly::Primitives(primitive) = &render.assembly else {
         panic!("{}: a draw of primitives", case.case.name);
     };
-    encoder
-        .draw_primitives(
-            metal_primitive_type(primitive),
-            vertex_start,
-            vertex_count,
-            instance_count,
-            base_instance,
-        )
-        .unwrap();
+    for _ in 0..times {
+        encoder
+            .draw_primitives(
+                metal_primitive_type(primitive),
+                vertex_start,
+                vertex_count,
+                instance_count,
+                base_instance,
+            )
+            .unwrap();
+    }
     encoder.end_encoding().unwrap();
     command_buffer.commit().unwrap();
     command_buffer.wait_until_completed_for(WAIT).unwrap();
@@ -239,7 +247,7 @@ fn a_fragment_samples_what_its_argument_buffer_names() {
     let case = public_render(SAMPLED);
     let metal = case.metal_output.clone().unwrap();
     on_device(|device| {
-        let (target, members) = draw(device, &case, RenderStages::FRAGMENT);
+        let (target, members) = draw(device, &case, RenderStages::FRAGMENT, 1);
         assert_eq!(members.samplers.len(), 1);
         assert_eq!(output(&case, &target, &members), metal);
     });
@@ -261,8 +269,74 @@ fn a_fragment_updates_the_buffer_its_argument_buffer_points_to() {
             return;
         }
         let stages = RenderStages::VERTEX | RenderStages::FRAGMENT;
-        let (target, members) = draw(device, &case, stages);
+        let (target, members) = draw(device, &case, stages, 1);
         assert_eq!(output(&case, &target, &members), metal);
+    });
+}
+
+/// Four draws of [`ORDERED`] in one encoder take the same uses, the buffer they update reached
+/// through the resident set alone: each after the first is noted already, the encoder having
+/// noted the same uses, reaching the same keys so, for the one before
+/// (`WorkCounts::commands_noted_as_before`). Each draw still updates as it would alone: a word
+/// Metal's one draw takes `k` rounds of `v -> 3v + 1` from its first value takes `4k`. A pipeline
+/// the device cannot make is an honest refusal, and is printed.
+#[test]
+fn draws_reaching_a_resident_buffer_as_the_one_before_are_noted_once() {
+    let case = public_render(ORDERED);
+    let metal = case.metal_output.clone().unwrap();
+    on_device(|device| {
+        if let Err(error) = render_pipeline_state(device, &case.inputs()) {
+            let why = error.to_string();
+            eprintln!("REFUSED {ORDERED}: {why}");
+            assert!(refusal(&why), "{why}");
+            return;
+        }
+        let stages = RenderStages::VERTEX | RenderStages::FRAGMENT;
+        let noted = || device.work_counts().commands_noted_as_before;
+        let before = noted();
+        let (target, members) = draw(device, &case, stages, 4);
+        assert_eq!(noted() - before, 3);
+        let RenderOutput::ArgumentBufferBuffer {
+            owner,
+            field_offset,
+            offset,
+            length,
+            ..
+        } = case.render.output
+        else {
+            panic!("{ORDERED}: an argument-buffer buffer's output");
+        };
+        let fragment = case.render.fragment.as_ref().unwrap();
+        let first = &fragment.resources.argument_buffer_buffers[&(owner, field_offset)];
+        let (offset, length) = (offset as usize, length as usize);
+        let words = |bytes: &[u8]| -> Vec<u32> {
+            (bytes.as_chunks::<4>().0.iter())
+                .map(|word| u32::from_le_bytes(*word))
+                .collect()
+        };
+        let round = |v: u32| v.wrapping_mul(3).wrapping_add(1);
+        let rounds = |mut v: u32, n: usize| {
+            for _ in 0..n {
+                v = round(v);
+            }
+            v
+        };
+        let drawn = words(&output(&case, &target, &members));
+        let once = words(&metal);
+        let firsts = words(&first[offset..offset + length]);
+        assert_eq!((drawn.len(), once.len()), (firsts.len(), firsts.len()));
+        for (word, ((&first, &once), &drawn)) in firsts.iter().zip(&once).zip(&drawn).enumerate() {
+            let k = (0..=64)
+                .find(|&k| rounds(first, k) == once)
+                .unwrap_or_else(|| {
+                    panic!("word {word}: Metal's {once:#x} is no rounds of {first:#x}")
+                });
+            assert_eq!(
+                drawn,
+                rounds(first, 4 * k),
+                "word {word}: {k} rounds a draw"
+            );
+        }
     });
 }
 

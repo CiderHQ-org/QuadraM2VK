@@ -410,10 +410,11 @@ fn color(
 impl RenderCommandEncoder {
     /// The shadows a draw binds: the held ones, none while the encoder records an execution's
     /// commands or a capture draw.
-    pub(super) fn extended_shadows_bound(&self) -> BTreeSet<u32> {
+    pub(super) fn extended_shadows_bound(&self) -> &BTreeSet<u32> {
+        static NONE: BTreeSet<u32> = BTreeSet::new();
         match self.replaying || self.capture_addresses().is_some() {
-            true => BTreeSet::new(),
-            false => self.extended.live.clone(),
+            true => &NONE,
+            false => &self.extended.live,
         }
     }
 
@@ -526,8 +527,7 @@ impl RenderCommandEncoder {
             return;
         }
         let graphics = &pipeline.base().graphics;
-        let touched: Vec<u32> = bound
-            .into_iter()
+        let touched: Vec<u32> = (bound.iter().copied())
             .filter(|&c| reads_color(graphics, c) || writes_color(graphics, c))
             .collect();
         self.extended.end(&touched);

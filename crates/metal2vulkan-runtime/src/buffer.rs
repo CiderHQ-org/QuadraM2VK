@@ -239,6 +239,17 @@ impl TexturesOver {
     }
 }
 
+/// How many times a no-copy buffer of the process (or a no-copy heap's own buffer) came to lie
+/// elsewhere ([`HostCell::replace`]: rebound or detached).
+static HOST_CELLS_MOVED: AtomicU64 = AtomicU64::new(0);
+
+/// The count of the times a no-copy buffer of the process came to lie elsewhere (rebound or
+/// detached) so far: while it holds, every buffer's binding is what it was (its base, its
+/// addresses), which is what an encoder's kept bind state reads of them (`live_bind.rs`).
+pub(super) fn host_cells_moved() -> u64 {
+    HOST_CELLS_MOVED.load(Ordering::Acquire)
+}
+
 /// A texture being made over a buffer's host pages ([`Buffer::making_texture`]): a detach
 /// refuses until it goes, once the texture is noted (`Buffer::note_texture`) or its making
 /// failed.
@@ -358,7 +369,7 @@ impl HostCell {
 
     /// Lie `lying` from now on: where the buffer lay.
     pub(super) fn replace(&self, lying: Lying) -> Lying {
-        std::mem::replace(&mut *lock(&self.pages), lying)
+        lay
     }
 
     /// Note `noted`, a texture over the buffer's bytes (`TexturesOver`), forgetting those

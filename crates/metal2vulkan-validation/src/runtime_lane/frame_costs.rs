@@ -60,6 +60,12 @@
 //! that the buffer keeps its bytes. Its lines also give a frame's wall time through its last
 //! command buffer's completion, the GPU's work included.
 //!
+//! `frame_costs_repeating` measures the plain device with each of a pass's draws but its panel
+//! drawn again right after itself, with no call before it ([`REPEATED`]): 11 draws a pass, 5 of
+//! which (45%) follow a draw with no call between them, about the share of the consumer's guest's
+//! draws on the Iris Xe (43%). Its draws bind what the draws before them bound, which every draw
+//! of the other runs changes.
+//!
 //! Ignored by default: a measurement, not a check. Run it by name with `--run-ignored all`, in a
 //! build with `--cfg m2v_system_alloc` for the times, whose lib test binary keeps the system
 //! allocator as a consumer's process does (the counting one costs the draw path about a sixth of
@@ -81,11 +87,17 @@
 //! commit none, and the frame's submissions none but the barrier command buffers they record to
 //! keep, on a device that keeps them (`Device::work_counts`). They count, and time nothing.
 
+use super::render_arguments::{Members, ORDERED};
+use super::renders::public_render;
 use super::{buffer_with, loader, open_device, ScratchCache, WAIT};
 use crate::air_library::AirLibrary;
+use crate::candidate::engine::graphics::Assembly;
+use crate::candidate::engine::resources::pixel_format;
+use crate::candidate::runtime_case::render_pipeline_state;
+use crate::case::indirect_commands::metal_primitive_type;
 use crate::gpu::TEST_DEVICE;
 use crate::worker::alloc;
-use metal2vulkan::bind::SamplerDescriptor;
+use metal2vulkan::bind::{DrawCall, SamplerDescriptor};
 use metal2vulkan::error::RuntimeDriverDefect;
 use metal2vulkan::library::{FunctionConstantValue, FunctionConstantValues};
 use metal2vulkan::metal::{
@@ -114,6 +126,9 @@ const COUNTED: usize = 20;
 const BUFFERS: usize = 67;
 /// The draws of a pass.
 const DRAWS: usize = 6;
+/// In a repeating run ([`Run::REPEATING`]), the draws of a pass drawn again right after
+/// themselves, with no call between the two: every one but the panel.
+const REPEATED: [bool; DRAWS] = [true, true, true, true, false, true];
 /// Every `RESOLVED`th pass draws into a 4-sample texture resolved into its layer.
 const RESOLVED: usize = 4;
 /// The window layers the passes draw into, and their side.
@@ -125,16 +140,16 @@ const TEXTURE_SIDE: u64 = 64;
 /// The bytes of `zwd_shapes`' `ZwdShape`: rectangle, fill, outline and shape.
 const SHAPE_BYTES: usize = 64;
 /// The most allocations a frame's draw makes on the encoding thread on average, its state changes
-/// and its draw call together, once every pipeline is made. Measured: 24.5 on RADV (Radeon 780M)
-/// and ANV (Iris Xe), 24.7 on lavapipe.
+/// over the last draw's (`BindingPlan::instantiate_draw_into`), and the draw its uses, descriptor
+/// writes, pushed set 0 and vertex buffers over the last draw's (`LiveBind`), so none of them
+/// allocate, and a pass's draws hold the first rectangle they reach (`clear_reach::DrawnArea`) and
 #[cfg(not(m2v_system_alloc))]
-const DRAW_ALLOCATIONS: f64 = 27.0;
+const DRAW_ALLOCATIONS: f64 = 9.0;
 /// [`DRAW_ALLOCATIONS`] in a build with debug assertions, which CI's tests are: the draw path's
 /// allocations and those of `LiveBind::shape`'s checks there, which build the state's whole bind
-/// shape at each draw to compare the kept or found one with it. Measured: 35.93 on lavapipe
-/// (llvmpipe, LLVM 23.1.1, Mesa 26.2.4), where a build without debug assertions makes 24.62.
+/// shape at each draw to compare the kept or found one with it. Measured: 17.88 on lavapipe
 #[cfg(not(m2v_system_alloc))]
-const DRAW_ALLOCATIONS_DEBUG: f64 = 38.0;
+const DRAW_ALLOCATIONS_DEBUG: f64 = 20.0;
 /// The most allocations a frame's pass open (`render_command_encoder`) makes on the encoding
 /// thread on average, once every pipeline is made. Measured: 13.0 on RADV (Radeon 780M), on
 /// lavapipe and on ANV (Iris Xe).
@@ -186,6 +201,8 @@ struct Run {
     announced: bool,
     checked: bool,
     layers: Layers,
+    /// Whether the [`REPEATED`] draws of each pass are drawn again with no call before them.
+    repeats: bool,
 }
 
 impl Run {
@@ -193,6 +210,7 @@ impl Run {
         announced: false,
         checked: false,
         layers: Layers::Private,
+        repeats: false,
     };
     const CHECKED: Run = Run {
         announced: false,
@@ -204,6 +222,11 @@ impl Run {
         checked: false,
         layers: Layers::Private,
     };
+    const REPEATING: Run = Run {
+        repeats: true,
+        ..Run::PLAIN
+    };
+
 
     /// The plain device's run with layers over buffers, its passes loading and storing them so.
     const fn over_buffers(load: LoadAction, store: StoreAction) -> Run {
@@ -225,6 +248,10 @@ impl Run {
             Layers::OverBuffers(load, store) => {
                 format!("{device}, layers over buffers, {load:?} load, {store:?} store")
             }
+        let device = match self.repeats {
+            false => device,
+            true => format!("{device}, draws repeated with no call before them"),
+        };
         }
     }
 }
@@ -276,7 +303,8 @@ struct Workload {
     layers: Layers,
     /// The buffers the layers lie over, where they do.
     layer_buffers: Vec<Buffer>,
-    queue: CommandQueue,
+    /// Whether each pass draws its [`REPEATED`] draws again with no call before them.
+    repeats: bool,
     /// A checked run's submissions checked.
     checks: Option<Arc<Checks>>,
     /// One sample, and four.
@@ -403,7 +431,11 @@ fn shape(n: usize) -> [u8; SHAPE_BYTES] {
 }
 
 impl Workload {
-    fn new(device: Device, checked: bool, layers: Layers) -> Workload {
+    fn new(
+        device: Device,
+        checked: bool,
+        layers: Layers,
+    ) -> Workload {
         let library = |name: &str| {
             device.new_library_with_air(&llvm_assemble(&engine_dir().join(name)).unwrap())
         };
@@ -461,7 +493,7 @@ impl Workload {
         Workload {
             layers,
             layer_buffers,
-            queue: device.new_command_queue().unwrap(),
+            repeats,
             checks: checked.then(Arc::default),
             pipelines,
             sampler,
@@ -541,6 +573,11 @@ impl Workload {
                 encoder.set_fragment_bytes(&shape, 0).unwrap();
             }
         }
+        self.draw_call(encoder);
+    }
+
+    /// The draw call of every draw: its rectangle's six indices.
+    fn draw_call(&self, encoder: &mut RenderCommandEncoder) {
         encoder
             .draw_indexed_primitives(
                 PrimitiveType::Triangle,
@@ -553,6 +590,14 @@ impl Workload {
                 0,
             )
             .unwrap();
+    }
+
+    fn draws(&self) -> usize {
+        DRAWS
+            + REPEATED
+                .iter()
+                .filter(|&&again| again && self.repeats)
+                .count()
     }
 
     /// Encode and commit one frame, then wait for its last command buffer: what each step cost.
@@ -588,6 +633,8 @@ impl Workload {
                 frame.draws.push(drawn);
                 if let Some(before) = &before {
                     begun[1].add(Begun::since(&self.device, before));
+                }
+                    }
                 }
             }
             let before = counts();
@@ -1139,13 +1186,19 @@ fn measure(runs: &[Run]) {
             (count(&counts) - count(&counts_before)) as f64 / TIMED as f64
         };
         eprintln!(
-            "FRAME-COST {name} {label}: a frame's work: {:.0} bind shapes made, {:.0} draws \
-             settled, {:.0} pipelines looked up, {:.0} draw states recorded, {:.0} argument \
-             tables retained, {:.1} command pools made, {:.1} timeline waits, {:.1} addressable \
-             buffers made, {:.1} queue submissions, {:.1} commits handed off, {:.1} submission \
-             checks",
+            "FRAME-COST {name} {label}: a frame's work: {:.0} bind shapes made, {:.0} found, \
+             {:.0} draws settled, {:.0} argument sampler lists taken, {:.0} bind views worked \
+             out, {:.0} stage tables read, {:.0} draws' uses noted as before, {:.0} pipelines \
+             looked up, {:.0} draw states recorded, {:.0} draws pushing set 0, {:.0} argument \
+             tables retained, {:.1} command pools made, \
+             {:.1} timeline waits, {:.1} addressable buffers made, {:.1} queue submissions, {:.1} \
             per_frame(|c| c.draw_shapes_made),
+            per_frame(|c| c.draw_shapes_found),
             per_frame(|c| c.draws_settled),
+            per_frame(|c| c.argument_samplers_taken),
+            per_frame(|c| c.bind_views_worked_out),
+            per_frame(|c| c.stage_tables_read),
+            per_frame(|c| c.commands_noted_as_before),
             per_frame(|c| c.graphics_pipelines_looked_up),
             per_frame(|c| c.draw_states_recorded),
             per_frame(|c| c.argument_tables_retained),
@@ -1258,6 +1311,12 @@ fn frame_costs_announced() {
 
 #[test]
 #[ignore = "a measurement, not a check: run by name with --run-ignored all"]
+fn frame_costs_repeating() {
+    measure(&[Run::REPEATING]);
+}
+
+#[test]
+#[ignore = "a measurement, not a check: run by name with --run-ignored all"]
 fn frame_costs_over_buffers() {
     measure(&[
         Run::over_buffers(LoadAction::Load, StoreAction::Store),
@@ -1291,8 +1350,9 @@ fn allocations_each(frame: &Frame, steps: StepsOf) -> f64 {
 /// A frame's draws allocate at most [`DRAW_ALLOCATIONS`] each on average on the encoding thread
 /// ([`DRAW_ALLOCATIONS_DEBUG`] with debug assertions), once every pipeline is made: what the draw
 /// path keeps of what it found before (each texture's storage view formats, the pipeline state's
-/// routing into the pass's colors, the settles of its latest bind shapes and the shapes
-/// themselves, the format table) is not made again at each draw, and what a draw retains, binds
+/// routing into the pass's colors and the colors it zeroes and drops, the settles of its latest
+/// bind shapes and the shapes themselves, the bind state the device's last ended render encoder
+/// left, the format table) is not made again at each draw, and what a draw retains, binds
 /// and records it holds and builds without allocating where the object or the list allows. Its
 /// passes' ends allocate at most [`PASS_END_ALLOCATIONS`] each: a pass end retains what its
 /// commands use as one object, and makes no tile grid where a draw reaches every tile, no sample
@@ -1499,5 +1559,126 @@ fn a_frame_s_commits_allocate_within_their_bound() {
         other <= SUBMIT_ALLOCATIONS,
         "{other:.2} allocations on the other threads a command buffer, more than \
          {SUBMIT_ALLOCATIONS}"
+    );
+}
+
+/// Draws in a pass of [`frame_costs_resident`].
+const RESIDENT_DRAWS: usize = 32;
+
+/// The plain device's draws that reach a buffer through the resident set alone, as the consumer's
+/// guest's draws reach its argument buffers' buffers: [`RESIDENT_DRAWS`] draws a pass of
+/// `render_arguments`' [`ORDERED`] case (a fragment function updating the buffer its argument
+/// buffer points to, made resident with `use_resources`), each of the same uses, a pass a command
+/// buffer, 20 untimed and 100 timed frames: a draw's user-space instructions and wall time, and
+/// how many of a pass's draws its encoder noted as before (`WorkCounts::commands_noted_as_before`).
+/// A device that cannot make the case's pipeline prints its refusal.
+#[test]
+#[ignore = "a measurement, not a check: run by name with --run-ignored all"]
+fn frame_costs_resident() {
+    let cache = ScratchCache::new().unwrap();
+    let heard = Heard::default();
+    let device = device(&cache, false, &heard, CompletionPolicy::default());
+    let case = public_render(ORDERED);
+    let state = match render_pipeline_state(&device, &case.inputs()) {
+        Ok(state) => state,
+        Err(error) => {
+            println!(
+                "FRAME-COST {}: resident draws refused: {error}",
+                device.name()
+            );
+            return;
+        }
+    };
+    let render = &case.render;
+    let members = Members::of(&device, render.fragment.as_ref().unwrap());
+    let target = &render.color_targets[&0];
+    let [width, height] = target.dimensions;
+    let format = pixel_format(target.format);
+    let mut descriptor = TextureDescriptor::texture_2d(format, width.into(), height.into(), false);
+    descriptor.usage = TextureUsage::RENDER_TARGET;
+    let texture = device.new_texture(&descriptor).unwrap();
+    let mut pass = RenderPassDescriptor::new();
+    let attachment = &mut pass.color_attachments[0];
+    attachment.texture = Some(texture);
+    attachment.load_action = LoadAction::Clear;
+    attachment.store_action = StoreAction::Store;
+    let DrawCall::Primitives {
+        vertex_start,
+        vertex_count,
+        instance_count,
+        base_instance,
+    } = render.draw
+    else {
+        panic!("{ORDERED}: a draw of primitives");
+    };
+    let &Assembly::Primitives(primitive) = &render.assembly else {
+        panic!("{ORDERED}: a draw of primitives");
+    };
+    let queue = device.new_command_queue().unwrap();
+    let resources = members.resources();
+    let stages = RenderStages::VERTEX | RenderStages::FRAGMENT;
+    let usage = ResourceUsage::READ | ResourceUsage::WRITE;
+    let frame = |counted: bool, draws: &mut Vec<Step>| {
+        let command_buffer = queue.command_buffer().unwrap();
+        let mut encoder = command_buffer.render_command_encoder(&pass).unwrap();
+        encoder.set_render_pipeline_state(&state).unwrap();
+        for (&index, owner) in &members.owners {
+            encoder.set_fragment_buffer(Some(owner), 0, index).unwrap();
+        }
+        encoder.use_resources(&resources, usage, stages).unwrap();
+        for _ in 0..RESIDENT_DRAWS {
+            let ((), drawn) = step(counted, || {
+                encoder
+                    .draw_primitives(
+                        metal_primitive_type(primitive),
+                        vertex_start,
+                        vertex_count,
+                        instance_count,
+                        base_instance,
+                    )
+                    .unwrap()
+            });
+            draws.push(drawn);
+        }
+        encoder.end_encoding().unwrap();
+        command_buffer.commit().unwrap();
+        command_buffer
+    };
+    let mut draws = Vec::new();
+    for _ in 0..20 {
+        frame(false, &mut draws)
+            .wait_until_completed_for(WAIT)
+            .unwrap();
+    }
+    draws.clear();
+    let noted = || device.work_counts().commands_noted_as_before;
+    let before = noted();
+    const FRAMES: usize = 100;
+    for _ in 0..FRAMES {
+        let last = frame(true, &mut draws);
+        last.wait_until_completed_for(WAIT).unwrap();
+        assert_eq!(last.status(), CommandBufferStatus::Completed);
+    }
+    let noted = (noted() - before) as f64 / FRAMES as f64;
+    let walls: Vec<f64> = draws.iter().map(|d| d.wall.as_secs_f64() * 1e6).collect();
+    let [wall, wall_p90] = percentiles(walls);
+    let instructions: Vec<f64> = draws
+        .iter()
+        .filter_map(|d| d.instructions)
+        .map(|n| n as f64)
+        .collect();
+    let counted = match instructions.is_empty() {
+        true => "instructions not counted".to_owned(),
+        false => {
+            let mean = instructions.iter().sum::<f64>() / instructions.len() as f64;
+            let [p50, _] = percentiles(instructions);
+            format!("{mean:.0} user-space instructions each (p50 {p50:.0})")
+        }
+    };
+    println!(
+        "FRAME-COST {}: resident draws, {RESIDENT_DRAWS} a pass of the same uses: draw: \
+         {wall:.2} us (p50; p90 {wall_p90:.2}); {counted}; {noted:.1} of a pass's draws noted as \
+         before",
+        device.name()
     );
 }

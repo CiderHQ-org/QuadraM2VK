@@ -99,6 +99,7 @@ mod mipmap_scratch;
 mod multisample_buffer_copy;
 #[cfg(any(m2v_gpu, m2v_cpu_icd))]
 mod nan_signs;
+mod noted_apart;
 mod numbered_samplers;
 mod options;
 mod own;
@@ -137,6 +138,8 @@ mod surface_two_planes;
 mod teardown_threads;
 mod texture;
 mod texture_descriptor;
+#[cfg(any(m2v_gpu, m2v_cpu_icd))]
+mod texture_facts;
 mod tracker;
 mod trails;
 #[cfg(any(m2v_gpu, m2v_cpu_icd))]

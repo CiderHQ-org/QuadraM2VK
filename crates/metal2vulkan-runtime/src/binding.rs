@@ -49,6 +49,7 @@ use super::address_map::SamplerMaps;
 use super::argument_table::{ArgumentTable, InlineBytes};
 use super::buffer::Buffer;
 use super::command_buffer::{NotedTable, State};
+use super::device::lock;
 use super::error::{internal, Error, RuntimeGap};
 use super::function_table::{self, TableSnapshot, VisibleFunctionTable};
 use super::heap_sets::{Keeper, TextureTable, HEAP_SET};
@@ -58,7 +59,7 @@ use super::render_target;
 use super::residency::{Residency, Used};
 use super::resource::ResourceKey;
 use super::sampler::{OwnedSampler, SamplerState};
-use super::texture::Texture;
+use super::texture::{Texture, TextureShared};
 use super::tracker::{Access, Use, UseRange};
 use super::upload::Upload;
 use super::Device;
@@ -74,7 +75,7 @@ use metal2vulkan::pipeline::{HandleClass, SlotClass, SlotRef, Stage, StorageAtta
 use std::collections::BTreeSet;
 use std::ops::Deref;
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, Weak};
 
 /// What an encoder binds: each stage's argument table.
 pub(super) struct Tables<'a> {
@@ -453,9 +454,9 @@ pub(super) struct Hole {
     address: u64,
 }
 
-/// What a command records besides its pipeline and its draw or groups.
+/// What a command records besides its pipeline, its draw or groups, and its descriptor writes
+/// ([`bind`]'s).
 pub(super) struct Bound {
-    pub(super) writes: Vec<Write>,
     /// The push holes' addresses, for [`push_writes`].
     pub(super) holes: Vec<Hole>,
     /// The Vulkan samplers the writes name, which the command buffer holds until it completes.
@@ -516,7 +517,9 @@ fn padded(n: usize) -> u64 {
 }
 
 /// The descriptors, uploads, and push hole addresses of `command`, a command (by `call`) of
-/// `plan` over `tables`, uploading into the command buffer's `state`.
+/// `plan` over `tables`, uploading into the command buffer's `state`: the descriptor writes in
+/// `writes`, emptied first, so a caller that keeps the vector writes each command's over the last
+/// one's storage (a draw's, `LiveBind::writes`).
 pub(super) fn bind(
     call: &'static str,
     device: &Device,
@@ -524,9 +527,10 @@ pub(super) fn bind(
     plan: &BindingPlan,
     command: &Command<'_>,
     tables: &Tables<'_>,
-    mut memo: Option<&mut BindMemo>,
+    (mut memo, writes): (Option<&mut BindMemo>, &mut Vec<Write>),
 ) -> Result<Bound, Error> {
-    let mut writes = Vec::with_capacity(plan.descriptors.len());
+    writes.clear();
+    writes.reserve(plan.descriptors.len());
     let mut samplers = Vec::new();
     // The sampler tables, whose regions the command buffer writes again as it commits.
     let sampler_keys = plan.sampler_tables();
@@ -670,7 +674,6 @@ pub(super) fn bind(
         });
     }
     Ok(Bound {
-        writes,
         holes,
         samplers,
         sampler_tables,
@@ -835,7 +838,22 @@ pub(super) fn push_writes(
         let at = (hole.offset - write.1) as usize;
         write.2[at..at + 8].copy_from_slice(&hole.address.to_le_bytes());
     }
-    Ok(filled)
+        let mut pushed = Vec::new();
+        Self::push_into(writes, immutable, &mut pushed);
+        pushed
+    }
+
+    /// [`pushed`](Self::pushed) in `pushed`, emptied first: over the last draw's storage, where
+    /// the caller keeps it (`LiveBind::pushed`).
+    pub(super) fn push_into(writes: &[Write], immutable: &[SetWrite], pushed: &mut Vec<SetWrite>) {
+        pushed.clear();
+        let writes = writes.iter().map(|write| SetWrite {
+            binding: write.binding,
+            element: write.element,
+            ty: write.ty,
+            info: write.info,
+        });
+        pushed.extend(writes.chain(immutable.iter().copied()));
 }
 
 /// The descriptor writes [`write_sets`] hands the driver in one call: their infos sit on the stack.
@@ -932,10 +950,12 @@ const KEPT: usize = 8;
 /// holds (a page's tiles) finds every one it bound before.
 const KEPT_VIEWS: usize = 256;
 
-/// The image views and samplers a render encoder's last binds made or found
+/// The image views and samplers render encoders' last binds made or found
 /// ([`image_descriptor`]), kept by everything each is a function of, so that a bind of the same
-/// takes them again without working them out (the encoder's, dropped with it, so it keeps
-/// nothing alive past the textures its draws retain):
+/// takes them again without working them out. An encoder that ends gives its memo to its device
+/// ([`SpareBindMemos`]), and the next render encoder opened takes it, so a pass that binds the
+/// textures and samplers the one before it bound works none out. A memo holds its textures
+/// weakly, so it keeps none alive:
 ///
 /// - **A view** of a texture slot is a function of the texture (its storage, image, decoded and
 ///   depth twins and record are fixed as it is made; its usage shadow is made once and kept), the
@@ -943,7 +963,8 @@ const KEPT_VIEWS: usize = 256;
 ///   image keeps once made until it lets them all go under its views lock (a rebind's or a
 ///   storage form's new `VkImage`, a detach's stand-in, a reattach). Each letting go counts in
 ///   `DeviceShared::views_epoch`: the views are kept while it holds, and all dropped once it
-///   moves.
+///   moves. A view is kept by its texture's address ([`KeptView`]), which stays the texture's
+///   while the memo keeps the view: a texture found there is the one the view is of.
 /// - **A sampler's description** (`sampler_desc`'s answer) for a sampler slot is a function of
 ///   the descriptor the bind maps the slot's state to (its LOD clamps and the address modes its
 ///   textures map), the facts `sampler_desc` takes beside the device (the use: a comparison, an
@@ -952,20 +973,53 @@ const KEPT_VIEWS: usize = 256;
 ///   state for its `VkSampler` of the description (`SamplerState::vk_sampler`), so the state keeps
 ///   and forgets its samplers as before.
 ///
-/// A view's key holds its texture, so one seen again is the same object; a sampler's
-/// descriptor is compared exactly, a float field by its bits.
+/// A sampler's descriptor is compared exactly, a float field by its bits.
 #[derive(Default)]
 pub(super) struct BindMemo {
     /// The views epoch the views were kept under.
     epoch: u64,
-    views: KeyMap<ViewKey, vk::ImageView>,
+    views: KeyMap<ViewKey, KeptView>,
     samplers: Vec<KeptSampler>,
 }
 
-/// What a view a bind made or found is a function of ([`BindMemo`]): a binding of the texture as
-/// the view, a storage one where the first flag is set, of a texture the draw's instance renders
-/// where the second is (`Tables::attached`).
-type ViewKey = (Texture, ImageViewDesc, bool, bool);
+/// What a view a bind made or found is a function of ([`BindMemo`]): a binding of the texture at
+/// the address as the view, a storage one where the first flag is set, of a texture the draw's
+/// instance renders where the second is (`Tables::attached`).
+type ViewKey = (usize, ImageViewDesc, bool, bool);
+
+/// A view a [`BindMemo`] keeps, and its texture, held weakly: a texture that goes leaves its
+/// allocation, and so its address, to its weak handles, so no other texture is at the address
+/// while the view is kept.
+struct KeptView {
+    texture: Weak<TextureShared>,
+    raw: vk::ImageView,
+}
+
+/// The most bind memos a device keeps for its render encoders to take: one per encoder open at
+/// once beyond it starts empty.
+const SPARE_BIND_MEMOS: usize = 4;
+
+/// A device's bind memos that ended render encoders left, which the render encoders it opens
+/// next take ([`BindMemo`]): at most [`SPARE_BIND_MEMOS`], the latest given taken first.
+#[derive(Default)]
+pub(super) struct SpareBindMemos(Mutex<Vec<BindMemo>>);
+
+impl SpareBindMemos {
+    /// The memo a render encoder opening takes: the latest an encoder gave back, else an empty
+    /// one.
+    pub(super) fn take(&self) -> BindMemo {
+        lock(&self.0).pop().unwrap_or_default()
+    }
+
+    /// Keep `memo`, an ended render encoder's, for the next encoder to take, where fewer than
+    /// [`SPARE_BIND_MEMOS`] are kept; else it goes.
+    pub(super) fn give(&self, memo: BindMemo) {
+        let mut spare = lock(&self.0);
+        if spare.len() < SPARE_BIND_MEMOS {
+            spare.push(memo);
+        }
+    }
+}
 
 /// A sampler description a bind worked out ([`BindMemo`]): `descriptor`'s under `facts`.
 struct KeptSampler {
@@ -1044,15 +1098,18 @@ fn image_descriptor(
         let Some(kept_views) = kept_views.as_deref_mut() else {
             return texture.slot_view(call, view, storage, attached);
         };
-        let key = (texture.clone(), *view, storage, attached);
-        if let Some(raw) = kept_views.get(&key) {
-            return Ok(*raw);
+        let key = (texture.address(), *view, storage, attached);
+        if let Some(kept) = kept_views.get(&key) {
+            debug_assert_eq!(kept.texture.as_ptr() as usize, key.0);
+            return Ok(kept.raw);
         }
+        device.shared().counts.bind_view_worked_out();
         let raw = texture.slot_view(call, view, storage, attached)?;
         if kept_views.len() == KEPT_VIEWS {
             kept_views.clear();
         }
-        kept_views.insert(key, raw);
+        let texture = texture.downgrade();
+        kept_views.insert(key, KeptView { texture, raw });
         Ok::<_, Error>(raw)
     };
     let mut sampler = |slot: SlotRef, use_: SamplerUse, opaque_black, format| {
@@ -1588,7 +1645,24 @@ pub(super) fn command_uses(
     index: Option<(&Buffer, u64)>,
     indirect: Option<(&Buffer, u64)>,
 ) -> Result<CommandUses, Error> {
-    let mut uses = Vec::new();
+    let mut uses = CommandUses::default();
+    command_uses_into(call, (plan, command, tables), (index, indirect), &mut uses)?;
+    Ok(uses)
+}
+
+/// [`command_uses`] in `into`, emptied first: over the last draw's storage, where the caller keeps
+/// it (`LiveBind::uses`).
+pub(super) fn command_uses_into(
+    call: &'static str,
+    (plan, command, tables): (&BindingPlan, &Command<'_>, &Tables<'_>),
+    (index, indirect): (Option<(&Buffer, u64)>, Option<(&Buffer, u64)>),
+    into: &mut CommandUses,
+) -> Result<(), Error> {
+    let CommandUses { uses, resident } = into;
+    uses.clear();
+    resident.clear();
+    // One use at most a resource use of the plan's or the command's: room for them all at once.
+    uses.reserve(plan.uses.len() + command.uses.len());
     // The keys of the buffers made resident the command reaches through the resident set, by
     // address; every other use names its resource (a descriptor, a root table's static, a view).
     // Those it names are gathered once it reaches one so: until then each use names its key.
@@ -1712,15 +1786,15 @@ pub(super) fn command_uses(
             write: access(write, resource.access.write),
         });
     }
-    let resident = reached.difference(&named).copied().collect();
-    Ok(CommandUses { uses, resident })
+    resident.extend(reached.difference(&named).copied());
+    Ok(())
 }
 
 /// A dispatch's or draw's uses (`command_uses`), for the tracker, and the keys among them that
 /// the command reaches through its root tables' resident set alone: buffers and heaps an encoder
 /// made resident, which no use of the command names. The encoder's core takes both
 /// (`EncoderCore::command_reaching`, `note_reaching`); a use added later names its key.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(super) struct CommandUses {
     uses: Vec<Use<ResourceKey>>,
     resident: BTreeSet<ResourceKey>,

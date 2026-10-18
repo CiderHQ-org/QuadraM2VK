@@ -504,8 +504,98 @@ impl Device {
     /// The live sampler states, in resource-ID order, each the holder of its ID
     /// (`resource_ids.rs`): what an argument buffer can name (`BindState::argument_samplers`).
     pub(super) fn argument_samplers(&self) -> Vec<SamplerState> {
-        let states = lock(&self.shared().resource_ids).samplers();
-        states.into_iter().map(SamplerState).collect()
+        self.argument_samplers_at().1
+    }
+
+    /// [`argument_samplers`](Self::argument_samplers), with the count of the sampler IDs' slots'
+    /// changes they are live at ([`sampler_slots_changed`](Self::sampler_slots_changed)).
+    fn argument_samplers_at(&self) -> (u64, Vec<SamplerState>) {
+        let (changed, states) = lock(&self.shared().resource_ids).samplers();
+        (changed, states.into_iter().map(SamplerState).collect())
+    }
+
+    /// [`argument_samplers_at`](Self::argument_samplers_at), for a draw's listing: counted
+    /// (`WorkCounts::argument_samplers_taken`).
+    fn argument_samplers_for_draw(&self) -> (u64, Vec<SamplerState>) {
+        self.shared().counts.argument_samplers_taken();
+        self.argument_samplers_at()
+    }
+
+    /// The count of the changes of the sampler IDs' slots so far: while it holds, the live
+    /// sampler states are the ones [`argument_samplers`](Self::argument_samplers) answered at it.
+    pub(super) fn sampler_slots_changed(&self) -> u64 {
+        self.shared()
+            .sampler_ids
+            .slots_changed
+            .load(Ordering::Acquire)
+    }
+}
+
+/// The device's live sampler states a draw lists (`BindState::argument_samplers`), each at the
+/// heap element of its resource ID, taken from the device only where the draw needs them
+/// (`RenderCommandEncoder::settle_draw`): a kept bind state listed at the count of the sampler
+/// IDs' slots' changes that still holds lists them already (`LiveBind::listed_at`), and a draw
+/// that writes no heap element and names no state in a notice takes none.
+pub(super) struct ArgumentSamplers {
+    /// The states and the count of slot changes they were live at, once taken.
+    taken: Option<(u64, Vec<SamplerState>)>,
+    /// Those the draw's variant's set-1 sampler arrays leave out were dropped
+    /// (`heap_sets::fit_samplers`): the states are no longer every live one.
+    trimmed: bool,
+}
+
+impl ArgumentSamplers {
+    /// None taken yet.
+    pub(super) fn untaken() -> ArgumentSamplers {
+        ArgumentSamplers {
+            taken: None,
+            trimmed: false,
+        }
+    }
+
+    /// `device`'s, taken now.
+    pub(super) fn taken(device: &Device) -> ArgumentSamplers {
+        ArgumentSamplers {
+            taken: Some(device.argument_samplers_for_draw()),
+            trimmed: false,
+        }
+    }
+
+    /// The states, taken from `device` now where none were yet.
+    pub(super) fn take(&mut self, device: &Device) -> &mut Vec<SamplerState> {
+        let (_, states) = self
+            .taken
+            .get_or_insert_with(|| device.argument_samplers_for_draw());
+        states
+    }
+
+    /// The states, where they were taken.
+    pub(super) fn states(&self) -> Option<&[SamplerState]> {
+        self.taken.as_ref().map(|(_, states)| &states[..])
+    }
+
+    /// The count of slot changes every live state is listed at: where the states were taken
+    /// and not trimmed.
+    pub(super) fn listed_at(&self) -> Option<u64> {
+        match (&self.taken, self.trimmed) {
+            (Some((changed, _)), false) => Some(*changed),
+            _ => None,
+        }
+    }
+
+    /// Keep those of the taken states that `set`, the variant's set 1, holds
+    /// (`heap_sets::fit_samplers`, `unlisted` saying so): whether every one fits.
+    pub(super) fn fit(
+        &mut self,
+        set: Option<&metal2vulkan::pipeline::DescriptorSetLayout>,
+        unlisted: &mut Option<(u64, u64)>,
+    ) -> bool {
+        let Some((_, states)) = &mut self.taken else {
+            return set.is_none();
+        };
+        let fits = super::heap_sets::fit_samplers(set, states, unlisted);
+        self.trimmed |= !fits;
+        fits
     }
 }
 

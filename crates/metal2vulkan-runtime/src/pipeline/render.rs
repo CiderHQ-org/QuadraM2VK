@@ -1905,8 +1905,9 @@ impl GraphicsState {
 
     /// What a draw of bind shape `shape` runs on in `forms` ([`settle`](Self::settle)'s answer),
     /// through what the state settled last for its latest [`SETTLED`] shapes: a draw of an equal
-    /// shape in the same forms (the very one, which its encoder kept, `live_bind.rs`, or an equal
-    /// one) settles as it did, not planned again; any other settles, and is kept in place of the
+    /// shape in the same forms (the very one, which its encoder kept, `live_bind.rs`, looked for
+    /// first by identity, or an equal one, compared whole where none is the very one) settles as
+    /// it did, not planned again; any other settles, and is kept in place of the
     /// one used least lately. Exact: what `settle` answers is a function of the shape and `forms`
     /// alone. A refused settle keeps nothing, and is answered as `settle` refuses it.
     pub(crate) fn settle_shape(
@@ -1916,9 +1917,13 @@ impl GraphicsState {
     ) -> Result<Settled, Error> {
         {
             let mut kept = lock(&self.0.settled);
-            let found = kept
-                .iter()
-                .position(|(kept, last)| *kept == forms && last.shape == *shape);
+            // The very shape first, as a draw's encoder keeps the one it found here; else an
+            // equal one, compared whole.
+            let found = (kept.iter())
+                .position(|(kept, last)| *kept == forms && Arc::ptr_eq(&last.shape, shape))
+                .or_else(|| {
+                    (kept.iter()).position(|(kept, last)| *kept == forms && last.shape == *shape)
+                });
             if let Some(entry) = found.and_then(|at| kept.remove(at)) {
                 let last = entry.1.clone();
                 kept.push_front(entry);

@@ -82,7 +82,7 @@ use super::memory::MemoryClass;
 use super::resource::ResourceKey;
 use super::tracker::{Use, UseRange};
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
 /// The key a buffer that joined another's memory adds to its uses: the memory's.
@@ -101,6 +101,10 @@ pub(super) struct HostAliases<I = HostImport> {
     crowded: AtomicBool,
     /// How many memories are noted: with none, a reported remap has none to end.
     noted: AtomicUsize,
+    /// How many times the buffers that joined a memory or the placements changed: while it
+    /// stands, [`augment`](Self::augment) gives the same uses for the same uses
+    /// (`noted_apart.rs`). Each change counts once it is made, under the lock.
+    version: AtomicU64,
     inner: Mutex<Inner<I>>,
 }
 
@@ -110,6 +114,7 @@ impl<I> Default for HostAliases<I> {
             any: AtomicBool::new(false),
             crowded: AtomicBool::new(false),
             noted: AtomicUsize::new(0),
+            version: AtomicU64::new(0),
             inner: Mutex::new(Inner {
                 made_over: KeyMap::default(),
                 memories: Memories::default(),
@@ -218,6 +223,7 @@ impl<I> HostAliases<I> {
         let alias = Alias { key: owner };
         Arc::make_mut(aliases).insert(key, alias);
         self.any.store(true, Ordering::Relaxed);
+        self.changed();
         Some(alias)
     }
 
@@ -272,6 +278,7 @@ impl<I> HostAliases<I> {
         inner.placements.unplace(key);
         self.crowded
             .store(inner.placements.crowded(), Ordering::Relaxed);
+        self.changed();
     }
 
     /// The buffer of `key` (a no-copy buffer, or a no-copy heap's own buffer, whose uses are of
@@ -284,6 +291,7 @@ impl<I> HostAliases<I> {
         inner.placements.place(key, at);
         self.crowded
             .store(inner.placements.crowded(), Ordering::Relaxed);
+        self.changed();
     }
 
     /// The buffer of `key` lies over no host bytes from now on (its bytes detached).
@@ -292,6 +300,21 @@ impl<I> HostAliases<I> {
         inner.placements.unplace(key);
         self.crowded
             .store(inner.placements.crowded(), Ordering::Relaxed);
+        self.changed();
+    }
+
+    /// Count a change of the buffers that joined a memory or of the placements, made under the
+    /// lock the caller holds ([`version`](Self::version)).
+    fn changed(&self) {
+        self.version.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// How many times the buffers that joined a memory or the placements changed: two calls of
+    /// [`augment`](Self::augment) with the same uses, between which it stood, give the same
+    /// uses. A change made before a call (one the caller ordered before it) counts by then.
+    pub(super) fn version(&self) -> u64 {
+        self.version.load(Ordering::Relaxed)
+    }
     }
 
     /// `uses` and, for each use of a buffer that joined a memory, a use of the memory's key of

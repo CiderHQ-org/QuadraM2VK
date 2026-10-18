@@ -620,6 +620,30 @@ impl<T> Few<T> {
             self.first = Some(self.rest.remove(0));
         }
     }
+
+    fn len(&self) -> usize {
+        usize::from(self.first.is_some()) + self.rest.len()
+    }
+
+    /// Change the values as `change` changes them as one list, in order.
+    fn change_all(&mut self, change: impl FnOnce(&mut Vec<T>)) {
+        if let Some(first) = self.first.take() {
+            self.rest.insert(0, first);
+        }
+        change(&mut self.rest);
+        if !self.rest.is_empty() {
+            self.first = Some(self.rest.remove(0));
+        }
+    }
+}
+
+impl<'a, T> IntoIterator for &'a Few<T> {
+    type Item = &'a T;
+    type IntoIter = std::iter::Chain<std::option::Iter<'a, T>, std::slice::Iter<'a, T>>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
 }
 
 impl<T> IntoIterator for Few<T> {
@@ -964,8 +988,10 @@ pub(super) struct EncoderUses<K> {
 
 /// The uses of one part of an encoder.
 struct Part<K> {
-    /// The tracked uses so far, one per range, at most [`ENTRIES_PER_KEY`] per resource.
-    tracked: KeyMap<K, Vec<Use<K>>>,
+    /// The tracked uses so far, one per range, at most [`ENTRIES_PER_KEY`] per resource: most
+    /// resources have one, held inline ([`Few`]), so a command's first use of a resource
+    /// allocates nothing of its own.
+    tracked: KeyMap<K, Few<Use<K>>>,
     stages: vk::PipelineStageFlags2,
 }
 
@@ -1042,7 +1068,7 @@ impl<K: Copy + Ord + Hash> EncoderUses<K> {
                 None => ranges.push(used.clone()),
             }
             if ranges.len() > ENTRIES_PER_KEY {
-                coalesce_uses(ranges);
+                ranges.change_all(coalesce_uses);
             }
         }
     }
@@ -1119,6 +1145,12 @@ impl<K: Copy + Ord + Hash> EncoderUses<K> {
         if !self.updates.contains(&fence) {
             self.updates.push(fence);
         }
+    }
+
+    /// How many parts the encoder's commands were recorded in so far: one more at each
+    /// [`split`](Self::split).
+    pub(super) fn parts(&self) -> usize {
+        self.parts.len()
     }
 
     /// The part commands are recorded into now.

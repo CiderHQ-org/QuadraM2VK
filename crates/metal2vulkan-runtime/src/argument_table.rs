@@ -63,8 +63,17 @@ pub(super) const ATTRIBUTE_STRIDE_STATIC: u64 = u64::MAX;
 /// limit for inline bytes, 4 KiB.
 pub(super) const INLINE_BYTES_LIMIT: u64 = 4096;
 
+    /// Whether `stage`'s slots are `slots` (none for a stage it does not keep): a table read under
+    /// them that binds the same offsets leaves the same out ([`ArgumentTable::at_bind_views`]),
+    /// as it left out its own as it was read.
+    pub(super) fn holds(&self, stage: Stage, slots: u64) -> bool {
+        self.of(stage)
+            .map_or(0, |kept| kept.load(Ordering::Relaxed))
+            == slots
+    }
+
 /// One stage's bound objects, by Metal index.
-#[derive(Clone, Default)]
+#[derive(Default)]
 pub(super) struct ArgumentTable {
     /// A compute encoder's table ([`ArgumentTable::compute`]): it holds buffers bound past their
     /// length and takes an offset at an index with no buffer as no change (the module docs).
@@ -93,6 +102,49 @@ pub(super) struct ArgumentTable {
     pub(super) bytes: BTreeMap<u32, InlineBytes>,
     /// What the table bound as an encoder's core last retained it ([`retain`](Self::retain)).
     retained: Retained,
+    /// Its contents' stamp, drawn afresh by every call that may change them.
+    stamp: Stamp,
+}
+
+/// A copy binds what the table binds, under a stamp of its own: a copy changed in place (a
+/// pass's copies of bytes its fragment stages wrote: `render/pass_start_reads.rs`) binds others.
+impl Clone for ArgumentTable {
+    fn clone(&self) -> ArgumentTable {
+        ArgumentTable {
+            compute: self.compute,
+            buffers: self.buffers.clone(),
+            function_tables: self.function_tables.clone(),
+            null_tables: self.null_tables.clone(),
+            attribute_strides: self.attribute_strides.clone(),
+            textures: self.textures.clone(),
+            samplers: self.samplers.clone(),
+            bytes: self.bytes.clone(),
+            retained: self.retained.clone(),
+            stamp: Stamp::fresh(),
+        }
+    }
+}
+
+/// What an argument table binds, named by a number drawn afresh for each new table (a copy
+/// included) and at each call that may change what it binds, which no other table of the process
+/// takes ([`ArgumentTable::stamp`]): while a table's stamp holds, it binds what it bound, by
+/// identity. A table made for one command (an execution's own buffers) is filled in place before
+/// any command reads it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct Stamp(u64);
+
+impl Stamp {
+    /// A stamp no table took before.
+    fn fresh() -> Stamp {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        Stamp(NEXT.fetch_add(1, Ordering::Relaxed))
+    }
+}
+
+impl Default for Stamp {
+    fn default() -> Stamp {
+        Stamp::fresh()
+    }
 }
 
 /// The core an argument table was last retained into ([`EncoderCore::id`]) and the objects it
@@ -112,6 +164,8 @@ impl Clone for Retained {
 #[derive(Clone, Default)]
 struct RetainedBy {
     core: Option<u64>,
+    /// The table's stamp then: while it holds, the table binds those objects still.
+    stamp: Option<Stamp>,
     /// Each object's slot (its table, then its index) and address; its storage is kept from
     /// one retain to the next.
     bound: Vec<((SlotClass, u32), usize)>,
@@ -312,6 +366,11 @@ impl ArgumentTable {
         }
     }
 
+    /// The stamp of what the table binds now ([`Stamp`]).
+    pub(super) fn stamp(&self) -> Stamp {
+        self.stamp
+    }
+
     /// Refuse `buffer` at `offset` in `call` of an encoder of `core`: a buffer of another device,
     /// and, in a render stage's table, an offset past its length (a compute table holds it).
     fn check_buffer(
@@ -355,6 +414,7 @@ impl ArgumentTable {
         stride: u64,
         index: u32,
     ) -> Result<(), Error> {
+        self.stamp = Stamp::fresh();
         check_index(call, index, BUFFER_SLOTS)?;
         let stride = attribute_stride(stride);
         if let Some(buffer) = buffer {
@@ -397,6 +457,7 @@ impl ArgumentTable {
         strides: Option<&[u64]>,
         first: u32,
     ) -> Result<(), Error> {
+        self.stamp = Stamp::fresh();
         if buffers.len() != offsets.len() || strides.is_some_and(|s| s.len() != buffers.len()) {
             return Err(invalid(call, Problem::LengthMismatch));
         }
@@ -457,6 +518,7 @@ impl ArgumentTable {
         stride: u64,
         index: u32,
     ) -> Result<(), Error> {
+        self.stamp = Stamp::fresh();
         check_index(call, index, BUFFER_SLOTS)?;
         let stride = attribute_stride(stride);
         if let Some(len) = self.bytes.get(&index).map(|bytes| bytes.len) {
@@ -522,6 +584,7 @@ impl ArgumentTable {
         stride: Option<u64>,
         index: u32,
     ) -> Result<(), Error> {
+        self.stamp = Stamp::fresh();
         check_index(call, index, BUFFER_SLOTS)?;
         let length = bytes.len() as u64;
         if length > INLINE_BYTES_LIMIT {
@@ -571,6 +634,7 @@ impl ArgumentTable {
         textures: &[Option<&Texture>],
         first: u32,
     ) -> Result<(), Error> {
+        self.stamp = Stamp::fresh();
         check_range(call, first, textures.len(), TEXTURE_SLOTS)?;
         for texture in textures.iter().flatten() {
             core.check_device(call, texture.device())?;
@@ -596,6 +660,7 @@ impl ArgumentTable {
         clamps: Option<(&[f32], &[f32])>,
         first: u32,
     ) -> Result<(), Error> {
+        self.stamp = Stamp::fresh();
         if let Some((min, max)) = clamps {
             if min.len() != samplers.len() || max.len() != samplers.len() {
                 return Err(invalid(call, Problem::LengthMismatch));
@@ -625,6 +690,7 @@ impl ArgumentTable {
         tables: &[Option<&VisibleFunctionTable>],
         first: u32,
     ) -> Result<(), Error> {
+        self.stamp = Stamp::fresh();
         check_range(call, first, tables.len(), BUFFER_SLOTS)?;
         for table in tables.iter().flatten() {
             core.check_device(call, table.device())?;
@@ -870,16 +936,17 @@ impl ArgumentTable {
         self.check_reading(kept, read, maps);
     }
 
-    /// That `kept`, brought in place by [`refresh_reading`](Self::refresh_reading), is the table
-    /// `stage`'s function of `interface` reads whole
-    /// ([`stage_table_reading`](Self::stage_table_reading)), each sampler as `maps` binds it
-    /// (debug builds): the same slots, each bound alike as its value prints (a float's sign told
-    /// apart, every NaN alike: [`same_as_printed`]), and nothing else in the table. Compared slot
-    /// by slot, with no table read whole made and nothing printed unless a slot differs, so a
+    /// That `kept`, brought in place by [`refresh_reading`](Self::refresh_reading) (or kept unread
+    /// while nothing it reads changed: `live_bind::ReadFrom`), is the table `stage`'s function of
+    /// `interface` reads whole ([`stage_table_reading`](Self::stage_table_reading)), each sampler
+    /// as `maps` binds it and its slots that tell the view base alignment apart as `views` leaves
+    /// them (debug builds): the same slots, each bound alike as its value prints (a float's sign
+    /// told apart, every NaN alike: [`same_as_printed`]), and nothing else in the table. Compared
+    /// slot by slot, with no table read whole made and nothing printed unless a slot differs, so a
     /// draw allocates as many times with debug assertions as without (`runtime_lane::frame_costs`
     /// holds its bound in every build). A slot that differs is named in the panic.
     #[cfg(debug_assertions)]
-    fn check_reading(
+    pub(super) fn check_reading(
         &self,
         kept: &StageTable,
         read: (Stage, &PipelineInterface),
@@ -975,30 +1042,15 @@ impl ArgumentTable {
     /// Hold everything bound until `core`'s command buffer completes: a command uses it, and
     /// the command buffer lists it among its used resources (`used_resources.rs`). Once while it
     /// binds the same objects: where `core` retained the table before and it binds exactly the
-    /// objects it bound then (by identity), `core` holds them and keeps their keys, each a function
-    /// of its object, until the command buffer completes, so nothing is retained again. Where it
-    /// binds others, `core` holds each object the table bound at its slot then already, and takes
-    /// the rest, each by another reference to it (`retained.rs`): its last first, so they go in
-    /// the table's order, as one hold of them all went.
+    /// objects it bound then (by identity; at once where its stamp is the one it had then, else
+    /// slot by slot), `core` holds them and keeps their keys, each a function of its object, until
+    /// the command buffer completes, so nothing is retained again. Where it binds others, `core`
+    /// holds each object the table bound at its slot then already, and takes the rest, each by
+    /// another reference to it (`retained.rs`): its last first, so they go in the table's order,
+    /// as one hold of them all went.
     pub(super) fn retain(&self, core: &mut EncoderCore) {
         let mut retained = lock(&self.retained.0);
-        let now = self.bound().map(|(slot, object)| (slot, object.address()));
-        if retained.core == Some(core.id()) && retained.bound.iter().copied().eq(now) {
-            return;
-        }
-        let keys = self.buffers.values().map(|(b, _)| b.identity().key);
-        let texture_keys = self.textures.values().map(Texture::use_key);
-        core.touch_keys(keys.chain(texture_keys));
-        for (slot, object) in self.bound().rev() {
-            if !retained.holds(core, slot, object) {
-                core.retain_shared(object.held());
-            }
-        }
-        let RetainedBy { core: by, bound } = &mut *retained;
-        bound.clear();
-        bound.extend(self.bound().map(|(slot, object)| (slot, object.address())));
-        *by = Some(core.id());
-        core.device().shared().counts.argument_table_retained();
+            stamp,
     }
 
     /// Let go of `object`, which the table bound at `slot` until a call replaced or unbound it:

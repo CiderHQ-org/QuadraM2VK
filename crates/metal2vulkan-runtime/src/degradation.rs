@@ -3329,16 +3329,9 @@ impl Device {
         samplers: &[crate::SamplerState],
     ) {
         const NOTE: PrecisionNote = PrecisionNote::ArgumentPixelSamplerScaling;
-        let Some(stage) = stages.iter().find(|s| s.precision_notes.contains(&NOTE)) else {
+        let Some(stage) = self.argument_pixel_samplers_noted(stages) else {
             return;
         };
-        if !self
-            .shared()
-            .announced
-            .pending(Degradation::ArgumentPixelSamplerScaling)
-        {
-            return;
-        }
         let Some(state) = samplers.iter().find(|s| s.scales_in_an_argument_buffer()) else {
             return;
         };
@@ -3354,6 +3347,23 @@ impl Device {
                 ),
             )
         });
+    }
+
+    /// The stage of `stages` whose note [`degrade_argument_pixel_samplers`] may announce: one
+    /// that records `PrecisionNote::ArgumentPixelSamplerScaling`, where the device has not
+    /// announced it yet; `None` where it would announce nothing, whatever the states.
+    ///
+    /// [`degrade_argument_pixel_samplers`]: Self::degrade_argument_pixel_samplers
+    pub(crate) fn argument_pixel_samplers_noted<'a>(
+        &self,
+        stages: &'a [StageModule],
+    ) -> Option<&'a StageModule> {
+        const NOTE: PrecisionNote = PrecisionNote::ArgumentPixelSamplerScaling;
+        let stage = stages.iter().find(|s| s.precision_notes.contains(&NOTE))?;
+        self.shared()
+            .announced
+            .pending(Degradation::ArgumentPixelSamplerScaling)
+            .then_some(stage)
     }
 
     /// Why `stage`, which records `note`, degrades: [`note_reason`](Self::note_reason)'s, and for

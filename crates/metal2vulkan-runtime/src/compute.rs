@@ -1608,6 +1608,7 @@ fn record(
         }
         false => Vec::new(),
     };
+    let mut writes = Vec::new();
     let bound = {
         let mut state = core.command_buffer().state();
         binding::bind(
@@ -1617,7 +1618,7 @@ fn record(
             &plan,
             &command,
             &bound_tables,
-            None,
+            (None, &mut writes),
         )?
     };
     let mut push = Vec::with_capacity(commands.regions.len());
@@ -1628,7 +1629,7 @@ fn record(
     let objects = std::sync::Arc::clone(variant.objects());
     // Set 0 per dispatch; set 1 the device's (written below, once nothing refuses).
     let (heap_writes, writes): (Vec<_>, Vec<_>) =
-        bound.writes.into_iter().partition(|write| write.set > 0);
+        writes.into_iter().partition(|write| write.set > 0);
     let set = objects.set_zero(&mut core.command_buffer().state().descriptors)?;
     // The dispatch binds the variant: the kinds its making announces at every occurrence.
     let formats: BoundFormats<'_> = &|slot| bound_tables.bound_format(slot);

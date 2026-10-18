@@ -103,6 +103,11 @@ pub(crate) struct Counters {
     stand_in_copies_made: AtomicU64,
     stand_in_copies_made_at_draws: AtomicU64,
     draw_shapes_made: AtomicU64,
+    draw_shapes_found: AtomicU64,
+    argument_samplers_taken: AtomicU64,
+    bind_views_worked_out: AtomicU64,
+    stage_tables_read: AtomicU64,
+    commands_noted_as_before: AtomicU64,
     draws_settled: AtomicU64,
     depth16_sided_draws: AtomicU64,
     bound_notices_made: AtomicU64,
@@ -618,6 +623,36 @@ impl Counters {
     /// A draw made the bind shape of its bind state (`LiveBind::shape`).
     pub(crate) fn draw_shape_made(&self) {
         self.draw_shapes_made.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A draw found the bind shape of its bind state among those its drawing state settled
+    /// lately (`LiveBind::shape`).
+    pub(crate) fn draw_shape_found(&self) {
+        self.draw_shapes_found.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A draw took the device's live sampler states to list (`sampler::ArgumentSamplers`).
+    pub(crate) fn argument_samplers_taken(&self) {
+        self.argument_samplers_taken.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A render encoder's bind worked out a texture slot's view that its bind memo did not keep
+    /// (`binding::BindMemo`).
+    pub(crate) fn bind_view_worked_out(&self) {
+        self.bind_views_worked_out.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A draw read a stage's table into its encoder's kept bind state
+    /// (`ArgumentTable::refresh_reading`).
+    pub(crate) fn stage_table_read(&self) {
+        self.stage_tables_read.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A draw's uses were noted already: the last command its encoder noted had them
+    /// (`noted_apart.rs`).
+    pub(crate) fn command_noted_as_before(&self) {
+        self.commands_noted_as_before
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     /// A draw settled its variant and plan from its bind shape (`GraphicsState::settle_shape`).
@@ -1413,6 +1448,31 @@ pub struct WorkCounts {
     /// Bind shapes draws made of their bind states: none for a draw whose bound slots keep their
     /// shapes and whose other bind state is its encoder's last draw's.
     pub draw_shapes_made: u64,
+    /// Bind shapes draws found among those their drawing states settled lately, compared with
+    /// their bind states in place: none for a draw whose bound slots keep their shapes and whose
+    /// other bind state's shape is its encoder's last draw's (values no shape reads, such as the
+    /// depth/stencil state, the stencil references or the blend color, may differ).
+    pub draw_shapes_found: u64,
+    /// Draws (and commands of other encoders that settle as draws do) that took the device's
+    /// live sampler states to list as their argument samplers: none for a draw whose kept bind
+    /// state lists them at the count of their slots' changes that still holds, whose variant has
+    /// no set-1 arrays and names no state in a notice (`sampler::ArgumentSamplers`).
+    pub argument_samplers_taken: u64,
+    /// Texture slot views render encoders' binds worked out: none for a bind of a texture, as a
+    /// view, that a bind of the same or an earlier encoder of the device bound, while no image of
+    /// the device let its views go (`binding::BindMemo`).
+    pub bind_views_worked_out: u64,
+    /// Stage tables (vertex, fragment, object, mesh) that draws, and commands of other encoders
+    /// that settle as draws do, read into their encoder's kept bind state: four a draw at most,
+    /// none for a table no call changed since a draw read it through the same drawing state's
+    /// interface, with the same samplers' address-mode maps, while no no-copy buffer was rebound
+    /// or detached (`live_bind::ReadFrom`).
+    pub stage_tables_read: u64,
+    /// Draws whose uses their encoder did not note again: the last command it noted had the same
+    /// uses, with the same uses of host aliases added, into the same part, with the same images
+    /// held in their attachment layout, and none of them reached through the resident set alone
+    /// (`noted_apart.rs`).
+    pub commands_noted_as_before: u64,
     /// Draws that settled their variant and plan from their bind shapes: none for a draw whose
     /// bind shape is one of the latest its pipeline state settled in the same buffer forms.
     pub draws_settled: u64,
@@ -1805,6 +1865,11 @@ impl Device {
                 .stand_in_copies_made_at_draws
                 .load(Ordering::Relaxed),
             draw_shapes_made: counters.draw_shapes_made.load(Ordering::Relaxed),
+            draw_shapes_found: counters.draw_shapes_found.load(Ordering::Relaxed),
+            argument_samplers_taken: counters.argument_samplers_taken.load(Ordering::Relaxed),
+            bind_views_worked_out: counters.bind_views_worked_out.load(Ordering::Relaxed),
+            stage_tables_read: counters.stage_tables_read.load(Ordering::Relaxed),
+            commands_noted_as_before: counters.commands_noted_as_before.load(Ordering::Relaxed),
             draws_settled: counters.draws_settled.load(Ordering::Relaxed),
             depth16_sided_draws: counters.depth16_sided_draws.load(Ordering::Relaxed),
             bound_notices_made: counters.bound_notices_made.load(Ordering::Relaxed),

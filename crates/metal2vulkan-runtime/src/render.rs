@@ -295,7 +295,7 @@ use super::index_rewrite::{self, RewritePass, RewriteSteps};
 use super::kept_bytes;
 use super::linear_attachment;
 use super::linear_merge::LinearMerge;
-use super::live_bind::{LiveBind, Reshape};
+use super::live_bind::{Emptied, LiveBind, Reshape};
 use super::nan_clear::{keeps_nan_sign, NanClears, NanDepthWrite};
 use super::pipeline::Settled;
 use super::pipeline::{BufferForms, DrawPipeline};
@@ -320,7 +320,7 @@ use super::resource::ResourceKey;
 use super::sample_planes::{self, Planes, PlanesCommands};
 use super::sample_positions;
 use super::sampler::OwnedSampler;
-use super::sampler::SamplerState;
+use super::sampler::{ArgumentSamplers, SamplerState};
 use super::sampler_listing::SamplerListing;
 use super::shadow::{self, ShadowCopy};
 use super::shadow_stencil::ShadowStencil;
@@ -354,8 +354,8 @@ use metal2vulkan::metal::{
     RenderStages, TriangleFillMode, Winding,
 };
 use metal2vulkan::pipeline::{
-    ColorGroup, GraphicsState, PipelineInterface, PushField, RuntimeFact, Stage,
-    StorageAttachmentUse, StorageAttachmentView,
+    ColorGroup, GraphicsState, PushField, RuntimeFact, Stage, StorageAttachmentUse,
+    StorageAttachmentView,
 };
 use pass_start_reads::{PassStartReads, PassStartTables};
 use pass_steps::{InstanceSteps, PassSteps, StagedDispatch};
@@ -640,10 +640,12 @@ struct DrawSettings {
     written_clamp: Option<WrittenDepthClamp>,
     /// The depth bias its primitives take: none for points and lines.
     bias: Option<DepthBiasEffect>,
-    /// Where its colors go among the pass's, the pass's colors it zeroes and its own it drops.
+    /// Where its colors go among the pass's.
     routing: Arc<Routing>,
-    zeroed_colors: BTreeMap<u32, PixelFormat>,
-    dropped_colors: BTreeSet<u32>,
+    /// The pass's colors it zeroes and its own it drops, where the encoder keeps no such colors
+    /// for its pipeline state in its pass (`Routed`): found for the draw alone. `None` where the
+    /// encoder keeps them, which the draw reads in place ([`RenderCommandEncoder::draw_colors`]).
+    routed_colors: Option<RoutedColors>,
     /// Whether the depth it renders against is `Depth16Unorm` (`BindState::depth16_pass`).
     depth16_pass: Option<bool>,
     /// The side of its depth bias (`BindState::depth16_bias_raises`).
@@ -1227,7 +1229,8 @@ pub struct RenderCommandEncoder {
     /// The last draw's variant, plan and specialization under which the bound values' notices
     /// were quiet (`Device::degrade_bound_values`), where it was.
     quiet_bound_values: Option<QuietBoundValues>,
-    /// The views and sampler descriptions its draws' binds made or found (`binding::BindMemo`).
+    /// The views and sampler descriptions its draws' binds made or found, taken from the
+    /// device's ended render encoders' and given back as it ends (`binding::BindMemo`).
     bind_memo: binding::BindMemo,
     /// What its last draw retained of its own ([`LastRetained`]).
     last_retained: LastRetained,
@@ -1333,11 +1336,23 @@ impl QuietBoundValues {
 }
 
 /// A drawing state's routing into a pass's colors ([`RenderCommandEncoder::routing`]), with the
-/// state and the pass's color formats it was found for: a function of those alone.
+/// state and the pass's color formats it was found for, and the colors a draw of it zeroes and
+/// drops by that routing ([`RenderCommandEncoder::routed_colors`]): each a function of those
+/// alone.
 struct Routed {
     state: DrawingState,
     pass: [Option<PixelFormat>; MAX_COLOR_ATTACHMENTS],
     routing: Result<Arc<Routing>, u32>,
+    /// `None` where the state's routing is refused.
+    colors: Option<RoutedColors>,
+}
+
+/// The pass colors a draw of a drawing state zeroes, and the state's colors it drops, by its
+/// routing ([`RenderCommandEncoder::zeroed_colors`], [`RenderCommandEncoder::dropped_colors`]).
+#[derive(Clone)]
+struct RoutedColors {
+    zeroed: BTreeMap<u32, PixelFormat>,
+    dropped: BTreeSet<u32>,
 }
 
 impl std::fmt::Debug for RenderCommandEncoder {
@@ -1551,7 +1566,10 @@ impl RenderCommandEncoder {
             grouped,
         } = opening;
         let keeping = capture::Keeping::of(&layout);
-        let rerecord = reroute::keeps_whole(core.device()) || extended.keeps_draws();
+        // The bind state the device's last ended render encoder left (`live_bind.rs`).
+        let live = core.device().shared().live_binds.take();
+        // The views and sampler descriptions its binds made or found (`binding::BindMemo`).
+        let bind_memo = core.device().shared().bind_memos.take();
         RenderCommandEncoder {
             core,
             earlier: Vec::new(),
@@ -1645,10 +1663,10 @@ impl RenderCommandEncoder {
             extended,
             pass_start: PassStartReads::default(),
             restart: None,
-            live: Arc::default(),
+            live,
             log,
             quiet_bound_values: None,
-            bind_memo: binding::BindMemo::default(),
+            bind_memo,
             last_retained: LastRetained::default(),
             inline: match inline {
                 Some(splits) => inline_first::Inline::Open { splits },
@@ -1774,6 +1792,10 @@ impl DrawDynamic {
     }
 }
 
+/// No colors or slots: what a draw's set of them is compared with where it names none
+/// ([`RenderCommandEncoder::settle_draw`]).
+static NO_INDICES: BTreeSet<u32> = BTreeSet::new();
+
 /// The dynamic states a draw records, beside `VERTEX_INPUT_BINDING_STRIDE` (recorded with the
 /// vertex buffers).
 const RECORDED: [vk::DynamicState; 16] = [
@@ -1844,8 +1866,14 @@ impl RenderCommandEncoder {
         // Routed once here: the check and each draw read it (`routing`).
         if let RenderStateKind::Graphics(graphics) = state.kind() {
             let pass = self.pass_formats();
+            let routing = graphics.routed(&pass, || Self::route(graphics, &pass));
+            let colors = routing
+                .as_ref()
+                .ok()
+                .map(|routing| self.colors_by(graphics, routing));
             self.routed = Some(Routed {
-                routing: graphics.routed(&pass, || Self::route(graphics, &pass)),
+                routing,
+                colors,
                 state: graphics.clone(),
                 pass,
             });
@@ -3437,8 +3465,16 @@ impl RenderCommandEncoder {
             drew_depth_writes,
             inline,
             grouped,
+            live,
+            bind_memo,
             ..
         } = self;
+        // The views and sampler descriptions its binds made or found, which the device's next
+        // render encoder takes (`binding::BindMemo`).
+        core.device().shared().bind_memos.give(bind_memo);
+        // The bind state its last draw left, which the device's next render encoder starts from
+        // (`live_bind.rs`): no draw holds it once the encoder ends.
+        core.device().shared().live_binds.give(live);
         earlier.push(current);
         let mut instances = earlier;
         // The first instance's render pass and framebuffer, where it recorded inline in the
@@ -4885,71 +4921,98 @@ impl RenderCommandEncoder {
     /// encoder made resident are its used resources, each in its render stages, `argument_samplers`
     /// the device's sampler states a draw lists, each at the heap element of its resource ID, and
     /// `function_tables` the live tables its state made (`render/arguments.rs`). Each stage's table
-    /// is read as `interface`, the state's, reads it: a buffer where a stage reads a
-    /// visible-function table reads as a null table. The vertex, object and mesh stages' tables are
-    /// `pass_start`'s, with the copies of bytes the pass's fragment stages wrote, or the encoder's
-    /// (`render/pass_start_reads.rs`; the object and mesh stages' changed). Each stage's samplers
-    /// are bound as `maps` binds them. The depth/stencil state and the fields the draw's settings
-    /// state are the caller's to bring ([`settle_draw`](Self::settle_draw)); the values a draw
-    /// sets past its settle, which no shape reads, are Metal's defaults until it sets them.
+    /// is read as the interface of `pipeline`, the drawing state, reads it: a buffer where a stage
+    /// reads a visible-function table reads as a null table; a table read last through the same
+    /// interface and maps, that no call changed, whose slots that tell the device's view base
+    /// alignment apart the state still holds as it read them, and that no no-copy buffer's move
+    /// may have changed since, is not read again (`live_bind::ReadFrom`). The vertex, object and
+    /// mesh stages' tables are `pass_start`'s, with the copies of bytes the pass's fragment stages
+    /// wrote, or the encoder's (`render/pass_start_reads.rs`; the object and mesh stages'
+    /// changed). Each stage's samplers are bound as `maps` binds them, and the buffer slots that
+    /// tell the device's view base alignment apart are the state's
+    /// (`argument_table::AtBindViews`). The depth/stencil state and the fields the draw's settings
+    /// state are the caller's to bring ([`settle_draw`](Self::settle_draw)); the values a draw sets
+    /// past its settle, which no shape reads, are Metal's defaults until it sets them.
     fn refresh_bind_state(
         &self,
         live: &mut LiveBind,
         pass_start: &PassStartTables,
-        (argument_samplers, function_tables): (&[SamplerState], &[VisibleFunctionTable]),
-        (interface, maps): (&PipelineInterface, &SamplerMaps),
+        (argument_samplers, function_tables): (&mut ArgumentSamplers, &[VisibleFunctionTable]),
+        (pipeline, maps): (&DrawingState, &SamplerMaps),
     ) -> Reshape {
         let mut reshape = Reshape::default();
+        let interface = &pipeline.base().interface;
         let state = &mut live.state;
-        for (stage, table) in [
+        let views = pipeline.at_bind_views();
+        let tables = [
             (Stage::Vertex, pass_start.or(Stage::Vertex, &self.vertex)),
             (Stage::Fragment, &self.fragment),
             (Stage::Object, pass_start.or(Stage::Object, &self.object)),
             (Stage::Mesh, pass_start.or(Stage::Mesh, &self.mesh)),
-        ] {
+        ];
+        // Read again only where what a table brings in may have changed since it was read
+        // (`live_bind::ReadFrom`); a table that keeps its stamp is checked in debug builds alone.
+        let moved = crate::buffer::host_cells_moved();
+        let same = live.read_from.reads(interface, maps, moved);
+        let counts = &self.core.device().shared().counts;
+        for (at, (stage, table)) in tables.into_iter().enumerate() {
             let kept = state.stages.entry(stage).or_default();
-            table.refresh_reading(kept, (stage, interface), maps, &mut reshape);
+            // Its slots that tell the view base alignment apart are as the state holds them
+            // (`AtBindViews::holds`): another table's offsets may have left some out since.
+            let views_held = views.holds(stage, kept.at_bind_views);
+            if same && views_held && live.read_from.unchanged(at, table.stamp()) {
+                #[cfg(debug_assertions)]
+                table.check_reading(kept, (stage, interface), (maps, views));
+                continue;
+            }
+            counts.stage_table_read();
         }
+        let stamps = tables.map(|(_, table)| table.stamp());
+        live.read_from
+            .read(stamps, (interface, || pipeline.held()), maps, moved);
         // The object function's threadgroup memory lengths, which its draws specialize.
         let object = state.stages.entry(Stage::Object).or_default();
-        reshape.field(
+        reshape.field_from(
             &mut object.threadgroup_lengths,
-            self.object_threadgroup_lengths.clone(),
+            &self.object_threadgroup_lengths,
         );
         reshape.field(&mut state.used_resources, self.residency.used_resources());
-        // Listed again only where the device's sampler states changed since.
-        if !heap_sets::lists(&state.argument_samplers, argument_samplers) {
-            reshape.field(
-                &mut state.argument_samplers,
-                heap_sets::listed(argument_samplers),
-            );
+        // Listed again only where the device's sampler states changed since: not where the
+        // listing kept is of every live state at the count of their slots' changes that still
+        // holds; else they are taken and compared state by state.
+        let device = self.core.device();
+        let current = argument_samplers.states().is_none()
+            && live.listed_at == Some(device.sampler_slots_changed());
+        if !current {
+            let states = argument_samplers.take(device);
+            if !heap_sets::lists(&state.argument_samplers, states) {
+                reshape.field(&mut state.argument_samplers, heap_sets::listed(states));
+            }
+            live.listed_at = argument_samplers.listed_at();
         }
         let listed = function_tables
             .iter()
             .map(VisibleFunctionTable::listed)
             .collect();
         reshape.field(&mut state.function_tables, listed);
-        reshape.field(&mut state.heap_placement, HeapPlacement::ResourceId);
         reshape.field(
             &mut state.render_target_array_length,
             self.render_target_array_length,
         );
-        reshape.field(&mut state.viewport_count, self.state.viewport_count(true));
+        // Values no shape reads (`BindState::shape`), stored as they are: a change of one leaves
+        // the shape as it was (`live_bind.rs`).
+        state.heap_placement = HeapPlacement::ResourceId;
+        state.viewport_count = self.state.viewport_count(true);
         // An extended-range blend computed in the shader reads the blend color as push data.
-        reshape.field(&mut state.blend_color, self.state.blend_color());
+        state.blend_color = self.state.blend_color();
         // A fragment function that runs the draw's depth test itself clamps its depth as the
         // encoder's depth clip mode says, read as push data (its range: `draw_resident`).
-        reshape.field(
-            &mut state.depth_clip_mode_clamp,
-            self.state.depth_clip_mode_clamp(),
-        );
+        state.depth_clip_mode_clamp = self.state.depth_clip_mode_clamp();
         // A fragment function that runs the draw's stencil test itself reads the references as
         // push data.
-        reshape.field(
-            &mut state.stencil_references,
-            self.state.stencil_reference(),
-        );
-        // Only a tessellation pipeline reads the factors: any other's shape leaves them out.
+        state.stencil_references = self.state.stencil_reference();
+        // Only a tessellation pipeline reads the factors: any other's shape leaves them out. The
+        // shape reads whether they name a buffer alone.
         let kind = self.pipeline.as_ref().map(RenderPipelineState::kind);
         let factors = match kind {
             Some(RenderStateKind::Graphics(graphics))
@@ -4959,7 +5022,9 @@ impl RenderCommandEncoder {
             }
             _ => TessellationFactors::default(),
         };
-        reshape.field(&mut state.tessellation_factors, factors);
+        reshape.shaped(&mut state.tessellation_factors, factors, |f| {
+            f.buffer.is_some()
+        });
         state.primitive_type = None;
         state.depth_range = <[f32; 2]>::default();
         state.depth_bias = [0.0; 3];
@@ -5059,17 +5124,16 @@ impl RenderCommandEncoder {
     /// What the tests of `depth_stencil` can do to the fragments of a draw of `pipeline`
     /// (`BindState::fragment_tests`) whose fragment function may store a color through the
     /// interlocked storage form before them: one that states `RuntimeFact::TestedStorageWrites`,
-    /// or one whose draw writes the instance's `interlocked` colors through that form, whose
-    /// variant may state it. `FragmentTests::Any`, which no other plan reads, for every other
-    /// draw, so that its plans stay one per shape whatever its tests.
+    /// `FragmentTests::Any`, which no other plan reads, for every other draw, so that its plans
+    /// stay one per shape whatever its tests.
     fn fragment_tests(
         &self,
         pipeline: &DrawingState,
         depth_stencil: &DepthStencilDescriptor,
-        interlocked: &BTreeSet<u32>,
+        stores: bool,
     ) -> FragmentTests {
         let base = pipeline.base();
-        let tested = !interlocked.is_empty()
+        let tested = stores
             || base
                 .dependencies
                 .iter()
@@ -5927,6 +5991,50 @@ impl RenderCommandEncoder {
         }
     }
 
+    /// The pass colors a draw of `pipeline`, routed by `routing`, zeroes and the colors of its own
+    /// it drops: those the encoder kept as `pipeline` was set where the pass's colors are still
+    /// the ones they were found for (a function of the state and those colors alone, as `routing`
+    /// is), else found again.
+    fn routed_colors(
+        &self,
+        pipeline: &DrawingState,
+        routing: &Routing,
+    ) -> std::borrow::Cow<'_, RoutedColors> {
+        match &self.routed {
+            Some(Routed {
+                state,
+                pass,
+                colors: Some(colors),
+                ..
+            }) if state.same(pipeline) && *pass == self.pass_formats() => {
+                std::borrow::Cow::Borrowed(colors)
+            }
+            _ => std::borrow::Cow::Owned(self.colors_by(pipeline, routing)),
+        }
+    }
+
+    /// The pass colors a draw of `pipeline` under `settings` zeroes and the colors of its own it
+    /// drops: those its settings found for it alone, else those the encoder keeps
+    /// ([`routed_colors`](Self::routed_colors)), read in place.
+    fn draw_colors<'a>(
+        &'a self,
+        pipeline: &DrawingState,
+        settings: &'a DrawSettings,
+    ) -> std::borrow::Cow<'a, RoutedColors> {
+        match &settings.routed_colors {
+            Some(colors) => std::borrow::Cow::Borrowed(colors),
+            None => self.routed_colors(pipeline, &settings.routing),
+        }
+    }
+
+    /// [`zeroed_colors`](Self::zeroed_colors) and [`dropped_colors`](Self::dropped_colors) of a
+    /// draw of `pipeline` routed by `routing`.
+    fn colors_by(&self, pipeline: &DrawingState, routing: &Routing) -> RoutedColors {
+        let zeroed = self.zeroed_colors(pipeline, routing);
+        let dropped = self.dropped_colors(pipeline, routing, zeroed.is_empty());
+        RoutedColors { zeroed, dropped }
+    }
+
     /// The pass's colors at no place of `pipeline`'s record (`routing`), the pass's format of
     /// each by the location the draw references it at, where plain Metal zeroes them at every
     /// sample a draw covers (`color_reformat::Uncovered::Zeroed`; Metal probes, probes): a draw
@@ -6134,11 +6242,16 @@ impl RenderCommandEncoder {
     /// probe): a draw runs the variant whose fragment function keeps no output there
     /// (`BindShape::dropped_colors`), so its pipeline writes no location without an attachment,
     /// and none into a pass color it keeps. They are the state's colors at no place of the pass's
-    /// record (`routing`); a pass color the draw keeps (`zeroed_colors` names none), at whose
-    /// location the state has no color; and in a routed draw each location its subpass leaves
-    /// out where the state has no color, which the function may write all the same. Empty for a
-    /// state without a fragment function, which writes no color.
-    fn dropped_colors(&self, pipeline: &DrawingState, routing: &Routing) -> BTreeSet<u32> {
+    /// record (`routing`); a pass color the draw keeps (`none_zeroed`: its `zeroed_colors` names
+    /// none), at whose location the state has no color; and in a routed draw each location its
+    /// subpass leaves out where the state has no color, which the function may write all the same.
+    /// Empty for a state without a fragment function, which writes no color.
+    fn dropped_colors(
+        &self,
+        pipeline: &DrawingState,
+        routing: &Routing,
+        none_zeroed: bool,
+    ) -> BTreeSet<u32> {
         let descriptor = pipeline.descriptor();
         if descriptor.vertex().is_some_and(|d| d.fragment.is_none()) {
             return BTreeSet::new();
@@ -6152,7 +6265,7 @@ impl RenderCommandEncoder {
                 .is_none_or(|pf| pf == PixelFormat::Invalid)
         };
         let mut dropped = routing.dropped.clone();
-        if Self::writes_colors(pipeline) && self.zeroed_colors(pipeline, routing).is_empty() {
+        if Self::writes_colors(pipeline) && none_zeroed {
             dropped.extend(routing.uncovered.keys().copied().filter(|&l| lacks(l)));
         }
         let left_out = (0u32..).zip(&routing.locations);
@@ -6660,7 +6773,7 @@ impl RenderCommandEncoder {
                             let routing = self
                                 .routing(state)
                                 .map_err(|_| internal("a draw of a state its pass refuses"))?;
-                            let zeroed = !self.zeroed_colors(state, &routing).is_empty();
+                            let zeroed = !self.routed_colors(state, &routing).zeroed.is_empty();
                             let writes = linear_attachment::writes(colors);
                             let writes = linear_attachment::pass_writes(&writes, &routing, zeroed);
                             self.coverage.add(&writes, rects)
@@ -6807,9 +6920,6 @@ impl RenderCommandEncoder {
         let hidden_depth = settings.hidden.is_some();
         let (_, stencil) = self.aspects();
         let max = pipeline.base().graphics.max_vertex_amplification_count;
-        // The device's sampler states, less those at IDs no set-1 sampler array of the variant
-        // holds (`heap_sets::fit_samplers`).
-        let mut argument_samplers = self.core.device().argument_samplers();
         let function_tables = pipeline.function_tables();
         let mut unlisted = None;
         let reads_tile_memory = pipeline.reads_tile_memory();
@@ -6820,6 +6930,14 @@ impl RenderCommandEncoder {
         // A capture draw (`render/capture.rs`) runs before the pass: it reads the bytes as they
         // were then, in place, and announces nothing its first recording did not.
         let capture = self.capture_addresses();
+        // The device's sampler states, less those at IDs no set-1 sampler array of the variant
+        // holds (`heap_sets::fit_samplers`): taken where the draw needs them
+        // (`sampler::ArgumentSamplers`), and at once for a capture draw, whose capture form is
+        // another variant than the one settled.
+        let mut argument_samplers = match capture {
+            Some(_) => ArgumentSamplers::taken(self.core.device()),
+            None => ArgumentSamplers::untaken(),
+        };
         let pass_start = match capture {
             Some(_) => PassStartTables::default(),
             None => self.pass_start.tables(
@@ -6881,9 +6999,12 @@ impl RenderCommandEncoder {
                 }
             }
         };
-        self.core
-            .device()
-            .degrade_argument_pixel_samplers(&variant.pipeline().stages, &argument_samplers);
+        let device = self.core.device();
+        let stages = &variant.pipeline().stages;
+        if device.argument_pixel_samplers_noted(stages).is_some() {
+            device.degrade_argument_pixel_samplers(stages, argument_samplers.take(device));
+        }
+        let zeroes_colors = !self.draw_colors(&pipeline, &settings).zeroed.is_empty();
         let DrawSettings {
             hidden,
             failing_state,
@@ -7207,6 +7328,7 @@ impl RenderCommandEncoder {
         let snapshot_split = snapshot.as_ref().is_some_and(|w| self.snapshot_apart(w));
         let storage_colors = self.storage_colors(&plan);
         let apart = snapshot_split || storage_colors & self.current.feedback.0 != 0;
+            && self.writes_memoryless(&pipeline, &routing, zeroes_colors);
         // A capture draw records into the capture's instance, the current one.
         let (next, stood) = match capture {
             Some(_) => (Next::Current, None),
@@ -7398,7 +7520,11 @@ impl RenderCommandEncoder {
             tables = tables.with_snapshots(views);
         }
         if let Some(heap) = &heap {
-            tables = tables.with_heap(&argument_samplers, heap);
+            // Taken as the draw settled: its variant has set-1 arrays.
+            let states = argument_samplers
+                .states()
+                .ok_or_else(|| internal("a heap's draw without its argument samplers"))?;
+            tables = tables.with_heap(states, heap);
         }
         if let Some((records, indices)) = capture {
             tables = tables.with_capture(records, indices);
@@ -7493,25 +7619,28 @@ impl RenderCommandEncoder {
                 .map(tessellation_scan::TessellationWork::regions),
         };
         let (index, indirect) = (buffers.index.as_ref(), buffers.indirect.as_ref());
-        let mut uses = binding::command_uses(
+        // Over the last draw's uses, in their storage (`LiveBind::uses`).
+        binding::command_uses_into(
             call,
-            &plan,
-            &command,
-            &tables,
-            index.map(DrawSource::metal),
-            indirect.map(DrawSource::metal),
+            (&plan, &command, &tables),
+            (
+                index.map(DrawSource::metal),
+                indirect.map(DrawSource::metal),
+            ),
+            &mut live.uses,
         )?;
+        let uses = &mut live.uses;
         // A use of an attachment's memory other than as the attachment, inside its instance,
         // which no copy serves (`texture/attached_reads.rs`): a draw that reads through snapshots
         // reads no attachment otherwise (`snapshot_holds`).
         if snapshot.is_none() {
-            device.degrade_attachment_reads(call, layout, uses.iter())?;
+            device.degrade_attachment_reads(call, layout, uses)?;
         }
         // In a pass of several color groups, what the draw reads of what another group writes
         // (`render/color_groups.rs`): checked at its first recording.
         if capture.is_none() && !self.rerouting {
             let roots = !commands.root_tables.is_empty();
-            self.check_group_reads(&uses, roots, &plan)?;
+            self.check_group_reads(uses, roots, &plan)?;
         }
         uses.extend(inputs);
         uses.extend(storage_uses);
@@ -7547,7 +7676,7 @@ impl RenderCommandEncoder {
             .chain(self.object.textures.values())
             .chain(self.mesh.textures.values())
             .chain(self.residency.textures());
-        let mut draw_shadows = shadow::shadow_uses(textures, &uses);
+        let mut draw_shadows = shadow::shadow_uses(textures, uses);
         // A draw that reads an attachment's texture at its fragments' own pixels alone copies in
         // only the texels around its scissors (`texture/attached_reads.rs`).
         if attached {
@@ -7565,7 +7694,8 @@ impl RenderCommandEncoder {
             self.capture_missed();
             return Ok(());
         }
-        let mut vertex_buffers = Vec::with_capacity(plan.vertex_buffers.len());
+        // Over the last draw's, in their storage (`LiveBind::vertex_buffers`).
+        live.vertex_buffers.clear();
         for bind in &plan.vertex_buffers {
             let table = pass_start.or(Stage::Vertex, &self.vertex);
             let offset = commands
@@ -7593,8 +7723,9 @@ impl RenderCommandEncoder {
                 (None, Some(bytes)) => (bytes.region.raw(), bytes.region.offset()),
                 (None, None) => return Err(internal("the plan binds an unbound vertex buffer")),
             };
-            vertex_buffers.push((bind.binding, raw, start + offset, stride.unwrap_or(0)));
+            (live.vertex_buffers).push((bind.binding, raw, start + offset, stride.unwrap_or(0)));
         }
+        let vertex_buffers = &live.vertex_buffers[..];
         let profile = device.compile_device().profile();
         let selects = graphics.writes_viewport_index;
         let mut fixed = self.draw_fixed(
@@ -7821,10 +7952,18 @@ impl RenderCommandEncoder {
         if let DrawPipeline::Made(made) = &draw_pipeline {
             variant.first_use(made, specialization, &formats);
         }
-        let bound = {
+        // Set 0's writes and the heap set's, in the last draw's storage (`LiveBind::writes`),
+        // emptied as the draw returns: their keepers hold nothing past it.
+        let mut writes = Emptied::new(&mut live.writes);
             let mut state = self.core.command_buffer().state();
             let memo = Some(&mut self.bind_memo);
-            binding::bind(call, &device, &mut state, &plan, &command, &tables, memo)?
+                call,
+                &device,
+                &mut state,
+                &plan,
+                &command,
+                &tables,
+                (memo, &mut writes),
         };
         // The draw's push bytes, filled in place.
         let push = binding::push_writes(commands.push_constants, &bound.holes)?;
@@ -7855,13 +7994,14 @@ impl RenderCommandEncoder {
         };
         let objects = Arc::clone(variant.objects());
         // Set 0 per draw; set 1 the device's (written below, once nothing refuses).
-        let mut writes = bound.writes;
         let heap_writes: Vec<_> = writes.extract_if(.., |write| write.set > 0).collect();
-        let set = objects.set_zero(&mut self.core.command_buffer().state().descriptors)?;
-        // SAFETY: the set was just allocated and no command uses it yet; every buffer, view
-        // and sampler written is live (the command buffer retains them below, and a refusal
-        // leaves the set unused in its pool).
-        unsafe { binding::write_sets(&device, set.as_slice(), &writes) }?;
+        let pushed: &[binding::SetWrite] = match objects.pushes_set_zero() {
+            true => {
+                // Over the last draw's, in their storage (`LiveBind::pushed`).
+                binding::SetWrite::push_into(&writes, objects.immutable_pushes(), &mut live.pushed);
+                &live.pushed
+            }
+                &[]
         // The Vulkan draws: the binder's, the index bounds pass's two, or the index rewrite
         // pass's one.
         let sized = device.shared().sized_index_bind;
@@ -7989,10 +8129,12 @@ impl RenderCommandEncoder {
             });
         // A capture draw's uses are the capture's command's, before the pass (`capture_uses`).
         if capture.is_none() {
-            self.core.note_reaching(stages, &uses, uses.resident())?;
-            self.unordered.add(&uses);
-            self.pass_start.announce(&device, &uses, mesh_before);
-            self.pass_start.add(&uses);
+            let reaching = (&**uses, uses.resident());
+            self.core
+                .note_reaching(stages, reaching, Some(&mut live.noted))?;
+            self.unordered.add(uses);
+            self.pass_start.announce(&device, uses, mesh_before);
+            self.pass_start.add(uses);
         }
         let heap_set = match heap {
             Some(_) => Some(heap_sets::bind(
@@ -8000,7 +8142,7 @@ impl RenderCommandEncoder {
                 &objects,
                 &mut self.core.command_buffer().state().heaps,
                 heap_writes,
-                Some(&*uses),
+                Some(&**uses),
             )?),
             None => None,
         };
@@ -8291,7 +8433,7 @@ impl RenderCommandEncoder {
         self.tile_memory_splits += usize::from(tile_memory_split);
         self.barrier_splits += usize::from(run_barrier_split);
         self.run_barrier = false;
-        self.gathering().add(&draw_shadows, &uses);
+        self.gathering().add(&draw_shadows, uses);
         if !empty && !culled {
             for source in index.into_iter().chain(indirect) {
                 match (source.copy_steps(&mut self.core), before_instance) {
@@ -8397,19 +8539,23 @@ impl RenderCommandEncoder {
             };
             // An emulated tessellation draw records its chunks in place of the amplifications:
             // each chunk's push writes, then its draw.
-            let entries: Vec<(&[binding::PushWrite], &[_])> = match chunked.is_empty() {
-                true => pushes.iter().map(|push| (&push[..], vk_draws)).collect(),
-                false => chunked
-                    .iter()
-                    .map(|(push, draw)| (&push[..], &draw[..]))
-                    .collect(),
+            let entries = match chunked.is_empty() {
+                true => pushes.len(),
+                false => chunked.len(),
+            };
+            let entry = |a: usize| -> (&[binding::PushWrite], &[_]) {
+                match chunked.get(a) {
+                    Some((push, draw)) => (&push[..], &draw[..]),
+                    None => (&pushes[a][..], vk_draws),
+                }
             };
             for &phase in phases {
                 let mut first = true;
                 // Amplification by amplification, each through its recordings' regions: Metal
                 // renders every primitive of one before the next's, and a pixel's regions are one.
                 // An emulated tessellation draw's chunks, likewise, in order.
-                for (a, &(push, vk_draws)) in entries.iter().enumerate() {
+                for a in 0..entries {
+                    let (push, vk_draws) = entry(a);
                     for state in draw_states.of(a) {
                         for &(index, indirect, draw) in vk_draws {
                             if indirect.is_some()
@@ -8443,9 +8589,10 @@ impl RenderCommandEncoder {
                                 layout: objects.layout(),
                                 pipeline: made_now.unwrap_or_default(),
                                 sets: set.as_slice(),
+                                pushed,
                                 heap: heap_set,
                                 push,
-                                vertex_buffers: &vertex_buffers,
+                                vertex_buffers,
                                 index,
                                 indirect,
                                 dynamic,
@@ -8631,7 +8778,7 @@ impl RenderCommandEncoder {
             self.core.retain(function_tables);
         }
         if capture.is_some() {
-            self.capture_uses(uses);
+            self.capture_uses(uses.clone());
         }
         Ok(())
     }
@@ -8842,8 +8989,10 @@ impl RenderCommandEncoder {
         let routing = self
             .routing(pipeline)
             .map_err(|_| internal("a draw of a state its pass refuses"))?;
-        let zeroed_colors = self.zeroed_colors(pipeline, &routing);
-        let dropped_colors = self.dropped_colors(pipeline, &routing);
+        let routed_colors = match self.routed_colors(pipeline, &routing) {
+            std::borrow::Cow::Borrowed(_) => None,
+            std::borrow::Cow::Owned(colors) => Some(colors),
+        };
         // A compensated depth, which a vertex clamp takes natively too, replaces the native
         // range (`clamp_draw_depth`).
         let compensated = compensation.is_some_and(|c| c.depth.is_some());
@@ -8867,8 +9016,7 @@ impl RenderCommandEncoder {
             written_clamp,
             bias,
             routing,
-            zeroed_colors,
-            dropped_colors,
+            routed_colors,
             depth16_pass,
             depth16_bias_raises,
             primitive_id_indices: None,
@@ -8909,7 +9057,7 @@ impl RenderCommandEncoder {
         live: &mut LiveBind,
         (pipeline, settings): (&DrawingState, &DrawSettings),
         pass_start: &PassStartTables,
-        (argument_samplers, unlisted): (&mut Vec<SamplerState>, &mut Option<(u64, u64)>),
+        (argument_samplers, unlisted): (&mut ArgumentSamplers, &mut Option<(u64, u64)>),
         (function_tables, snapshot): (&[VisibleFunctionTable], &mut Option<snapshot::Wanted>),
     ) -> Result<Settled, Error> {
         // Its runtime samplers' address modes as the textures they sample map them.
@@ -8918,33 +9066,32 @@ impl RenderCommandEncoder {
         // reads and writes beside the codes (`render/extended_shadow.rs`); its interlocked
         // colors are the others.
         let mut shadows = self.extended_shadows_bound();
-        let mut interlocked: BTreeSet<u32> = self
-            .interlocked_colors(pipeline)
-            .difference(&shadows)
-            .copied()
-            .collect();
-        let interface = &pipeline.base().interface;
+        // From the state the pipeline state's last draw left, where the encoder set it aside.
+        live.select(&pipeline.base().interface);
         loop {
             let mut reshape = self.refresh_bind_state(
                 live,
                 pass_start,
                 (argument_samplers, function_tables),
-                (interface, &sampler_maps),
+                (pipeline, &sampler_maps),
             );
             let state = &mut live.state;
-            reshape.field(
-                &mut state.vertex_amplification,
-                settings.amplification.clone(),
-            );
-            reshape.field(
+            // Each field the draw's settings or the loop hold on to compared in place, and copied
+            // only where it changed.
+            reshape.field_from(&mut state.vertex_amplification, &settings.amplification);
+            // The shape reads the compensation's kind alone, and whether a clamp range is set.
+            reshape.shaped(
                 &mut state.viewport_compensation,
                 settings.compensation.map(|c| c.viewport),
+                |c| c.map(|c| c.compensation),
             );
-            reshape.field(
+            reshape.shaped(
                 &mut state.depth_clamp_range,
                 settings.written_clamp.map(|w| w.range),
+                Option::is_some,
             );
-            reshape.field(&mut state.zeroed_colors, settings.zeroed_colors.clone());
+            let colors = self.draw_colors(pipeline, settings);
+            reshape.field_from(&mut state.zeroed_colors, &colors.zeroed);
             reshape.field(&mut state.depth16_pass, settings.depth16_pass);
             reshape.field(
                 &mut state.depth16_biased,
@@ -8955,18 +9102,17 @@ impl RenderCommandEncoder {
                 &mut state.primitive_id_indices,
                 settings.primitive_id_indices,
             );
-            reshape.field(&mut state.dropped_colors, settings.dropped_colors.clone());
-            reshape.field(&mut state.interlocked_colors, interlocked.clone());
-            reshape.field(&mut state.extended_shadows, shadows.clone());
-            let snapshots = snapshot.as_ref().map(|w| w.slots.clone());
-            reshape.field(&mut state.snapshot_textures, snapshots.unwrap_or_default());
+            reshape.field_from(&mut state.dropped_colors, &colors.dropped);
+            reshape.field_from(&mut state.extended_shadows, shadows);
+            let snapshots = snapshot.as_ref().map_or(&NO_INDICES, |w| &w.slots);
+            reshape.field_from(&mut state.snapshot_textures, snapshots);
             let depth_stencil = match &settings.failing_state {
                 Some(failing) => failing.failing_depth(),
                 None => self.state.depth_stencil_descriptor(),
             };
-            reshape.field(&mut state.depth_stencil, depth_stencil);
-            let stored: BTreeSet<u32> = interlocked.union(&shadows).copied().collect();
-            let tests = self.fragment_tests(pipeline, &state.depth_stencil, &stored);
+            // No shape reads the depth/stencil state but through the fragment tests (below).
+            state.depth_stencil = depth_stencil;
+            let tests = self.fragment_tests(pipeline, &state.depth_stencil, stores);
             reshape.field(&mut state.fragment_tests, tests);
             let tiles = settings.tiles.map(|(tile, area)| {
                 let memory = self
@@ -9002,22 +9148,7 @@ impl RenderCommandEncoder {
                     if self.rerouting {
                         return Err(refused);
                     }
-                    shadows = BTreeSet::new();
-                    interlocked = self.interlocked_colors(pipeline);
-                    continue;
-                }
-                // A variant whose writes of the instance's interlocked colors the storage form
-                // refuses (a blend, among others), or the bind layer does not build (an amplified
-                // draw's): remembered, and the draw records in an instance of its own, as without
-                // them; a reroute fails instead.
-                Err(refused @ (Error::Unsupported(_) | Error::Bind(BindError::Unsupported(_))))
-                    if !interlocked.is_empty() =>
-                {
-                    pipeline.refuse_interlock(&interlocked);
-                    if self.rerouting {
-                        return Err(refused);
-                    }
-                    interlocked = BTreeSet::new();
+                    shadows = &NO_INDICES;
                     continue;
                 }
                 settled => settled?,
@@ -9032,9 +9163,12 @@ impl RenderCommandEncoder {
                 }
             }
             let set = settled.variant.pipeline().layout.sets.get(1);
-            if heap_sets::fit_samplers(set, argument_samplers, unlisted) {
+            if argument_samplers.fit(set, unlisted) {
                 return Ok(settled);
             }
+            // A variant of set-1 arrays writes the listed states' elements: it takes the states,
+            // listed again (alike, where the kept listing is current) against them.
+            argument_samplers.take(self.core.device());
         }
     }
 

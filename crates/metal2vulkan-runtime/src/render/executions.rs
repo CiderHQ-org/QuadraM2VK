@@ -288,6 +288,7 @@ use crate::render_target::{self, Feedback, PassShape, Position, RenderPassObject
 use crate::residency::{every_render_stage, Residency};
 use crate::resource::ResourceKey;
 use crate::sample_planes::{PlanesCommands, PlanesStep};
+use crate::sampler::ArgumentSamplers;
 use crate::shadow::{self, ShadowUse};
 use crate::shadow_stencil::ShadowStencil;
 use crate::tessellation::{FactorBuffer, Factors};
@@ -1605,7 +1606,7 @@ impl RenderCommandEncoder {
     ) -> Result<SettledDraw, Error> {
         let assembly = Assembly::Primitives(primitive_type);
         let settings = self.draw_settings(CALL, state, assembly, false)?;
-        let mut argument_samplers = self.core.device().argument_samplers();
+        let mut argument_samplers = ArgumentSamplers::taken(self.core.device());
         let function_tables = state.function_tables();
         let live = Arc::clone(&self.live);
         let settled = self.settle_draw(
@@ -1616,9 +1617,9 @@ impl RenderCommandEncoder {
             (&function_tables, &mut None),
         )?;
         let Settled { variant, plan, .. } = settled;
-        self.core
-            .device()
-            .degrade_argument_pixel_samplers(&variant.pipeline().stages, &argument_samplers);
+        let device = self.core.device();
+        let stages = &variant.pipeline().stages;
+        device.degrade_argument_pixel_samplers(stages, argument_samplers.take(device));
         // The neutrals the plan binds, which the step makes none of (`neutral.rs`). One not made
         // here (the device out of memory) leaves the variant settled: the step refuses the
         // neutral where it binds it, typed (`CommandBufferError::HostStepObject`).

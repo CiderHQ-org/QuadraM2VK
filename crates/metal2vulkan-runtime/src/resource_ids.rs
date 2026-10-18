@@ -299,6 +299,10 @@ pub(super) struct ResourceIds {
     /// How many holders hold a sampler ID now (the module docs' live count), shared with the
     /// device, which reads it without this lock ([`ResourceIds::sampler_id_reads`]).
     sampler_ids_live: Arc<AtomicU64>,
+    /// How many times a sampler ID's slot took a holder or let one go, shared with the device,
+    /// which reads it without this lock ([`ResourceIds::sampler_id_reads`]): while it holds, the
+    /// live states [`samplers`](Self::samplers) lists are the ones it listed.
+    sampler_slots_changed: Arc<AtomicU64>,
 }
 
 /// What a device reads of its sampler IDs without their lock: the live count and the sampler
@@ -307,6 +311,8 @@ pub(super) struct ResourceIds {
 pub(super) struct SamplerIdReads {
     pub(super) live: Arc<AtomicU64>,
     pub(super) pool_size: Arc<AtomicU64>,
+    /// The count of changes of the sampler IDs' slots (`ResourceIds::sampler_slots_changed`).
+    pub(super) slots_changed: Arc<AtomicU64>,
 }
 
 impl Default for ResourceIds {
@@ -325,6 +331,7 @@ impl Default for ResourceIds {
             libraries: BTreeMap::new(),
             functions: BTreeMap::new(),
             sampler_ids_live: Arc::default(),
+            sampler_slots_changed: Arc::default(),
         }
     }
 }
@@ -350,7 +357,13 @@ impl ResourceIds {
         SamplerIdReads {
             live: Arc::clone(&self.sampler_ids_live),
             pool_size: Arc::clone(&self.samplers.pool_size),
+            slots_changed: Arc::clone(&self.sampler_slots_changed),
         }
+    }
+
+    /// A sampler ID's slot took a holder or let one go: the device's live states may differ.
+    fn sampler_slot_changed(&self) {
+        self.sampler_slots_changed.fetch_add(1, Ordering::AcqRel);
     }
 
     /// A holder took a sampler ID (`taken`) or gave one back: the live count follows.
@@ -462,16 +475,20 @@ impl ResourceIds {
         self.released_pipelines.get(&id).copied()
     }
 
-    /// The live holders of sampler IDs, in ID order: the states a sampler table lists.
-    pub(super) fn samplers(&self) -> Vec<Arc<SamplerShared>> {
-        self.samplers
+    /// The live holders of sampler IDs, in ID order: the states a sampler table lists, with the
+    /// count of the slots' changes they are live at (`sampler_slots_changed`).
+    pub(super) fn samplers(&self) -> (u64, Vec<Arc<SamplerShared>>) {
+        let changed = self.sampler_slots_changed.load(Ordering::Acquire);
+        let states = self
+            .samplers
             .slots
             .values()
             .filter_map(|slot| match &slot.holder {
                 Holder::Sampler(state) => state.upgrade(),
                 _ => None,
             })
-            .collect()
+            .collect();
+        (changed, states)
     }
 }
 
@@ -830,6 +847,9 @@ impl IdHold {
                 generation,
             },
         );
+        if self.space == IdSpace::Sampler {
+            all.sampler_slot_changed();
+        }
     }
 
     /// The ID.
@@ -867,6 +887,9 @@ impl Drop for IdHold {
             };
             if let Some(kind) = kind {
                 all.released_pipelines.insert(self.id, (kind, self.serial));
+            }
+            if self.space == IdSpace::Sampler {
+                all.sampler_slot_changed();
             }
         }
     }

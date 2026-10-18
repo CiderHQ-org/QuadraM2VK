@@ -13,7 +13,8 @@
 //!   the mapped modes, through the same pipeline variant (its SPIR-V) and the same bind shape
 //!   but for the map the shape states, so every emulation that reads the mode follows; a map that
 //!   leaves the bound modes as they are changes neither. The same holds for a fragment function's
-//!   texture sampled through a runtime sampler slot, the consumer's path;
+//!   texture sampled through a runtime sampler slot, the consumer's path, and for one encoder's
+//!   draws that rebind that slot between a mapped texture and its texels unmapped;
 //! - a constexpr sampler whose modes a mapped texture's map changes samples it through its slot's
 //!   pipeline variant, its immutable sampler holding the mapped modes; one whose modes the map
 //!   keeps samples the texture as an unmapped one, through the unmapped texture's pipeline; a map
@@ -378,23 +379,7 @@ fn a_mapped_texture_samples_as_its_mapped_sampler() {
 #[test]
 fn a_fragments_runtime_sampler_takes_its_textures_map() {
     on_device(|device, _| {
-        let bitcode = llvm_assemble(&engine_dir().join("tob_renders.ll")).unwrap();
-        let library = device.new_library_with_air(&bitcode).unwrap();
-        let function = |name| {
-            StageSource::Function(
-                library
-                    .new_function_with_name(name)
-                    .unwrap()
-                    .function_descriptor(),
-            )
-        };
-        let mut descriptor = RenderPipelineDescriptor::new(function("tob_rect"));
-        descriptor.fragment = Some(function("tob_sample"));
-        descriptor.color_attachments[0] =
-            Some(ColorAttachmentDescriptor::new(PixelFormat::RGBA32Float));
-        let pipeline = device
-            .new_render_pipeline_state(&descriptor, &PipelineOptions::default())
-            .unwrap();
+        let pipeline = sampling_pipeline(device);
         let plain = texture(device, TextureUsage::SHADER_READ, |_| {});
         let mut wrong = Vec::new();
         let (mut checked, mut refusals) = (0usize, 0usize);
@@ -473,6 +458,129 @@ fn a_fragments_runtime_sampler_takes_its_textures_map() {
         );
         assert!(checked > 0);
         assert!(wrong.is_empty(), "{} cases differ", wrong.len());
+    });
+}
+
+/// A pipeline state of `tob_renders`'s `tob_rect` (a rectangle of the corners at vertex buffer 0)
+/// and `tob_sample` into an `RGBA32Float` color attachment.
+fn sampling_pipeline(device: &Device) -> RenderPipelineState {
+    let bitcode = llvm_assemble(&engine_dir().join("tob_renders.ll")).unwrap();
+    let library = device.new_library_with_air(&bitcode).unwrap();
+    let function = |name| {
+        StageSource::Function(
+            library
+                .new_function_with_name(name)
+                .unwrap()
+                .function_descriptor(),
+        )
+    };
+    let mut descriptor = RenderPipelineDescriptor::new(function("tob_rect"));
+    descriptor.fragment = Some(function("tob_sample"));
+    descriptor.color_attachments[0] =
+        Some(ColorAttachmentDescriptor::new(PixelFormat::RGBA32Float));
+    device
+        .new_render_pipeline_state(&descriptor, &PipelineOptions::default())
+        .unwrap()
+}
+
+/// One encoder's draws that rebind the fragment texture slot in turn to a mapped texture and to
+/// the same texels unmapped, alike but for the map, through one repeating sampler state (the
+/// consumer's second rule maps repeat to clamp to edge): each texture draws twice in a row over
+/// its half of the target, so a bind takes the view and the sampler its write took last, and
+/// after each rebind those an earlier bind took, the sampler's modes mapped or not. Each half is,
+/// bit for bit, what a draw of the unmapped texels over the whole target draws there through the
+/// mode its texture is sampled with ([`drawn`]): clamp to edge for the mapped texture, repeat for
+/// the other; and the two modes draw other texels in each half.
+#[test]
+fn draws_rebinding_a_slot_between_a_texture_and_its_mapped_twin_keep_each_view_and_sampler() {
+    on_device(|device, _| {
+        let pipeline = sampling_pipeline(device);
+        let plain = texture(device, TextureUsage::SHADER_READ, |_| {});
+        let mapped = texture(device, TextureUsage::SHADER_READ, |d| {
+            d.address_mode_map = all_edges();
+        });
+        assert_eq!(all_edges().mode(Mode::Repeat), Mode::ClampToEdge);
+        let filter = SamplerMinMagFilter::Nearest;
+        let border = SamplerBorderColor::TransparentBlack;
+        let (repeat, clamp) = states(device, Mode::Repeat, all_edges(), filter, border).unwrap();
+        let (w, h) = (u64::from(4 * WIDTH), u64::from(3 * HEIGHT));
+        let mut target = TextureDescriptor::texture_2d(PixelFormat::RGBA32Float, w, h, false);
+        target.usage = TextureUsage::RENDER_TARGET;
+        target.resource_options = ResourceOptions::shared();
+        let target = device.new_texture(&target).unwrap();
+        let mut pass = RenderPassDescriptor::new();
+        let color = &mut pass.color_attachments[0];
+        color.texture = Some(target.clone());
+        color.load_action = LoadAction::Clear;
+        color.store_action = StoreAction::Store;
+        color.clear_color = ClearColor::new(0.0, 0.0, 0.0, 0.0);
+        let queue = device.new_command_queue().unwrap();
+        let command_buffer = queue.command_buffer().unwrap();
+        let mut encoder = command_buffer.render_command_encoder(&pass).unwrap();
+        encoder.set_render_pipeline_state(&pipeline).unwrap();
+        encoder
+            .set_fragment_sampler_state(Some(&repeat), 0)
+            .unwrap();
+        let halves = [
+            (&mapped, [-1.0f32, -1.0, 0.0, 1.0]),
+            (&plain, [0.0, -1.0, 1.0, 1.0]),
+        ];
+        for _ in 0..3 {
+            for (texture, corners) in &halves {
+                let corners: Vec<u8> = corners.iter().flat_map(|v| v.to_le_bytes()).collect();
+                encoder.set_vertex_bytes(&corners, 0).unwrap();
+                encoder.set_fragment_texture(Some(texture), 0).unwrap();
+                for _ in 0..2 {
+                    encoder
+                        .draw_primitives(PrimitiveType::Triangle, 0, 6, 1, 0)
+                        .unwrap();
+                }
+            }
+        }
+        encoder.end_encoding().unwrap();
+        command_buffer.commit().unwrap();
+        command_buffer.wait_until_completed_for(WAIT).unwrap();
+        assert_eq!(command_buffer.status(), CommandBufferStatus::Completed);
+        assert_eq!(command_buffer.error(), None);
+        let mut bytes = vec![0u8; (16 * w * h) as usize];
+        target
+            .get_bytes(&mut bytes, 16 * w, 0, Region::new_2d(0, 0, w, h), 0, 0)
+            .unwrap();
+        let got: Vec<[u32; 4]> = bytes
+            .as_chunks::<16>()
+            .0
+            .iter()
+            .map(|v| {
+                let w = |i: usize| u32::from_le_bytes([v[i], v[i + 1], v[i + 2], v[i + 3]]);
+                [w(0), w(4), w(8), w(12)]
+            })
+            .collect();
+        let clamped = drawn(device, &pipeline, &plain, &clamp).unwrap().texels;
+        let repeated = drawn(device, &pipeline, &plain, &repeat).unwrap().texels;
+        // The left half's pixels, or the right half's, by row.
+        let half = |texels: &[[u32; 4]], right: bool| -> Vec<[u32; 4]> {
+            (texels.iter().enumerate())
+                .filter(|&(at, _)| (at as u64 % w >= w / 2) == right)
+                .map(|(_, &texel)| texel)
+                .collect()
+        };
+        for right in [false, true] {
+            assert_ne!(
+                half(&clamped, right),
+                half(&repeated, right),
+                "right {right}"
+            );
+        }
+        assert_eq!(
+            half(&got, false),
+            half(&clamped, false),
+            "the mapped texture's half"
+        );
+        assert_eq!(
+            half(&got, true),
+            half(&repeated, true),
+            "the unmapped texture's half"
+        );
     });
 }
 

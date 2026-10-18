@@ -370,13 +370,14 @@ pub(super) struct TextureShared {
     /// `HeapPlace::heap`), so a command buffer that keeps the image keeps nothing of the heap but
     /// its memory, and the heap goes at the program's release, as Metal frees it.
     heap: Option<Heap>,
-    /// The formats a storage binding views the texture's pixel format in
-    /// (`storage_view_formats`), found at the first binding plan that reads them ([`facts`]) and
-    /// kept: they follow from the pixel format and the device's profile alone, and finding them
-    /// again at every draw was 2.2% of the thread encoding a window server's frame on RADV.
+    /// The facts a binding plan reads of the texture ([`facts`]), worked out at the first draw or
+    /// plan that reads them and kept: they follow from what the texture is made with alone (its
+    /// record, its image's plan and twins, its storage) and the device's profile, none of which
+    /// changes while it lives. Working them out again at every draw that binds it was each
+    /// bound texture's walk of its storage view formats and image plan.
     ///
     /// [`facts`]: Texture::facts
-    storage_formats: OnceLock<Vec<metal2vulkan::vk::Format>>,
+    facts: OnceLock<TextureFacts>,
 }
 
 impl Drop for TextureShared {
@@ -4673,7 +4674,7 @@ impl Texture {
             kept_backings: Mutex::new(Vec::new()),
             render_shadow: Mutex::new(None),
             heap,
-            storage_formats: OnceLock::new(),
+            facts: OnceLock::new(),
         }));
         if let Some(objects) = texture.0.storage.objects() {
             objects.object_made();
@@ -5161,8 +5162,14 @@ impl Texture {
         Ok(&self.image()?.resolves)
     }
 
-    /// The facts a binding plan reads of the texture.
+    /// The facts a binding plan reads of the texture, worked out once and kept
+    /// (`TextureShared::facts`).
     pub(super) fn facts(&self) -> TextureFacts {
+        *self.0.facts.get_or_init(|| self.worked_out_facts())
+    }
+
+    /// The facts a binding plan reads of the texture, worked out from what it was made with.
+    pub(super) fn worked_out_facts(&self) -> TextureFacts {
         let record = self.0.record.bound();
         let mut facts = texture_facts(&record);
         facts.depth_twin = self.twin_image().is_some();
@@ -5173,11 +5180,8 @@ impl Texture {
         // the shadow, made with them.
         facts.own_format_views = !self.needs_usage_shadow(true)
             && self.image().is_ok_and(|image| {
-                let formats = self.0.storage_formats.get_or_init(|| {
-                    let profile = self.device().compile_device().profile();
-                    storage_view_formats(record.pixel_format, profile)
-                });
-                formats
+                let profile = self.device().compile_device().profile();
+                storage_view_formats(record.pixel_format, profile)
                     .iter()
                     .any(|&format| !views_as(image.plan(), format, false))
             });

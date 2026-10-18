@@ -34,6 +34,7 @@ use super::error::{internal, invalid, vulkan, CommandBufferError, Error, Problem
 use super::execution::Execution;
 use super::fresh_unwritten::FreshRead;
 use super::heap::Heap;
+use super::noted_apart::{NotedApart, NotedInto};
 use super::pending_dispatch::PendingDispatch;
 use super::rebind::{Holds, Taken};
 use super::replay::Replay;
@@ -861,12 +862,15 @@ impl EncoderCore {
     /// Note one command recorded outside the encoder's own `VkCommandBuffer` (a render encoder's
     /// draw, in its secondary command buffer) that runs in `stages` with `uses`. Only an
     /// unordered encoder's commands are recorded so: they need no barrier between them. Call it
-    /// before recording the command; it refuses (internal) an ordered encoder.
+    /// before recording the command; it refuses (internal) an ordered encoder. A draw noted with
+    /// the same uses, reaching the same keys through the resident set alone, as the last one
+    /// `noted` keeps (a render encoder's draws'), into the same state, is noted already
+    /// (`noted_apart.rs`); a command with no `noted` (a tile dispatch) is noted whole.
     pub(super) fn note_reaching(
         &mut self,
         stages: vk::PipelineStageFlags2,
-        uses: &[Use<ResourceKey>],
-        resident: &BTreeSet<ResourceKey>,
+        (uses, resident): (&[Use<ResourceKey>], &BTreeSet<ResourceKey>),
+        noted: Option<&mut NotedApart>,
     ) -> Result<(), Error> {
         if self.uses.ordered() {
             return Err(super::error::internal(
@@ -874,10 +878,25 @@ impl EncoderCore {
             ));
         }
         self.observe_fresh(uses, &[]);
-        let aliased = self.aliased(uses);
-        self.uses
-            .record(stages, aliased.as_deref().unwrap_or(uses), None);
+        let Some(noted) = noted else {
+            self.touch_reaching(uses, resident);
+            return Ok(());
+        };
+        let shared = self.device().shared();
+        // Read before the host aliases' uses are worked out, so a change made since counts.
+        let into = NotedInto {
+            core: self.id,
+            parts: self.uses.parts(),
+            held: self.uses.held().len(),
+            rebinds: shared.rebinds.any(),
+            aliases: shared.aliases.version(),
+        };
+        if noted.holds(stages, (uses, resident), into) {
+            shared.counts.command_noted_as_before();
+            return Ok(());
+        }
         self.touch_reaching(uses, resident);
+        noted.note(stages, (uses, resident), into);
         Ok(())
     }
 

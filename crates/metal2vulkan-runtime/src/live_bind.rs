@@ -2,28 +2,78 @@
 //! last draw bound to its own in place, and makes its bind shape again only where a change may have
 //! changed it.
 //!
-//! - **Brought in place.** Each slot's binding is derived again from the encoder's tables at each
-//!   draw and compared with the kept one (`ArgumentTable::refresh_reading`), and every other field
-//!   is computed as before and compared ([`Reshape::field`]). The new value is always stored, so
-//!   the state is the draw's exactly, a float of the other sign (which compares equal) included.
-//!   No `set*` call marks a slot: a bound buffer's pages may be rebound or detached between draws,
-//!   which changes its binding with no call, so deriving the binding is the check. While the same
-//!   slots stay bound, nothing is allocated.
+//! - **Brought in place.** Each slot's binding is derived again from the encoder's tables and
+//!   compared with the kept one (`ArgumentTable::refresh_reading`), at each draw whose table may
+//!   bring in another: a stage's table read last through the same interface and samplers' maps,
+//!   that no call changed since (its stamp, `argument_table::Stamp`), whose slots that tell the
+//!   device's view base alignment apart its drawing state still holds as they were read
+//!   (`argument_table::AtBindViews`, which another table's offsets may shrink), and that no rebind
+//!   or detach of a no-copy buffer may have changed (which changes a bound buffer's binding with
+//!   no call: `buffer::host_cells_moved`), is not read again ([`ReadFrom`]; checked whole in debug
+//!   builds).
+//!   Every other field is computed as before and compared ([`Reshape::field`]), as much of it as
+//!   the shape reads ([`Reshape::shaped`]; a value no shape reads, such as the depth/stencil state,
+//!   the stencil references or the blend color, is stored uncompared). The new value is always
+//!   stored, so the state is the draw's exactly, a float of the other sign (which compares equal)
+//!   included. While the same slots stay bound, nothing is allocated.
 //! - **The shape found again only where it may have changed.** A bind shape is each bound slot's
 //!   shape beside the shapes of the state's other fields (`BindState::shape`: a stage's tables
 //!   are its slots' shapes, and a stage with none is left out). Where every changed slot keeps its
-//!   shape, no slot was bound or unbound, and no other field changed, the shape is the kept one.
+//!   shape, no slot was bound or unbound, and no other field's shape changed, the shape is the
+//!   kept one: a function of those alone, so a draw that changes only values the shape does not
+//!   read (a depth/stencil state, as draws between which the program sets another) finds it kept.
 //!   After any other change, and at an encoder's first draw, it is one the drawing state settled
 //!   lately where the state has it (`BindState::position_of_shape`, compared in place:
 //!   `GraphicsState::kept_shape`), so a pass that draws as the one before it makes none; else it
 //!   is made again, whole.
+//! - **One per pipeline state lately drawn.** Beside the state its last draw brought in place, the
+//!   encoder sets aside the states of up to [`SET_ASIDE`] pipeline states it drew before that one
+//!   ([`LiveBind::select`]), and a draw starts from its pipeline state's, where one is set aside:
+//!   draws that switch between pipeline states each find their own state's shape kept, and their
+//!   stage tables read through their own interface, where no slot of theirs changed its shape.
+//!   Exact for the reason a draw's is: whichever state a draw starts from, it brings every field
+//!   in place, and the starting state decides only whether the shape is kept.
+//! - **Kept from one encoder to the next.** An encoder that ends gives its state, with its shape,
+//!   to its device ([`SpareLiveBinds`]), and the next render encoder opened starts from it, as a
+//!   draw starts from the draw before it: its first draw brings it in place, so a pass that binds
+//!   as the one before it finds its shape kept and adds no slot. Exact for the reason a draw's is:
+//!   every field of the state a render encoder's draw binds is derived again at each draw (its
+//!   slots, by `ArgumentTable::refresh_reading`, which unbinds every slot the encoder's tables do
+//!   not bind; every other field, by `RenderCommandEncoder::settle_draw` and
+//!   `refresh_bind_state`), and none other is ever set: a render encoder's state holds no compute
+//!   or tile field (`stage_in_region`, `kept_imageblock_bytes`, `resident_ranges`, a stage's
+//!   acceleration structures), which a tile dispatch binds in a state of its own. The state names
+//!   no object (its bindings are values, and its tables' drawing state is held weakly), so a kept
+//!   one holds nothing alive; the next encoder's tables are new, with stamps of their own.
+//! - **The draws' storage kept with it.** The vectors a draw fills and drops (its commands, push
+//!   writes, uses, descriptor writes, pushed set 0 and vertex buffers) are kept here too, each
+//!   draw's written over the last one's storage. Those hold values and raw handles, but for the
+//!   descriptor writes, whose keepers hold samplers and function tables: those are emptied as
+//!   the draw is done with them ([`Emptied`]), so they hold nothing past it, as a new vector's did.
 
-use metal2vulkan::bind::{BindShape, BindState};
+use ash::vk;
+use metal2vulkan::pipeline::PipelineInterface;
+use std::any::Any;
 use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::ops::{Deref, DerefMut};
+use std::sync::{Arc, Mutex, Weak};
 
+use super::address_map::SamplerMaps;
+use super::argument_table::Stamp;
+use super::binding::{CommandUses, PushWrite, SetWrite, Write};
+use super::device::lock;
+use super::noted_apart::NotedApart;
 use super::work_counts::Counters;
+
+/// The most bind states a device keeps for its render encoders to start from: one per encoder
+/// open at once beyond it starts empty, as every encoder did before.
+const SPARE_LIVE_BINDS: usize = 4;
+
+/// The most states a [`LiveBind`] sets aside, of the pipeline states its draws drew through before
+/// the last draw's ([`LiveBind::select`]): a draw of one of more pipeline states in turn than
+/// this starts from the state set aside longest.
+const SET_ASIDE: usize = 7;
 
 /// Whether the changes brought into a kept bind state may have changed its shape.
 #[derive(Clone, Copy, Debug, Default)]
@@ -66,6 +116,30 @@ impl Reshape {
         }
         *field = value;
     }
+
+    /// [`field`](Self::field) of a value the caller holds on to: compared in place, and copied
+    /// into `field` only where it differs, so a field held as it was copies nothing. For a type
+    /// whose equality is its value's (`Eq`), so a field kept as equal holds what a copy would.
+    pub(super) fn field_from<T: Eq + Clone>(&mut self, field: &mut T, value: &T) {
+        if *field != *value {
+            self.0 = true;
+            field.clone_from(value);
+        }
+    }
+
+    /// Store `value` in `field`, a field of the kept state of which the shape reads `shape` alone
+    /// (`BindState::shape`): its shape may change only where that does.
+    pub(super) fn shaped<T, S: PartialEq>(
+        &mut self,
+        field: &mut T,
+        value: T,
+        shape: impl Fn(&T) -> S,
+    ) {
+        if !self.0 && shape(field) != shape(&value) {
+            self.0 = true;
+        }
+        *field = value;
+    }
 }
 
 /// A render encoder's bind state as its last draw bound it, and its shape while no change may
@@ -74,12 +148,154 @@ impl Reshape {
 pub(super) struct LiveBind {
     /// The state. Each draw brings it to its own through [`Reshape`] (its values past its settle,
     /// which no shape reads, aside), and then hands the reshape to [`reshaped`](Self::reshaped).
-    pub(super) state: BindState,
+    /// Boxed, so a draw of another pipeline state changes it for one set aside by its address
+    /// ([`select`](Self::select)).
+    pub(super) state: Box<BindState>,
     /// The state's shape, `None` where a change may have changed it.
     shape: Option<Arc<BindShape>>,
+    /// The count of the device's sampler IDs' slots' changes (`Device::sampler_slots_changed`)
+    /// at which the state's argument samplers are every live sampler state: while the count
+    /// holds, a draw lists them as they are, without taking the states again
+    /// (`sampler::ArgumentSamplers`). `None` where they are not (none listed yet, or those a
+    /// variant's set-1 arrays hold alone).
+    pub(super) listed_at: Option<u64>,
+    /// What the state's stage tables were read from ([`ReadFrom`]).
+    pub(super) read_from: ReadFrom,
+    /// The states the encoder's draws of other pipeline states brought in place, each as its
+    /// pipeline state's last draw left it ([`select`](Self::select)).
+    set_aside: [SetAside; SET_ASIDE],
+    /// How many times a state went aside: each set aside holds the count as it went, so the one
+    /// set aside longest holds the least.
+    asides: u64,
+    /// The last draw its encoder noted apart (`noted_apart.rs`), kept here so its storage goes
+    /// from one encoder to the next.
+    pub(super) noted: NotedApart,
+    /// The last draw's uses (`binding::command_uses_into`), kept likewise.
+    pub(super) uses: CommandUses,
+    /// The storage of the last draw's descriptor writes (`binding::bind`), kept likewise and
+    /// empty between draws ([`Emptied`]).
+    pub(super) writes: Vec<Write>,
+    /// The last draw's pushed set 0 (`binding::SetWrite::push_into`), kept likewise.
+    pub(super) pushed: Vec<SetWrite>,
+    /// The last draw's vertex buffers, `(binding, buffer, offset, stride)`, kept likewise.
+    pub(super) vertex_buffers: Vec<(u32, vk::Buffer, u64, u64)>,
+}
+
+/// A bind state a [`LiveBind`] set aside, with its shape, its listing's count and what its stage
+/// tables were read from, as [`LiveBind`] holds them for its last draw's state.
+#[derive(Default)]
+struct SetAside {
+    state: Box<BindState>,
+    shape: Option<Arc<BindShape>>,
+    listed_at: Option<u64>,
+    read_from: ReadFrom,
+    /// [`LiveBind::asides`] as it went aside.
+    at: u64,
+}
+
+/// What a kept state's stage tables were read from at the draw that read them last
+/// (`RenderCommandEncoder::refresh_bind_state`; the module docs): the encoder's table of each
+/// stage by its stamp (`argument_table::Stamp`), the interface they were read through, the
+/// samplers' address-mode maps, and the count of no-copy buffers' moves
+/// (`buffer::host_cells_moved`). A stage's table that keeps its stamp, read through the same
+/// interface with the same maps while no no-copy buffer moved, brings in what it brought in then
+/// where its drawing state's slots that tell the view base alignment apart are still those it
+/// read under (`AtBindViews::holds`, checked at each draw): a slot's binding is a function of the
+/// object bound there (its length, its base and addresses, which only a move changes; a texture's
+/// facts, made with it; a sampler's descriptor), of the table's other entries, of the function's
+/// reading of the slot (the interface), of the maps, and of those slots.
+#[derive(Default)]
+pub(super) struct ReadFrom {
+    /// Each stage's table's stamp, by the stage's place in the draw's reading order.
+    tables: [Option<Stamp>; 4],
+    /// The interface they were read through, by address, with the drawing state that holds it,
+    /// held without keeping it alive: while that state lives, no other interface lies there.
+    interface: Option<(usize, Weak<dyn Any + Send + Sync>)>,
+    /// The maps they were read with.
+    maps: SamplerMaps,
+    /// The count of no-copy buffers' moves as they were read.
+    moved: u64,
+}
+
+impl ReadFrom {
+    /// Whether the tables were read through `interface` with `maps` at `moved` moves: then a
+    /// table that keeps its stamp is [`unchanged`](Self::unchanged).
+    pub(super) fn reads(
+        &self,
+        interface: &PipelineInterface,
+        maps: &SamplerMaps,
+        moved: u64,
+    ) -> bool {
+        self.moved == moved && self.through(interface) && self.maps == *maps
+    }
+
+    /// Whether the tables were read through `interface`: the one at its address, while the
+    /// drawing state that held it then lives.
+    fn through(&self, interface: &PipelineInterface) -> bool {
+        let at = std::ptr::from_ref(interface).addr();
+        (self.interface.as_ref())
+            .is_some_and(|(read, state)| *read == at && state.strong_count() > 0)
+    }
+
+    /// Whether the table at `at` in the reading order, stamped `stamp`, is the one read.
+    pub(super) fn unchanged(&self, at: usize, stamp: Stamp) -> bool {
+        self.tables[at] == Some(stamp)
+    }
+
+    /// The tables of `stamps` read now through `interface` (of the drawing state `state` gives)
+    /// with `maps` at `moved` moves.
+    pub(super) fn read(
+        &mut self,
+        stamps: [Stamp; 4],
+        (interface, state): (
+            &PipelineInterface,
+            impl FnOnce() -> Arc<dyn Any + Send + Sync>,
+        ),
+        maps: &SamplerMaps,
+        moved: u64,
+    ) {
+        if !self.through(interface) {
+            let at = std::ptr::from_ref(interface).addr();
+            self.interface = Some((at, Arc::downgrade(&state())));
+        }
+        if self.maps != *maps {
+            self.maps = maps.clone();
+        }
+        self.tables = stamps.map(Some);
+        self.moved = moved;
+    }
 }
 
 impl LiveBind {
+    /// Start a draw through `interface` from the state that pipeline state's last draw left, where
+    /// one is set aside: it and the state in place change places. Where none is, the state in
+    /// place changes places with the one set aside longest, which the draw starts from. Both are
+    /// states as draws left them (or empty, as a new encoder's): exact whichever a draw starts
+    /// from, as it brings every field of the state in place (the module docs), so this chooses
+    /// only whether the shape may be kept, and which reads the draw skips.
+    pub(super) fn select(&mut self, interface: &PipelineInterface) {
+        if self.read_from.through(interface) {
+            return;
+        }
+        let set_aside = self.set_aside.iter();
+        let at = match set_aside
+            .clone()
+            .position(|aside| aside.read_from.through(interface))
+        {
+            Some(at) => at,
+            None => (set_aside.enumerate())
+                .min_by_key(|(_, aside)| aside.at)
+                .map_or(0, |(at, _)| at),
+        };
+        self.asides += 1;
+        let aside = &mut self.set_aside[at];
+        std::mem::swap(&mut self.state, &mut aside.state);
+        std::mem::swap(&mut self.shape, &mut aside.shape);
+        std::mem::swap(&mut self.listed_at, &mut aside.listed_at);
+        std::mem::swap(&mut self.read_from, &mut aside.read_from);
+        aside.at = self.asides;
+    }
+
     /// Take the changes brought into the state since its shape was made.
     pub(super) fn reshaped(&mut self, reshape: Reshape) {
         if reshape.0 {
@@ -88,7 +304,7 @@ impl LiveBind {
     }
 
     /// The state's shape: the kept one, else the one `found` finds of the state, else made
-    /// again (counted in `counts`).
+    /// again (counted in `counts`, found or made).
     pub(super) fn shape(
         &mut self,
         counts: &Counters,
@@ -107,6 +323,7 @@ impl LiveBind {
                     *shape == self.state.shape(),
                     "a bind shape found that is not its state's"
                 );
+                counts.draw_shape_found();
                 shape
             }
             None => {
@@ -116,5 +333,68 @@ impl LiveBind {
         };
         self.shape = Some(Arc::clone(&shape));
         shape
+    }
+}
+
+/// A vector in storage kept beyond its use (a [`LiveBind`]'s), emptied as it is made and as it
+/// drops: what it holds lives as long as it would in a vector of its own, on every path out of its
+/// use, while the storage goes on to the next one.
+pub(super) struct Emptied<'a, T>(&'a mut Vec<T>);
+
+impl<'a, T> Emptied<'a, T> {
+    /// `storage`, emptied.
+    pub(super) fn new(storage: &'a mut Vec<T>) -> Emptied<'a, T> {
+        storage.clear();
+        Emptied(storage)
+    }
+}
+
+impl<T> Deref for Emptied<'_, T> {
+    type Target = Vec<T>;
+
+    fn deref(&self) -> &Vec<T> {
+        self.0
+    }
+}
+
+impl<T> DerefMut for Emptied<'_, T> {
+    fn deref_mut(&mut self) -> &mut Vec<T> {
+        self.0
+    }
+}
+
+impl<T> Drop for Emptied<'_, T> {
+    fn drop(&mut self) {
+        self.0.clear();
+    }
+}
+
+/// A device's bind states that ended render encoders left, which the render encoders it opens
+/// next start from (the module docs): at most [`SPARE_LIVE_BINDS`], the latest given taken first.
+/// Each is kept in the shared cell its encoder held it in, so an encoder's open and end move and
+/// allocate none.
+#[derive(Default)]
+pub(super) struct SpareLiveBinds(Mutex<Vec<Arc<Mutex<LiveBind>>>>);
+
+impl SpareLiveBinds {
+    /// The state a render encoder opening starts from: the latest an encoder gave back, else an
+    /// empty one.
+    pub(super) fn take(&self) -> Arc<Mutex<LiveBind>> {
+        lock(&self.0).pop().unwrap_or_default()
+    }
+
+    /// Keep `live`, an ended render encoder's state, for the next encoder to start from, where
+    /// nothing else holds it (no draw does once its encoder ended) and fewer than
+    /// [`SPARE_LIVE_BINDS`] are kept; else it goes. A draw that panicked holding it left it as
+    /// far as it got, which the next draw brings in place as any.
+    pub(super) fn give(&self, mut live: Arc<Mutex<LiveBind>>) {
+        if Arc::get_mut(&mut live).is_none() {
+            return;
+        }
+        live.clear_poison();
+        let mut spare = lock(&self.0);
+        if spare.len() < SPARE_LIVE_BINDS {
+            spare.push(live);
+        }
     }
 }

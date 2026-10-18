@@ -485,3 +485,36 @@ fn a_sample_through_a_second_key_waits_for_a_render_through_the_first() {
         }]
     );
 }
+
+/// The version counts each change of what `augment` reads: a buffer joining another's memory,
+/// a key placed, rebound or unplaced, a buffer forgotten. A buffer over a memory of its own, a
+/// rebound buffer leaving its memory, a reported remap, and `augment` itself change nothing it
+/// reads, and leave it standing.
+#[test]
+fn the_version_counts_each_change_augment_reads() {
+    let aliases = Aliases::default();
+    let (first, second, placed) = (ResourceKey::new(), ResourceKey::new(), ResourceKey::new());
+    let version = aliases.version();
+    join(&aliases, first, (0x40000, 0x1000));
+    assert_eq!(aliases.version(), version, "a memory of its own");
+    join(&aliases, second, (0x40000, 0x1000));
+    let joined = aliases.version();
+    assert!(joined > version, "joined");
+    aliases.augment(&[write(second, 0..64)]);
+    aliases.leave(second);
+    assert_eq!(aliases.version(), joined, "augment, leave and a remap");
+    let mut last = joined;
+    let mut changed = |what: &str| {
+        let now = aliases.version();
+        assert!(now > last, "{what}");
+        last = now;
+    };
+    aliases.place(placed, (0x80000, 0x2000));
+    changed("placed");
+    aliases.place(placed, (0x90000, 0x2000));
+    changed("rebound");
+    aliases.unplace(placed);
+    changed("unplaced");
+    aliases.forget(second);
+    changed("forgotten");
+}

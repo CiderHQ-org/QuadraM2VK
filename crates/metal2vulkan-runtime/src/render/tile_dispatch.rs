@@ -1088,9 +1088,11 @@ impl RenderCommandEncoder {
         let textures = self.tile.textures.values().chain(self.residency.textures());
         let mut shadows = InstanceShadows::default();
         shadows.add(&shadow::shadow_uses(textures, &uses), &uses);
+        let mut writes = Vec::new();
         let bound = {
             let mut state = self.core.command_buffer().state();
-            binding::bind(call, &device, &mut state, &plan, &command, &tables, None)?
+            let into = (None, &mut writes);
+            binding::bind(call, &device, &mut state, &plan, &command, &tables, into)?
         };
         // The formats its notices name, where the device announces any of its variant's kinds
         // at every occurrence (announced as the dispatch records, below), taken while its
@@ -1133,7 +1135,7 @@ impl RenderCommandEncoder {
         let objects = Arc::clone(variant.objects());
         // Set 0 per dispatch; set 1 the device's (written below, once nothing refuses).
         let (heap_writes, writes): (Vec<_>, Vec<_>) =
-            bound.writes.into_iter().partition(|write| write.set > 0);
+            writes.into_iter().partition(|write| write.set > 0);
         let set = objects.set_zero(&mut self.core.command_buffer().state().descriptors)?;
         // SAFETY: the set was just allocated and no command uses it yet; every buffer, view
         // and sampler written is live (the command buffer retains them below, and a refusal
@@ -1144,7 +1146,8 @@ impl RenderCommandEncoder {
             .fold(vk::PipelineStageFlags2::empty(), |all, used| {
                 all | used.read.stages | used.write.stages
             });
-        self.core.note_reaching(stages, &uses, uses.resident())?;
+        self.core
+            .note_reaching(stages, (&*uses, uses.resident()), None)?;
         self.unordered.add(&uses);
         self.unordered_dispatches.add(&uses);
         let heap_set = match heap {

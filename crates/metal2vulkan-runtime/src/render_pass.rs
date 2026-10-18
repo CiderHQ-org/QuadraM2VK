@@ -1238,8 +1238,9 @@ pub(super) fn layout(
         }
         _ => descriptor,
     };
-    let mut colors: Vec<Option<ColorTarget>> = Vec::new();
-    let mut extents: Vec<([u32; 2], u32)> = Vec::new();
+    // One entry each color attachment: room for them all at once, so no color target moves.
+    let mut colors: Vec<Option<ColorTarget>> =
+        Vec::with_capacity(descriptor.color_attachments.len());
     let positioned = Some(!descriptor.sample_positions.is_empty());
     for (index, color) in descriptor.color_attachments.iter().enumerate() {
         let which = Attachment::Color(index as u32);

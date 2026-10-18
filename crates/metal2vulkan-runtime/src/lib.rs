@@ -141,6 +141,7 @@ mod mipmap_scratch;
 mod misplaced_notices;
 mod nan_clear;
 mod neutral;
+mod noted_apart;
 mod owned_kernel;
 mod pending_dispatch;
 mod pipeline;
