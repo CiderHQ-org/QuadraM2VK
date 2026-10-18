@@ -390,6 +390,7 @@ mod snapshot;
 mod tessellation_scan;
 mod tile_dispatch;
 mod tile_memory;
+mod untouched;
 mod unused_bits_load;
 mod vertex_reach;
 mod vertex_strides;
@@ -3601,11 +3602,44 @@ impl RenderCommandEncoder {
         {
             sample_positions::check_options(CALL, Attachment::Stencil, s.options, s.store, None)?;
         }
+        // A pass that changes no texel records nothing, but holds its attachments until its
+        // command buffer completes (`render/untouched.rs`); not the first group of a pass of
+        // several color groups, whose later groups' colors its layout leaves out.
+        if grouped.is_none()
+            && untouched::changes_nothing(&layout, (called, depth_writes), &instances)
+        {
+            core.device().shared().counts.untouched_pass_skipped();
+            let targets: Vec<Texture> = (layout.colors.iter().flatten())
+                .map(|color| color.target.texture.clone())
+                .chain(layout.depth_stencil.iter().flat_map(|ds| {
+                    let separate = ds.separate.iter().flat_map(Separate::targets);
+                    std::iter::once(&ds.target)
+                        .chain(separate)
+                        .map(|t| t.texture.clone())
+                }))
+                .collect();
+            core.retain((targets, passes, inline_objects));
             // The instance's secondary, where the pass began one as it opened, is given up
             // unrun (`end_unrun`).
+            if let [only] = instances.as_slice() {
+                if only.draws != vk::CommandBuffer::null() {
+                    // SAFETY: the secondary command buffer is recording, only this encoder
                     // records it, nothing recorded into it (`untouched::changes_nothing`), and
                     // nothing executes it.
                     let ended = unsafe { core.command_buffer().give_up_raw(only.draws) };
+                    if ended.is_ok() {
+                        core.device().shared().counts.unrun_instance_ended();
+                    }
+                }
+            }
+            return Ok(color_groups::Ended {
+                core,
+                residency,
+                log,
+                keeps_log: captured.is_none(),
+                later: None,
+            });
+        }
         // An extended-range attachment's clear takes Metal's straight route where Metal keeps its
         // level compressed and the pass has no draw call, where a `half` NaN clear keeps its sign
         // (`nan_clear::keeps_nan_sign`), and goes through `half` elsewhere (bfloat: EVs

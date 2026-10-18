@@ -47,6 +47,10 @@
 //! - A `DontCare`-loaded memoryless color attachment clears to zero in a pass whose draws reach a
 //!   tile: Metal's answer in every tile a fragment reads it (an Apple M4, EV ZIN-zp1-m4), and it is
 //!   never stored, so the answer is exact.
+//! - A pass without a draw call whose attachments all load with `Load` or `DontCare` and store
+//!   with `Store` or `DontCare`, resolving nothing, and that sets no depth/stencil state with depth
+//!   writes, changes no texel: it records nothing (`render/untouched.rs`), before any of the steps
+//!   here.
 //! - Each `Clear`-loaded attachment (a converted one too) whose clear reaches past the render
 //!   area ([`reach`]) is cleared there before the pass by a render pass of its own: the attachment
 //!   alone, loaded and stored, over the pass's layers, `vkCmdClearAttachments` clearing the reach

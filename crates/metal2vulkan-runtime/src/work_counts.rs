@@ -128,6 +128,7 @@ pub(crate) struct Counters {
     bare_starts: AtomicU64,
     prefixed_starts: AtomicU64,
     unrun_instances_ended: AtomicU64,
+    untouched_passes_skipped: AtomicU64,
     inline_passes: AtomicU64,
     inline_passes_split: AtomicU64,
     inline_split_instances: AtomicU64,
@@ -883,6 +884,13 @@ impl Counters {
     /// deferred, else ended.
     pub(crate) fn unrun_instance_ended(&self) {
         self.unrun_instances_ended.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A render pass that changes no texel ended without recording anything
+    /// (`render/untouched.rs`).
+    pub(crate) fn untouched_pass_skipped(&self) {
+        self.untouched_passes_skipped
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     /// A commit left its batches to the scheduler's thread (`scheduler/inbox.rs`).
@@ -2245,6 +2253,11 @@ pub struct WorkCounts {
     /// may record inline begins its draws' secondary only where a command records into it, so
     /// one replaced or recording inline before then began none, ended none, and is not counted.
     pub unrun_instances_ended: u64,
+    /// Render passes that changed no texel and ended without recording anything: no draw call,
+    /// no clear, resolve or visibility result buffer, no depth/stencil state with depth writes
+    /// set, every attachment loaded with `Load` or `DontCare` and stored with `Store` or
+    /// `DontCare`, which Metal's pass leaves as it was (`render/untouched.rs`).
+    pub untouched_passes_skipped: u64,
     /// Render passes whose first render pass instance recorded its draws inline in a primary
     /// command buffer of its encoder's, begun at its first draw, in place of a secondary
     /// (`render/inline_first.rs`).
@@ -3084,6 +3097,7 @@ impl Device {
             bare_starts: counters.bare_starts.load(Ordering::Relaxed),
             prefixed_starts: counters.prefixed_starts.load(Ordering::Relaxed),
             unrun_instances_ended: counters.unrun_instances_ended.load(Ordering::Relaxed),
+            untouched_passes_skipped: counters.untouched_passes_skipped.load(Ordering::Relaxed),
             inline_passes: counters.inline_passes.load(Ordering::Relaxed),
             inline_passes_split: counters.inline_passes_split.load(Ordering::Relaxed),
             inline_split_instances: counters.inline_split_instances.load(Ordering::Relaxed),

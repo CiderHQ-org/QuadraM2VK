@@ -66,8 +66,10 @@
 //! (`DeviceOptions::announce_each`): each pass announces `dont-care-stand-in` and counts one pass
 //! exactly where its texture is neither shadowed, rendered apart nor handed to Metal, a `Store`
 //! control neither; no
-//! pass announces `dont-care-store`, Metal's answer being exact. Each case prints its form
-//! (`KEPT-BYTES`).
+//! pass announces `dont-care-store`, Metal's answer being exact. A pass without a draw call that
+//! loads by `Load` or `DontCare` records nothing at all (`render/untouched.rs`,
+//! `WorkCounts::untouched_passes_skipped`), so it neither announces nor counts. Each case prints
+//! its form (`KEPT-BYTES`).
 //!
 //! Metal's one exception, the first pass in a process to overflow its tiler (some 2 to 4 million
 //! triangle-tile entries), which leaves the rendered texels, is not modelled: no case comes near.
@@ -251,9 +253,11 @@ struct Shape {
     rows: u64,
 }
 
-/// What a pass counted (`WorkCounts::kept_bytes_passes`) and announced.
+/// What a pass counted (`WorkCounts::kept_bytes_passes`, `WorkCounts::untouched_passes_skipped`)
+/// and announced.
 struct Seen {
     counted: u64,
+    skipped: u64,
     notices: BTreeMap<Degradation, usize>,
 }
 
@@ -537,10 +541,12 @@ impl<'a> Lane<'a> {
     /// Run `pass`: what it counted and announced, which [`Lane::announced`] checks once the
     /// buffer's bytes are.
     fn run(&self, pass: impl FnOnce()) -> Seen {
-        let before = self.device.work_counts().kept_bytes_passes;
+        let before = self.device.work_counts();
         pass();
+        let after = self.device.work_counts();
         Seen {
-            counted: self.device.work_counts().kept_bytes_passes - before,
+            counted: after.kept_bytes_passes - before.kept_bytes_passes,
+            skipped: after.untouched_passes_skipped - before.untouched_passes_skipped,
             notices: counts(&self.messages.take_notices()),
         }
     }
@@ -555,13 +561,21 @@ impl<'a> Lane<'a> {
     /// the pass stores: neither announced nor counted. And where the driver stores `DONT_CARE` as
     /// Metal's own `DontCare` and the pass, one render pass instance the driver runs unbroken,
     /// hands it the attachment so (`whole`: no barrier, no resolve copying its texels), the
-    /// pass renders it in place, Metal keeping the bytes: neither announced nor counted.
+    /// pass renders it in place, Metal keeping the bytes: neither announced nor counted. And a
+    /// pass that changes no texel records nothing (`render/untouched.rs`): neither announced nor
+    /// counted.
     fn announced(&self, case: &str, over: &Over, (keeps, whole): (bool, bool), seen: Seen) {
-        let Seen { counted, notices } = seen;
+        let Seen {
+            counted,
+            skipped,
+            notices,
+        } = seen;
+        let skipped = skipped > 0;
         let apart = notices.contains_key(&Degradation::LinearAttachmentCopies);
         let handed = keeps && whole && self.metals && !over.shadowed;
-        let kept = keeps && !over.shadowed && !apart && !handed;
+        let kept = keeps && !over.shadowed && !apart && !handed && !skipped;
         let form = match (keeps, over.shadowed, apart, handed) {
+            _ if skipped => "not recorded, as it changes no texel",
             (_, true, _, _) => "shadowed",
             (_, false, true, _) => "apart, beside a second attachment",
             (_, false, false, true) => "in place, handed to Metal's own DontCare",
@@ -695,6 +709,16 @@ fn case(
                 },
             )
         });
+        // A pass without a draw call that clears nothing records nothing (`render/untouched.rs`).
+        let untouched = coverage == Coverage::None
+            && load != LoadAction::Clear
+            && second.is_none()
+            && variant.barrier().is_none();
+        assert_eq!(
+            seen.skipped,
+            u64::from(untouched),
+            "{case}: passes not recorded"
+        );
         let got = lane.bytes(&over);
         match keeps {
             true => check(&case, &got, &before, (shape, bpp), |_, _| None),

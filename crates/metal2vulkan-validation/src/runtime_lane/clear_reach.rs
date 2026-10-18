@@ -13,7 +13,8 @@
 //! a pass of one layer that does not; a `DontCare` load keeps the texels in a pass that does not
 //! draw and clears to zero (a color) or the clear value (depth, stencil) in one that does, which
 //! is Metal's answer in each tile a draw touches and a near-equivalent elsewhere, announced once
-//! ([`DONT_CARE_LOADS`]).
+//! ([`DONT_CARE_LOADS`]). A pass without a draw call that clears and resolves nothing records
+//! nothing at all, its texels kept ([`a_pass_that_changes_no_texel_records_nothing`]).
 
 use super::degrade_notices::{assert_made_once, forced, made_render_kinds};
 use super::degrade_notices::{shared_in_system_memory, twins_depth};
@@ -725,11 +726,53 @@ fn depth_stencil_and_multisampled_clears_reach_past_the_render_area_as_metal_s()
     quiet(lane, &messages);
 }
 
+/// A pass without a draw call that clears nothing and resolves nothing keeps every texel, Metal's
+/// answer, and the runtime records nothing for it (`WorkCounts::untouched_passes_skipped`): a color
+/// loaded `DontCare` or `Load` and stored `Store` or `DontCare`, and beside a depth loaded
+/// `DontCare` and stored. A `Clear` load clears the whole attachment there, a draw call of no
 /// vertex keeps the texels, and a pass with a visibility result buffer keeps them: each records its
 /// pass as before. The pass beside a depth, whose first instance never records inline, began its
 /// draws' secondary as it opened: given up unused (`WorkCounts::unrun_instances_ended`), it is
 /// never replayed (`CommandBuffer::give_up_raw`).
+#[test]
+fn a_pass_that_changes_no_texel_records_nothing() {
+    let (messages, _cache, lane) = lane();
+    let rgba8 = PixelFormat::RGBA8Unorm;
+    let target = TextureUsage::RENDER_TARGET;
+    let pipeline = lane.pipeline(&[rgba8], (None, None), 1);
+    let whole = [SIDE, SIDE];
+    let skipped = || lane.device.work_counts().untouched_passes_skipped;
+    let old = OLD.repeat((SIDE * SIDE) as usize);
+    for (load, store) in [
+        (LoadAction::DontCare, StoreAction::Store),
+        (LoadAction::Load, StoreAction::Store),
+        (LoadAction::Load, StoreAction::DontCare),
+    ] {
+        let texture = lane.old_color(rgba8, PLAIN, target);
+        let mut descriptor = color_pass(&texture, load, whole);
+        descriptor.color_attachments[0].store_action = store;
+        let before = skipped();
+        lane.run(&descriptor, Draw::None, None);
+        let what = format!("{load:?} and {store:?}, no draw call");
+        assert_eq!(skipped() - before, 1, "{what}: passes skipped");
+        assert_eq!(
+            lane.read(&texture, (0, 0), 4, BlitOption::None),
+            old,
+            "{what}: the texels"
+        );
+    }
+    // Beside a depth loaded `DontCare` and stored, which keeps its texels too.
+    let texture = lane.old_color(rgba8, PLAIN, target);
+    let depth = PixelFormat::Depth32Float;
+    let kept = lane.old_depth_stencil(depth, PLAIN, (true, false));
+    let mut descriptor = color_pass(&texture, LoadAction::Load, whole);
+    descriptor.depth_attachment.texture = Some(kept.clone());
+    descriptor.depth_attachment.load_action = LoadAction::DontCare;
+    descriptor.depth_attachment.store_action = StoreAction::Store;
+    let before = skipped();
     let counted = lane.device.work_counts();
+    lane.run(&descriptor, Draw::None, None);
+    assert_eq!(skipped() - before, 1, "a depth beside: passes skipped");
     let after = lane.device.work_counts();
     let unrun = after.unrun_instances_ended - counted.unrun_instances_ended;
     assert_eq!(unrun, 1, "a depth beside: secondaries given up");
@@ -744,6 +787,67 @@ fn depth_stencil_and_multisampled_clears_reach_past_the_render_area_as_metal_s()
         deferred - unrun,
         "a depth beside: command buffers replayed of those begun deferred"
     );
+    assert_eq!(
+        lane.read(&texture, (0, 0), 4, BlitOption::None),
+        old,
+        "a depth beside: the color's texels"
+    );
+    assert_eq!(
+        lane.read(&kept, (0, 0), 4, BlitOption::None),
+        0.75f32.to_le_bytes().repeat((SIDE * SIDE) as usize),
+        "a depth beside: the depth's texels"
+    );
+    // A `Clear` load clears the whole attachment in a pass without a draw call.
+    let texture = lane.old_color(rgba8, PLAIN, target);
+    let before = skipped();
+    lane.run(
+        &color_pass(&texture, LoadAction::Clear, whole),
+        Draw::None,
+        None,
+    );
+    assert_eq!(skipped() - before, 0, "a Clear load: passes skipped");
+    assert_eq!(
+        lane.read(&texture, (0, 0), 4, BlitOption::None),
+        RED.repeat((SIDE * SIDE) as usize),
+        "a Clear load: the texels"
+    );
+    // A draw call of no vertex, and a visibility result buffer: recorded, the texels kept.
+    let texture = lane.old_color(rgba8, PLAIN, target);
+    let before = skipped();
+    lane.run(
+        &color_pass(&texture, LoadAction::DontCare, whole),
+        Draw::Empty,
+        Some(&pipeline),
+    );
+    assert_eq!(
+        skipped() - before,
+        0,
+        "a draw call of no vertex: passes skipped"
+    );
+    assert_eq!(
+        lane.read(&texture, (0, 0), 4, BlitOption::None),
+        old,
+        "a draw call of no vertex: the texels"
+    );
+    let texture = lane.old_color(rgba8, PLAIN, target);
+    let mut descriptor = color_pass(&texture, LoadAction::Load, whole);
+    descriptor.visibility_result_buffer = Some(buffer_with(&lane.device, &[0; 64]).unwrap());
+    let before = skipped();
+    lane.run(&descriptor, Draw::None, None);
+    assert_eq!(
+        skipped() - before,
+        0,
+        "a visibility result buffer: passes skipped"
+    );
+    assert_eq!(
+        lane.read(&texture, (0, 0), 4, BlitOption::None),
+        old,
+        "a visibility result buffer: the texels"
+    );
+    drop((pipeline, kept));
+    quiet(lane, &messages);
+}
+
 /// that does not draw (a draw call of no vertex, or through a pipeline that rasterizes nothing,
 /// included), as Metal keeps it, with no notice; cleared to zero over every tile, Metal's answer
 /// with no notice, where such a pass clears and stores its depth (the clear rule); in one that
