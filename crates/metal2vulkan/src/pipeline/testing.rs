@@ -31,19 +31,32 @@ pub use metal2vulkan_devtools::{
     engine_dir, fixtures_dir, llvm_assemble, metal_assemble, AssembleError,
 };
 
-/// A scratch directory, removed on drop.
-struct Scratch(PathBuf);
+/// A scratch directory of the caller's own, `<temp dir>/<stem>-<process id>-<n>` with `n` from a
+/// process-wide counter: tests on threads of one process (`cargo test`) and tests in processes of
+/// their own (nextest) never share one. Removed, with what it holds, on drop.
+pub(crate) struct Scratch(PathBuf);
 
 impl Scratch {
-    fn new() -> std::io::Result<Scratch> {
+    /// A fresh scratch directory named after `stem`; panics when it cannot be made.
+    pub(crate) fn new(stem: &str) -> Scratch {
+        Scratch::try_new(stem).unwrap_or_else(|e| panic!("scratch directory {stem}: {e}"))
+    }
+
+    /// [`Scratch::new`], with the error returned.
+    pub(crate) fn try_new(stem: &str) -> std::io::Result<Scratch> {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let dir = std::env::temp_dir().join(format!(
-            "m2v-pipeline-testing-{}-{}",
+            "{stem}-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         std::fs::create_dir_all(&dir)?;
         Ok(Scratch(dir))
+    }
+
+    /// The directory.
+    pub(crate) fn path(&self) -> &Path {
+        &self.0
     }
 }
 
@@ -1057,8 +1070,8 @@ fn convert_to_msl(
     args: &MoltenVkMslArgs,
     scratch: &Scratch,
 ) -> Result<PathBuf, AssembleError> {
-    let spv = scratch.0.join("module.spv");
-    let msl = scratch.0.join("module.metal");
+    let spv = scratch.path().join("module.spv");
+    let msl = scratch.path().join("module.metal");
     let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
     std::fs::write(&spv, bytes).map_err(|e| AssembleError::Missing(format!("scratch: {e}")))?;
     let mut convert = vec![spv.as_os_str()];
@@ -1073,7 +1086,8 @@ fn convert_to_msl(
 /// installed; `Rejected` when it refuses the module.
 pub fn moltenvk_msl(words: &[u32]) -> Result<String, AssembleError> {
     let args = moltenvk_msl_args(words).map_err(AssembleError::Rejected)?;
-    let scratch = Scratch::new().map_err(|e| AssembleError::Missing(format!("scratch: {e}")))?;
+    let scratch = Scratch::try_new("m2v-pipeline-testing")
+        .map_err(|e| AssembleError::Missing(format!("scratch: {e}")))?;
     let msl = convert_to_msl(words, &args, &scratch)?;
     std::fs::read_to_string(&msl).map_err(|e| AssembleError::Rejected(format!("msl: {e}")))
 }
@@ -1090,8 +1104,9 @@ pub fn moltenvk_msl_compile(words: &[u32]) -> Result<(), AssembleError> {
         ));
     }
     let args = moltenvk_msl_args(words).map_err(AssembleError::Rejected)?;
-    let scratch = Scratch::new().map_err(|e| AssembleError::Missing(format!("scratch: {e}")))?;
-    let air = scratch.0.join("module.air");
+    let scratch = Scratch::try_new("m2v-pipeline-testing")
+        .map_err(|e| AssembleError::Missing(format!("scratch: {e}")))?;
+    let air = scratch.path().join("module.air");
     // The Metal toolchain is a separate download: probe for it before blaming the module.
     msl_tool(
         "xcrun",

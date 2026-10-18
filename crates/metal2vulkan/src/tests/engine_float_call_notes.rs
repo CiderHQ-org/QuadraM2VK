@@ -23,7 +23,7 @@ use crate::lower::arith::fma::{self, Route};
 use crate::lower::arith::libm::Mode;
 use crate::lower::arith::{denormal, float_binop_notes, float_call_notes, FloatFmt};
 use crate::pipeline::artifact::{EntryMath, PrecisionNote};
-use crate::pipeline::testing::{compile, exact_maths, llvm_assemble, AssembleError};
+use crate::pipeline::testing::{compile, exact_maths, llvm_assemble, AssembleError, Scratch};
 use crate::spirv::testing::committed_profiles_with;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -263,15 +263,11 @@ fn module(kernels: &[Kernel]) -> String {
 }
 
 fn assemble(token: &str, chunk: usize, text: &str) -> Option<Vec<u8>> {
-    let dir = std::env::temp_dir().join(format!(
-        "m2v-float-call-notes-{token}-{chunk}-{}",
-        std::process::id()
-    ));
-    std::fs::create_dir_all(&dir).expect("temp dir");
+    let scratch = Scratch::new(&format!("m2v-float-call-notes-{token}-{chunk}"));
+    let dir = scratch.path();
     let ll = dir.join("notes.ll");
     std::fs::write(&ll, text).expect("write");
     let assembled = llvm_assemble(&ll);
-    std::fs::remove_dir_all(&dir).expect("remove temp dir");
     match assembled {
         Ok(b) => Some(b),
         Err(AssembleError::Missing(t)) => {

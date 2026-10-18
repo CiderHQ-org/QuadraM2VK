@@ -30,7 +30,7 @@ use crate::pipeline::compile::{plan_bitcode, EntryRef};
 use crate::pipeline::sym::{ResourceKind, ResourceSlot, Stage};
 use crate::pipeline::testing::{
     compile, exact_maths, link_and_validate, llvm_assemble, meter, profile, tiny_check_scales,
-    without_math_routines, AssembleError,
+    without_math_routines, AssembleError, Scratch,
 };
 use crate::spirv::interp::{run, Buffer, Config, Resources};
 
@@ -973,12 +973,11 @@ fn module(ks: &[Kernel]) -> String {
 
 /// Assemble `text`, or `None` (skipped visibly) without `llvm-as`.
 fn assemble(tag: &str, text: &str) -> Option<Vec<u8>> {
-    let dir = std::env::temp_dir().join(format!("m2v-arith-{tag}-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).expect("temp dir");
+    let scratch = Scratch::new(&format!("m2v-arith-{tag}"));
+    let dir = scratch.path();
     let ll = dir.join("arith.ll");
     std::fs::write(&ll, text).expect("write");
     let assembled = llvm_assemble(&ll);
-    std::fs::remove_dir_all(&dir).expect("remove temp dir");
     match assembled {
         Ok(b) => Some(b),
         Err(AssembleError::Missing(t)) => {

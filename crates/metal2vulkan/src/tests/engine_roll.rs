@@ -15,7 +15,7 @@ use crate::device::{Device, DeviceDescription, DevicePolicy};
 use crate::lower::select::Plan;
 use crate::pipeline::sym::{ResourceKind, ResourceSlot, Stage};
 use crate::pipeline::testing::{
-    compile_kept, link_and_validate, llvm_assemble, meter, profile, AssembleError,
+    compile_kept, link_and_validate, llvm_assemble, meter, profile, AssembleError, Scratch,
 };
 use crate::spirv::interp::{run, Buffer, Config, Resources};
 use crate::spirv::ir::TypedModule;
@@ -138,12 +138,11 @@ fn halves(i: usize) -> bool {
 
 /// The module assembled by `llvm-as`, or `None` (the test skips visibly) without it.
 fn assembled() -> Option<Vec<u8>> {
-    let dir = std::env::temp_dir().join(format!("m2v-roll-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).expect("temp dir");
+    let scratch = Scratch::new("m2v-roll");
+    let dir = scratch.path();
     let ll = dir.join("twice.ll");
     std::fs::write(&ll, module()).expect("write");
     let assembled = llvm_assemble(&ll);
-    std::fs::remove_dir_all(&dir).expect("remove temp dir");
     match assembled {
         Ok(b) => Some(b),
         Err(AssembleError::Missing(t)) => {

@@ -27,6 +27,7 @@ use crate::pipeline::interface::PushLoc;
 use crate::pipeline::sym::{Axis, PushField, ResourceKind, ResourceSlot, SpecKey, Stage};
 use crate::pipeline::testing::{
     compile, engine_dir, link_and_validate, llvm_assemble, profile, typed_module, AssembleError,
+    Scratch,
 };
 use crate::spirv::interp::{run, BarrierRule, Buffer, Config, Order, Resources, SubgroupSize};
 use crate::spirv::ir::TypedModule;
@@ -105,16 +106,11 @@ attributes #1 = {{ convergent mustprogress nounwind willreturn }}
 !20 = !{{!"Metal", i32 4, i32 0, i32 0}}
 "#
     );
-    let dir = std::env::temp_dir().join(format!(
-        "m2v-divergent-barriers-{}-{name}",
-        std::process::id()
-    ));
-    std::fs::create_dir_all(&dir).expect("scratch");
+    let scratch = Scratch::new(&format!("m2v-divergent-barriers-{name}"));
+    let dir = scratch.path();
     let path = dir.join("kernel.ll");
     std::fs::write(&path, text).expect("write");
-    let bc = assemble_file(&path, name);
-    let _ = std::fs::remove_dir_all(&dir);
-    bc
+    assemble_file(&path, name)
 }
 
 /// `if (t < limits[0]) { a[t] = 3t + 1; barrier; out[t] = a[(t + 1) % limits[0]]; } else

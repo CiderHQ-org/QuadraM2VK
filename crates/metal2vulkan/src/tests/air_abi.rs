@@ -9,7 +9,6 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicU32, Ordering};
 
 use crate::air::abi::{
     self, AbiInt, Access, AddressMode, AirAbi, Builtin, DepthQualifier, EntryPoint, Filter,
@@ -19,28 +18,9 @@ use crate::air::abi::{
 use crate::air::bitcode::decode;
 use crate::air::ir::{FuncId, Type, TypeId, TypeTable};
 use crate::budget::{Budget, Meter};
+use crate::pipeline::testing::Scratch;
 
 // ---- Tools and fixtures ----
-
-static SCRATCH: AtomicU32 = AtomicU32::new(0);
-
-/// A fresh scratch directory, removed by the guard.
-struct Scratch(PathBuf);
-
-impl Scratch {
-    fn new() -> Scratch {
-        let n = SCRATCH.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!("m2v-air-abi-{}-{n}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        Scratch(dir)
-    }
-}
-
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
 
 /// `llvm-as`: the `METAL2VULKAN_LLVM_AS` override, else `PATH`, else the Homebrew LLVM prefixes.
 fn llvm_as() -> Option<PathBuf> {
@@ -107,12 +87,12 @@ fn opaque_fixtures() -> Vec<PathBuf> {
 
 /// The bitcode of `ll`. Every committed fixture assembles, so a rejection fails.
 fn llvm_assemble(tool: &Path, ll: &Path, scratch: &Scratch) -> Vec<u8> {
-    let out = scratch.0.join("fixture.bc");
+    let out = scratch.path().join("fixture.bc");
     assemble(tool, &[ll.as_os_str()], &out).unwrap_or_else(|| panic!("llvm-as rejected {ll:?}"))
 }
 
 fn metal_assemble(air_ll: &Path, scratch: &Scratch) -> Vec<u8> {
-    let out = scratch.0.join("fixture.air");
+    let out = scratch.path().join("fixture.air");
     let args = [std::ffi::OsStr::new("metal-as"), air_ll.as_os_str()];
     assemble(Path::new("xcrun"), &args, &out)
         .unwrap_or_else(|| panic!("xcrun metal-as rejected {air_ll:?}"))
@@ -234,7 +214,7 @@ fn spelled(types: &TypeTable, id: TypeId) -> String {
 
 /// The ABI of the opaque fixture `name` (relative to the public fixture directory).
 fn fixture_abi(tool: &Path, name: &str) -> AirAbi {
-    let scratch = Scratch::new();
+    let scratch = Scratch::new("m2v-air-abi");
     let path = fixtures_dir().join(name);
     let bytes = llvm_assemble(tool, &path, &scratch);
     abi_of(&bytes, &path)
@@ -266,7 +246,7 @@ fn every_public_fixture_decodes_its_abi() {
         eprintln!("SKIP: llvm-as not found; set METAL2VULKAN_LLVM_AS");
         return;
     };
-    let scratch = Scratch::new();
+    let scratch = Scratch::new("m2v-air-abi");
     let (mut kernels, mut vertex, mut fragment, mut meshes) = (0, 0, 0, 0);
     let (mut constants, mut samplers) = (0, 0);
     let mut decoded = 0;
@@ -603,7 +583,7 @@ fn typed_and_opaque_spellings_decode_the_same_abi() {
         let Some(stem) = name.strip_suffix(".air.ll") else {
             continue;
         };
-        let scratch = Scratch::new();
+        let scratch = Scratch::new("m2v-air-abi");
         let mut typed_spelling = spelling(&metal_assemble(&typed, &scratch), &typed);
         let opaque = engine_dir().join(format!("{stem}.ll"));
         let bytes = llvm_assemble(&tool, &opaque, &scratch);

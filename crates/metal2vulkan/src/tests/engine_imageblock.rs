@@ -48,6 +48,7 @@ use crate::pipeline::sym::{
 };
 use crate::pipeline::testing::{
     engine_dir, fixtures_dir, llvm_assemble, typed_module, typed_module_with, AssembleError,
+    Scratch,
 };
 use crate::pipeline::{
     ComputePipeline, ComputePipelineDescriptor, FunctionDescriptor, StageSource,
@@ -378,13 +379,11 @@ fn parameter_value_kernel() -> String {
 
 /// Assemble `text` through a scratch file named after `name`, removed after.
 fn assemble_text(name: &str, text: &str) -> Option<Vec<u8>> {
-    let dir = std::env::temp_dir().join(format!("m2v-imageblock-{}-{name}", std::process::id()));
-    std::fs::create_dir_all(&dir).expect("scratch dir");
+    let scratch = Scratch::new(&format!("m2v-imageblock-{name}"));
+    let dir = scratch.path();
     let path = dir.join(format!("{name}.ll"));
     std::fs::write(&path, text).expect("write scratch .ll");
-    let bc = assemble(path);
-    std::fs::remove_dir_all(&dir).expect("remove scratch dir");
-    bc
+    assemble(path)
 }
 
 /// A cell stride is the data size rounded up to the imageblock's alignment: a 6-byte cell of

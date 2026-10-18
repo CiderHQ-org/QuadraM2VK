@@ -25,7 +25,7 @@ use crate::lower::select::{select, LowerInputs};
 use crate::memory::static_root::analyze_memory;
 use crate::pipeline::sym::{ResourceKind, ResourceSlot, Stage};
 use crate::pipeline::testing::{
-    compile, link_and_validate, llvm_assemble, meter, profile, AssembleError,
+    compile, link_and_validate, llvm_assemble, meter, profile, AssembleError, Scratch,
 };
 use crate::pipeline::PrecisionNote;
 use crate::spirv::interp::{run, Buffer, Config, Resources};
@@ -228,12 +228,11 @@ fn module() -> String {
 
 /// The module's bitcode, or `None` (skipped visibly) without `llvm-as`.
 fn bitcode() -> Option<Vec<u8>> {
-    let dir = std::env::temp_dir().join(format!("m2v-native-maths-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).expect("temp dir");
+    let scratch = Scratch::new("m2v-native-maths");
+    let dir = scratch.path();
     let ll = dir.join("native.ll");
     std::fs::write(&ll, module()).expect("write");
     let assembled = llvm_assemble(&ll);
-    std::fs::remove_dir_all(&dir).expect("remove temp dir");
     match assembled {
         Ok(b) => Some(b),
         Err(AssembleError::Missing(t)) => {

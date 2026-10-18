@@ -38,7 +38,7 @@ use crate::pipeline::lower_inputs::LoweringInputs;
 use crate::pipeline::sym::{Axis, PushField, ResourceKind, ResourceSlot, SpecKey, Stage};
 use crate::pipeline::testing::{
     engine_dir, link_and_validate, llvm_assemble, meter, profile, typed_module_specialized,
-    AssembleError,
+    AssembleError, Scratch,
 };
 use crate::spirv::interp::{run, Buffer, Config, Order, Resources, SubgroupSize};
 use crate::spirv::ir::TypedModule;
@@ -571,16 +571,11 @@ fn respelled(pairs: &[(&str, &str)]) -> Option<Vec<u8>> {
         .map(|(_, to)| *to)
         .collect::<Vec<_>>()
         .join(" | ");
-    let dir = std::env::temp_dir().join(format!(
-        "m2v-matmul2d-{}-{}",
-        std::process::id(),
-        what.len()
-    ));
-    std::fs::create_dir_all(&dir).expect("scratch");
+    let scratch = Scratch::new(&format!("m2v-matmul2d-{}", what.len()));
+    let dir = scratch.path();
     let ll = dir.join("k.ll");
     std::fs::write(&ll, text).expect("write");
     let r = llvm_assemble(&ll);
-    let _ = std::fs::remove_dir_all(&dir);
     match r {
         Ok(b) => Some(b),
         Err(AssembleError::Missing(why)) => {

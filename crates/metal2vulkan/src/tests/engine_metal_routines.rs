@@ -17,7 +17,7 @@
 use crate::device::{DevicePolicy, DeviceProfile, NanMinMaxPolicy};
 use crate::pipeline::sym::{ResourceKind, ResourceSlot, Stage};
 use crate::pipeline::testing::{
-    compile, link_and_validate, llvm_assemble, profile, typed_module, AssembleError,
+    compile, link_and_validate, llvm_assemble, profile, typed_module, AssembleError, Scratch,
 };
 use crate::pipeline::PrecisionNote;
 use crate::spirv::interp::{run, Buffer, Config, Resources};
@@ -357,12 +357,11 @@ fn module() -> String {
 
 /// Assemble the module, or `None` (skipped visibly) without `llvm-as`.
 fn assemble() -> Option<Vec<u8>> {
-    let dir = std::env::temp_dir().join(format!("m2v-routines-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).expect("temp dir");
+    let scratch = Scratch::new("m2v-routines");
+    let dir = scratch.path();
     let ll = dir.join("routines.ll");
     std::fs::write(&ll, module()).expect("write");
     let assembled = llvm_assemble(&ll);
-    std::fs::remove_dir_all(&dir).expect("remove temp dir");
     match assembled {
         Ok(b) => Some(b),
         Err(AssembleError::Missing(t)) => {

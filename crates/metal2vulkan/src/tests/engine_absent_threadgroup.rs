@@ -39,7 +39,7 @@ use crate::pipeline::lower_inputs::LoweringInputs;
 use crate::pipeline::relocate::relocate;
 use crate::pipeline::sym::Stage;
 use crate::pipeline::testing::{
-    llvm_assemble, meter, status_reach, status_reach_on, AssembleError, StatusReach,
+    llvm_assemble, meter, status_reach, status_reach_on, AssembleError, Scratch, StatusReach,
 };
 use crate::spirv::testing::{check_words_valid, committed_profiles};
 
@@ -146,12 +146,11 @@ define internal void @_GLOBAL__sub_I_() section "air.static_init" {
 
 /// [`MODULE`] assembled, or `None` (skipped visibly) without `llvm-as`.
 fn module() -> Option<Vec<u8>> {
-    let dir = std::env::temp_dir().join(format!("m2v-absent-threadgroup-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).expect("scratch");
+    let scratch = Scratch::new("m2v-absent-threadgroup");
+    let dir = scratch.path();
     let ll = dir.join("absent_threadgroup.ll");
     std::fs::write(&ll, MODULE).expect("write");
     let r = llvm_assemble(&ll);
-    let _ = std::fs::remove_dir_all(&dir);
     match r {
         Ok(b) => Some(b),
         Err(AssembleError::Missing(why)) => {

@@ -23,7 +23,7 @@ use crate::memory::static_root::analyze_memory;
 use crate::pipeline::sym::{ResourceKind, ResourceSlot, Stage};
 use crate::pipeline::testing::{
     compile, compile_kept, exact_half, link_and_validate, llvm_assemble, meter, profile,
-    AssembleError,
+    AssembleError, Scratch,
 };
 use crate::pipeline::PrecisionNote;
 use crate::spirv::builder::QuantizeForm;
@@ -85,12 +85,11 @@ fn bitcode() -> Option<Vec<u8>> {
 /// `text` assembled by `llvm-as` (in a directory of its own named after `stem`), or `None`
 /// (skipped visibly) without it.
 fn assemble(stem: &str, text: &str) -> Option<Vec<u8>> {
-    let dir = std::env::temp_dir().join(format!("m2v-{stem}-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).expect("temp dir");
+    let scratch = Scratch::new(&format!("m2v-{stem}"));
+    let dir = scratch.path();
     let ll = dir.join(format!("{stem}.ll"));
     std::fs::write(&ll, text).expect("write");
     let assembled = llvm_assemble(&ll);
-    std::fs::remove_dir_all(&dir).expect("remove temp dir");
     match assembled {
         Ok(b) => Some(b),
         Err(AssembleError::Missing(t)) => {

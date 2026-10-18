@@ -234,10 +234,12 @@ entry:
 /// `text` written to `row.ll` in two directories whose paths differ in length, each in its own
 /// scratch (removed on drop).
 fn two_places(text: &str) -> ([PathBuf; 2], [Scratch; 2]) {
-    let (near, far) = (Scratch::new().unwrap(), Scratch::new().unwrap());
-    let deep = far.0.join("a-directory-whose-name-makes-the-path-longer");
+    let (near, far) = (Scratch::new("m2v-near"), Scratch::new("m2v-far"));
+    let deep = far
+        .path()
+        .join("a-directory-whose-name-makes-the-path-longer");
     std::fs::create_dir_all(&deep).unwrap();
-    let paths = [near.0.join("row.ll"), deep.join("row.ll")];
+    let paths = [near.path().join("row.ll"), deep.join("row.ll")];
     for path in &paths {
         std::fs::write(path, text).unwrap();
     }

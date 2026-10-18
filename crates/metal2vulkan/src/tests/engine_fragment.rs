@@ -34,7 +34,7 @@ use crate::pipeline::lower_inputs::{FramebufferFetchInputs, LoweringInputs};
 use crate::pipeline::sym::ResourceKind;
 use crate::pipeline::testing::{
     compile, compile_with, engine_dir, interlocked_coherence, link_and_validate, llvm_assemble,
-    moltenvk_msl_compile, profile, typed_module, typed_module_with, AssembleError,
+    moltenvk_msl_compile, profile, typed_module, typed_module_with, AssembleError, Scratch,
 };
 use crate::spirv::ids::FuncId;
 use crate::spirv::ir::{ExecMode, Inst, Terminator, TypedModule};
@@ -378,12 +378,11 @@ fn a_discard_without_a_language_version_is_refused() {
         .map(|l| format!("{l}\n"))
         .collect();
     assert_ne!(stripped.len(), text.len(), "the fixture states its version");
-    let dir = std::env::temp_dir().join(format!("m2v-fragment-test-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).expect("scratch");
+    let scratch = Scratch::new("m2v-fragment-test");
+    let dir = scratch.path();
     let path = dir.join("unversioned.ll");
     std::fs::write(&path, stripped).expect("write");
     let bc = assemble(&path);
-    let _ = std::fs::remove_dir_all(&dir);
     let Some(bc) = bc else { return };
     let (_, p) = committed_profiles()
         .expect("profiles")
@@ -1123,13 +1122,11 @@ fn fetch_with_discard() -> Option<Vec<u8>> {
             "define float @fetch_scalar(float noundef %0) local_unnamed_addr #2",
             "define float @fetch_scalar(float noundef %0) local_unnamed_addr",
         );
-    let dir = std::env::temp_dir().join(format!("m2v-fetch-discard-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).expect("scratch");
+    let scratch = Scratch::new("m2v-fetch-discard");
+    let dir = scratch.path();
     let path = dir.join("fetch_discard.ll");
     std::fs::write(&path, edited).expect("write");
-    let bc = assemble(&path);
-    let _ = std::fs::remove_dir_all(&dir);
-    bc
+    assemble(&path)
 }
 
 /// The storage form declares early fragment tests where a depth or stencil attachment's tests could
@@ -4627,17 +4624,11 @@ attributes #1 = {{ convergent nounwind willreturn }}
 !10 = !{{!"Metal", i32 4, i32 0, i32 0}}
 "#
     );
-    let dir = std::env::temp_dir().join(format!(
-        "m2v-unm-varying-{}-{}",
-        std::process::id(),
-        name.replace(' ', "-")
-    ));
-    std::fs::create_dir_all(&dir).expect("scratch");
+    let scratch = Scratch::new(&format!("m2v-unm-varying-{}", name.replace(' ', "-")));
+    let dir = scratch.path();
     let path = dir.join("f.ll");
     std::fs::write(&path, text).expect("write");
-    let bc = assemble(&path);
-    let _ = std::fs::remove_dir_all(&dir);
-    bc
+    assemble(&path)
 }
 
 /// The answer of `f` in the module `bc` on each committed profile, as whether it records `note`:

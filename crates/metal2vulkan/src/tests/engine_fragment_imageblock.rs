@@ -47,7 +47,7 @@ use crate::pipeline::layout::BindingSource;
 use crate::pipeline::sym::{Stage, SyntheticBinding};
 use crate::pipeline::testing::{
     compile, engine_dir, fixtures_dir, interlocked_coherence, link_and_validate, llvm_assemble,
-    typed_module, AssembleError,
+    typed_module, AssembleError, Scratch,
 };
 use crate::pipeline::{ImageblockMechanism, RenderPipeline};
 use crate::spirv::ir::{ExecMode, Inst, Terminator, TypedModule};
@@ -473,16 +473,11 @@ define <4 x half> @probe(%struct.Cell %0, ptr addrspace(1) %1) {{
 
 /// Assemble `text` through a scratch file named after `name`, removed after.
 fn assemble_text(name: &str, text: &str) -> Option<Vec<u8>> {
-    let dir = std::env::temp_dir().join(format!(
-        "m2v-fragment-imageblock-{}-{name}",
-        std::process::id()
-    ));
-    std::fs::create_dir_all(&dir).expect("scratch dir");
+    let scratch = Scratch::new(&format!("m2v-fragment-imageblock-{name}"));
+    let dir = scratch.path();
     let path = dir.join(format!("{name}.ll"));
     std::fs::write(&path, text).expect("write scratch .ll");
-    let bc = assemble(&path);
-    std::fs::remove_dir_all(&dir).expect("remove scratch dir");
-    bc
+    assemble(&path)
 }
 
 const CELL: &str = "<4 x half>, half";

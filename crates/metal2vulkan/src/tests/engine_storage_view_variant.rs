@@ -22,7 +22,7 @@ use crate::pipeline::descriptor::{
 };
 use crate::pipeline::interface::{BufferForm, DescriptorView, SlotInterface};
 use crate::pipeline::sym::{SlotClass, SlotRef, Stage};
-use crate::pipeline::testing::{engine_dir, llvm_assemble, AssembleError};
+use crate::pipeline::testing::{engine_dir, llvm_assemble, AssembleError, Scratch};
 use crate::pipeline::{
     ComputePipelineDescriptor, FunctionDescriptor, LoweringInputs, RenderPipeline,
     RenderPipelineDescriptor, RuntimeFact, StageSource, UniformViewChoice,
@@ -50,12 +50,11 @@ fn assembled(result: Result<Vec<u8>, AssembleError>, name: &str) -> Option<Vec<u
 
 /// `text` assembled through a scratch file this test owns and removes.
 fn assemble(name: &str, text: &str) -> Option<Vec<u8>> {
-    let dir = std::env::temp_dir().join(format!("m2v-d183-{}-{name}", std::process::id()));
-    std::fs::create_dir_all(&dir).expect("scratch");
+    let scratch = Scratch::new(&format!("m2v-storage-view-variant-{name}"));
+    let dir = scratch.path();
     let ll = dir.join(format!("{name}.ll"));
     std::fs::write(&ll, text).expect("write");
     let r = llvm_assemble(&ll);
-    let _ = std::fs::remove_dir_all(&dir);
     assembled(r, name)
 }
 

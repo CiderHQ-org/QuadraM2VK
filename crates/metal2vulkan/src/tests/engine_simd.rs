@@ -27,7 +27,7 @@ use crate::pipeline::interface::PushLoc;
 use crate::pipeline::sym::{Axis, PushField, ResourceKind, ResourceSlot, SpecKey, Stage};
 use crate::pipeline::testing::{
     compile, compile_kept, engine_dir, link_and_validate, llvm_assemble, profile, typed_module,
-    AssembleError,
+    AssembleError, Scratch,
 };
 use crate::spirv::interp::{run, Buffer, Config, Order, Resources, SubgroupSize};
 use crate::spirv::ir::TypedModule;
@@ -877,12 +877,11 @@ fn compute_derivatives_with_a_simd_operation_are_refused() {
     let decls = "\ndeclare float @air.dfdx.f32(float)\n\
                  declare i32 @air.simd_shuffle.u.i32(i32, i16)\n\nattributes #0";
     let text = text.replacen("\nattributes #0", decls, 1);
-    let dir = std::env::temp_dir().join(format!("m2v-engine-simd-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).expect("scratch");
+    let scratch = Scratch::new("m2v-engine-simd");
+    let dir = scratch.path();
     let path = dir.join("kernel.ll");
     std::fs::write(&path, text).expect("write");
     let bc = llvm_assemble(&path);
-    let _ = std::fs::remove_dir_all(&dir);
     let bc = match bc {
         Ok(b) => b,
         Err(AssembleError::Missing(why)) => {
@@ -947,12 +946,11 @@ fn sixty_four_bit_group_operations_are_not_metal() {
         let body = format!("  {call}\n  ret void\n}}");
         let text = text.replacen("  ret void\n}", &body, 1);
         let text = text.replacen("\nattributes #0", &format!("\n{decl}\n\nattributes #0"), 1);
-        let dir = std::env::temp_dir().join(format!("m2v-engine-simd64-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).expect("scratch");
+        let scratch = Scratch::new("m2v-engine-simd64");
+        let dir = scratch.path();
         let path = dir.join("kernel.ll");
         std::fs::write(&path, text).expect("write");
         let bc = llvm_assemble(&path);
-        let _ = std::fs::remove_dir_all(&dir);
         let bc = match bc {
             Ok(b) => b,
             Err(AssembleError::Missing(why)) => {
@@ -1037,12 +1035,11 @@ fn uniform_kernel(tag: &str, body: &str) -> Option<Vec<u8>> {
          !13 = !{{i32 1, !\"air.thread_index_in_threadgroup\", !\"air.arg_type_name\", !\"uint\", !\"air.arg_name\", !\"t\"}}\n\
          !17 = !{{i32 2, i32 8, i32 0}}\n!18 = !{{!\"Metal\", i32 4, i32 0, i32 0}}\n"
     );
-    let dir = std::env::temp_dir().join(format!("m2v-engine-uniform-{}-{tag}", std::process::id()));
-    std::fs::create_dir_all(&dir).expect("scratch");
+    let scratch = Scratch::new(&format!("m2v-engine-uniform-{tag}"));
+    let dir = scratch.path();
     let path = dir.join("kernel.ll");
     std::fs::write(&path, text).expect("write");
     let bc = llvm_assemble(&path);
-    let _ = std::fs::remove_dir_all(&dir);
     match bc {
         Ok(b) => Some(b),
         Err(AssembleError::Missing(why)) => {
@@ -1368,15 +1365,11 @@ fn float_group_kernel(tag: &str, call: &str, flags: &str, extra: &str) -> Option
          !13 = !{{i32 1, !\"air.thread_index_in_threadgroup\", !\"air.arg_type_name\", !\"uint\", !\"air.arg_name\", !\"t\"}}\n\
          !17 = !{{i32 2, i32 8, i32 0}}\n!18 = !{{!\"Metal\", i32 4, i32 0, i32 0}}\n"
     );
-    let dir = std::env::temp_dir().join(format!(
-        "m2v-engine-float-group-{}-{tag}",
-        std::process::id()
-    ));
-    std::fs::create_dir_all(&dir).expect("scratch");
+    let scratch = Scratch::new(&format!("m2v-engine-float-group-{tag}"));
+    let dir = scratch.path();
     let path = dir.join("kernel.ll");
     std::fs::write(&path, text).expect("write");
     let bc = llvm_assemble(&path);
-    let _ = std::fs::remove_dir_all(&dir);
     match bc {
         Ok(b) => Some(b),
         Err(AssembleError::Missing(why)) => {

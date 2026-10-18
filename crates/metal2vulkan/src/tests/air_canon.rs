@@ -9,33 +9,13 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicU32, Ordering};
 
 use crate::air::error::{Error, MissingInput};
 use crate::air::ir::print::print;
 use crate::air::{decode, specialize, ConstValue, Decoded, Entry, SpecRequest};
 use crate::budget::{Budget, Meter};
 use crate::metal::DataType;
-
-static SCRATCH: AtomicU32 = AtomicU32::new(0);
-
-/// A fresh scratch directory, removed by the guard.
-struct Scratch(PathBuf);
-
-impl Scratch {
-    fn new() -> Scratch {
-        let n = SCRATCH.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!("m2v-air-canon-{}-{n}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        Scratch(dir)
-    }
-}
-
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
+use crate::pipeline::testing::Scratch;
 
 /// `llvm-as`: the `METAL2VULKAN_LLVM_AS` override, else `PATH`, else the Homebrew LLVM prefixes.
 fn llvm_as() -> Option<PathBuf> {
@@ -98,7 +78,7 @@ fn opaque_fixtures(dir: &Path) -> Vec<PathBuf> {
 
 /// Opaque bitcode of `ll`; `None` when this `llvm-as` rejects a legacy top-level fixture.
 fn llvm_assemble(tool: &Path, ll: &Path, scratch: &Scratch) -> Option<Vec<u8>> {
-    let bytes = assemble(tool, &[ll.as_os_str()], &scratch.0.join("fixture.bc"));
+    let bytes = assemble(tool, &[ll.as_os_str()], &scratch.path().join("fixture.bc"));
     assert!(
         bytes.is_some() || !ll.starts_with(engine_dir()),
         "llvm-as rejected {ll:?}"
@@ -107,7 +87,7 @@ fn llvm_assemble(tool: &Path, ll: &Path, scratch: &Scratch) -> Option<Vec<u8>> {
 }
 
 fn metal_assemble(air_ll: &Path, scratch: &Scratch) -> Vec<u8> {
-    let out = scratch.0.join("fixture.air");
+    let out = scratch.path().join("fixture.air");
     let args = [std::ffi::OsStr::new("metal-as"), air_ll.as_os_str()];
     assemble(Path::new("xcrun"), &args, &out)
         .unwrap_or_else(|| panic!("xcrun metal-as rejected {air_ll:?}"))
@@ -148,7 +128,7 @@ fn every_public_entry_specializes_or_is_refused_typed() {
         eprintln!("SKIP every_public_entry_specializes_or_is_refused_typed: no llvm-as");
         return;
     };
-    let scratch = Scratch::new();
+    let scratch = Scratch::new("m2v-air-canon");
     let (mut ok, mut refused, mut abi_refused) = (0, 0, 0);
     let mut fixtures = opaque_fixtures(&fixtures_dir());
     fixtures.extend(opaque_fixtures(&engine_dir()));
@@ -200,7 +180,7 @@ fn specialization_is_deterministic() {
         eprintln!("SKIP specialization_is_deterministic: no llvm-as");
         return;
     };
-    let scratch = Scratch::new();
+    let scratch = Scratch::new("m2v-air-canon");
     for ll in opaque_fixtures(&engine_dir()) {
         let bytes = llvm_assemble(&tool, &ll, &scratch).unwrap();
         for name in entry_names(&decode(&bytes, &mut meter()).unwrap()) {
@@ -253,7 +233,7 @@ fn typed_and_opaque_fixtures_specialize_identically() {
         eprintln!("SKIP typed_and_opaque_fixtures_specialize_identically: no xcrun metal-as");
         return;
     }
-    let scratch = Scratch::new();
+    let scratch = Scratch::new("m2v-air-canon");
     let mut compared = 0;
     for ll in opaque_fixtures(&engine_dir()) {
         let opaque = llvm_assemble(&tool, &ll, &scratch).unwrap();
@@ -288,7 +268,7 @@ fn the_order_of_declarations_reaches_no_specialized_module() {
         eprintln!("SKIP the_order_of_declarations_reaches_no_specialized_module: no llvm-as");
         return;
     };
-    let scratch = Scratch::new();
+    let scratch = Scratch::new("m2v-air-canon");
     let ll = engine_dir().join("zws_compositor.ll");
     let text = std::fs::read_to_string(&ll).unwrap();
     let memset = text
@@ -302,7 +282,7 @@ fn the_order_of_declarations_reaches_no_specialized_module() {
         text[first..].replacen(&format!("{memset}\n"), "", 1)
     );
     assert_ne!(moved, text);
-    let reordered = scratch.0.join("reordered.ll");
+    let reordered = scratch.path().join("reordered.ll");
     std::fs::write(&reordered, &moved).unwrap();
     let a = llvm_assemble(&tool, &ll, &scratch).unwrap();
     let b = llvm_assemble(&tool, &reordered, &scratch).unwrap();
@@ -321,7 +301,7 @@ fn a_static_initializer_fixture_specializes_with_its_constant() {
         eprintln!("SKIP a_static_initializer_fixture_specializes_with_its_constant: no llvm-as");
         return;
     };
-    let scratch = Scratch::new();
+    let scratch = Scratch::new("m2v-air-canon");
     let ll = fixtures_dir().join("kernel_function_constant_gate_fold.ll");
     let bytes = llvm_assemble(&tool, &ll, &scratch).unwrap();
     assert_eq!(
@@ -362,7 +342,7 @@ fn a_vector_function_constant_bakes_through_the_static_initializer() {
         );
         return;
     };
-    let scratch = Scratch::new();
+    let scratch = Scratch::new("m2v-air-canon");
     let ll = engine_dir().join("kernel_vector_function_constant.ll");
     let mut spellings = vec![llvm_assemble(&tool, &ll, &scratch).unwrap()];
     if have_metal_as() {

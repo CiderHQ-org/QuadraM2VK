@@ -50,7 +50,7 @@ use crate::pipeline::stage_io::{IoRole, StageBuiltin};
 use crate::pipeline::sym::{SlotClass, Stage};
 use crate::pipeline::testing::{
     engine_dir, fixtures_dir, llvm_assemble, meter, profile, status_reach, status_reach_on,
-    AssembleError,
+    AssembleError, Scratch,
 };
 use crate::spirv::testing::{check_words_valid, committed_profiles};
 
@@ -459,13 +459,11 @@ define internal void @_GLOBAL__sub_I_() section "air.static_init" {
 
 /// [`PRIVATE_INPUT`] assembled in a scratch directory removed before this returns.
 fn private_input() -> Option<Vec<u8>> {
-    let dir = std::env::temp_dir().join(format!("m2v-fc-private-input-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).expect("scratch");
+    let scratch = Scratch::new("m2v-fc-private-input");
+    let dir = scratch.path();
     let ll = dir.join("private_input.ll");
     std::fs::write(&ll, PRIVATE_INPUT).expect("write");
-    let bc = assemble(&ll);
-    let _ = std::fs::remove_dir_all(&dir);
-    bc
+    assemble(&ll)
 }
 
 /// The AIR user keys of the varyings `a` reads.
@@ -582,12 +580,11 @@ fn texture_slots(a: &FunctionArtifact) -> Vec<u32> {
 /// binds all four textures.
 #[test]
 fn an_absent_texture_array_s_element_address_nothing_uses_compiles() {
-    let dir = std::env::temp_dir().join(format!("m2v-fc-absent-table-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).expect("scratch");
+    let scratch = Scratch::new("m2v-fc-absent-table");
+    let dir = scratch.path();
     let ll = dir.join("absent_table.ll");
     std::fs::write(&ll, ABSENT_TABLE).expect("write");
     let bc = assemble(&ll);
-    let _ = std::fs::remove_dir_all(&dir);
     let Some(bc) = bc else { return };
     for (stem, p) in committed_profiles().expect("profiles") {
         let off = compile_bools(&bc, "fc_kernel_absent_table", &[(0, false)], &p);
@@ -664,12 +661,11 @@ fn color_outputs(a: &FunctionArtifact) -> Vec<u32> {
 /// translated with one store winning.
 #[test]
 fn two_remaining_outputs_at_one_color_are_an_invalid_request() {
-    let dir = std::env::temp_dir().join(format!("m2v-fc-shared-color-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).expect("scratch");
+    let scratch = Scratch::new("m2v-fc-shared-color");
+    let dir = scratch.path();
     let ll = dir.join("shared_color.ll");
     std::fs::write(&ll, SHARED_COLOR).expect("write");
     let bc = assemble(&ll);
-    let _ = std::fs::remove_dir_all(&dir);
     let Some(bc) = bc else { return };
     let entry = "fc_fragment_shared_color";
     for (stem, p) in committed_profiles().expect("profiles") {
@@ -713,12 +709,11 @@ fn an_observed_element_of_an_absent_texture_table_is_an_absent_read() {
     let guard = "br i1 %on, label %read, label %done";
     assert!(ABSENT_TABLE.contains(guard));
     let text = ABSENT_TABLE.replace(guard, "br label %read");
-    let dir = std::env::temp_dir().join(format!("m2v-fc-absent-element-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).expect("scratch");
+    let scratch = Scratch::new("m2v-fc-absent-element");
+    let dir = scratch.path();
     let ll = dir.join("absent_element.ll");
     std::fs::write(&ll, text).expect("write");
     let bc = assemble(&ll);
-    let _ = std::fs::remove_dir_all(&dir);
     let Some(bc) = bc else { return };
     let entry = "fc_kernel_absent_table";
     absent_read(&bc, entry, &[(0, false)]);

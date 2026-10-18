@@ -10,7 +10,9 @@
 use crate::air::error::{CanonError, InputErrorKind};
 use crate::device::DevicePolicy;
 use crate::error::{DiagName, Error, Feature, Location, LowerFamily, Needs, Unsupported};
-use crate::pipeline::testing::{compile, link_and_validate, llvm_assemble, profile, AssembleError};
+use crate::pipeline::testing::{
+    compile, link_and_validate, llvm_assemble, profile, AssembleError, Scratch,
+};
 use crate::spirv::testing::committed_profiles;
 
 const HEADER: &str = "target datalayout = \"e-p:64:64:64-i1:8:8-i8:8:8-i16:16:16-i32:32:32-i64:64:64-f32:32:32-f64:64:64-v16:16:16-v24:32:32-v32:32:32-v48:64:64-v64:64:64-v96:128:128-v128:128:128-v192:256:256-v256:256:256-v512:512:512-v1024:1024:1024-n8:16:32\"\ntarget triple = \"air64_v28-apple-macosx26.0.0\"\n\n";
@@ -27,12 +29,11 @@ const OUT: &str = "!{i32 0, !\"air.buffer\", !\"air.location_index\", i32 0, i32
 
 /// `text` (after [`HEADER`]) assembled from a scratch file, or `None` when `llvm-as` is missing.
 fn assemble(tag: &str, text: &str) -> Option<Vec<u8>> {
-    let dir = std::env::temp_dir().join(format!("m2v-engine-refused-{}-{tag}", std::process::id()));
-    std::fs::create_dir_all(&dir).expect("scratch");
+    let scratch = Scratch::new(&format!("m2v-engine-refused-{tag}"));
+    let dir = scratch.path();
     let path = dir.join("module.ll");
     std::fs::write(&path, format!("{HEADER}{text}{VERSIONS}")).expect("write");
     let bc = llvm_assemble(&path);
-    let _ = std::fs::remove_dir_all(&dir);
     match bc {
         Ok(b) => Some(b),
         Err(AssembleError::Missing(why)) => {

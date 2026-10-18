@@ -32,7 +32,7 @@ use crate::pipeline::sym::{
 };
 use crate::pipeline::testing::{
     compile, engine_dir, fixtures_dir, link_and_validate, llvm_assemble, metal_assemble, meter,
-    profile, zero_relocations, AssembleError,
+    profile, zero_relocations, AssembleError, Scratch,
 };
 use crate::spirv::testing::check_words_valid;
 use crate::vk;
@@ -399,12 +399,11 @@ done:
 
 #[test]
 fn a_switch_on_a_dispatch_builtin_is_the_dispatch_familys() {
-    let dir = std::env::temp_dir().join(format!("m2v-switch-gid-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).expect("temp dir");
+    let scratch = Scratch::new("m2v-switch-gid");
+    let dir = scratch.path();
     let ll = dir.join("switch_on_gid.ll");
     std::fs::write(&ll, SWITCH_ON_GID).expect("write");
     let assembled = llvm_assemble(&ll);
-    std::fs::remove_dir_all(&dir).expect("remove temp dir");
     let bitcode = match assembled {
         Ok(b) => b,
         Err(AssembleError::Missing(t)) => {

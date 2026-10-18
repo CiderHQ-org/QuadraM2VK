@@ -29,7 +29,7 @@ use crate::pipeline::stage_io::{
 };
 use crate::pipeline::sym::{Symbol, VaryingKey};
 use crate::pipeline::testing::{
-    compile, engine_dir, llvm_assemble, meter, profile, zero_relocations, AssembleError,
+    compile, engine_dir, llvm_assemble, meter, profile, zero_relocations, AssembleError, Scratch,
 };
 use crate::spirv::testing::check_words_valid;
 
@@ -686,12 +686,11 @@ fn sixty_four_bit_interface_values_are_not_metal() {
             assert!(text.contains(from), "{stem}: {from}");
             text = text.replacen(from, to, 1);
         }
-        let dir = std::env::temp_dir().join(format!("m2v-io64-{stem}-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).expect("scratch");
+        let scratch = Scratch::new(&format!("m2v-io64-{stem}"));
+        let dir = scratch.path();
         let path = dir.join("edited.ll");
         std::fs::write(&path, text).expect("write");
         let bc = llvm_assemble(&path);
-        let _ = std::fs::remove_dir_all(&dir);
         match bc {
             Ok(b) => Some(b),
             Err(AssembleError::Missing(why)) => {
@@ -847,12 +846,11 @@ fn a_bfloat_color_output_is_not_metal() {
             assert!(text.contains(from), "{stem}: {from}");
             text = text.replacen(from, to, 1);
         }
-        let dir = std::env::temp_dir().join(format!("m2v-bfout-{stem}-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).expect("scratch");
+        let scratch = Scratch::new(&format!("m2v-bfout-{stem}"));
+        let dir = scratch.path();
         let path = dir.join("edited.ll");
         std::fs::write(&path, text).expect("write");
         let bc = llvm_assemble(&path);
-        let _ = std::fs::remove_dir_all(&dir);
         match bc {
             Ok(b) => Some(b),
             Err(AssembleError::Missing(why)) => {
@@ -1218,15 +1216,11 @@ fn math_mode_edited(mode: Option<&str>) -> Option<Vec<u8>> {
         Some(mode) => text.replacen(option, &format!("!70 = !{{!\"{mode}\"}}"), 1),
         None => text.replacen(list, "!air.compile_options = !{!69, !71}", 1),
     };
-    // One directory per call: tests running on threads of one process do not share it.
-    static CALLS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-    let call = CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!("m2v-hmath-{}-{call}", std::process::id()));
-    std::fs::create_dir_all(&dir).expect("scratch");
+    let scratch = Scratch::new("m2v-hmath");
+    let dir = scratch.path();
     let path = dir.join("edited.ll");
     std::fs::write(&path, text).expect("write");
     let bc = llvm_assemble(&path);
-    let _ = std::fs::remove_dir_all(&dir);
     match bc {
         Ok(b) => Some(b),
         Err(AssembleError::Missing(why)) => {
@@ -1297,15 +1291,11 @@ fn half_returned(to: &str) -> Option<Vec<u8>> {
     let text = std::fs::read_to_string(engine_dir().join("stage_io.ll")).expect("read the fixture");
     assert!(text.contains(last), "the fixture's return");
     let text = text.replacen(last, to, 1);
-    // One directory per call: tests running on threads of one process do not share it.
-    static CALLS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-    let call = CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!("m2v-hof32-{}-{call}", std::process::id()));
-    std::fs::create_dir_all(&dir).expect("scratch");
+    let scratch = Scratch::new("m2v-hof32");
+    let dir = scratch.path();
     let path = dir.join("edited.ll");
     std::fs::write(&path, text).expect("write");
     let bc = llvm_assemble(&path);
-    let _ = std::fs::remove_dir_all(&dir);
     match bc {
         Ok(b) => Some(b),
         Err(AssembleError::Missing(why)) => {

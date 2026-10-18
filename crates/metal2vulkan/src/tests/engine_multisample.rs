@@ -50,7 +50,7 @@ use crate::pipeline::facts::RuntimeFact;
 use crate::pipeline::lower_inputs::LoweringInputs;
 use crate::pipeline::sym::SpecKey;
 use crate::pipeline::testing::{
-    compile, engine_dir, llvm_assemble, moltenvk_msl_compile, AssembleError,
+    compile, engine_dir, llvm_assemble, moltenvk_msl_compile, AssembleError, Scratch,
 };
 use crate::pipeline::RenderPipeline;
 use crate::spirv::testing::{check_words_valid, MOLTENVK_CAPTURES};
@@ -898,12 +898,11 @@ fn get_num_samples_reads_the_pipeline_sample_count() {
         "@air.get_num_samples.i32(i32 1)",
     );
     assert_ne!(other, text);
-    let dir = std::env::temp_dir().join(format!("m2v-num-samples-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).expect("scratch");
+    let scratch = Scratch::new("m2v-num-samples");
+    let dir = scratch.path();
     let ll = dir.join("num_samples_one.ll");
     std::fs::write(&ll, other).expect("write");
     let bc = llvm_assemble(&ll);
-    let _ = std::fs::remove_dir_all(&dir);
     let bc = bc.expect("assembled");
     let p = Device::new(description("lavapipe"), DevicePolicy::default()).expect("device");
     match compile(&bc, "spc_num_samples", p.profile()) {

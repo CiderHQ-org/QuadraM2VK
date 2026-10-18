@@ -9,14 +9,15 @@
 //! The allocator below counts the bytes the translation asked for, so the ledger's share of them
 //! is a property of the code, not of the host. It is the global allocator of the crate's whole
 //! test build, so it counts only inside `held_during`, and every other test allocates at the cost
-//! of one relaxed load. The counters are process-wide: a measurement assumes its test runs alone in
-//! its process, as nextest runs every test. Other tests count allocations with it
-//! ([`allocations_during`]).
+//! of one thread-local read. Its counters are the measuring thread's own: the translation runs on
+//! its caller's thread, so a measurement holds whether its test runs alone in its process (as
+//! nextest runs every test) or beside others on libtest's threads (`cargo test`), whose
+//! allocations it does not see. Other tests count allocations with it ([`allocations_during`]).
 //!
 //! `llvm-as` assembles the kernel; without it the test skips visibly.
 
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU64, Ordering};
+use std::cell::Cell;
 
 use crate::budget::{Budget, Meter, LEDGER_BYTES, SPIRV_WORDS, WORK_UNITS};
 use crate::cache::PipelineArtifact;
@@ -25,28 +26,46 @@ use crate::error::{Error, Feature, Limit};
 use crate::library::{FunctionConstantValues, Library};
 use crate::lower::select::LowerInputs;
 use crate::pipeline::compile::{compile_bitcode, EntryRef};
-use crate::pipeline::testing::{llvm_assemble, profile, AssembleError};
+use crate::pipeline::testing::{llvm_assemble, profile, AssembleError, Scratch};
 use crate::pipeline::{ComputePipelineDescriptor, FunctionDescriptor, StageSource};
 
-/// Whether the allocator counts, the bytes live since `held_during` armed it, and their
-/// high-water mark.
-static COUNTING: AtomicBool = AtomicBool::new(false);
-static LIVE: AtomicIsize = AtomicIsize::new(0);
-static PEAK: AtomicIsize = AtomicIsize::new(0);
-/// The allocations and reallocations made since `held_during` or `allocations_during` armed it.
-static ALLOCATIONS: AtomicU64 = AtomicU64::new(0);
+/// One thread's counts, while `held_during` measures on it.
+#[derive(Clone, Copy)]
+struct Counts {
+    /// Whether the allocator counts this thread's allocations.
+    counting: bool,
+    /// The bytes live since `held_during` armed it, and their high-water mark.
+    live: isize,
+    peak: isize,
+    /// The allocations and reallocations made since `held_during` armed it.
+    allocations: u64,
+}
 
-/// `grown` bytes allocated and `freed` released, while the allocator counts: an allocation or
-/// reallocation where `grown` is not 0.
+thread_local! {
+    /// The calling thread's counts: a constant with no destructor, so the allocator reads it
+    /// without allocating, at any point of the thread's life.
+    static COUNTS: Cell<Counts> = const {
+        Cell::new(Counts {
+            counting: false,
+            live: 0,
+            peak: 0,
+            allocations: 0,
+        })
+    };
+}
+
+/// `grown` bytes allocated and `freed` released on the calling thread, while the allocator counts
+/// there: an allocation or reallocation where `grown` is not 0.
 fn count(grown: usize, freed: usize) {
-    if COUNTING.load(Ordering::Relaxed) {
-        if grown != 0 {
-            ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+    let _ = COUNTS.try_with(|counts| {
+        let mut now = counts.get();
+        if now.counting {
+            now.allocations += u64::from(grown != 0);
+            now.live += grown as isize - freed as isize;
+            now.peak = now.peak.max(now.live);
+            counts.set(now);
         }
-        let delta = grown as isize - freed as isize;
-        let live = LIVE.fetch_add(delta, Ordering::Relaxed) + delta;
-        PEAK.fetch_max(live, Ordering::Relaxed);
-    }
+    });
 }
 
 struct Counting;
@@ -85,22 +104,38 @@ unsafe impl GlobalAlloc for Counting {
 #[global_allocator]
 static ALLOCATOR: Counting = Counting;
 
-/// `work`'s result, and the most bytes it held at once beyond what was live when it started.
-pub(crate) fn held_during<T>(work: impl FnOnce() -> T) -> (T, u64) {
-    LIVE.store(0, Ordering::Relaxed);
-    PEAK.store(0, Ordering::Relaxed);
-    ALLOCATIONS.store(0, Ordering::Relaxed);
-    COUNTING.store(true, Ordering::Relaxed);
+/// `work`'s result, and the most bytes it held at once on the calling thread beyond what was live
+/// when it started; and the allocations and reallocations it made there.
+fn measured<T>(work: impl FnOnce() -> T) -> (T, Counts) {
+    let armed = Counts {
+        counting: true,
+        live: 0,
+        peak: 0,
+        allocations: 0,
+    };
+    COUNTS.with(|counts| counts.set(armed));
     let value = work();
-    COUNTING.store(false, Ordering::Relaxed);
-    (value, PEAK.load(Ordering::Relaxed).max(0) as u64)
+    let counts = COUNTS.with(|counts| {
+        let mut now = counts.get();
+        now.counting = false;
+        counts.set(now);
+        now
+    });
+    (value, counts)
 }
 
-/// `work`'s result, and the allocations and reallocations made while it ran (every thread's: the
-/// test runs it alone in its process).
+/// `work`'s result, and the most bytes it held at once beyond what was live when it started (the
+/// calling thread's, on which the translation runs).
+pub(crate) fn held_during<T>(work: impl FnOnce() -> T) -> (T, u64) {
+    let (value, counts) = measured(work);
+    (value, counts.peak.max(0) as u64)
+}
+
+/// `work`'s result, and the allocations and reallocations it made while it ran (the calling
+/// thread's).
 pub(super) fn allocations_during<T>(work: impl FnOnce() -> T) -> (T, u64) {
-    let (value, _) = held_during(work);
-    (value, ALLOCATIONS.load(Ordering::Relaxed))
+    let (value, counts) = measured(work);
+    (value, counts.allocations)
 }
 
 const DATALAYOUT: &str = "e-p:64:64:64-i1:8:8-i8:8:8-i16:16:16-i32:32:32-i64:64:64-f32:32:32-f64:64:64-v16:16:16-v24:32:32-v32:32:32-v48:64:64-v64:64:64-v96:128:128-v128:128:128-v192:256:256-v256:256:256-v512:512:512-v1024:1024:1024-n8:16:32";
@@ -174,15 +209,11 @@ define void @blob(ptr addrspace(1) %out, i32 %t) {{
 }
 
 fn assemble(depth: u32, escaping: Escaping) -> Option<Vec<u8>> {
-    let dir = std::env::temp_dir().join(format!(
-        "m2v-blob-footprint-{}-{depth}-{escaping:?}",
-        std::process::id()
-    ));
-    std::fs::create_dir_all(&dir).expect("scratch");
+    let scratch = Scratch::new(&format!("m2v-blob-footprint-{depth}-{escaping:?}"));
+    let dir = scratch.path();
     let ll = dir.join("k.ll");
     std::fs::write(&ll, blob_kernel(depth, escaping)).expect("write");
     let r = llvm_assemble(&ll);
-    let _ = std::fs::remove_dir_all(&dir);
     match r {
         Ok(b) => Some(b),
         Err(AssembleError::Missing(why)) => {

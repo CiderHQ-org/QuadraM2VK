@@ -37,6 +37,7 @@ use crate::pipeline::sym::{
 };
 use crate::pipeline::testing::{
     compile, engine_dir, link_and_validate, llvm_assemble, meter, specialized_entry, AssembleError,
+    Scratch,
 };
 use crate::pipeline::{ComputePipelineDescriptor, FunctionDescriptor, PrecisionNote, StageSource};
 use crate::spirv::interp::{run, Buffer, Config, Resources};
@@ -57,12 +58,11 @@ const RAY_FEATURES: [VkFeature; 3] = [
 
 /// `text` (after [`HEADER`]) assembled from a scratch file, or `None` when `llvm-as` is missing.
 fn assemble(tag: &str, text: &str) -> Option<Vec<u8>> {
-    let dir = std::env::temp_dir().join(format!("m2v-engine-ray-{}-{tag}", std::process::id()));
-    std::fs::create_dir_all(&dir).expect("scratch");
+    let scratch = Scratch::new(&format!("m2v-engine-ray-{tag}"));
+    let dir = scratch.path();
     let path = dir.join("module.ll");
     std::fs::write(&path, format!("{HEADER}{text}{VERSIONS}")).expect("write");
     let bc = llvm_assemble(&path);
-    let _ = std::fs::remove_dir_all(&dir);
     match bc {
         Ok(b) => Some(b),
         Err(AssembleError::Missing(why)) => {

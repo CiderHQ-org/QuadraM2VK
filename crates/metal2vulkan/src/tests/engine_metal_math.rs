@@ -39,7 +39,7 @@ use crate::pipeline::interface::PushLoc;
 use crate::pipeline::sym::{Axis, PushField, ResourceKind, ResourceSlot, SpecKey, Stage};
 use crate::pipeline::testing::{
     compile, engine_dir, exact_maths, link_and_validate, llvm_assemble, meter, profile,
-    tiny_check_scales, typed_module, without_math_routines, AssembleError,
+    tiny_check_scales, typed_module, without_math_routines, AssembleError, Scratch,
 };
 use crate::spirv::interp::{run, Buffer, Config, Resources};
 use crate::spirv::ir::StorageClass;
@@ -187,12 +187,11 @@ fn module() -> String {
 }
 
 fn assemble() -> Option<Vec<u8>> {
-    let dir = std::env::temp_dir().join(format!("m2v-metal-math-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).expect("temp dir");
+    let scratch = Scratch::new("m2v-metal-math");
+    let dir = scratch.path();
     let ll = dir.join("metal_math.ll");
     std::fs::write(&ll, module()).expect("write");
     let assembled = llvm_assemble(&ll);
-    std::fs::remove_dir_all(&dir).expect("remove temp dir");
     match assembled {
         Ok(b) => Some(b),
         Err(AssembleError::Missing(t)) => {

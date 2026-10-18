@@ -43,7 +43,7 @@ use crate::pipeline::sym::{
     PushField, ResourceKind, ResourceSlot, SlotClass, SlotRef, Stage, Symbol,
 };
 use crate::pipeline::testing::{
-    engine_dir, llvm_assemble, meter, profile, typed_module_with, AssembleError,
+    engine_dir, llvm_assemble, meter, profile, typed_module_with, AssembleError, Scratch,
 };
 use crate::spirv::interp::{run, Buffer, Config, Resources};
 use crate::spirv::testing::check_words_valid;
@@ -744,12 +744,11 @@ fn probe(ptr_attrs: &str, access: &str, body: &str) -> String {
 
 /// `text` assembled by `llvm-as` from a scratch file removed at once.
 fn assemble_text(name: &str, text: &str) -> Option<Vec<u8>> {
-    let dir = std::env::temp_dir().join(format!("m2v-vertex-fetch-{}-{name}", std::process::id()));
-    std::fs::create_dir_all(&dir).expect("scratch");
+    let scratch = Scratch::new(&format!("m2v-vertex-fetch-{name}"));
+    let dir = scratch.path();
     let ll = dir.join("probe.ll");
     std::fs::write(&ll, text).expect("write");
     let r = llvm_assemble(&ll);
-    let _ = std::fs::remove_dir_all(&dir);
     match r {
         Ok(b) => Some(b),
         Err(AssembleError::Missing(why)) => {

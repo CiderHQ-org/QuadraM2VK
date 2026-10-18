@@ -18,7 +18,7 @@ use crate::lower::arith::fma;
 use crate::pipeline::artifact::PrecisionNote;
 use crate::pipeline::sym::{ResourceKind, ResourceSlot, Stage};
 use crate::pipeline::testing::{
-    compile, link_and_validate, llvm_assemble, typed_module, AssembleError,
+    compile, link_and_validate, llvm_assemble, typed_module, AssembleError, Scratch,
 };
 use crate::spirv::interp::{run, Buffer, Config, Resources};
 use crate::spirv::testing::committed_profiles_with;
@@ -203,12 +203,11 @@ fn module() -> String {
 
 /// Assemble the module, or `None` (skipped visibly) without `llvm-as`.
 fn assemble() -> Option<Vec<u8>> {
-    let dir = std::env::temp_dir().join(format!("m2v-metal-denormals-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).expect("temp dir");
+    let scratch = Scratch::new("m2v-metal-denormals");
+    let dir = scratch.path();
     let ll = dir.join("denormals.ll");
     std::fs::write(&ll, module()).expect("write");
     let assembled = llvm_assemble(&ll);
-    std::fs::remove_dir_all(&dir).expect("remove temp dir");
     match assembled {
         Ok(b) => Some(b),
         Err(AssembleError::Missing(t)) => {

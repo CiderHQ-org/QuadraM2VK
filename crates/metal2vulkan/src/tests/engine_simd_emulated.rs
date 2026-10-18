@@ -44,7 +44,7 @@ use crate::pipeline::interface::PushLoc;
 use crate::pipeline::sym::{Axis, PushField, ResourceKind, ResourceSlot, SpecKey, Stage};
 use crate::pipeline::testing::{
     compile, engine_dir, link_and_validate, llvm_assemble, profile, typed_module,
-    typed_module_with, AssembleError,
+    typed_module_with, AssembleError, Scratch,
 };
 use crate::pipeline::{
     ComputePipeline, ComputePipelineDescriptor, FunctionDescriptor, LoweringInputs, Reconvergence,
@@ -94,13 +94,11 @@ fn assemble(stem: &str) -> Option<Vec<u8>> {
 
 /// `text` assembled from a scratch file.
 fn assemble_text(tag: &str, text: &str) -> Option<Vec<u8>> {
-    let dir = std::env::temp_dir().join(format!("m2v-simd-emulated-{}-{tag}", std::process::id()));
-    std::fs::create_dir_all(&dir).expect("scratch");
+    let scratch = Scratch::new(&format!("m2v-simd-emulated-{tag}"));
+    let dir = scratch.path();
     let path = dir.join("kernel.ll");
     std::fs::write(&path, text).expect("write");
-    let bc = assemble_file(&path, tag);
-    let _ = std::fs::remove_dir_all(&dir);
-    bc
+    assemble_file(&path, tag)
 }
 
 /// Every word of buffer 0 after one workgroup of local size `local` ran `m` (planned as `plan`)

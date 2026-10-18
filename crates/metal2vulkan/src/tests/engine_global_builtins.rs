@@ -10,7 +10,7 @@ use crate::error::{Error, Feature, LowerFamily, Needs};
 use crate::pipeline::interface::PushLoc;
 use crate::pipeline::sym::{Axis, PushField, ResourceKind, ResourceSlot, SpecKey, Stage};
 use crate::pipeline::testing::{
-    compile, engine_dir, link_and_validate, llvm_assemble, typed_module, AssembleError,
+    compile, engine_dir, link_and_validate, llvm_assemble, typed_module, AssembleError, Scratch,
 };
 use crate::spirv::interp::{run, Buffer, Config, Order, Resources, SubgroupSize};
 use crate::spirv::testing::committed_profiles;
@@ -202,15 +202,11 @@ fn kernel(reads: &[Read], global: bool) -> String {
 
 /// `text` assembled from a scratch file, or `None` (a skip) without `llvm-as`.
 fn assemble(tag: &str, text: &str) -> Option<Vec<u8>> {
-    let dir = std::env::temp_dir().join(format!(
-        "m2v-engine-global-builtins-{}-{tag}",
-        std::process::id()
-    ));
-    std::fs::create_dir_all(&dir).expect("scratch");
+    let scratch = Scratch::new(&format!("m2v-engine-global-builtins-{tag}"));
+    let dir = scratch.path();
     let path = dir.join("kernel.ll");
     std::fs::write(&path, text).expect("write");
     let bc = llvm_assemble(&path);
-    let _ = std::fs::remove_dir_all(&dir);
     match bc {
         Ok(b) => Some(b),
         Err(AssembleError::Missing(why)) => {

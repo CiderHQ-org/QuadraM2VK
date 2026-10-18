@@ -39,7 +39,9 @@ use crate::device::subgroup::Tier;
 use crate::device::DevicePolicy;
 use crate::lower::select::Plan;
 use crate::pipeline::sym::{Axis, ResourceKind, ResourceSlot, SpecKey, Stage};
-use crate::pipeline::testing::{compile, llvm_assemble, profile, typed_module, AssembleError};
+use crate::pipeline::testing::{
+    compile, llvm_assemble, profile, typed_module, AssembleError, Scratch,
+};
 use crate::spirv::interp::{run, Buffer, Config, Order, Resources, SubgroupSize};
 use crate::spirv::ir::TypedModule;
 
@@ -87,8 +89,8 @@ fn assemble(name: &str, body: &str) -> Option<Vec<u8>> {
 
 /// Module `text` (kernel `name`) assembled.
 fn assemble_text(name: &str, text: &str) -> Option<Vec<u8>> {
-    let dir = std::env::temp_dir().join(format!("m2v-lockstep-{}-{name}", std::process::id()));
-    std::fs::create_dir_all(&dir).expect("scratch");
+    let scratch = Scratch::new(&format!("m2v-lockstep-{name}"));
+    let dir = scratch.path();
     let path = dir.join("kernel.ll");
     std::fs::write(&path, text).expect("write");
     let bc = match llvm_assemble(&path) {
@@ -99,7 +101,6 @@ fn assemble_text(name: &str, text: &str) -> Option<Vec<u8>> {
         }
         Err(AssembleError::Rejected(why)) => panic!("llvm-as rejected {name}: {why}"),
     };
-    let _ = std::fs::remove_dir_all(&dir);
     bc
 }
 

@@ -14,35 +14,15 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicU32, Ordering};
 
 use crate::air::bitcode::{decode, decode_with, DecodeOptions, Decoded};
 use crate::air::error::{Error, InputErrorKind};
 use crate::air::ir::print::print;
 use crate::air::ir::{Callee, CastOp, Const, ConstExpr, ConstId, FuncId, InstKind, Type, TypeId};
 use crate::budget::{Budget, Meter};
+use crate::pipeline::testing::Scratch;
 
 // ---- Tools and fixtures ----
-
-static SCRATCH: AtomicU32 = AtomicU32::new(0);
-
-/// A fresh scratch directory, removed by the guard.
-struct Scratch(PathBuf);
-
-impl Scratch {
-    fn new() -> Scratch {
-        let n = SCRATCH.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!("m2v-air-input-{}-{n}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        Scratch(dir)
-    }
-}
-
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
 
 /// `llvm-as`: the `METAL2VULKAN_LLVM_AS` override, else `PATH`, else the Homebrew LLVM prefixes.
 fn llvm_as() -> Option<PathBuf> {
@@ -136,7 +116,7 @@ fn llvm_assemble(tool: &Path, ll: &Path, scratch: &Scratch) -> Vec<u8> {
 /// LLVM for every version (their text, not bitcode, was the old engine's input). The
 /// engine fixtures must always assemble.
 fn try_llvm_assemble(tool: &Path, ll: &Path, scratch: &Scratch) -> Option<Vec<u8>> {
-    let out = scratch.0.join("fixture.bc");
+    let out = scratch.path().join("fixture.bc");
     let bytes = assemble(tool, &[ll.as_os_str()], &out);
     assert!(
         bytes.is_some() || !ll.starts_with(engine_dir()),
@@ -146,7 +126,7 @@ fn try_llvm_assemble(tool: &Path, ll: &Path, scratch: &Scratch) -> Option<Vec<u8
 }
 
 fn metal_assemble(air_ll: &Path, scratch: &Scratch) -> Vec<u8> {
-    let out = scratch.0.join("fixture.air");
+    let out = scratch.path().join("fixture.air");
     let args = [std::ffi::OsStr::new("metal-as"), air_ll.as_os_str()];
     assemble(Path::new("xcrun"), &args, &out)
         .unwrap_or_else(|| panic!("xcrun metal-as rejected {air_ll:?}"))
@@ -351,7 +331,7 @@ fn every_public_fixture_decodes_into_its_text_shape() {
         eprintln!("SKIP every_public_fixture_decodes_into_its_text_shape: llvm-as not found");
         return;
     };
-    let scratch = Scratch::new();
+    let scratch = Scratch::new("m2v-air-input");
     let (mut decoded, mut skipped, mut refused) = (0, Vec::new(), Vec::new());
     for ll in all_opaque_fixtures() {
         let Some(bytes) = try_llvm_assemble(&tool, &ll, &scratch) else {
@@ -385,7 +365,7 @@ fn every_public_intrinsic_call_decodes_or_is_listed() {
         eprintln!("SKIP every_public_intrinsic_call_decodes_or_is_listed: llvm-as not found");
         return;
     };
-    let scratch = Scratch::new();
+    let scratch = Scratch::new("m2v-air-input");
     let (mut decoded, mut unlisted) = (0, Vec::new());
     for ll in all_opaque_fixtures() {
         let Some(bytes) = try_llvm_assemble(&tool, &ll, &scratch) else {
@@ -426,7 +406,7 @@ fn decoding_is_deterministic() {
         eprintln!("SKIP decoding_is_deterministic: llvm-as not found");
         return;
     };
-    let scratch = Scratch::new();
+    let scratch = Scratch::new("m2v-air-input");
     for ll in all_opaque_fixtures() {
         let Some(bytes) = try_llvm_assemble(&tool, &ll, &scratch) else {
             continue;
@@ -500,7 +480,7 @@ fn engine_fixtures_match_their_golden_printout() {
             }
         }
     }
-    let scratch = Scratch::new();
+    let scratch = Scratch::new("m2v-air-input");
     let mut differ = Vec::new();
     for tool in &tools {
         let version = llvm_major(tool).unwrap_or_else(|| "?".to_string());
@@ -541,7 +521,7 @@ fn engine_fixtures_match_their_golden_printout() {
 #[ignore]
 fn bless_engine_goldens() {
     let tool = llvm_as().expect("llvm-as");
-    let scratch = Scratch::new();
+    let scratch = Scratch::new("m2v-air-input");
     for ll in opaque_fixtures(&engine_dir()) {
         let d = decode_compared(&llvm_assemble(&tool, &ll, &scratch), &ll);
         let path = golden_path(&ll);
@@ -732,7 +712,7 @@ fn typed_and_opaque_fixtures_decode_to_the_same_instructions() {
         );
         return;
     }
-    let scratch = Scratch::new();
+    let scratch = Scratch::new("m2v-air-input");
     let mut compared = 0;
     for ll in opaque_fixtures(&engine_dir()) {
         let air_ll = ll.with_extension("air.ll");
@@ -755,8 +735,8 @@ fn typed_and_opaque_fixtures_decode_to_the_same_instructions() {
 /// Assemble `text` with `llvm-as` and decode it; `None` when `llvm-as` is missing.
 fn decode_text(text: &str) -> Option<Result<Decoded, Error>> {
     let tool = llvm_as()?;
-    let scratch = Scratch::new();
-    let ll = scratch.0.join("input.ll");
+    let scratch = Scratch::new("m2v-air-input");
+    let ll = scratch.path().join("input.ll");
     std::fs::write(&ll, text).unwrap();
     let bytes = llvm_assemble(&tool, &ll, &scratch);
     let mut m = Meter::new(&Budget::default());
