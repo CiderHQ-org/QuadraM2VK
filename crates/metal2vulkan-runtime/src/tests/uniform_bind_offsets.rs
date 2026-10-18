@@ -5,6 +5,9 @@
 //! inline bytes) or the residual plus it (offsets 4, 20, 36, 260 and 516, which no device's
 //! alignment of at least 16 divides, and every offset of a slot a state once found bound at
 //! such an offset, `argument_table::AtBindViews`). A slot bound at offsets that move keeps one
+//! shape and one pipeline. A state's creation makes its predicted key's residual form, every slot
+//! read at its residual, and a draw whose own key is not made draws with it at once while its own
+//! is made on the device's pool (`pipeline/render/residual.rs`).
 //!
 //! A device test: compiled only under the validation crate's GPU safety cfgs (`m2v_gpu`,
 //! `m2v_cpu_icd`), on the kind of device the cfg selects. The functions are those of the owned
@@ -97,6 +100,24 @@ fn pass(device: &Device) -> (RenderPassDescriptor, Texture) {
     (pass, target)
 }
 
+/// `device`'s work counts once its pipeline pool holds no piece (`WorkCounts::pipeline_pool_busy`):
+/// a draw that took its key's residual form does not wait for its own key's making.
+fn idle(device: &Device) -> crate::WorkCounts {
+    let until = std::time::Instant::now() + WAIT;
+    loop {
+        let counts = device.work_counts();
+        if counts.pipeline_pool_busy == 0 {
+            return counts;
+        }
+        assert!(
+            std::time::Instant::now() < until,
+            "the device's pipeline pool still holds {} pieces after {WAIT:?}",
+            counts.pipeline_pool_busy
+        );
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+}
+
 /// Draw each of `cases` into a target of its own in one command buffer, and check every pixel.
 fn draw(device: &Device, queue: &CommandQueue, state: &RenderPipelineState, cases: &[Bound]) {
     let data = constants();
@@ -157,13 +178,19 @@ fn draw(device: &Device, queue: &CommandQueue, state: &RenderPipelineState, case
 /// A draw reads its vertex and fragment constants at their bind offsets in either form. Draws
 /// whose ranges start at their bind offsets share one pipeline; each other combination of the two
 /// slots' forms, on a state of its own (a state's slot found at such an offset once is read in
+/// the other form from then on), makes one of its own (the path ran), but for both slots read at
+/// their residuals, the creation's residual form. Each making a draw began is made on the device's
+/// pool, which is waited for before the pipelines made are counted.
 #[test]
 fn vertex_and_fragment_constants_read_at_every_bind_offset() {
     let scratch = Scratch::new("uniform-bind-offsets");
     let device = device(&scratch.0);
     let queue = device.new_command_queue().unwrap();
     let [state, fragment, vertex, both] = [(); 4].map(|()| self::state(&device));
+    let made = || idle(&device).variant_pipelines_made;
     let start = made();
+    // Offsets every device's alignment divides, and inline bytes: one pipeline, which the state's
+    // creation did not make (it made the residual form).
     draw(
         &device,
         &queue,
@@ -176,7 +203,10 @@ fn vertex_and_fragment_constants_read_at_every_bind_offset() {
         ],
     );
     let aligned = made();
+    assert_eq!(aligned - start, 1, "pipelines made");
     // Offsets no device's alignment divides, on one slot, the other, and both, each on a state of
+    // its own: a pipeline for each of the first two, and none for both, the creation's residual
+    // form, and the states keep them.
     draw(&device, &queue, &fragment, &[Bound::Buffer(4, 0)]);
     draw(&device, &queue, &vertex, &[Bound::Buffer(0, 4)]);
     draw(
@@ -190,6 +220,7 @@ fn vertex_and_fragment_constants_read_at_every_bind_offset() {
         ],
     );
     let other = made();
+    assert_eq!(other - aligned, 2, "one pipeline per other combination");
     // Offsets some devices' alignments divide, and offsets every device's divides, on slots
     // found at another before: read in the other form, in the pipelines made.
     let moved = [
@@ -214,6 +245,10 @@ fn vertex_and_fragment_constants_read_at_every_bind_offset() {
 /// and makes and looks up no pipeline. The first makes two shapes at most: where the device's
 /// view base alignment divides the first offset, 256, and not the next, which leaves the slot out
 /// of those that tell it apart from then on (`argument_table::AtBindViews`). A first command
+/// buffer draws the offsets once and completes, and the device's pipeline pool is waited for, so
+/// their pipelines are made before the counted passes: a draw of a pipeline its device's pool still
+/// makes looks the key up (ANV makes them so while the draws record, and a draw that takes its
+/// key's residual form meanwhile does not wait for them).
 #[test]
 fn constants_bound_at_moving_offsets_keep_one_shape() {
     let scratch = Scratch::new("uniform-moving-offsets");
@@ -286,6 +321,7 @@ fn constants_bound_at_moving_offsets_keep_one_shape() {
         counts
     };
     let made_first = run(1);
+    idle(&device);
     let shapes = made_first[1].draw_shapes_made - made_first[0].draw_shapes_made;
     assert!(shapes <= 2, "{shapes} shapes made on the first pass");
     let counts = run(2);
@@ -303,6 +339,123 @@ fn constants_bound_at_moving_offsets_keep_one_shape() {
         made(second),
         "shapes made, draws settled, pipelines made and looked up on the second pass"
     );
+}
+
+/// A state's creation makes its predicted key's residual form, each slot read at its residual
+/// (`pipeline/render/residual.rs`). With the device's pool held, so that a draw waiting for a
+/// making there could not complete, a draw binding both slots at offset 0, which every device's
+/// alignment divides, and a draw binding the fragment slot at 4, which none divides, both draw at
+/// once with the creation's pipeline and read their bytes: their own keys' makings wait in the
+/// pool, nothing waiting for them. Once the pool runs they are made, and a later draw of the
+/// second key (the state reads the fragment slot at its residual from then on) takes its own.
+#[test]
+fn draws_take_the_residual_form_while_their_own_keys_are_made() {
+    let scratch = Scratch::new("uniform-residual-form");
+    let device = device(&scratch.0);
+    let queue = device.new_command_queue().unwrap();
+    let before = device.work_counts();
+    let state = state(&device);
+    let created = device.work_counts();
+    assert_eq!(
+        created.creation_pipelines_made - before.creation_pipelines_made,
+        1,
+        "the creation's residual form"
+    );
+    let hold = crate::pipeline::pool::held::hold();
+    draw(
+        &device,
+        &queue,
+        &state,
+        &[Bound::Buffer(0, 0), Bound::Buffer(4, 0)],
+    );
+    let drawn = device.work_counts();
+    drop(hold);
+    assert_eq!(
+        drawn.residual_form_draws - created.residual_form_draws,
+        2,
+        "draws that took the residual form"
+    );
+    assert_eq!(
+        drawn.residual_form_makings - created.residual_form_makings,
+        2,
+        "makings begun that nothing waits for"
+    );
+    assert_eq!(
+        drawn.creation_pipelines_drawn - created.creation_pipelines_drawn,
+        1,
+        "the creation's pipeline, drawn"
+    );
+    assert_eq!(
+        drawn.variant_pipelines_made, created.variant_pipelines_made,
+        "pipelines made while the pool was held"
+    );
+    let made = idle(&device);
+    assert_eq!(
+        made.variant_pipelines_made - drawn.variant_pipelines_made,
+        2,
+        "the draws' own keys, made on the pool"
+    );
+    draw(&device, &queue, &state, &[Bound::Buffer(0, 0)]);
+    let later = device.work_counts();
+    assert_eq!(
+        later.residual_form_draws, made.residual_form_draws,
+        "a later draw of a key made took the residual form"
+    );
+    assert_eq!(
+        later.variant_pipelines_made, made.variant_pipelines_made,
+        "pipelines made for a later draw of a key made"
+    );
+}
+
+/// A slot bound to nothing is read at its residual, its residual 0 (`RangeAtBindOffset` 0, as
+/// `bind::plan::slots::range_at_bind_offset` has it): the key of a draw that leaves both constant
+/// slots unbound is the creation's, its residual form. With the device's pool held, such a draw
+/// takes the creation's pipeline itself, neither through the residual form nor by a making of its
+/// own: nothing is made, handed to the pool or begun, and its command buffer completes while the
+/// pool is still held. (Its pixels read unbound slots, which Metal leaves undefined: unchecked.)
+#[test]
+fn a_draw_that_leaves_constant_slots_unbound_takes_the_creations_key() {
+    let scratch = Scratch::new("uniform-unbound");
+    let device = device(&scratch.0);
+    let queue = device.new_command_queue().unwrap();
+    let state = state(&device);
+    let created = idle(&device);
+    let hold = crate::pipeline::pool::held::hold();
+    let (pass, _target) = pass(&device);
+    let command_buffer = queue.command_buffer().unwrap();
+    let mut encoder = command_buffer.render_command_encoder(&pass).unwrap();
+    encoder.set_render_pipeline_state(&state).unwrap();
+    encoder
+        .draw_primitives(PrimitiveType::Triangle, 0, 3, 1, 0)
+        .unwrap();
+    encoder.end_encoding().unwrap();
+    let drawn = device.work_counts();
+    assert_eq!(
+        drawn.creation_pipelines_drawn - created.creation_pipelines_drawn,
+        1,
+        "the creation's pipeline, drawn"
+    );
+    assert_eq!(
+        (
+            drawn.residual_form_draws - created.residual_form_draws,
+            drawn.residual_form_makings - created.residual_form_makings,
+            drawn.pipelines_pooled - created.pipelines_pooled,
+            drawn.variant_pipelines_made - created.variant_pipelines_made,
+        ),
+        (0, 0, 0, 0),
+        "residual-form draws, their makings, pieces pooled and pipelines made"
+    );
+    command_buffer.commit().unwrap();
+    command_buffer
+        .wait_until_completed_for(WAIT)
+        .expect("the draw's command buffer waits for no making");
+    assert_eq!(command_buffer.error(), None);
+    assert_eq!(
+        device.work_counts().pipeline_pool_busy,
+        0,
+        "nothing waits in the pool"
+    );
+    drop(hold);
 }
 
 /// A kernel reads its constants at their bind offset in either form.

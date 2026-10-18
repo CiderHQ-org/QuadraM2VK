@@ -41,6 +41,8 @@ pub(crate) struct Counters {
     addressable_buffers_made: AtomicU64,
     mipmap_first_levels_fetched: AtomicU64,
     pipelines_pooled: AtomicU64,
+    residual_form_draws: AtomicU64,
+    residual_form_makings: AtomicU64,
     shader_modules_made: AtomicU64,
     shader_modules_shared: AtomicU64,
     pipeline_layouts_made: AtomicU64,
@@ -272,6 +274,7 @@ pub(crate) struct Counters {
     fragment_shader_libraries_made: AtomicU64,
     pipelines_linked: AtomicU64,
     dispatch_pipelines_pooled: AtomicU64,
+    tile_pipelines_pooled: AtomicU64,
     upload_chunks_in_device_memory: AtomicU64,
 
 /// How a render pass took a shadowed texture as a color attachment
@@ -479,6 +482,18 @@ impl Counters {
         self.pipelines_pooled.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// A draw whose key's `VkPipeline` was not made took its residual form's
+    /// (`pipeline/render/residual.rs`).
+    pub(crate) fn residual_form_drawn(&self) {
+        self.residual_form_draws.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A draw that began its key's making took its residual form's `VkPipeline` meanwhile
+    /// (`pipeline/render/residual.rs`).
+    pub(crate) fn residual_form_making(&self) {
+        self.residual_form_makings.fetch_add(1, Ordering::Relaxed);
+    }
+
     /// A pipeline state's variant made a `VkShaderModule` (`pipeline/objects.rs`).
     pub(crate) fn shader_module_made(&self) {
         self.shader_modules_made.fetch_add(1, Ordering::Relaxed);
@@ -527,6 +542,12 @@ impl Counters {
     pub(crate) fn dispatch_pipeline_pooled(&self) {
         self.dispatch_pipelines_pooled
             .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A render encoder's tile dispatch handed the making of a region's `VkPipeline` to the
+    /// device's pool and went on (`render/pending_tile.rs`).
+    pub(crate) fn tile_pipeline_pooled(&self) {
+        self.tile_pipelines_pooled.fetch_add(1, Ordering::Relaxed);
     }
 
     /// A command buffer's upload arena opened a chunk in device-local memory of a device without
@@ -1803,6 +1824,18 @@ pub struct WorkCounts {
     /// Draws that handed the making of their `VkPipeline` to the device's pool and went on,
     /// rather than make it at the draw.
     pub pipelines_pooled: u64,
+    /// Draws whose key's `VkPipeline` was not made, which drew at once with the made one of its
+    /// residual form, each of the key's uniform-view slots read at its residual (which reads the
+    /// same bytes at every bind offset): none waited for its key's making.
+    pub residual_form_draws: u64,
+    /// Of the makings draws began, those whose draw took its key's residual form meanwhile:
+    /// makings on the device's pool that nothing waits for.
+    pub residual_form_makings: u64,
+    /// The pieces the device's pipeline pool holds as the counts are read, waiting or running:
+    /// not a count of events, but the pool's state then. A making a draw that took its key's
+    /// residual form began may outlast the draw's command buffer, which does not wait for it: a
+    /// lane counting what later draws make waits until this is 0.
+    pub pipeline_pool_busy: u64,
     /// `VkShaderModule`s pipeline states' variants made: none for a state made again whose
     /// released variant's objects were kept (`pipeline/kept.rs`).
     pub shader_modules_made: u64,
@@ -2831,9 +2864,14 @@ pub struct WorkCounts {
     /// Render variants' `VkPipeline`s linked from libraries (each counted in
     /// `variant_pipelines_made` too).
     pub pipelines_linked: u64,
-    /// Dispatches that handed the making of a region's `VkPipeline` to the device's pool and
-    /// went on, rather than make it at the dispatch: each counted once per region it handed.
+    /// Compute encoders' dispatches that handed the making of a region's `VkPipeline` to the
+    /// device's pool and went on, rather than make it at the dispatch: each counted once per
+    /// region it handed.
     pub dispatch_pipelines_pooled: u64,
+    /// Render encoders' tile dispatches that handed the making of a region's `VkPipeline` to the
+    /// device's pool and went on, their passes recorded once it is made, rather than make it at
+    /// the dispatch: each counted once per region it handed.
+    pub tile_pipelines_pooled: u64,
     /// Chunks of command buffers' upload arenas placed in device-local memory on a device without
     /// unified memory, which the encoding thread then writes: none where the device has
     /// host-coherent, host-cached system memory (`upload.rs`).
@@ -2904,6 +2942,9 @@ impl Device {
                 .mipmap_first_levels_fetched
                 .load(Ordering::Relaxed),
             pipelines_pooled: counters.pipelines_pooled.load(Ordering::Relaxed),
+            residual_form_draws: counters.residual_form_draws.load(Ordering::Relaxed),
+            residual_form_makings: counters.residual_form_makings.load(Ordering::Relaxed),
+            pipeline_pool_busy: self.shared().pipeline_pool.busy() as u64,
             shader_modules_made: counters.shader_modules_made.load(Ordering::Relaxed),
             shader_modules_shared: counters.shader_modules_shared.load(Ordering::Relaxed),
             pipeline_layouts_made: counters.pipeline_layouts_made.load(Ordering::Relaxed),
@@ -3298,6 +3339,7 @@ impl Device {
                 .load(Ordering::Relaxed),
             pipelines_linked: counters.pipelines_linked.load(Ordering::Relaxed),
             dispatch_pipelines_pooled: counters.dispatch_pipelines_pooled.load(Ordering::Relaxed),
+            tile_pipelines_pooled: counters.tile_pipelines_pooled.load(Ordering::Relaxed),
             upload_chunks_in_device_memory: (counters.upload_chunks_in_device_memory)
                 .load(Ordering::Relaxed),
         }

@@ -932,7 +932,9 @@ How a notice reaches you:
   once per object.
 
 With `METAL2VULKAN_LOG_PIPELINES` set, a device also logs one line per render `VkPipeline` it
-makes (id name `metal2vulkan-pipeline-creation`, `Info` severity), and, once per reason, why a draw
+makes (id name `metal2vulkan-pipeline-creation`, `Info` severity), with where its time went: the
+wait for its turn, the digests that name its parts, each library (made by this making, from its
+driver cache record or not, or another caller's) and the link; and, once per reason, why a draw
 that reads its own pass's color attachment after a barrier took the split rather than a snapshot
 (id name `metal2vulkan-snapshot-fallback`, `Info` severity; `WorkCounts::reading_draws_snapshotted`
 counts those that took a snapshot), and now and then a count of the draws the snapshot's area rule
@@ -2598,8 +2600,23 @@ each item named states the rule in full.
 - **A draw's `VkPipeline` is made while the draw goes on.** A draw whose pipeline is not made yet
   returns once encoded; the pipeline is made on the device's pool of at most four threads, and the
   command buffer's work waits for it in queue order.
+- **A draw can take its key's residual form while its own pipeline is made.** A state's creation
+  makes its predicted key with every constant buffer slot read through a uniform view read at the
+  slot's residual (`RangeAtBindOffset` 0), which reads the same bytes at every bind offset: the
+  binder writes the slot's descriptor range and residual from the bind offset alone, whichever form
+  the pipeline takes, and the residual is 0 wherever the range starts at the bind offset. A slot
+  bound to nothing is read at its residual too (0), so a draw that leaves such slots unbound takes
+  the creation's pipeline itself. A draw whose own pipeline (which reads such a slot at the bind
+  offset alone, the residual-free form) is not made, and whose key's residual form's is, draws with
+  that one at once; its own is made on the pool behind the makings something waits for, and later
+  draws take it. Only GPU time moves for the draws before it lands: on ANV the residual form's reads
+  are loads where the other form's are pushed constants (`WorkCounts::residual_form_draws`,
+  `residual_form_makings`).
 - **A dispatch's `VkPipeline` is made while the dispatch goes on**, the same way: one pipeline per
-  threadgroup size and edge region, made on the pool.
+  threadgroup size and edge region, made on the pool. So is a tile dispatch's, its pass recorded
+  once it is made, the making ranked from the dispatch as one a committed command buffer waits for
+  (`WorkCounts::tile_pipelines_pooled`); a failed making fails the command buffer, as a draw's
+  does, `FailedPipeline` naming the dispatch by its order among the encoder's tile dispatch calls.
 
 **Binary archives and dynamic libraries**
 

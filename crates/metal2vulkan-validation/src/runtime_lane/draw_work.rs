@@ -56,6 +56,7 @@
 //! vertex buffer 0) and `tob_sample` (texture 0 through sampler 0, where its pixel lies).
 
 use super::degrade_notices::{on_device, on_device_with};
+use super::{buffer_with, pipelines_settled, WAIT};
 use crate::air_library::AirLibrary;
 use metal2vulkan::bind::{BindState, SamplerDescriptor};
 use metal2vulkan::device::VkExtension;
@@ -679,8 +680,8 @@ fn draws_that_change_a_slot_s_class_make_their_shapes_again() {
 /// Draws that switch between two pipeline states at every draw, of the same functions, look
 /// neither's `VkPipeline` up by its key once each state's draw found it made: each state's later
 /// draws find that entry again (`WorkCounts::graphics_pipelines_looked_up`), and neither makes a
-/// shape or settles. A first command buffer, completed, has both pipelines made. Every column
-/// is drawn.
+/// shape or settles. A first command buffer, completed, and the pipeline makings its draws began
+/// on the device's pool, settled, have both pipelines made. Every column is drawn.
 #[test]
 fn draws_switching_pipeline_states_find_their_pipelines_again() {
     on_device(|device, _| {
@@ -696,6 +697,7 @@ fn draws_switching_pipeline_states_find_their_pipelines_again() {
         }
         encoder.end_encoding().unwrap();
         scene.pixels(&made);
+        pipelines_settled(device);
         let (command_buffer, mut encoder) = scene.encoder(device);
         encoder.set_fragment_texture(Some(&red), 0).unwrap();
         let mut first = None;
@@ -1032,8 +1034,11 @@ fn recorded_by(device: &Device, encoder: &mut RenderCommandEncoder) -> u64 {
     grew(&before, &device.work_counts(), |c| c.draw_states_recorded)
 }
 
-/// Draw once through each of `pipelines` in a command buffer of its own, completed, so each
-/// pipeline is made: a later draw records as it draws, not once a making is done.
+/// Draw once through each of `pipelines` in a command buffer of its own, completed, and wait
+/// until the device's pool settled ([`pipelines_settled`]), so each draw's own key is made: a
+/// draw that took its key's residual form began that key's making on the pool, which its command
+/// buffer does not wait for. A later draw then takes its key's pipeline from its first draw on,
+/// and records as it draws, never switching pipelines once a making lands mid-test.
 fn make(device: &Device, scene: &Scene, pipelines: &[RenderPipelineState], texture: &Texture) {
     let (command_buffer, mut encoder) = scene.encoder(device);
     encoder.set_fragment_texture(Some(texture), 0).unwrap();
@@ -1044,6 +1049,8 @@ fn make(device: &Device, scene: &Scene, pipelines: &[RenderPipelineState], textu
     }
     encoder.end_encoding().unwrap();
     scene.pixels(&command_buffer);
+    pipelines_settled(device);
+}
 
 /// Whether `device` pushes set 0: Vulkan 1.4 or `VK_KHR_push_descriptor` (the instance's Vulkan
 /// 1.2 leaves `VK_KHR_push_descriptor` alone), whose `maxPushDescriptors` the lanes' set 0 fits,
@@ -1078,6 +1085,9 @@ pub(super) fn on_device_both_ways(test: impl Fn(&Device)) {
 /// set 0 anew), so no pipeline, push constant, buffer or dynamic state is set again. Where the
 /// device pushes set 0 ([`pushes`]), every draw pushes it, and past the first a draw records
 /// nothing, its writes the same. The first draw records them all, and the target is the
+/// texture's. Every draw takes its key's own pipeline, made beforehand ([`make`]), none the
+/// residual form, so no pipeline is bound again past the first draw. Both ways
+/// ([`on_device_both_ways`]).
 #[test]
 fn draws_of_an_unchanged_state_record_its_commands_once() {
     const DRAWS: usize = 16;
@@ -1094,7 +1104,14 @@ fn draws_of_an_unchanged_state_record_its_commands_once() {
         let later: Vec<u64> = (1..DRAWS)
             .map(|_| recorded_by(device, &mut encoder))
             .collect();
+        let after = device.work_counts();
+        let pushed = grew(&before, &after, |c| c.draws_pushing_set_zero);
         encoder.end_encoding().unwrap();
+        let residual = grew(&before, &after, |c| c.residual_form_draws);
+        assert_eq!(
+            residual, 0,
+            "a draw took its key's residual form: its key was not made"
+        );
         let pushes = pushes(device);
         assert_eq!(pushed, if pushes { DRAWS as u64 } else { 0 }, "{pushes}");
         let most = if pushes { 0 } else { 1 };

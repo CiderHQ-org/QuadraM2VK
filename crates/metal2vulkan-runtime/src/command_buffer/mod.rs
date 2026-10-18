@@ -67,6 +67,7 @@ use super::gpu_time::{self, KernelTimes, Life, Placement, Stamped, Times};
 use super::heap::Heap;
 use super::heap_sets::HeapUse;
 use super::live_buffers::LiveTable;
+use super::pipeline::budget::Urgency;
 use super::pipeline::kept::StepNumbers;
 use super::predication::Predication;
 use super::program_objects;
@@ -2007,7 +2008,7 @@ impl CommandBuffer {
             for work in &made_later {
                 work.when_made(&waker);
                 // Its batch waits for them now: they go before the makings nothing waits for.
-                work.hasten();
+                work.hasten(Urgency::Committed);
             }
         }
         drop(unreplayable);
@@ -2451,6 +2452,26 @@ impl CommandBufferShared {
                     .flat_map(|encoder| &encoder.sparse)
                     .any(SparseUpdate::needs_step),
             pipelines: segments().any(Segment::steps_after_pipelines),
+        }
+    }
+
+    /// Raise the makings of the pipelines batch `index`'s host step records, still being made,
+    /// to a queue's first held batch's (`budget::Urgency::Head`): the scheduler found the batch
+    /// first in its queue's line, every batch after it there waiting behind it. The makings are
+    /// read under the command buffer's lock and hastened with it released, as `commit` hastens
+    /// them.
+    pub(crate) fn hasten_head(&self, index: usize) {
+        let works: Vec<Deferred> = {
+            let state = lock(&self.state);
+            state.recorded[state.batch_range(index)]
+                .iter()
+                .flat_map(|encoder| &encoder.segments)
+                .filter(|segment| segment.steps_after_pipelines())
+                .map(|segment| segment.work.clone())
+                .collect()
+        };
+        for work in &works {
+            work.hasten(Urgency::Head);
         }
     }
 

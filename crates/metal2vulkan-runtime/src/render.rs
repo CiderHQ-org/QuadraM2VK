@@ -381,6 +381,7 @@ mod mesh;
 mod pass_start_reads;
 mod pass_steps;
 mod pending;
+mod pending_tile;
 mod replay;
 mod reroute;
 mod restart;
@@ -1130,6 +1131,9 @@ pub struct RenderCommandEncoder {
     /// The encoder's draw calls that returned `Ok` so far: the next one's order among them,
     /// which a draw whose pipeline is being made keeps for its failure (`FailedPipeline::draw`).
     draw_calls: usize,
+    /// Its tile dispatch calls that returned `Ok` so far, likewise for a tile dispatch
+    /// (`render/pending_tile.rs`).
+    tile_dispatch_calls: usize,
     /// The encoder records an execution's commands (`render/executions.rs`): a draw that needs
     /// another instance than the execution's is refused.
     replaying: bool,
@@ -1681,6 +1685,7 @@ impl RenderCommandEncoder {
             executions: Vec::new(),
             pending: Vec::new(),
             draw_calls: 0,
+            tile_dispatch_calls: 0,
             replaying: false,
             rerouting: false,
             keeping,
@@ -4549,6 +4554,12 @@ impl RenderCommandEncoder {
         // writes it: no depth resolve drawn after them, in a pass of its own or in a resolving
         // instance, no sign strip, no shader-side depth or stencil test, and no execution of
         // render commands or draw whose pipeline is being made, whose pass records later.
+        // The tile dispatches' pipelines, where every making finished made: a pass of one still
+        // being made, or failed, records later too (`render/pending_tile.rs`).
+        let tiles_made: Option<Vec<_>> = dispatches
+            .iter()
+            .map(|dispatch| dispatch.pipelines.made_now())
+            .collect();
         let held_depth = match layout.depth_stencil.as_ref() {
             Some(ds) if ds.separate.is_none() && ds.stand_in.is_none() && !ds.hidden => {
                 let none = crate::tracker::Access::NONE;
@@ -4556,6 +4567,7 @@ impl RenderCommandEncoder {
                 let alone = !inline
                     && executions.is_empty()
                     && pending.is_empty()
+                    && tiles_made.is_some()
                     && !resolve_after
                     && later_resolves.is_empty()
                     && picked_resolve.is_none()
@@ -4713,8 +4725,12 @@ impl RenderCommandEncoder {
         // The steps of a pass recorded now, or the pass that records later.
         let (mut recorded_steps, mut deferred) = (None, None);
         // A pass of a draw whose pipeline is being made records later too, once it is made
-        // (`render/pending.rs`).
-        if executions.is_empty() && pending.is_empty() {
+        // (`render/pending.rs`), and one of a tile dispatch's (`render/pending_tile.rs`).
+        let now = match &tiles_made {
+            Some(tiles) if executions.is_empty() && pending.is_empty() => Some(tiles),
+            Some(_) | None => None,
+        };
+        if let Some(tiles) = now {
             core.command(
                 render_target::ATTACHMENT_STAGES,
                 &uses,
@@ -4743,7 +4759,7 @@ impl RenderCommandEncoder {
                             if let Some(copies) = &stand_ins_after_first {
                                 copies.record_in(raw, command_buffer);
                             }
-                            steps.after(raw, command_buffer, last);
+                            steps.after(raw, command_buffer, last, tiles);
                         }
                         let later = drawn.iter().zip(&objects);
                         for (index, ((draws, _, _), (pass, framebuffer))) in (inlined..).zip(later)
@@ -4761,7 +4777,7 @@ impl RenderCommandEncoder {
                             }
                             raw.cmd_end_render_pass(command_buffer);
                             steps.ended(raw, command_buffer, index);
-                            steps.after(raw, command_buffer, index);
+                            steps.after(raw, command_buffer, index, tiles);
                         }
                         steps.end(raw, command_buffer);
                     }
@@ -4800,7 +4816,9 @@ impl RenderCommandEncoder {
                             if let Some(copies) = &stand_ins_after_first {
                                 copies.record_in(raw, command_buffer);
                             }
-                            steps.after(raw, command_buffer, last);
+                            // The tile dispatches after the last of them record with the later
+                            // instances, once their pipelines are made (`render/pending_tile.rs`).
+                            steps.after_copies(raw, command_buffer, last);
                         }
                     },
                 );
@@ -4842,11 +4860,19 @@ impl RenderCommandEncoder {
                     }
                     false => None,
                 };
-                // A pass that records later began every instance's secondary: its executions
-                // and pending draws record into the instance they join (`Instance::draws`).
-                if draws == vk::CommandBuffer::null() {
-                    return Err(internal("a pass recorded later with an unbegun instance"));
-                }
+                // A pass that records later began every instance's secondary its executions and
+                // pending draws record into (`Instance::draws`): one that never began, as a pass
+                // whose first command is a tile dispatch leaves its first, records nothing, and
+                // the pass executes an empty one for it.
+                let draws = match draws == vk::CommandBuffer::null() {
+                    true => {
+                        let empty = core.command_buffer().begin_draws(pass)?;
+                        // SAFETY: only this encoder records it, begun just now.
+                        unsafe { core.command_buffer().end_raw(empty) }.map_err(vulkan)?;
+                        empty
+                    }
+                    false => draws,
+                };
                 pass_instances.push(PassInstance {
                     pass: pass.raw,
                     framebuffer: framebuffer.raw,

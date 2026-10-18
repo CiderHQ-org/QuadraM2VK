@@ -54,6 +54,25 @@ pub const METAL_ENVIRONMENT: &str = "apple-m3-max-macos27.0.1";
 /// The longest a lane command buffer may take.
 const WAIT: Duration = Duration::from_secs(60);
 
+/// `device`'s work counts once its pipeline pool holds no piece (`WorkCounts::pipeline_pool_busy`),
+/// waiting at most [`WAIT`]: a draw that took its key's residual form does not wait for its own
+/// key's making, which may outlast the draw's command buffer.
+#[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
+fn pipelines_settled(device: &Device) -> metal2vulkan_runtime::WorkCounts {
+    let until = std::time::Instant::now() + WAIT;
+    loop {
+        let counts = device.work_counts();
+        if counts.pipeline_pool_busy == 0 {
+            return counts;
+        }
+        assert!(
+            std::time::Instant::now() < until,
+            "the device's pipeline pool still busy after {WAIT:?}"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
 /// What [`wait_for_device`] saw: whether the command buffer completed, the wall time it waited,
 /// and the longest wait for a CPU that one of the process's threads had meanwhile.
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]

@@ -42,7 +42,7 @@ mod additions;
 mod attachment_formats;
 pub(super) mod budget;
 pub(super) mod content_keyed;
-mod creation_log;
+pub(super) mod creation_log;
 mod dispatch_making;
 pub(super) mod flight;
 mod graphics;
@@ -1364,8 +1364,8 @@ impl Variant {
 
     /// The `VkPipeline` of `region`, from the memo or made now, outside the memo's lock
     /// (`making.rs`), for a dispatch that binds `formats` and waits for it: one an execution of
-    /// commands or a host step records, or a tile dispatch (an encoder's own dispatch hands its
-    /// making to the pool, `dispatch_making.rs`).
+    /// commands or a host step records, or one of an encoder encoded again (an encoder's own
+    /// dispatch or tile dispatch hands its making to the pool, `dispatch_making.rs`).
     pub(super) fn region_pipeline(
         &self,
         region: &DispatchRegion,

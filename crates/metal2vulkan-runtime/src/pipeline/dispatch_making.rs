@@ -10,7 +10,8 @@
 //! - **A dispatch never waits.** One whose region's `VkPipeline` its variant has not made hands
 //!   the making to the device's pool (`pool.rs`) and goes on, as a draw does
 //!   (`render/pending.rs`); a making in flight already (another dispatch's) is taken as it stands.
-//!   The dispatch is recorded later (`pending_dispatch.rs`). Its specialized notices are announced
+//!   The dispatch is recorded later (`pending_dispatch.rs`); a render encoder's tile dispatch
+//!   alike, its pass recorded later (`render/pending_tile.rs`). Its specialized notices are announced
 //!   at the dispatch that hands the making over, on the program's thread, naming what it binds: the
 //!   pool decides nothing the program sees.
 //! - **Nothing at the creation.** A compute state's creation starts no making: one that ran
@@ -73,12 +74,13 @@ impl Variant {
     }
 
     /// The `VkPipeline` of `region` for a dispatch that binds `formats` and records it later
-    /// (the module docs): from the memo, the making in flight for it, or handed now to the
-    /// device's pool, its making kept by `holds`, its state's.
+    /// (the module docs), a render encoder's tile dispatch where `tile`: from the memo, the
+    /// making in flight for it, or handed now to the device's pool, its making kept by `holds`,
+    /// its state's.
     fn begin_region_pipeline(
         self: &Arc<Self>,
         holds: &Arc<PieceHolds<RegionHeld>>,
-        region: &DispatchRegion,
+        (region, tile): (&DispatchRegion, bool),
         formats: BoundFormats<'_>,
     ) -> RegionPipeline {
         let key = RegionKey::of(region);
@@ -87,11 +89,11 @@ impl Variant {
             // The command that began it announces its kinds.
             Begun::Pending(pending) => RegionPipeline::Making(pending),
             Begun::Yours(ticket) => {
-                self.objects
-                    .device
-                    .shared()
-                    .counts
-                    .dispatch_pipeline_pooled();
+                let counts = &self.objects.device.shared().counts;
+                match tile {
+                    true => counts.tile_pipeline_pooled(),
+                    false => counts.dispatch_pipeline_pooled(),
+                }
                 self.announce(&key, formats);
                 let pending = ticket.pending();
                 pending.queued_at(self.pooled(holds, key, ticket));
@@ -149,13 +151,15 @@ impl Variant {
 impl ComputePipelineState {
     /// The `VkPipeline` of `region` of `variant`, the state's, for a dispatch that binds
     /// `formats` and records it later ([`Variant::begin_region_pipeline`]), its making kept by
-    /// the state.
+    /// the state: a compute encoder's dispatch, or a render encoder's tile dispatch of a tile
+    /// function's state (`render/pending_tile.rs`).
     pub(crate) fn begin_region_pipeline(
         &self,
         variant: &Arc<Variant>,
         region: &DispatchRegion,
         formats: BoundFormats<'_>,
     ) -> RegionPipeline {
-        variant.begin_region_pipeline(&self.0.program.pieces, region, formats)
+        let holds = &self.0.program.pieces;
+        variant.begin_region_pipeline(holds, (region, self.is_tile()), formats)
     }
 }

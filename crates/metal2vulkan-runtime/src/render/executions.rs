@@ -254,6 +254,7 @@ use super::bound::Bound;
 use super::mesh::MeshGrid;
 use super::pass_start_reads::{PassStartReads, PassStartTables};
 use super::pass_steps::PassSteps;
+use super::pending_tile::TilePipelines;
 use super::shadows::InstanceShadows;
 use super::tile_memory::TileMemory;
 use super::RenderCall;
@@ -278,6 +279,7 @@ use crate::fragment_imageblock::PassImageblock;
 use crate::indirect_command_buffer::{IndirectCommandBuffer, IndirectCommandBufferProblem, Reader};
 use crate::indirect_dispatch;
 use crate::indirect_execute::{self, ExecutionRange};
+use crate::pipeline::budget::Urgency;
 use crate::pipeline::RenderPipelineState;
 use crate::pipeline::Settled;
 use crate::pipeline::{BufferForms, FixedState, GraphicsKey, RawPipeline, RenderVariant};
@@ -2121,6 +2123,7 @@ impl RenderExecution {
             executions: Vec::new(),
             pending: Vec::new(),
             draw_calls: 0,
+            tile_dispatch_calls: 0,
             replaying: true,
             rerouting: false,
             keeping: super::capture::Keeping::Stopped,
@@ -2290,11 +2293,12 @@ pub(crate) struct DeferredPass {
     /// encoder recorded inline (`held`), else 0. The steps name instances by that index.
     first: usize,
     /// The command buffer the encoder recorded the pass's leading instances inline in, and the
-    /// steps after the last of them, ended and handed over (`render/inline_first.rs`,
-    /// `render/inline_splits.rs`, `EncoderCore::hand_over_pass`): the segment places it after what
-    /// it records before the pass (the executions' copies and dispatches before it, a fragment
-    /// imageblock's clear) and before the later instances, where the first instance runs in a
-    /// segment that records it (`EncoderCore::cut_before`).
+    /// steps after the last of them but its tile dispatches (which the segment records, once their
+    /// pipelines are made, `render/pending_tile.rs`), ended and handed over
+    /// (`render/inline_first.rs`, `render/inline_splits.rs`, `EncoderCore::hand_over_pass`): the
+    /// segment places it after what it records before the pass (the executions' copies and
+    /// dispatches before it, a fragment imageblock's clear) and before the later instances, where
+    /// the first instance runs in a segment that records it (`EncoderCore::cut_before`).
     held: Option<vk::CommandBuffer>,
     /// The steps around its instances, as the encoder's own pass records them
     /// (`render/pass_steps.rs`): the shadowed textures' copies, the sample planes', the
@@ -2416,15 +2420,18 @@ impl DeferredPass {
             .any(|execution| execution.icb.gpu_written() || execution.range.indirect())
     }
 
-    /// Whether a pipeline one of its draws records is still being made.
+    /// Whether a pipeline one of its draws or tile dispatches records is still being made.
     pub(crate) fn making(&self) -> bool {
         self.pending.iter().any(|draw| !draw.made())
+            || self.steps.tile_pipelines().any(TilePipelines::making)
     }
 
     /// Whether the making of a pipeline one of its draws records failed: its recording fails
-    /// the command buffer, which a host step does (`render/pending.rs`).
+    /// the command buffer, which a host step does (`render/pending.rs`); or one of its tile
+    /// dispatches', which its recording makes again (`render/pending_tile.rs`).
     pub(crate) fn failed(&self) -> bool {
         self.pending.iter().any(PendingDraw::failed)
+            || self.steps.tile_pipelines().any(TilePipelines::failed)
     }
 
     /// Whether it executes render commands whose records the CPU writes, which its recording
@@ -2452,29 +2459,37 @@ impl DeferredPass {
         Some(uses.finish())
     }
 
-    /// Wait until every pipeline its draws record is made, or failed, each making hastened
-    /// first (`pipeline/pool.rs`).
+    /// Wait until every pipeline its draws and tile dispatches record is made, or failed, each
+    /// making hastened first (`pipeline/pool.rs`).
     pub(crate) fn wait_made(&self) {
-        self.hasten();
+        self.hasten(Urgency::Committed);
         for draw in &self.pending {
             // Its outcome is the recording's to read.
             drop(draw.pipeline.wait());
         }
+        self.steps.tile_pipelines().for_each(TilePipelines::wait);
     }
 
-    /// Run the makings of the pipelines its draws record before the device's pool's pieces that
-    /// nothing waits for: a submission waits for them.
-    pub(crate) fn hasten(&self) {
+    /// Run the makings of the pipelines its draws and tile dispatches record before the
+    /// device's pool's pieces of a lower rank than `urgency`: a submission waits for them.
+    pub(crate) fn hasten(&self, urgency: Urgency) {
         for draw in &self.pending {
-            draw.pipeline.hasten();
+            draw.pipeline.hasten(urgency);
+        }
+        for tile in self.steps.tile_pipelines() {
+            tile.hasten(urgency);
         }
     }
 
-    /// Run `waker` each time the making of a pipeline its draws record finishes: at once for one
-    /// finished already (none is skipped, so no finish goes unannounced).
+    /// Run `waker` each time the making of a pipeline its draws or tile dispatches record
+    /// finishes: at once for one finished already (none is skipped, so no finish goes
+    /// unannounced).
     pub(crate) fn when_made(&self, waker: &(impl Fn() + Clone + Send + 'static)) {
         for draw in &self.pending {
             draw.when_made(waker.clone());
+        }
+        for tile in self.steps.tile_pipelines() {
+            tile.when_made(waker);
         }
     }
 
@@ -2527,6 +2542,9 @@ impl DeferredPass {
         {
             return Err(Error::NotImplemented(RuntimeGap::IndirectRenderCommands));
         }
+        // Its tile dispatches' pipelines, waiting for those being made; a failed one fails the
+        // command buffer (`render/pending_tile.rs`).
+        let tiles = self.steps.tiles_made(command_buffer)?;
         let mut core = EncoderCore::segment(command_buffer, false)?;
         let mut found = Found::default();
         let mut recorded = Vec::with_capacity(self.executions.len());
@@ -2773,6 +2791,12 @@ impl DeferredPass {
             // run past an execution's first are held with the runs, each recorded between barriers
             // outside a render pass.
             unsafe {
+                // The tile dispatches after the instances the encoder recorded inline, which the
+                // command buffer it handed over, placed before these, leaves out
+                // (`render/pending_tile.rs`).
+                if let Some(last) = first.checked_sub(1) {
+                    steps.dispatches_after(raw, cb, last, &tiles);
+                }
                 let runs = instances.iter().enumerate().flat_map(|(at, runs)| {
                     let last = runs.len() - 1;
                     runs.iter()
@@ -2814,7 +2838,7 @@ impl DeferredPass {
                         copies.record_out(raw, cb);
                     }
                     if last_run {
-                        steps.after(raw, cb, at + first);
+                        steps.after(raw, cb, at + first, &tiles);
                     }
                 }
                 steps.end(raw, cb);
@@ -2835,9 +2859,10 @@ impl DeferredPass {
                 device.degrade_planes(layout);
             }
         }
-        // The runs' steps' objects (the sample planes' descriptor sets and framebuffers), held
-        // until the command buffer completes.
+        // The runs' steps' objects (the sample planes' descriptor sets and framebuffers), and the
+        // tile dispatches' pipelines, held until the command buffer completes.
         core.retain(recorded);
+        core.retain(tiles);
         let mut segment = core.end_segment()?;
         segment.resident_misses = found.misses;
         segment.faults = found.faults;

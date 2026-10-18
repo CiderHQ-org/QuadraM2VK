@@ -1800,8 +1800,8 @@ pub struct FailedPipeline {
     pub encoder: usize,
     /// The command, by its order among its encoder's commands of its kind that returned `Ok`,
     /// from 0: a render encoder's draw calls (every `draw_*` call: of primitives, indexed,
-    /// indirect, patches and meshes), a compute encoder's dispatch calls (every `dispatch_*`
-    /// call, direct and indirect).
+    /// indirect, patches and meshes) or tile dispatch calls (every `dispatch_threads_per_tile*`
+    /// call), a compute encoder's dispatch calls (every `dispatch_*` call, direct and indirect).
     pub draw: usize,
     /// The state the command ran.
     pub state: FailedState,
@@ -1823,7 +1823,7 @@ pub struct FailedPipeline {
 #[non_exhaustive]
 #[derive(Clone, Debug)]
 pub enum FailedState {
-    /// A draw's render pipeline state.
+    /// A draw's render pipeline state, or a tile dispatch's tile render pipeline state.
     Render(crate::RenderPipelineState),
     /// A dispatch's compute pipeline state.
     Compute(crate::ComputePipelineState),

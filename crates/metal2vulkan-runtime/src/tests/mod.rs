@@ -158,6 +158,8 @@ mod texture;
 mod texture_descriptor;
 #[cfg(any(m2v_gpu, m2v_cpu_icd))]
 mod texture_facts;
+#[cfg(any(m2v_gpu, m2v_cpu_icd))]
+mod tile_pending;
 mod tracker;
 mod trails;
 #[cfg(any(m2v_gpu, m2v_cpu_icd))]

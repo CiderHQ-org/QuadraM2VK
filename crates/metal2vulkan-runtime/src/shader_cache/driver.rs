@@ -308,6 +308,8 @@ pub(crate) fn make<T, E>(
             }
         }
     });
+    // The creation log's split names whether the making started from its record.
+    crate::pipeline::creation_log::record_loaded(seeded.is_some());
     let loaded = if seeded.is_some() {
         seed.as_ref()
     } else {

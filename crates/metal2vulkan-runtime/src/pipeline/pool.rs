@@ -432,6 +432,22 @@ impl Pool {
         outcomes
     }
 
+    /// The urgency the piece waiting first here ranks at, aged as the budget orders it, where any
+    /// waits (the device tests, `tests/pipeline_wait_order.rs`).
+    #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
+    pub(crate) fn first_urgency(&self) -> Option<Urgency> {
+        let state = lock(&self.shared.state);
+        let first = state.next_rank(self.shared.budget.age(), true).flatten();
+        first.map(|((urgency, _), _)| urgency)
+    }
+
+    /// The pieces it holds as asked, waiting or running on its threads
+    /// (`WorkCounts::pipeline_pool_busy`).
+    pub(crate) fn busy(&self) -> usize {
+        let state = lock(&self.shared.state);
+        state.work.len() + state.threads.saturating_sub(state.free)
+    }
+
     /// The threads alive and those of them free (the pool's tests).
     #[cfg(test)]
     fn census(&self) -> (usize, usize) {
@@ -545,35 +561,46 @@ fn as_piece<R>(work: impl FnOnce() -> R) -> R {
 
 /// The runtime's tests' hold on the pool: while a [`Hold`](held::Hold) lives, no piece starts,
 /// so every pipeline a draw hands here stays being made (`tests/pipeline_wait_order.rs`, a
-/// device test, compiled under the validation crate's GPU safety cfgs alone).
+/// device test, compiled under the validation crate's GPU safety cfgs alone). The holds are
+/// counted: tests that run at once in one process each keep the pool held until their own is
+/// dropped, whatever the others drop.
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
 pub(crate) mod held {
     use crate::device::lock;
     use std::sync::{Condvar, Mutex};
 
-    static HELD: Mutex<bool> = Mutex::new(false);
+    /// The holds that live.
+    static HELD: Mutex<usize> = Mutex::new(0);
     static RELEASED: Condvar = Condvar::new();
 
-    /// The hold, released when dropped.
+    /// One hold, given back when dropped.
     pub(crate) struct Hold(());
 
-    /// Hold every piece the pool starts from now until the hold is dropped.
+    /// Hold every piece the pool starts from now until this hold and every other is dropped.
     pub(crate) fn hold() -> Hold {
-        *lock(&HELD) = true;
+        *lock(&HELD) += 1;
         Hold(())
     }
 
     impl Drop for Hold {
         fn drop(&mut self) {
-            *lock(&HELD) = false;
-            RELEASED.notify_all();
+            let mut held = lock(&HELD);
+            *held -= 1;
+            if *held == 0 {
+                RELEASED.notify_all();
+            }
         }
+    }
+
+    /// Whether a hold lives.
+    pub(crate) fn holding() -> bool {
+        *lock(&HELD) > 0
     }
 
     /// Wait while a hold lives.
     pub(super) fn wait() {
         let mut held = lock(&HELD);
-        while *held {
+        while *held > 0 {
             held = RELEASED
                 .wait(held)
                 .unwrap_or_else(std::sync::PoisonError::into_inner);

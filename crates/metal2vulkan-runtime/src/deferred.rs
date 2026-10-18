@@ -17,6 +17,7 @@ use super::resource::ResourceKey;
 use super::sparse::emulated::Scrub;
 use super::tracker::Summary;
 use super::Device;
+use crate::pipeline::budget::Urgency;
 use std::any::Any;
 use std::sync::Arc;
 
@@ -300,12 +301,12 @@ impl Deferred {
         }
     }
 
-    /// Run the makings of the pipelines the work records before the device's pool's pieces that
-    /// nothing waits for (`pipeline/pool.rs`): its submission waits for them.
-    pub(super) fn hasten(&self) {
+    /// Run the makings of the pipelines the work records before the device's pool's pieces of a
+    /// lower rank than `urgency` (`pipeline/pool.rs`): its submission waits for them.
+    pub(super) fn hasten(&self, urgency: Urgency) {
         match self {
-            Deferred::RenderPass(pass) => pass.hasten(),
-            Deferred::Pending(dispatch) => dispatch.hasten(),
+            Deferred::RenderPass(pass) => pass.hasten(urgency),
+            Deferred::Pending(dispatch) => dispatch.hasten(urgency),
             Deferred::Execute(_) | Deferred::Dispatch(_) | Deferred::SparseScrub(_) => {}
         }
     }

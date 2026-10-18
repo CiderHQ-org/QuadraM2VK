@@ -154,6 +154,11 @@ pub(crate) fn plan_buffer(
 /// consumer's aligned upload; a buffer, at an offset whose alignment class
 /// (`BufferShape::Buffer::offset_alignment`: `BindState::view_base_alignment` where the runtime
 /// tells it apart at the slot and it divides the offset, else a power of two up to 4) the base
+/// alignment divides. A slot bound to nothing takes false, the form that reads at the residual:
+/// its residual is 0 (`instantiate::slot_field`), so either form reads the Metal offset alone of
+/// the same descriptor, and false keeps the key of a draw that leaves the slot unbound the key
+/// that reads every such slot at its residual, which a consumer can make before any draw binds
+/// it (the runtime's creation, `pipeline/predicted.rs`).
 pub(crate) fn range_at_bind_offset(
     b: &BufferSlot,
     shape: Option<&BufferShape>,
@@ -167,6 +172,8 @@ pub(crate) fn range_at_bind_offset(
         Some(&BufferShape::Buffer {
             offset_alignment, ..
         }) => u64::from(offset_alignment),
+        Some(BufferShape::Bytes { .. }) => 0,
+        None => return false,
     };
     let alignment = crate::memory::views::base_alignment(min);
     crate::bind::instantiate::starts_at_bind(offset, b.window, alignment)

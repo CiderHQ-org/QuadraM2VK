@@ -227,6 +227,15 @@ impl<K: Clone + Eq + Hash, V> Making<K, V> {
         }
     }
 
+    /// The object of `key` where it is made, as [`begin`](Self::begin) finds it, beginning
+    /// nothing where it is not.
+    pub(crate) fn made(&self, key: &K) -> Option<Arc<V>> {
+        match lock(&self.memo).get(key)? {
+            Entry::Made(made) => Some(Arc::clone(made)),
+            Entry::Making(_) => None,
+        }
+    }
+
     /// The object made at `at` ([`begin_at`](Self::begin_at)), as [`begin`](Self::begin) of its
     /// key finds it and with the same use of the entry, while the entry stays: an entry stays
     /// what it was kept as, so one found made is made.
@@ -277,10 +286,11 @@ impl<V> Pending<V> {
         self.turn.queued_at(place);
     }
 
-    /// Run it before the pool's pieces that nothing waits for, where it waits there: a
-    /// committed command buffer's submission waits for it (`budget::Urgency::Committed`).
-    pub(crate) fn hasten(&self) {
-        self.turn.hasten(Urgency::Committed);
+    /// Run it before the pool's pieces of a lower rank than `urgency`, where it waits there: a
+    /// committed command buffer's submission waits for it (`budget::Urgency::Committed`), or a
+    /// queue's first held batch's (`budget::Urgency::Head`).
+    pub(crate) fn hasten(&self, urgency: Urgency) {
+        self.turn.hasten(urgency);
     }
 
     /// Run `waker` once it finished, given its outcome, with no lock held: now, where it

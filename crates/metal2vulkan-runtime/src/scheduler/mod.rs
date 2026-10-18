@@ -449,6 +449,9 @@ struct Held {
     gate: Option<Vec<u64>>,
     /// Its command buffer has a submission check, so it may wait for checks to run.
     checked: bool,
+    /// The makings of the pipelines its host step records were raised to a queue's first held
+    /// batch's ([`hasten_heads`]).
+    hastened: bool,
 }
 
 /// What a batch's host step waits for (`CommandBufferShared::step_waits`).
@@ -915,6 +918,7 @@ fn pass(
             segments: batch.segments,
             gate: None,
             checked: batch.checked,
+            hastened: false,
         });
         order.push(queue, held);
         // The commit's own hold goes without the lock: its batches hold the command buffer now.
@@ -999,6 +1003,7 @@ fn submit_ready(
             .filter(|&sequence| is_behind(&state.order, &state.binary, &mut memo, sequence))
             .collect(),
         };
+        hasten_heads(&mut state.order);
         let waiting = gate_heads(state, &behind, left, awaits);
         let landing = check_heads(state, &behind, left, awaits);
         let binary = &state.binary;
@@ -1357,6 +1362,22 @@ fn check_heads(state: &mut State, behind: &[u64], left: &mut Left<Work>, awaits:
         goes(held)
     });
     landing
+}
+
+/// Raise the makings of the pipelines each command queue's first held batch's host step records
+/// to a head's (`budget::Urgency::Head`), once per batch, whatever else it waits for: every batch
+/// committed after it on its queue waits behind it, and once a queue's command buffers are all
+/// held, so does the program's thread. Metal makes a pipeline state at its creation, so no
+/// submission of Metal's waits for a making; a head's making goes before the other committed
+/// batches' and those nothing waits for, aged or not, whose tickets are earlier. Each making's
+/// end wakes the thread (`CommandBuffer::commit` registers it, `when_made`).
+fn hasten_heads(order: &mut Order<Held>) {
+    for held in order.heads_mut(&[]) {
+        if held.segments && !held.hastened {
+            held.hastened = true;
+            held.buffer.hasten_head(held.index);
+        }
+    }
 }
 
 /// Look at each line's head that is otherwise ready (not `behind` an earlier commit either,

@@ -37,6 +37,7 @@ use super::Before;
 use crate::attachment_stand_in::StandInCopies;
 use crate::depth_stand_in::StandInCopies as DepthStandInCopies;
 use crate::device::functions::Vk;
+use crate::pipeline::RawPipeline;
 use crate::render_target::{self, ClearValues, FramebufferObject, MovedImage, RenderPassObject};
 use crate::resolve::ResolveSource;
 use crate::sample_planes::PlanesCommands;
@@ -218,18 +219,42 @@ impl PassSteps {
         // SAFETY: the caller's contract.
         unsafe { render_target::moved_barriers(raw, command_buffer, moved, false, self.family) };
     }
+
+    /// Record what goes after instance `index` (the module docs), once it ended: the copies
+    /// back ([`after_copies`](Self::after_copies)), then its tile dispatches with `tiles`
+    /// ([`dispatches_after`](Self::dispatches_after)).
+    ///
+    /// # Safety
+    ///
+    /// As for [`PassSteps::dispatches_after`].
+    pub(super) unsafe fn after(
+        &self,
+        raw: &Vk,
+        command_buffer: vk::CommandBuffer,
+        index: usize,
+        tiles: &[Vec<Arc<RawPipeline>>],
+    ) {
         // SAFETY: the caller's contract.
         unsafe {
-            render_target::feedback_barriers(raw, command_buffer, feedback, false, self.family)
-        };
+            self.after_copies(raw, command_buffer, index);
+            self.dispatches_after(raw, command_buffer, index, tiles);
+        }
     }
 
-    /// Record what goes after instance `index` (the module docs), once it ended.
+    /// Record the copies back that go after instance `index` (the module docs), once it ended:
+    /// all of [`after`](Self::after) but the tile dispatches. A pass that records later records
+    /// these after its instances recorded inline as the encoder ends, and their dispatches with its
+    /// later instances, once their pipelines are made (`render/pending_tile.rs`).
     ///
     /// # Safety
     ///
     /// As for [`PassSteps::before`].
-    pub(super) unsafe fn after(&self, raw: &Vk, command_buffer: vk::CommandBuffer, index: usize) {
+    pub(super) unsafe fn after_copies(
+        &self,
+        raw: &Vk,
+        command_buffer: vk::CommandBuffer,
+        index: usize,
+    ) {
         // SAFETY: the caller's contract.
         unsafe {
             let reformat = self
@@ -247,10 +272,29 @@ impl PassSteps {
             if let Some(copies) = self.stand_in_copies.as_ref().filter(|_| tests) {
                 copies.record_out(raw, command_buffer);
             }
-            for staged in self
+        }
+    }
+
+    /// Record the tile dispatches that follow instance `index` (the module docs) with `tiles`,
+    /// each dispatch's pipelines in the dispatches' order ([`PassSteps::tiles_made`]).
+    ///
+    /// # Safety
+    ///
+    /// As for [`PassSteps::before`]; `tiles` live until the command buffer completes.
+    pub(super) unsafe fn dispatches_after(
+        &self,
+        raw: &Vk,
+        command_buffer: vk::CommandBuffer,
+        index: usize,
+        tiles: &[Vec<Arc<RawPipeline>>],
+    ) {
+        // SAFETY: the caller's contract.
+        unsafe {
+            for (staged, pipelines) in self
                 .dispatches
                 .iter()
-                .filter(|s| s.dispatch.after == index + 1)
+                .zip(tiles)
+                .filter(|(s, _)| s.dispatch.after == index + 1)
             {
                 // Its shadowed textures' copies, each after a barrier from what precedes it; the
                 // dispatch begins with another.
@@ -258,7 +302,9 @@ impl PassSteps {
                     Barrier::everything().record(raw, command_buffer);
                     copy.record(raw, command_buffer);
                 }
-                staged.dispatch.record(raw, command_buffer, &staged.staging);
+                staged
+                    .dispatch
+                    .record(raw, command_buffer, &staged.staging, pipelines);
             }
         }
     }

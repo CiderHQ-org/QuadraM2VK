@@ -398,6 +398,9 @@ fn descriptor_bases_are_sixteen_aligned_on_every_profile() {
 /// bind offset, its residual 0, on every committed profile, for a buffer bound anywhere before the
 /// end of its allocation under a window starting at or after the bind offset and inside the
 /// allocation (elsewhere it never holds where the residual is not 0; false reads correctly at any
+/// residual); and for inline bytes, at offset 0 of their upload. An unbound slot, whose residual
+/// is 0, takes false: the key's residual form, which a draw's key matches where it leaves the slot
+/// unbound.
 #[test]
 fn a_uniform_range_starts_at_the_bind_offset_where_the_specialization_says() {
     const LENGTH: u64 = 4096;
@@ -465,6 +468,8 @@ fn a_uniform_range_starts_at_the_bind_offset_where_the_specialization_says() {
                 zero(0) && !matches!(window, Window::Bounded { start, .. } if start < 0),
                 "{stem} {window:?} bytes"
             );
+            assert!(
+                !range_at_bind_offset(&b, None, limits),
                 "{stem} {window:?} unbound"
             );
         }

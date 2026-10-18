@@ -13,11 +13,13 @@
 //! fixture `validation/fixtures/public/examples/runtime_examples.ll` (`llvm-as`), as the
 //! examples run it.
 
+use crate::pipeline::budget::Urgency;
 use crate::pipeline::pool::held;
 use crate::{
-    BlitOption, Buffer, ClearColor, CommandBufferStatus, Device, DeviceKind, DeviceOptions,
-    HostMemory, LoadAction, Origin, PipelineOptions, RenderPassDescriptor, RenderPipelineState,
-    ResourceOptions, ShaderCacheOptions, Size, StoreAction, Texture, TextureDescriptor,
+    BlitOption, Buffer, ClearColor, CommandBuffer, CommandBufferStatus, CommandQueue, Device,
+    DeviceKind, DeviceOptions, EventRef, HostMemory, LoadAction, Origin, PipelineOptions,
+    RenderPassDescriptor, RenderPipelineState, ResourceOptions, ShaderCacheOptions, Size,
+    StoreAction, Texture, TextureDescriptor,
 };
 use metal2vulkan::metal::{PixelFormat, PrimitiveType, TextureUsage};
 use metal2vulkan::pipeline::{ColorAttachmentDescriptor, RenderPipelineDescriptor, StageSource};
@@ -86,6 +88,11 @@ fn device(cache: &Path) -> Device {
 /// The fixture's render pipeline state: `colored_vertex` and `colored_fragment`, one
 /// `RGBA8Unorm` target.
 fn state(device: &Device) -> RenderPipelineState {
+    blended_state(device, false)
+}
+
+/// [`state`]'s, its target blended where `blended`: a state of other pipelines.
+fn blended_state(device: &Device, blended: bool) -> RenderPipelineState {
     let ll = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../metal2vulkan-validation/fixtures/public/examples/runtime_examples.ll");
     let bitcode = metal2vulkan_devtools::llvm_assemble(&ll).unwrap();
@@ -96,7 +103,9 @@ fn state(device: &Device) -> RenderPipelineState {
     let mut descriptor =
         RenderPipelineDescriptor::new(StageSource::Function(vertex.function_descriptor()));
     descriptor.fragment = Some(StageSource::Function(fragment.function_descriptor()));
-    descriptor.color_attachments[0] = Some(ColorAttachmentDescriptor::new(PixelFormat::RGBA8Unorm));
+    let mut target = ColorAttachmentDescriptor::new(PixelFormat::RGBA8Unorm);
+    target.blending_enabled = blended;
+    descriptor.color_attachments[0] = Some(target);
     device
         .new_render_pipeline_state(&descriptor, &PipelineOptions::default())
         .unwrap()
@@ -140,6 +149,17 @@ fn no_copy_texture(device: &Device, freed: &Arc<AtomicBool>) -> (Buffer, Texture
     descriptor.resource_options = ResourceOptions::shared();
     let texture = buffer.new_texture(&descriptor, 0, row).unwrap();
     (buffer, texture)
+}
+
+/// The pool's holds are counted: a test's hold lives until its own drop, whatever holds the
+/// tests running beside it in the process drop meanwhile.
+#[test]
+fn a_hold_of_the_pool_lives_until_its_own_drop() {
+    let first = held::hold();
+    let second = held::hold();
+    drop(first);
+    assert!(held::holding(), "another hold's drop let the pool go");
+    drop(second);
 }
 
 /// Queue A's pass, whose draw's `VkPipeline` the pool is held from making, waits for it; a batch
@@ -269,11 +289,17 @@ fn a_batch_waiting_for_a_pipeline_holds_only_the_batches_that_share_its_resource
     .unwrap();
     blit.end_encoding().unwrap();
     conflicting.commit().unwrap();
+    // The pool's hold is counted (`pool::held`): another test's drop never lets the pass's
+    // making go meanwhile, so the copy cannot complete while the hold lives, however long it is
+    // watched.
+    let early = conflicting.wait_until_completed_for(WATCHED).is_ok();
+    let drawn = drawing.status();
     assert!(
-        conflicting.wait_until_completed_for(WATCHED).is_err(),
-        "a batch that reads the pass's target waits for the pass"
+        !early,
+        "a batch that reads the pass's target waits for the pass (the pass is {drawn:?}: its \
+         making went while held where it completed, the copy missed its wait where not)"
     );
-    assert_ne!(drawing.status(), CommandBufferStatus::Completed);
+    assert_ne!(drawn, CommandBufferStatus::Completed);
     drop(hold);
     for command_buffer in [&drawing, &conflicting] {
         command_buffer.wait_until_completed_for(WAIT).unwrap();
@@ -287,4 +313,97 @@ fn a_batch_waiting_for_a_pipeline_holds_only_the_batches_that_share_its_resource
         DRAWN_TEXEL,
         "the copy reads what the pass drew"
     );
+}
+
+/// A command buffer on `queue` of one pass into a new target, whose line's `VkPipeline` of
+/// `state` the device's pool makes: committed.
+fn pass_of_a_pooled_line(
+    device: &Device,
+    queue: &CommandQueue,
+    state: &RenderPipelineState,
+) -> CommandBuffer {
+    let mut target = TextureDescriptor::texture_2d(PixelFormat::RGBA8Unorm, SIDE, SIDE, false);
+    target.usage = TextureUsage::RENDER_TARGET;
+    target.resource_options = ResourceOptions::private();
+    let target = device.new_texture(&target).unwrap();
+    let row_center = 1.0 - 1.0 / SIDE as f32;
+    let positions = floats(device, [-2.0, row_center, 2.0, row_center]);
+    let colors = floats(device, (0..2).flat_map(|_| DRAWN));
+    let mut pass = RenderPassDescriptor::new();
+    let color = &mut pass.color_attachments[0];
+    color.texture = Some(target);
+    color.load_action = LoadAction::Clear;
+    color.store_action = StoreAction::Store;
+    let pooled = device.work_counts().pipelines_pooled;
+    let command_buffer = queue.command_buffer().unwrap();
+    let mut encoder = command_buffer.render_command_encoder(&pass).unwrap();
+    encoder.set_render_pipeline_state(state).unwrap();
+    encoder.set_vertex_buffer(Some(&positions), 0, 0).unwrap();
+    encoder.set_vertex_buffer(Some(&colors), 0, 1).unwrap();
+    encoder
+        .draw_primitives(PrimitiveType::Line, 0, 2, 1, 0)
+        .unwrap();
+    encoder.end_encoding().unwrap();
+    assert_eq!(
+        device.work_counts().pipelines_pooled,
+        pooled + 1,
+        "the line's making waits in the pool"
+    );
+    command_buffer.commit().unwrap();
+    command_buffer
+}
+
+/// The making a queue's first held batch waits for goes first in the device's pool: queue B's
+/// first command buffer waits for an event the test signals last, and the pass committed behind
+/// it there hands its line's making to the pool first; queue A's pass, committed after on a
+/// target of its own, hands its own. Once the scheduler finds A's pass first in its queue's line,
+/// its making ranks first (`budget::Urgency::Head`), before B's, whose batch cannot go before the
+/// event anyway: Metal makes a pipeline state at its creation, so no submission waits behind
+/// another queue's makings. Every command buffer then completes.
+#[test]
+fn a_queue_s_first_held_batch_s_making_goes_first_in_the_pool() {
+    let scratch = Scratch::new();
+    let device = device(&scratch.0);
+    let (behind, first) = (state(&device), blended_state(&device, true));
+    let (a, b) = (
+        device.new_command_queue().unwrap(),
+        device.new_command_queue().unwrap(),
+    );
+    let event = device.new_shared_event().unwrap();
+    let hold = held::hold();
+
+    // Queue B: a command buffer that waits for the event, then a pass behind it.
+    let waiting = b.command_buffer().unwrap();
+    waiting
+        .encode_wait_for_event(EventRef::from(&event), 1)
+        .unwrap();
+    waiting.commit().unwrap();
+    let held_behind = pass_of_a_pooled_line(&device, &b, &behind);
+    // Queue A: a pass, first in its queue's line.
+    let head = pass_of_a_pooled_line(&device, &a, &first);
+
+    let pool = &device.shared().pipeline_pool;
+    let deadline = Instant::now() + WAIT;
+    while pool.first_urgency() != Some(Urgency::Head) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(
+        pool.first_urgency(),
+        Some(Urgency::Head),
+        "queue A's pass's making ranks first, before the earlier making of the pass behind B's \
+         waiting command buffer"
+    );
+    drop(hold);
+    head.wait_until_completed_for(WAIT)
+        .expect("queue A's pass runs once its making is made");
+    assert_ne!(
+        held_behind.status(),
+        CommandBufferStatus::Completed,
+        "queue B's pass waits behind the event"
+    );
+    event.set_signaled_value(1);
+    for command_buffer in [&waiting, &held_behind, &head] {
+        command_buffer.wait_until_completed_for(WAIT).unwrap();
+        assert_eq!(command_buffer.status(), CommandBufferStatus::Completed);
+    }
 }

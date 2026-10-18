@@ -28,6 +28,15 @@
 //!   and the pipeline compile, each as its count and its total milliseconds. The statistics are
 //!   the device's: a creation that overlapped another on another thread says so, and its split
 //!   then holds both.
+//! - **Where the making's time went** (the consumer's cold-boot holds). The line adds `parts:`, a
+//!   split of the creation's time as its making notes it on its thread ([`note`]): `content`,
+//!   the digests of the pipeline's parts that name its record and its libraries; for a pipeline
+//!   linked from libraries, each part's library, `made` by this making (a part with shaders
+//!   through its record: `record loaded` where its driver cache started from the record, `record
+//!   missed` where not) or `another caller's` (found made, or waited for while another caller
+//!   made it), then the `link`; else the whole `pipeline`'s driver making, its record loaded or
+//!   missed. The translation of the state's functions is not in it: a variant is translated
+//!   before any of its pipelines is made, on the program's thread.
 //! - **Bounded, and off by default.** Nothing is kept or measured while the variable is unset.
 //!   With it set, each state keeps the fields of its last [`HISTORY`] pipelines, and nothing
 //!   else changes: the same pipelines are made, from the same keys, at the same points.
@@ -43,11 +52,12 @@ use crate::Device;
 use metal2vulkan::cache::VariantKey;
 use metal2vulkan::pipeline::{RenderPipeline, SpecKey};
 use metal2vulkan::vk::{DriverId, ShaderStage};
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// The pipelines a state keeps for its diffs.
 const HISTORY: usize = 256;
@@ -63,6 +73,77 @@ const HELPER_GUARD_STRATEGY: &str = "fragment.helper-guard";
 pub(crate) fn enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     *ON.get_or_init(metal2vulkan::env_vars::log_pipelines)
+}
+
+thread_local! {
+    /// The split of the making whose line this thread times now ([`Line::made`]), if any: each
+    /// part noted, with how long it took.
+    static SPLIT: RefCell<Option<Vec<(String, Duration)>>> = const { RefCell::new(None) };
+    /// Whether the driver making this thread ran last started from its record
+    /// ([`record_loaded`]), while a split is noted.
+    static RECORD: Cell<Option<bool>> = const { Cell::new(None) };
+}
+
+/// Whether this thread notes the split of a making's time now: its line is timed
+/// ([`Line::made`]). Each part's timing is taken only then.
+pub(crate) fn splitting() -> bool {
+    SPLIT.with(|split| split.borrow().is_some())
+}
+
+/// Note a part of the making this thread's line times, which took `took`; nothing where none is
+/// timed.
+pub(crate) fn note(part: impl FnOnce() -> String, took: Duration) {
+    SPLIT.with(|split| {
+        if let Some(parts) = split.borrow_mut().as_mut() {
+            parts.push((part(), took));
+        }
+    });
+}
+
+/// The driver making this thread runs started its cache from its record, or not
+/// (`shader_cache/driver.rs`), while a split is noted.
+pub(crate) fn record_loaded(loaded: bool) {
+    if splitting() {
+        RECORD.with(|record| record.set(Some(loaded)));
+    }
+}
+
+/// What [`record_loaded`] last noted on this thread, read and reset: `None` where the making
+/// kept no record.
+pub(crate) fn take_record() -> Option<bool> {
+    RECORD.take()
+}
+
+/// Run `make`, noting the split of its time on this thread ([`note`]): what it made and the
+/// parts noted, the split of a making that encloses it (a line timed around this one) put back
+/// after it.
+fn split_of<T>(make: impl FnOnce() -> T) -> (T, Vec<(String, Duration)>) {
+    let enclosing = SPLIT.replace(Some(Vec::new()));
+    let made = make();
+    let parts = SPLIT.replace(enclosing).unwrap_or_default();
+    (made, parts)
+}
+
+/// The split's text in a line: `; parts: ` and each part with its milliseconds, in the order
+/// noted; empty where none was noted.
+fn split_text(parts: &[(String, Duration)]) -> String {
+    if parts.is_empty() {
+        return String::new();
+    }
+    let parts: Vec<String> = parts
+        .iter()
+        .map(|(part, took)| format!("{part} {:.1} ms", took.as_secs_f64() * 1000.0))
+        .collect();
+    format!("; parts: {}", parts.join(", "))
+}
+
+/// How a part made through its record names it in the split.
+pub(crate) fn record_text(record: Option<bool>) -> &'static str {
+    match record {
+        Some(true) => ", record loaded",
+        Some(false) => ", record missed",
+        None => "",
+    }
 }
 
 /// The hash a line names a stage's SPIR-V `words` by: `DefaultHasher`'s (SipHash-1-3, its zero
@@ -196,7 +277,8 @@ impl Line {
             (_, false) => std::time::Duration::ZERO,
         };
         let start = Instant::now();
-        let made = make();
+        // This making's split, the one of a making that encloses it put back after it.
+        let (made, parts) = split_of(make);
         let turn = super::budget::take_waited();
         let elapsed = start.elapsed().saturating_sub(turn);
         let waited = queued + turn;
@@ -218,6 +300,7 @@ impl Line {
                 waited.as_secs_f64() * 1000.0
             ));
         }
+        line.push_str(&split_text(&parts));
         line.push_str(&format!("; largest module {} words", self.words));
         line.push_str(self.note);
         match (&statistics, before, after) {
@@ -627,8 +710,46 @@ fn find_statistics_function() -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
-    use super::{describe, elided, Fields};
+    use super::{
+        describe, elided, note, record_loaded, record_text, split_of, split_text, splitting,
+        take_record, Fields,
+    };
     use std::collections::VecDeque;
+    use std::time::Duration;
+
+    /// A making's split holds the parts noted while its line is timed, in order, and nothing
+    /// outside one; a line timed inside another keeps its own parts, and the enclosing line's
+    /// go on after it. A record's load is noted only while a split is.
+    #[test]
+    fn a_making_s_split_holds_its_own_parts_in_order() {
+        assert!(!splitting());
+        note(
+            || panic!("a part is named where no line is timed"),
+            Duration::ZERO,
+        );
+        record_loaded(true);
+        assert_eq!(take_record(), None, "no record noted outside a split");
+        let ((inner, record), outer) = split_of(|| {
+            assert!(splitting());
+            note(|| "content".to_owned(), Duration::from_micros(300));
+            let inner = split_of(|| note(|| "link".to_owned(), Duration::from_millis(2)));
+            record_loaded(false);
+            let record = take_record();
+            note(
+                || format!("fragment shader library (made{})", record_text(record)),
+                Duration::from_millis(6812),
+            );
+            (inner, record)
+        });
+        assert!(!splitting());
+        assert_eq!(record, Some(false));
+        assert_eq!(inner.1, [("link".to_owned(), Duration::from_millis(2))]);
+        assert_eq!(
+            split_text(&outer),
+            "; parts: content 0.3 ms, fragment shader library (made, record missed) 6812.0 ms"
+        );
+        assert_eq!(split_text(&[]), "");
+    }
 
     fn fields(pairs: &[(&str, &str)]) -> Fields {
         pairs

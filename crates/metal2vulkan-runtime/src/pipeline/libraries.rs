@@ -33,6 +33,7 @@
 //!   (`shader_cache/driver.rs`), as a whole pipeline is; the vertex input and fragment output
 //!   libraries hold no shader and keep no record.
 
+use super::budget;
 use super::content_keyed::{program_call, ContentKeyed, Gone, Owned};
 use crate::device::{lock, DeviceShared};
 use crate::error::Error;
@@ -135,7 +136,12 @@ impl Library {
 
     /// The library, made now by `make` where no caller made it or is making it, else the one
     /// another caller made, waited for. A failed making leaves it to the next caller, as one of
-    /// a key's draw does (`making.rs`).
+    /// a key's draw does (`making.rs`). A caller that waits for another's making holds no turn of
+    /// the process's budget meanwhile (`budget.rs`, "no making waits on another while it holds a
+    /// turn"): a pool's piece, or a program's thread, gives its thread's turn back for the wait
+    /// and takes one again after it at the rank it was given at, before it makes the library or
+    /// links its pipeline, so the callers of one fragment shader's library never hold the turns
+    /// idle while one of them compiles it.
     pub(crate) fn made(
         &self,
         make: impl FnOnce() -> Result<vk::Pipeline, Error>,
@@ -145,10 +151,17 @@ impl Library {
             match *state {
                 Slot::Made(raw) => return Ok(raw),
                 Slot::Making => {
-                    state = self
-                        .ended
-                        .wait(state)
-                        .unwrap_or_else(PoisonError::into_inner);
+                    drop(state);
+                    budget::without_turn(|| {
+                        let mut state = lock(&self.state);
+                        while matches!(*state, Slot::Making) {
+                            state = self
+                                .ended
+                                .wait(state)
+                                .unwrap_or_else(PoisonError::into_inner);
+                        }
+                    });
+                    state = lock(&self.state);
                 }
                 Slot::Waiting => break,
             }
@@ -324,5 +337,57 @@ mod tests {
             assert_eq!(maker.join().unwrap().unwrap(), raw(13));
             assert_eq!(waiter.join().unwrap().unwrap(), raw(13));
         });
+    }
+
+    /// A caller that waits for the making another caller began holds no turn meanwhile: of a
+    /// budget of two turns, the maker's and the waiter's, the waiter's goes back for the wait, a
+    /// making asked for meanwhile takes it at once, and the waiter takes one again before it
+    /// returns the library.
+    #[test]
+    fn a_caller_waiting_for_another_s_making_lends_its_turn() {
+        use crate::pipeline::budget::{ticket, waited_turn, Budget};
+        let turns = Arc::new(Budget::new(2, 2));
+        let library = Library::new();
+        let (started, has_started) = mpsc::channel();
+        let (finish, finishing) = mpsc::channel::<()>();
+        let (waiting, is_waiting) = mpsc::channel();
+        std::thread::scope(|scope| {
+            let (library, turns) = (&library, &turns);
+            let maker = exit_guard::spawn_scoped(scope, Builder::new(), move || {
+                let _turn = waited_turn(turns, ticket());
+                library.made(|| {
+                    started.send(()).unwrap();
+                    finishing.recv_timeout(WAIT).unwrap();
+                    Ok(raw(17))
+                })
+            })
+            .unwrap();
+            has_started.recv_timeout(WAIT).unwrap();
+            let waiter = exit_guard::spawn_scoped(scope, Builder::new(), move || {
+                let _turn = waited_turn(turns, ticket());
+                waiting.send(()).unwrap();
+                let made = library.made(|| panic!("a library being made is made again"));
+                assert!(budget::holds_turn(), "the waiter took a turn again");
+                made
+            })
+            .unwrap();
+            is_waiting.recv_timeout(WAIT).unwrap();
+            let deadline = std::time::Instant::now() + WAIT;
+            while turns.census() != (1, 0) && std::time::Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            assert_eq!(turns.census(), (1, 0), "the waiter gave its turn back");
+            let meanwhile = waited_turn(turns, ticket());
+            assert_eq!(
+                turns.census(),
+                (2, 0),
+                "a making asked for meanwhile took it"
+            );
+            drop(meanwhile);
+            finish.send(()).unwrap();
+            assert_eq!(maker.join().unwrap().unwrap(), raw(17));
+            assert_eq!(waiter.join().unwrap().unwrap(), raw(17));
+        });
+        assert_eq!(turns.census(), (0, 0));
     }
 }

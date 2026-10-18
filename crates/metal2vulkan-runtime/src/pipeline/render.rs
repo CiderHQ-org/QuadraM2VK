@@ -79,6 +79,8 @@ use std::any::Any;
 use std::collections::{BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
+mod residual;
+
 /// A Metal render pipeline state (`MTLRenderPipelineState`): one that draws, or a tile pipeline's
 /// ([`Device::new_tile_render_pipeline_state`]), which dispatches per tile. Cheap to clone (a
 /// retain); `Send + Sync`.
@@ -2427,19 +2429,24 @@ impl RenderVariant {
 
     /// The `VkPipeline` of `key`, from the memo or made now against `render_pass`, a pass of
     /// `key.pass`; made once, outside the memo's lock (`making.rs`), for a draw of `state` that
-    /// binds `formats`, whose part of the pipeline creation log logs it.
+    /// binds `formats`, whose part of the pipeline creation log logs it. Where it is not made and
+    /// its residual form's is, the draw takes that one, and `key`'s is made on the device's pool
+    /// (`render/residual.rs`).
     pub(crate) fn graphics_pipeline(
-        &self,
+        self: &Arc<Self>,
         key: &GraphicsKey,
-        render_pass: &RenderPassObject,
+        render_pass: &Arc<RenderPassObject>,
         (state, formats): (&GraphicsState, crate::degradation::BoundFormats<'_>),
     ) -> Result<Arc<RawPipeline>, Error> {
+        if let Some(drawn) = self.residual_drawn(key, render_pass, (state, formats)) {
+            return Ok(drawn);
+        }
         self.pipelines.get_or_make(key, || {
             let make = || {
                 self.objects.graphics_pipeline(
                     &self.pipeline,
                     key,
-                    (render_pass, Notices::Now(Some(formats))),
+                    (&**render_pass, Notices::Now(Some(formats))),
                     None,
                 )
             };
@@ -2578,7 +2585,8 @@ impl RenderVariant {
     /// the pool where a specialized note tests them, `VariantObjects::tested_formats`), whose part
     /// of the pipeline creation log logs it as [`graphics_pipeline`](Self::graphics_pipeline)
     /// does. The draw goes on meanwhile; its command buffer's batch is submitted once it is made
-    /// (`render/pending.rs`).
+    /// (`render/pending.rs`). Where it is not made and its residual form's is, the draw takes that
+    /// one, and nothing waits for `key`'s making (`render/residual.rs`).
     pub(crate) fn begin_graphics_pipeline(
         self: &Arc<Self>,
         device: &Device,
@@ -2617,100 +2625,136 @@ impl RenderVariant {
                 }
                 DrawPipeline::Made(made)
             }
-            (Begun::Pending(pending), _) => DrawPipeline::Making(pending),
-            (Begun::Yours(ticket), _) => {
-                // Its libraries claimed on the draw's thread, the device's where it links them.
-                // Where its shaders' libraries are made it is linked here, in milliseconds, and
-                // the draw takes it: no making in the pool, and nothing waits.
-                let claimed = self.claim_libraries(key);
-                if let Some(linked) = claimed.as_ref().filter(|linked| linked.shaders_made()) {
-                    let line = state.0.log.as_ref().map(|log| {
-                        log.begin((&self.key, &self.pipeline, key, self.logged_spirv()))
-                    });
-                    let make = || {
-                        self.objects.graphics_pipeline(
-                            &self.pipeline,
-                            key,
-                            (&**compatible, Notices::Now(Some(formats))),
-                            Some(linked.clone()),
-                        )
-                    };
-                    let made = match line {
-                        None => make(),
-                        Some(line) => line.made(&self.objects.device, make),
-                    };
-                    let pending = ticket.pending();
-                    return match ticket.settle(made) {
-                        Ok(made) => DrawPipeline::Made(made),
-                        // The draw's batch meets the failure as it meets a pool's.
-                        Err(_) => DrawPipeline::Making(pending),
-                    };
+            // A draw of a key another caller makes takes the key's residual form where it is made
+            // (`render/residual.rs`).
+            (Begun::Pending(pending), _) => match self.residual_made(key) {
+                Some(drawn) => {
+                    device.shared().counts.residual_form_drawn();
+                    DrawPipeline::Made(drawn)
                 }
-                device.shared().counts.pipeline_pooled();
-                // Its specialized notices now, on the draw's thread in the guest's order: the
-                // pool decides nothing the guest or host sees.
-                self.objects.device.degrade_specialized(
-                    &self.objects.specialized,
-                    &key.specialization,
-                    Some(formats),
-                    Occurrence::Made,
-                );
-                let pending = ticket.pending();
-                // Its creation log line numbered here, on the draw's thread in the guest's order.
-                let line =
-                    state.0.log.as_ref().map(|log| {
-                        log.begin((&self.key, &self.pipeline, key, self.logged_spirv()))
-                    });
-                let key = key.clone();
-                let keeping = state.0.pieces.keep(PieceHeld::Draw(
-                    Arc::clone(self),
-                    Arc::clone(compatible),
-                    Box::new(ticket),
-                ));
-                let place = device.shared().pipeline_pool.run(Box::new(move || {
-                    // Where the state let go meanwhile, the piece stops: its ticket went with the
-                    // state, failing the making.
-                    let Some((lease, held)) = keeping.start() else {
-                        return;
-                    };
-                    let (variant, compatible, ticket) = match held {
-                        PieceHeld::Draw(variant, compatible, ticket) => {
-                            (variant, compatible, *ticket)
+                None => DrawPipeline::Making(pending),
+            },
+            (Begun::Yours(ticket), _) => {
+                match self.make_drawn(device, key, compatible, (state, formats), ticket) {
+                    // Handed to the pool: the draw takes the key's residual form where it is made,
+                    // and nothing waits for the making (`render/residual.rs`).
+                    DrawPipeline::Making(pending) => match self.residual_made(key) {
+                        Some(drawn) => {
+                            device.shared().counts.residual_form_making();
+                            device.shared().counts.residual_form_drawn();
+                            DrawPipeline::Made(drawn)
                         }
-                        other => return lease.give_back(other, None),
-                    };
-                    #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
-                    super::pool::held::mid_making();
-                    let make = || {
-                        variant.objects.graphics_pipeline(
-                            &variant.pipeline,
-                            &key,
-                            (&*compatible, Notices::Announced),
-                            claimed,
-                        )
-                    };
-                    let made = match line {
-                        None => make(),
-                        Some(line) => line.made(&variant.objects.device, make),
-                    };
-                    // Its callers take it from the making: from the settle, the batches that wait
-                    // for it may run and complete while this piece still holds the variant and the
-                    // pass, and the device with them, until it gave them back. A trail spans that
-                    // (`trails.rs`).
-                    let trail = variant.objects.device.shared().trails.open();
-                    drop(ticket.settle(made));
-                    lease.give_back(
-                        PieceHeld::Drawn {
-                            _variant: variant,
-                            _pass: compatible,
-                        },
-                        Some(trail),
-                    );
-                }));
-                pending.queued_at(place);
-                DrawPipeline::Making(pending)
+                        None => DrawPipeline::Making(pending),
+                    },
+                    made => made,
+                }
             }
         }
+    }
+
+    /// The making of `key`, this caller's (`ticket`), for a draw of `state` that binds `formats`
+    /// ([`begin_graphics_pipeline`](Self::begin_graphics_pipeline)): linked here, against
+    /// `compatible`, where its shaders' libraries are made; else handed to `device`'s pool, the
+    /// draw going on meanwhile.
+    fn make_drawn(
+        self: &Arc<Self>,
+        device: &Device,
+        key: &GraphicsKey,
+        compatible: &Arc<RenderPassObject>,
+        (state, formats): (&GraphicsState, crate::degradation::BoundFormats<'_>),
+        ticket: Ticket<GraphicsKey, RawPipeline>,
+    ) -> DrawPipeline {
+        // Its libraries claimed on the draw's thread, the device's where it links them.
+        // Where its shaders' libraries are made it is linked here, in milliseconds, and
+        // the draw takes it: no making in the pool, and nothing waits.
+        let claimed = self.claim_libraries(key);
+        if let Some(linked) = claimed.as_ref().filter(|linked| linked.shaders_made()) {
+            let line = state
+                .0
+                .log
+                .as_ref()
+                .map(|log| log.begin((&self.key, &self.pipeline, key, self.logged_spirv())));
+            let make = || {
+                self.objects.graphics_pipeline(
+                    &self.pipeline,
+                    key,
+                    (&**compatible, Notices::Now(Some(formats))),
+                    Some(linked.clone()),
+                )
+            };
+            let made = match line {
+                None => make(),
+                Some(line) => line.made(&self.objects.device, make),
+            };
+            let pending = ticket.pending();
+            return match ticket.settle(made) {
+                Ok(made) => DrawPipeline::Made(made),
+                // The draw's batch meets the failure as it meets a pool's.
+                Err(_) => DrawPipeline::Making(pending),
+            };
+        }
+        device.shared().counts.pipeline_pooled();
+        // Its specialized notices now, on the draw's thread in the guest's order: the
+        // pool decides nothing the guest or host sees.
+        self.objects.device.degrade_specialized(
+            &self.objects.specialized,
+            &key.specialization,
+            Some(formats),
+            Occurrence::Made,
+        );
+        let pending = ticket.pending();
+        // Its creation log line numbered here, on the draw's thread in the guest's order.
+        let line = state
+            .0
+            .log
+            .as_ref()
+            .map(|log| log.begin((&self.key, &self.pipeline, key, self.logged_spirv())));
+        let key = key.clone();
+        let keeping = state.0.pieces.keep(PieceHeld::Draw(
+            Arc::clone(self),
+            Arc::clone(compatible),
+            Box::new(ticket),
+        ));
+        let place = device.shared().pipeline_pool.run(Box::new(move || {
+            // Where the state let go meanwhile, the piece stops: its ticket went with the
+            // state, failing the making.
+            let Some((lease, held)) = keeping.start() else {
+                return;
+            };
+            let (variant, compatible, ticket) = match held {
+                PieceHeld::Draw(variant, compatible, ticket) => (variant, compatible, *ticket),
+                other => return lease.give_back(other, None),
+            };
+            #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
+            super::pool::held::mid_making();
+            let make = || {
+                variant.objects.graphics_pipeline(
+                    &variant.pipeline,
+                    &key,
+                    (&*compatible, Notices::Announced),
+                    claimed,
+                )
+            };
+            let made = match line {
+                None => make(),
+                Some(line) => line.made(&variant.objects.device, make),
+            };
+            // Its callers take it from the making: from the settle, the batches that wait
+            // for it may run and complete while this piece still holds the variant and the
+            // pass, and the device with them, until it gave them back. A trail spans that
+            // (`trails.rs`).
+            let trail = variant.objects.device.shared().trails.open();
+            drop(ticket.settle(made));
+            lease.give_back(
+                PieceHeld::Drawn {
+                    _variant: variant,
+                    _pass: compatible,
+                },
+                Some(trail),
+            );
+        }));
+        pending.queued_at(place);
+        DrawPipeline::Making(pending)
     }
 
     /// The compute `VkPipeline`s of the variant's emulated object and mesh functions under a

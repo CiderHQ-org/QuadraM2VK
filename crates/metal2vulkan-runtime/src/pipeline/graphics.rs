@@ -17,6 +17,7 @@
 //! pipeline of its own runs (`objects.rs`), and draws its synthesized vertex stage's list of the
 //! mesh's topology.
 
+use super::creation_log;
 use super::kept::Place;
 use super::libraries::{Linked, Part};
 use super::objects::{RawPipeline, VariantObjects};
@@ -951,7 +952,13 @@ impl VariantObjects {
         claimed: Option<Linked>,
     ) -> Result<RawPipeline, Error> {
         let graphics = &pipeline.graphics;
+        // The creation log's split, where it times this making (`creation_log.rs`).
+        let split = creation_log::splitting();
+        let digested = split.then(std::time::Instant::now);
         let content = self.graphics_content(pipeline, key)?;
+        if let Some(at) = digested {
+            creation_log::note(|| "content".to_owned(), at.elapsed());
+        }
         let shared = self.device.shared();
         let libraries = shared.libraries.as_ref().filter(|_| content.links());
         // Whether the making's cache held it and each of its stages, where the making reports
@@ -1012,13 +1019,18 @@ impl VariantObjects {
                     if driver_reports {
                         info = info.push_next(&mut feedback);
                     }
-                    shared
-                        .make_pipelines(making, |cache| {
-                            // SAFETY: every pointer in `info` outlives the call; the pipeline
-                            // cache is the making's own, destroyed once the call returned.
-                            unsafe { shared.vk().create_graphics_pipelines(cache, &[info], None) }
-                        })
-                        .map_err(|(_, error)| vulkan(error))
+                    let making_at = split.then(std::time::Instant::now);
+                    let _ = creation_log::take_record();
+                    let made = shared.make_pipelines(making, |cache| {
+                        // SAFETY: every pointer in `info` outlives the call; the pipeline
+                        // cache is the making's own, destroyed once the call returned.
+                        unsafe { shared.vk().create_graphics_pipelines(cache, &[info], None) }
+                    });
+                    if let Some(at) = making_at {
+                        let record = creation_log::record_text(creation_log::take_record());
+                        creation_log::note(|| format!("pipeline (made{record})"), at.elapsed());
+                    }
+                    made.map_err(|(_, error)| vulkan(error))
                         .and_then(|created| {
                             created
                                 .first()
@@ -1075,12 +1087,16 @@ impl VariantObjects {
         linked: Linked,
     ) -> Result<(vk::Pipeline, Linked), Error> {
         let shared = self.device.shared();
+        let split = creation_log::splitting();
         let mut raws = [vk::Pipeline::null(); 4];
         for ((part, library), (raw, name)) in Part::ALL
             .into_iter()
             .zip(&linked.0)
             .zip(raws.iter_mut().zip(names))
         {
+            // The creation log's split: how long the part took, and whether this making made it.
+            let asked = split.then(std::time::Instant::now);
+            let mut made_here = None;
             *raw = library.made(|| {
                 let mut flag =
                     vk::GraphicsPipelineLibraryCreateInfoEXT::default().flags(part.flag());
@@ -1093,20 +1109,37 @@ impl VariantObjects {
                 // A part with shaders is made through the device's shader cache, under a record
                 // of its own; one without holds nothing a record would keep.
                 let made = match part.holds_shaders() {
-                    true => shared.make_pipelines(Making::new(part.kind()).digest(name), create),
-                    false => create(vk::PipelineCache::null()),
-                }
-                .map_err(|(_, error)| vulkan(error))?;
+                    true => {
+                        let _ = creation_log::take_record();
+                        let made =
+                            shared.make_pipelines(Making::new(part.kind()).digest(name), create);
+                        made_here = Some(creation_log::take_record());
+                        made
+                    }
+                    false => {
+                        made_here = Some(None);
+                        create(vk::PipelineCache::null())
+                    }
+                };
+                let made = made.map_err(|(_, error)| vulkan(error))?;
                 shared.counts.pipeline_library_made(part);
                 made.first()
                     .copied()
                     .ok_or_else(|| internal("the driver made no pipeline library"))
             })?;
+            if let Some(at) = asked {
+                let how = match made_here {
+                    Some(record) => format!("made{}", creation_log::record_text(record)),
+                    None => "another caller's".to_owned(),
+                };
+                creation_log::note(|| format!("{} ({how})", part.kind()), at.elapsed());
+            }
         }
         let mut libraries = vk::PipelineLibraryCreateInfoKHR::default().libraries(&raws);
         let info = vk::GraphicsPipelineCreateInfo::default()
             .layout(infos.layout)
             .push_next(&mut libraries);
+        let linking = split.then(std::time::Instant::now);
         // SAFETY: every pointer in `info` outlives the call, and each library it links is made
         // and held by `linked` for as long as the pipeline lives. A driver's making, which the exit
         // waits for longer on a pool's thread.
@@ -1114,8 +1147,11 @@ impl VariantObjects {
             shared
                 .vk()
                 .create_graphics_pipelines(vk::PipelineCache::null(), &[info], None)
-        })
-        .map_err(|(_, error)| vulkan(error))?;
+        });
+        if let Some(at) = linking {
+            creation_log::note(|| "link".to_owned(), at.elapsed());
+        }
+        let created = created.map_err(|(_, error)| vulkan(error))?;
         shared.counts.pipeline_linked();
         let raw = created
             .first()

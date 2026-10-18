@@ -53,6 +53,9 @@
 //!   stored (`render.rs`'s instances); `end_encoding` records each dispatch between the
 //!   instances it falls between, and a pass whose last command is a dispatch ends with one more
 //!   instance, of no draws, which runs the pass's store actions.
+//! - **Its pipelines.** A region's `VkPipeline` the tile function's variant has not made is made
+//!   on the device's pool while the dispatch goes on, and the pass records once it is made
+//!   (`render/pending_tile.rs`).
 //! - **Attachments.** The tile function stages each attachment it reaches through a storage view
 //!   in its staging format (an integer one, `WriteSource::TileAttachment`), which an
 //!   attachment's own image may lack: the dispatch reads and writes a scratch image of the
@@ -92,6 +95,7 @@
 //!   rounded up to 8 and reads every other word as zero, dropping its writes; the dispatch runs the
 //!   variant that does so (`BindState::kept_imageblock_bytes`).
 
+use super::pending_tile::{TileCall, TilePipelines};
 use super::replay::Samplers;
 use super::shadows::InstanceShadows;
 use super::{draw_problem, DrawProblem, RenderCommandEncoder};
@@ -110,7 +114,7 @@ use crate::fragment_imageblock::PassImageblock;
 use crate::function_table::VisibleFunctionTable;
 use crate::heap_sets;
 use crate::image_plan::ImagePlan;
-use crate::pipeline::{BufferForms, RenderPipelineState, RenderStateKind};
+use crate::pipeline::{BufferForms, RawPipeline, RenderPipelineState, RenderStateKind};
 use crate::render_pass::{PassLayout, Target};
 use crate::render_values::LoadAction;
 use crate::resource::ResourceKey;
@@ -132,7 +136,7 @@ use metal2vulkan::metal::format::{imageblock_sample_length, FormatMapping};
 use metal2vulkan::metal::{RenderStages, TextureType, TextureUsage};
 use metal2vulkan::pipeline::Stage;
 use metal2vulkan::vk::{ImageAspectFlags, ImageCreateFlags, ImageType, ImageUsageFlags};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 /// One tile dispatch of a pass, made at its call; `end_encoding` records it after the render
 /// pass instance before it.
@@ -152,8 +156,10 @@ pub(super) struct TileDispatch {
     pushed: Vec<binding::SetWrite>,
     /// Set 1, the command buffer's heap set of the variant, when the variant has one.
     heap: Option<vk::DescriptorSet>,
-    /// Each region's pipeline, push constants and group count.
-    regions: Vec<(vk::Pipeline, Vec<binding::PushWrite>, [u32; 3])>,
+    /// Each region's push constants and group count.
+    regions: Vec<(Vec<binding::PushWrite>, [u32; 3])>,
+    /// Its regions' `VkPipeline`s, made at the call or being made (`render/pending_tile.rs`).
+    pub(super) pipelines: TilePipelines,
     /// The shadowed textures it uses and its uses of buffers' bytes (the module docs).
     pub(super) shadows: InstanceShadows,
 }
@@ -185,20 +191,22 @@ impl TileDispatch {
         Ok(copies)
     }
 
-    /// Record the dispatch in `command_buffer`, outside any render pass instance: each staged
-    /// attachment copied into its scratch (`copies`, from [`TileDispatch::copies`]), the
-    /// dispatch, and the scratch copied back, between barriers from everything before and to
-    /// everything after.
+    /// Record the dispatch in `command_buffer` with `pipelines`, its regions' (its
+    /// [`TilePipelines`] made), outside any render pass instance: each staged attachment copied
+    /// into its scratch (`copies`, from [`TileDispatch::copies`]), the dispatch, and the scratch
+    /// copied back, between barriers from everything before and to everything after.
     ///
     /// # Safety
     ///
     /// `command_buffer` is recording outside a render pass; every object named lives until it
-    /// completes; the images are in the `GENERAL` layout.
+    /// completes; the images are in the `GENERAL` layout; `pipelines` are made with the
+    /// variant's layout, one per region.
     pub(super) unsafe fn record(
         &self,
         raw: &Vk,
         command_buffer: vk::CommandBuffer,
         copies: &[Staging],
+        pipelines: &[Arc<RawPipeline>],
     ) {
         // SAFETY: the caller's contract.
         unsafe {
@@ -242,11 +250,12 @@ impl TileDispatch {
                     &[],
                 );
             }
-            for (index, (pipeline, push, [x, y, z])) in self.regions.iter().enumerate() {
+            let regions = self.regions.iter().zip(pipelines);
+            for (index, ((push, [x, y, z]), pipeline)) in regions.enumerate() {
                 if index > 0 {
                     Barrier::between_dispatches().record(raw, command_buffer);
                 }
-                raw.cmd_bind_pipeline(command_buffer, vk::PipelineBindPoint::COMPUTE, *pipeline);
+                raw.cmd_bind_pipeline(command_buffer, vk::PipelineBindPoint::COMPUTE, pipeline.raw);
                 for (stages, offset, bytes) in push {
                     raw.cmd_push_constants(command_buffer, self.layout, *stages, *offset, bytes);
                 }
@@ -771,6 +780,7 @@ impl RenderCommandEncoder {
             _ => RenderStages::empty(),
         };
         self.dispatch_tiles_resident(call, threads, region)?;
+        self.tile_dispatch_calls += 1;
         self.command_encoded(reads);
         Ok(())
     }
@@ -1135,13 +1145,43 @@ impl RenderCommandEncoder {
             }
         }
         let mut regions = Vec::with_capacity(commands.regions.len());
-        let mut pipelines = Vec::with_capacity(commands.regions.len());
         for region in &commands.regions {
             let push = binding::push_writes(region.push_constants.clone(), &bound.holes)?;
-            let pipeline = variant.region_pipeline(region, &|slot| tables.bound_format(slot))?;
-            regions.push((pipeline.raw, push, region.group_count));
-            pipelines.push(pipeline);
+            regions.push((push, region.group_count));
         }
+        // Each region's `VkPipeline`: made, or handed to the device's pool while the dispatch goes
+        // on, its pass recording once it is made (`render/pending_tile.rs`); an encoder encoded
+        // again waits for it (`replay.rs`), as a compute encoder does.
+        let formats: BoundFormats<'_> = &|slot| tables.bound_format(slot);
+        let creation = self
+            .core
+            .records_executions()
+            .then(|| Arc::new(OnceLock::new()));
+        let pipelines = match self.core.encodes_again() {
+            true => {
+                let mut made = Vec::with_capacity(commands.regions.len());
+                for region in &commands.regions {
+                    made.push(variant.region_pipeline(region, formats)?);
+                }
+                TilePipelines::Made(made)
+            }
+            false => {
+                let call = TileCall {
+                    state: (self.pipeline.clone())
+                        .ok_or_else(|| internal("a tile dispatch without its pipeline state"))?,
+                    encoder: self.core.command_buffer().state().open_encoder_place(),
+                    dispatch: self.tile_dispatch_calls,
+                };
+                let regions = &commands.regions;
+                TilePipelines::begin(
+                    (&kernel, &variant),
+                    regions,
+                    formats,
+                    call,
+                    creation.clone(),
+                )
+            }
+        };
         let objects = Arc::clone(variant.objects());
         // Set 0 per dispatch; set 1 the device's (written below, once nothing refuses).
         let (heap_writes, writes): (Vec<_>, Vec<_>) =
@@ -1200,6 +1240,11 @@ impl RenderCommandEncoder {
         if let Some(own) = first {
             device.degrade_tile_scratch(own, staged.len(), area);
         }
+        // The pipelines made at the call, held until the command buffer completes.
+        let made_pipelines = match &pipelines {
+            TilePipelines::Made(made) => Some(made.clone()),
+            TilePipelines::Making(_) => None,
+        };
         self.dispatches.push(TileDispatch {
             after: self.earlier.len() + 1,
             staged,
@@ -1209,6 +1254,7 @@ impl RenderCommandEncoder {
             pushed,
             heap: heap_set,
             regions,
+            pipelines,
             shadows,
         });
         self.dispatched = true;
@@ -1221,17 +1267,22 @@ impl RenderCommandEncoder {
         self.coverage.everywhere();
         // Nor do its positions run again before the pass (`render/capture.rs`).
         self.keeping = super::capture::Keeping::Stopped;
-        self.core.executed(|| {
-            Execution::new(
-                ExecutedPipeline::Compute(Arc::clone(variant.shared_pipeline())),
-                Arc::new(bind.shape()),
-                pipelines.iter().map(|made| made.created_in).collect(),
-            )
-        });
+        let executed = || ExecutedPipeline::Compute(Arc::clone(variant.shared_pipeline()));
+        match (&made_pipelines, creation) {
+            (Some(made), _) => self.core.executed(|| {
+                let times = made.iter().map(|made| made.created_in).collect();
+                Execution::new(executed(), Arc::new(bind.shape()), times)
+            }),
+            // Its times set once its pipelines are made.
+            (None, Some(creation)) => self
+                .core
+                .executed(|| Execution::made_later(executed(), Arc::new(bind.shape()), creation)),
+            (None, None) => {}
+        }
         // The dispatch binds the variant: the kinds its making announces at every occurrence.
         if let Some(tested) = &bound_each {
             let formats = |slot| tested.iter().find(|(s, _)| *s == slot)?.1;
-            let formats: crate::degradation::BoundFormats<'_> = &formats;
+            let formats: BoundFormats<'_> = &formats;
             objects.announce_bound(
                 (std::slice::from_ref(&variant.pipeline().stage), None),
                 commands
@@ -1242,6 +1293,9 @@ impl RenderCommandEncoder {
         }
         self.core.retain(kernel);
         self.core.retain(objects);
+        if let Some(made) = made_pipelines {
+            self.core.retain(made);
+        }
         self.tile.retain_exclusive(&mut self.core);
         self.core.retain(bound.samplers);
         // The pass's tile memory, untracked: live until the command buffer completes.

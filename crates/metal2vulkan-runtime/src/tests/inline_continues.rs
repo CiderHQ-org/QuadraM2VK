@@ -4,9 +4,10 @@
 //! that reads its own attachment at its own pixel, with no barrier, reads the texels from before
 //! the pass (`texture/attached_reads.rs`), Metal's answer there (probe `selfsample`).
 //!
-//! The pass's first draw fills a box (its pipeline made at the state's creation), so its first
-//! instance records inline; the second, a line that reads the attachment, has a pipeline only its
-//! draw makes (a line, of another topology class than the state's creation predicts,
+//! The pass's first draw fills a box (with the pipeline made at the state's creation, its key's
+//! residual form, while its own key's making waits in the pool, `pipeline/render/residual.rs`), so
+//! its first instance records inline; the second, a line that reads the attachment, has a pipeline
+//! only its draw makes (a line, of another topology class than the state's creation predicts,
 //! `pipeline/predicted.rs`), which the device's pool's test hold (`pool::held`) keeps being made,
 //! so it records into an instance after the inline one.
 //!
@@ -154,7 +155,9 @@ fn a_draw_after_an_inline_first_instance_reads_the_copy_from_before_the_pass() {
         .draw_primitives(PrimitiveType::Line, 0, 6, 1, 0)
         .unwrap();
     encoder.end_encoding().unwrap();
-    let pooled = device.work_counts().pipelines_pooled - counted.pipelines_pooled;
+    let drawn = device.work_counts();
+    let pooled = drawn.pipelines_pooled - counted.pipelines_pooled;
+    let residual = drawn.residual_form_makings - counted.residual_form_makings;
     let mut blit = command_buffer.blit_command_encoder().unwrap();
     blit.copy_from_texture_to_buffer(
         &target,
@@ -176,7 +179,11 @@ fn a_draw_after_an_inline_first_instance_reads_the_copy_from_before_the_pass() {
     assert_eq!(command_buffer.error(), None);
     let after = device.work_counts();
     // The path ran: the first instance inline, the line's draw after it, its making held.
-    assert_eq!(pooled, 1, "the line's making waits in the pool");
+    assert_eq!(
+        residual, 1,
+        "the fill's own key's making, which nothing waits for"
+    );
+    assert_eq!(pooled - residual, 1, "the line's making waits in the pool");
     assert_eq!(after.inline_passes - counted.inline_passes, 1);
     assert_eq!(after.inline_passes_split - counted.inline_passes_split, 1);
     let contents = back.contents().unwrap();

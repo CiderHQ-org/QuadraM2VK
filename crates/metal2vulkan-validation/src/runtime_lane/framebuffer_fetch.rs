@@ -155,7 +155,7 @@ use super::presenting::{image_info, made_image, shared_among};
 use super::resolves::{lane, quiet, Lane, Shape, FULL, ONE, WHITE};
 use super::Messages;
 use crate::air_library::AirLibrary;
-use crate::runtime_lane::{buffer_with, read_buffer, WAIT};
+use crate::runtime_lane::{buffer_with, pipelines_settled, read_buffer, WAIT};
 use metal2vulkan::device::{DriverFact, VkFeature};
 use metal2vulkan::metal::{
     BlendFactor, IndexType, IndirectCommandType, PixelFormat, PrimitiveType, TextureType,
@@ -2409,14 +2409,20 @@ fn a_state_storing_before_its_tests_makes_its_first_draw_s_pipeline_at_creation(
     drawn
         .expect("the draw")
         .unwrap_or_else(|error| panic!("the draw on {device}: {error}"));
-    let after = lane.device.work_counts();
+    // Its constant slots bound at offset 0, the draw's key reads them at the bind offset alone
+    // where the creation's reads them at the residual: it draws with the creation's pipeline, its
+    // own key made on the pool behind it, nothing waiting (`pipeline/render/residual.rs`), and
+    // counted once the pool settles.
+    let after = pipelines_settled(&lane.device);
+    let behind = after.residual_form_makings - created.residual_form_makings;
     assert_eq!(
         (
             after.variant_pipelines_made - created.variant_pipelines_made,
             after.creation_pipelines_drawn - created.creation_pipelines_drawn,
         ),
-        (0, 1),
-        "the draw took the pipeline made at the creation on {device} through {}",
+        (behind, 1),
+        "the draw took the pipeline made at the creation on {device} through {}, nothing made \
+         but its own key behind it ({behind})",
         form(&lane)
     );
     // Color 0's color words: three 10-bit codes, `(code - 384) / 510` each, within four codes.

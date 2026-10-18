@@ -35,6 +35,7 @@ use super::resource::ResourceKey;
 use super::tracker::{Barrier, EncoderUses, Summary};
 use super::upload::Upload;
 use crate::device::functions::Vk;
+use crate::pipeline::budget::Urgency;
 use ash::vk;
 use metal2vulkan::bind::PredicationStep;
 use std::sync::{Arc, OnceLock};
@@ -185,11 +186,11 @@ impl PendingDispatch {
         }
     }
 
-    /// Run its makings before the device's pool's pieces that nothing waits for: its batch's
-    /// submission waits for them.
-    pub(super) fn hasten(&self) {
+    /// Run its makings before the device's pool's pieces of a lower rank than `urgency`: its
+    /// batch's submission waits for them.
+    pub(super) fn hasten(&self, urgency: Urgency) {
         for pending in self.makings() {
-            pending.hasten();
+            pending.hasten(urgency);
         }
     }
 

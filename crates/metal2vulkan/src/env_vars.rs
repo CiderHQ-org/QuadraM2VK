@@ -40,8 +40,10 @@ pub const REGISTRY: &[EnvVar] = &[
         effect: "metal2vulkan-runtime's diagnostics: one line per render VkPipeline a device \
                  makes, through the device's message sink or on stderr: its state, its key, the \
                  key's fields that differ from the state's closest earlier pipeline, and the \
-                 creation's time, split by MoltenVK's activities where its performance tracking \
-                 is on (MVK_CONFIG_PERFORMANCE_TRACKING=1); and once per reason, why a draw \
+                 creation's time, split by the making's parts (the digests, each library made \
+                 with its record loaded or missed or another caller's, the link) and by \
+                 MoltenVK's activities where its performance tracking is on \
+                 (MVK_CONFIG_PERFORMANCE_TRACKING=1); and once per reason, why a draw \
                  that reads its own pass's color attachment after a barrier took the split rather \
                  than a snapshot, and how many such draws the snapshot's area rule weighed at each \
                  share of their colors' pixels and texel bytes; set to anything but empty or 0",
