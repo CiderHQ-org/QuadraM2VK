@@ -177,6 +177,8 @@ fn pixels() -> impl Iterator<Item = (u64, u64)> {
     (0..AREA[1]).flat_map(|y| (0..AREA[0]).map(move |x| (x, y)))
 }
 
+/// A tile dispatch runs each tile of the pass, and the device counts it once
+/// (`WorkCounts::tile_dispatches_recorded`).
 #[test]
 fn a_tile_dispatch_runs_each_tile_of_the_pass() {
     on_device(|device| {
@@ -191,6 +193,7 @@ fn a_tile_dispatch_runs_each_tile_of_the_pass() {
         let out = device
             .new_buffer(RECORDS, ResourceOptions::shared())
             .unwrap();
+        let recorded = device.work_counts().tile_dispatches_recorded;
         run(device, &pass(&targets, LoadAction::Load, 0.0), |encoder| {
             assert_eq!(
                 (encoder.tile_width(), encoder.tile_height()),
@@ -202,6 +205,11 @@ fn a_tile_dispatch_runs_each_tile_of_the_pass() {
                 .dispatch_threads_per_tile(Size::new(8, 8, 1))
                 .unwrap();
         });
+        assert_eq!(
+            device.work_counts().tile_dispatches_recorded,
+            recorded + 1,
+            "the tile dispatches counted"
+        );
         let [fs, vs, tags] = [&targets[0], &targets[1], &targets[2]].map(words);
         for (i, (x, y)) in pixels().enumerate() {
             assert_eq!(
@@ -386,6 +394,8 @@ fn a_tile_dispatch_announces_its_scratch_and_split_once() {
     );
 }
 
+/// The passes and dispatches Metal refuses are refused, and a refused dispatch is not counted
+/// (`WorkCounts::tile_dispatches_recorded`).
 #[test]
 fn a_tile_pass_and_dispatch_are_refused_where_metal_refuses_them() {
     on_device(|device| {
@@ -441,6 +451,7 @@ fn a_tile_pass_and_dispatch_are_refused_where_metal_refuses_them() {
         unset.tile_width = 0;
         unset.tile_height = 0;
         let command_buffer = queue.command_buffer().unwrap();
+        let recorded = device.work_counts().tile_dispatches_recorded;
         let mut encoder = command_buffer.render_command_encoder(&unset).unwrap();
         assert_eq!(
             (encoder.tile_width(), encoder.tile_height()),
@@ -469,6 +480,11 @@ fn a_tile_pass_and_dispatch_are_refused_where_metal_refuses_them() {
             }))
         );
         encoder.end_encoding().unwrap();
+        assert_eq!(
+            device.work_counts().tile_dispatches_recorded,
+            recorded,
+            "refused dispatches counted"
+        );
     });
 }
 

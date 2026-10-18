@@ -21,6 +21,10 @@
 //!   buffers of two such passes, over fresh memoryless attachments, the second loaded `DontCare`
 //!   (`c · 27`), make one backing between them where the device renders the attachment into an
 //!   image of its own, and passes of 12 sizes, rendered twice in turn, one backing for each size.
+//!   And a memoryless attachment loaded `DontCare` that `exf2_fetch_unwritten` reads, then
+//!   `mli_tag_step` (`mli_memoryless_step`: what it reads plus (1, 2, 3, 4)) steps twice, then
+//!   `exf2_fetch_unwritten` folds in, in two passes in turn: `c · 11` each, which holds only where
+//!   each pass's tag starts from zero, whatever an earlier pass left in its backing.
 //!
 //! - **Load, store, and later passes**: a 16² `R32Float` texture cleared to 0.75 and stored,
 //!   then loaded and halved by `fetch_scalar` (0.375, stored), sampled by `a4_pixel_fetch` in a
@@ -317,7 +321,6 @@ pub(super) fn through_inputs(lane: &Lane) -> bool {
 
 /// Whether the device keeps whole a pass that a fetch through the pixel interlock would split
 /// after plain draws: its driver ran such a pass faster whole
-/// (`DriverFact::InterlockedPassWholeFaster`). Elsewhere the pass splits there.
 fn keeps_whole(lane: &Lane) -> bool {
     lane.device
         .properties()
@@ -601,6 +604,94 @@ fn a_dont_care_memoryless_attachment_reads_zero() {
     quiet(lane, &messages);
 }
 
+/// A memoryless attachment loaded `DontCare` that a pass's first draw only reads, then steps,
+/// then folds into the stored count: over the count cleared to (1, 2, 3, 4),
+/// `exf2_fetch_unwritten` (the tag read as zero), `mli_tag_step` twice (the owned fixture
+/// `mli_memoryless_step`: the tag `2 (k + 1)` in lane `k`), `exf2_fetch_unwritten`: `11 c`, in
+/// each of two passes in turn, the second of which would read `13 c` where it found what the first
+/// left in a backing the queue keeps. Where the device fetches through input attachments, the
+/// first draw records inline, and the first step splits the pass before it
+/// (`WorkCounts::inline_memoryless_write_splits`): the backing the split brings stands in from
+/// there on, cleared to the zero the first instance read, and the instance after the split
+/// records inline too (`render/inline_first.rs`, `render/inline_splits.rs`). In the interlock the
+/// first draw brings the backing, and the pass records as before.
+#[test]
+fn a_memoryless_attachment_stepped_after_an_inline_read_starts_from_zero() {
+    let (messages, cache, lane) = lane();
+    let vertices = library(&lane, "rt6_resolves");
+    let unwritten = library(&lane, "exf2_fetch_unwritten");
+    let stepping = library(&lane, "mli_memoryless_step");
+    let pf = PixelFormat::RGBA32Uint;
+    let counted = || {
+        let counts = lane.device.work_counts();
+        let splits = counts.inline_memoryless_write_splits;
+        (counts.inline_passes, splits, counts.inline_split_instances)
+    };
+    let before = counted();
+    let ran = (|| {
+        let fold = pipeline(
+            &lane,
+            &vertices,
+            (&unwritten, "exf2_fetch_unwritten"),
+            &[pf, pf],
+            1,
+        )?;
+        let step = pipeline(&lane, &vertices, (&stepping, "mli_tag_step"), &[pf, pf], 1)?;
+        let count = lane.texture(pf, ONE, TextureUsage::RENDER_TARGET);
+        let tag = memoryless(
+            &lane,
+            TextureType::Type2D,
+            pf,
+            ONE,
+            TextureUsage::RENDER_TARGET,
+        )?;
+        let targets = [
+            (
+                &count,
+                ClearColor::new(1.0, 2.0, 3.0, 4.0),
+                StoreAction::Store,
+            ),
+            (
+                &tag,
+                ClearColor::new(0.0, 0.0, 0.0, 0.0),
+                StoreAction::DontCare,
+            ),
+        ];
+        let mut unloaded = pass(&targets, None);
+        unloaded.color_attachments[1].load_action = LoadAction::DontCare;
+        let mut read = Vec::new();
+        for _ in 0..2 {
+            steps(&lane, &unloaded, &[&fold, &step, &step, &fold])?;
+            read.extend(lane.read(&count, (0, 0), 16, BlitOption::None));
+        }
+        Ok(read)
+    })();
+    let (inline, splits, later) = counted();
+    let texel: Vec<u8> = (1u32..=4).flat_map(|c| (c * 11).to_le_bytes()).collect();
+    expect(
+        &lane,
+        "a memoryless attachment stepped after an inline read",
+        ran,
+        &texel.repeat(2 * TEXELS),
+    );
+    let (inline, splits) = (inline - before.0, splits - before.1);
+    let later = later - before.2;
+    eprintln!(
+        "a memoryless attachment stepped after an inline read on {}: {inline} passes inline, \
+         {splits} split before a write of it, {later} instances inline after a split",
+        lane.device.name()
+    );
+    if through_inputs(&lane) {
+        assert_eq!(
+            (inline, splits, later),
+            (2, 2, 2),
+            "inline, and split before the step into an instance inline too"
+        );
+    }
+    drop(cache);
+    quiet(lane, &messages);
+}
+
 /// The colors a pass's fetching draws read and write as storage images in the pixel interlock,
 /// which their subpass leaves out: the framebuffer of each instance holds a view of a placeholder
 /// the device keeps for each such color, never one of the image the draws write
@@ -686,6 +777,95 @@ fn a_left_out_color_s_framebuffer_view_is_a_placeholder() {
         false => vec![(2, 2), (2, 4), (4, 6), (4, 8)],
     };
     assert_eq!(after, expected, "placeholders made, and attachments taken");
+    drop(cache);
+    quiet(lane, &messages);
+}
+
+/// A memoryless attachment loaded `DontCare` that a pass's first draw leaves alone, then folded,
+/// stepped twice and folded again: over the count cleared to zero, `mli_count_seed` (the count
+/// (1, 2, 3, 4), fetching nothing), `exf2_fetch_unwritten`, `mli_tag_step` twice (the tag
+/// `2 (k + 1)` in lane `k`), `exf2_fetch_unwritten`: `11 c`, in each of two passes in turn, the
+/// second of which would read `13 c` where it found what the first left in the backing the queue
+/// keeps. The first draw records inline, and the pass splits once: in the interlock before the
+/// first fold, whose draws read and write the colors as storage images, the memoryless one's
+/// backing arriving with it; through input attachments before the first step, a write of the
+/// memoryless color (`WorkCounts::inline_memoryless_write_splits`). The instance after the split
+/// records inline too, after the backing is cleared (`render/inline_splits.rs`).
+#[test]
+fn a_memoryless_attachment_fetched_after_a_plain_inline_draw_starts_from_zero() {
+    let (messages, cache, lane) = lane();
+    let vertices = library(&lane, "rt6_resolves");
+    let unwritten = library(&lane, "exf2_fetch_unwritten");
+    let stepping = library(&lane, "mli_memoryless_step");
+    let pf = PixelFormat::RGBA32Uint;
+    let counted = || {
+        let counts = lane.device.work_counts();
+        let splits = counts.inline_memoryless_write_splits;
+        (counts.inline_passes, splits, counts.inline_split_instances)
+    };
+    let before = counted();
+    let ran = (|| {
+        let seed = pipeline(
+            &lane,
+            &vertices,
+            (&stepping, "mli_count_seed"),
+            &[pf, pf],
+            1,
+        )?;
+        let fold = pipeline(
+            &lane,
+            &vertices,
+            (&unwritten, "exf2_fetch_unwritten"),
+            &[pf, pf],
+            1,
+        )?;
+        let step = pipeline(&lane, &vertices, (&stepping, "mli_tag_step"), &[pf, pf], 1)?;
+        let count = lane.texture(pf, ONE, TextureUsage::RENDER_TARGET);
+        let tag = memoryless(
+            &lane,
+            TextureType::Type2D,
+            pf,
+            ONE,
+            TextureUsage::RENDER_TARGET,
+        )?;
+        let zero = ClearColor::new(0.0, 0.0, 0.0, 0.0);
+        let targets = [
+            (&count, zero, StoreAction::Store),
+            (&tag, zero, StoreAction::DontCare),
+        ];
+        let mut unloaded = pass(&targets, None);
+        unloaded.color_attachments[1].load_action = LoadAction::DontCare;
+        let mut read = Vec::new();
+        for _ in 0..2 {
+            steps(&lane, &unloaded, &[&seed, &fold, &step, &step, &fold])?;
+            read.extend(lane.read(&count, (0, 0), 16, BlitOption::None));
+        }
+        Ok(read)
+    })();
+    let (inline, splits, later) = counted();
+    let texel: Vec<u8> = (1u32..=4).flat_map(|c| (c * 11).to_le_bytes()).collect();
+    expect(
+        &lane,
+        "a memoryless attachment fetched after a plain inline draw",
+        ran,
+        &texel.repeat(2 * TEXELS),
+    );
+    let (inline, splits) = (inline - before.0, splits - before.1);
+    let later = later - before.2;
+    eprintln!(
+        "a memoryless attachment fetched after a plain inline draw on {}: {inline} passes \
+         inline, {splits} split before a write of it, {later} instances inline after a split",
+        lane.device.name()
+    );
+    let written = match through_inputs(&lane) {
+        true => 2,
+        false => 0,
+    };
+    assert_eq!(
+        (inline, splits, later),
+        (2, written, 2),
+        "inline, and split into an instance inline too"
+    );
     drop(cache);
     quiet(lane, &messages);
 }
@@ -1213,11 +1393,14 @@ fn a_callers_image_without_the_fetch_usage_fetches_through_a_scratch() {
     let loaded =
         steps(&lane, &loading(&texture, StoreAction::Store), &[&halve]).map(|()| read(&texture));
     expect(&lane, "of a caller's image, loaded", loaded, &floats(0.5));
-    let split = steps(&lane, &pass(&targets, None), &[&white, &halve]).map(|()| read(&texture));
+    let inline_passes = || lane.device.work_counts().inline_passes;
+    let before = inline_passes();
+    let drawn = steps(&lane, &pass(&targets, None), &[&white, &halve]).map(|()| read(&texture));
+    let inline = inline_passes() > before;
     expect(
         &lane,
         "of a caller's image, drawn first",
-        split,
+        drawn,
         &floats(0.5),
     );
     let notices = messages.take_notices();
@@ -1241,7 +1424,7 @@ fn a_callers_image_without_the_fetch_usage_fetches_through_a_scratch() {
     assert_eq!(
         counts.contains_key(&Degradation::RenderPassSplit),
         split,
-        "the split of the pass drawn first on {device}: {counts:?}"
+        "the split of the pass drawn first on {device} (inline: {inline}): {counts:?}"
     );
     let scratch = notices
         .iter()
@@ -1263,9 +1446,67 @@ fn a_callers_image_without_the_fetch_usage_fetches_through_a_scratch() {
         "the scratch's notice on {device}: {scratch}"
     );
     eprintln!(
-        "framebuffer fetch of a caller's image on {device} through {}: {counts:?}",
+        "framebuffer fetch of a caller's image on {device} through {} (first instance inline: \
+         {inline}): {counts:?}",
         form(&lane)
     );
+    // Beside a memoryless attachment, which no inline instance takes.
+    let colors = [pf, pf];
+    let halve_beside = pipeline(&lane, &vertices, (&fetch, "fetch_scalar"), &colors, 1).unwrap();
+    let white_beside = pipeline(&lane, &vertices, (&vertices, WHITE), &colors, 1).unwrap();
+    let shape = Shape { size: SIDE, ..ONE };
+    let tag = memoryless(
+        &lane,
+        TextureType::Type2D,
+        pf,
+        shape,
+        TextureUsage::RENDER_TARGET,
+    )
+    .unwrap();
+    let beside = [
+        (&texture, clear, StoreAction::Store),
+        (&tag, clear, StoreAction::DontCare),
+    ];
+    let drawn = steps(&lane, &pass(&beside, None), &[&white_beside, &halve_beside])
+        .map(|()| read(&texture));
+    assert_eq!(
+        inline_passes(),
+        before,
+        "a pass beside a memoryless attachment on {device} records no instance inline"
+    );
+    expect(
+        &lane,
+        "of a caller's image, drawn first beside a memoryless attachment",
+        drawn,
+        &floats(0.5),
+    );
+    if !through_inputs(&lane) {
+        // The split was announced at the pass drawn first, where the device announces it.
+        let kinds: Vec<Degradation> = [Degradation::MemorylessBacked]
+            .into_iter()
+            .filter(|_| backed)
+            .collect();
+        let mut first = made(
+            &lane,
+            &[
+                pipeline_descriptor(&vertices, (&fetch, "fetch_scalar"), &colors, 1),
+                pipeline_descriptor(&vertices, (&vertices, WHITE), &colors, 1),
+            ],
+        );
+        first.extend(forced(&[(
+            Degradation::FetchThroughScratch,
+            scratched(&messages),
+        )]));
+        let counts = assert_made_once(&messages, &kinds, &first);
+        assert!(
+            !counts.contains_key(&Degradation::RenderPassSplit),
+            "the pass beside a memoryless attachment on {device}: {counts:?}"
+        );
+        eprintln!(
+            "framebuffer fetch of a caller's image beside a memoryless attachment on {device}: \
+        );
+    }
+    drop(tag);
     drop(texture);
     // SAFETY: nothing uses them: the texture is gone and every command buffer completed.
     unsafe {

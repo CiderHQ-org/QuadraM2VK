@@ -1688,6 +1688,12 @@ impl<M> Default for ShadowSync<M> {
     }
 }
 
+impl<M> ShadowSync<M> {
+    /// Whether the encoder used no shadowed texture yet: then a command that uses none takes no
+    /// copy, and changes nothing here ([`before`](Self::before), [`after`](Self::after)).
+    pub(super) fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
 
     /// How many of the textures the encoder used share their truth with one it used before
     /// (another texture over the same bytes): each copies the texels in apart
@@ -1700,6 +1706,8 @@ impl<M> Default for ShadowSync<M> {
             })
             .count()
     }
+}
+
 /// What a merge's scratch keeps of a shadow's texels (`shadow_merge.rs`): the rectangle
 /// `[x0, y0, x1, y1)` its keep, its copy of the changed texels and its merge are cut to, or `None`
 /// for every texel.

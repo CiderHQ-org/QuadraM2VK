@@ -780,6 +780,7 @@ impl RenderCommandEncoder {
             _ => RenderStages::empty(),
         };
         self.dispatch_tiles_resident(call, threads, region)?;
+        self.core.device().shared().counts.tile_dispatch_recorded();
         self.tile_dispatch_calls += 1;
         self.command_encoded(reads);
         Ok(())

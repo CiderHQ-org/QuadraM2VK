@@ -58,10 +58,10 @@
 //!   is a load operation's clear: on a device that renders through Metal (MoltenVK) that clears
 //!   a pass without a draw over the whole attachment, as Metal does, so the reach pass's would,
 //!   and the pass's own would in a pass whose draw calls draw nothing (lane `clear_reach` on
-//!   MoltenVK, EVs RRS-lane9-mvk3 and RRS-lane11-mvk3). A stand-in's copy back to its texture
-//!   covers the reach (`attachment_stand_in.rs`). So is a cleared attachment the pass's first
-//!   instance leaves out where no whole-subresource clear may stand for its load operation
-//!   (`render.rs`'s `cleared_ahead`), over the render area where it stores nothing.
+//! - A pass whose first instance records inline clears none before it: that instance, begun at a
+//!   draw that records (of a vertex and an instance at least), renders over the reach its colors
+//!   share, and its load operations' clear reaches it (`render/inline_first.rs`). Unmeasured on
+//!   MoltenVK past the render area.
 
 use super::clear_value;
 use super::encoder::EncoderCore;

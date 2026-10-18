@@ -511,6 +511,8 @@ mod indirect_host_steps;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
 mod inline_bytes;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
+mod inline_reasons;
+#[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
 mod int_attributes;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
 mod interlocked_draw_order;

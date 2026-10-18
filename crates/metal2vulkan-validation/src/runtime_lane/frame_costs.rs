@@ -127,6 +127,10 @@
 //! one layout (`WorkCounts::pipeline_layouts_shared`): its lines give what a draw's push of set 0
 //! carries there.
 //!
+//! `frame_costs_part_area` measures the plain device with the old image's passes over a render
+//! area of 500x300 of each 512x512 layer ([`Shape::Part`]), whose clears reach past it to whole
+//! tiles, 512x320 (`clear_reach.rs`).
+//!
 //! `frame_costs_host_pages` measures the plain device with the index and rectangle buffers over
 //! host pages ([`Workload::host_pages`]), as every buffer of the consumer's guest lies over its RAM,
 //! in the window server's frame and in the new image's: each draw's uses of them then take the
@@ -207,6 +211,9 @@ const RESOLVED: usize = 4;
 /// The window layers the passes draw into, and their side.
 const TARGETS: usize = 4;
 const TARGET_SIDE: u64 = 512;
+/// The render area of [`Shape::Part`]'s passes, of whole 32-pixel tiles on neither axis: a clear
+/// reaches 512x320.
+const PART: [u64; 2] = [500, 300];
 /// The sampled textures the rectangles take in turn, and their side.
 const TEXTURES: usize = 16;
 const TEXTURE_SIDE: u64 = 64;
@@ -473,6 +480,11 @@ impl Run {
                 "{device}, {buffers} command buffers of 1 pass of {draws} masked shapes \
                  alternating between two pipeline states of one layout, the guest's loads"
             ),
+            Shape::Part { buffers, passes } => format!(
+                "{device}, {buffers} command buffers of {passes} passes of one draw over {}x{} of \
+                 each layer, the guest's loads",
+                PART[0], PART[1]
+            ),
         };
         let device = match self.host {
             false => device,
@@ -513,6 +525,9 @@ enum Shape {
     /// mask's pipeline state and the gathering mask's ([`Workload::gather`]) at every draw,
     /// loading as [`GUEST_LOADS`].
     Alternating { buffers: usize, draws: usize },
+    /// [`Shape::Passes`]'s passes over a render area of [`PART`] of each layer, whose clears reach
+    /// past it, to whole tiles (`clear_reach.rs`).
+    Part { buffers: usize, passes: usize },
 }
 
 impl Shape {
@@ -526,6 +541,7 @@ impl Shape {
                 .collect(),
             Shape::Composite { buffers, draws, .. } => vec![vec![draws]; buffers],
             Shape::Alternating { buffers, draws } => vec![vec![draws]; buffers],
+            Shape::Part { buffers, passes } => vec![vec![1; passes]; buffers],
         }
     }
 }
@@ -992,6 +1008,12 @@ impl Workload {
             color.load_action = GUEST_LOADS[pass % GUEST_LOADS.len()];
             color.clear_color = ClearColor::new(0.0, 0.0, 0.0, 0.0);
             color.store_action = StoreAction::Store;
+            if let Shape::Part { .. } = self.shape {
+                [
+                    descriptor.render_target_width,
+                    descriptor.render_target_height,
+                ] = PART;
+            }
         } else if self.resolved(pass) {
             color.texture = Some(self.multisampled.clone());
             color.resolve_texture = Some(layer);
@@ -1798,6 +1820,9 @@ fn measure(runs: &[Run]) {
         eprintln!(
             "FRAME-COST {name} {label}: a frame's passes: {:.1} recorded their first instance \
              inline; not inline for the encoder {:.1}, the layout {:.1}, a memoryless color {:.1}, \
+             a color's actions {:.1} (a DontCare load {:.1}, a reach not shared {:.1}, \
+             a clear to a NaN {:.1}, a resolve {:.1}, a store {:.1}), a texture over a buffer \
+             {:.1}, another attachment kind \
              {:.1}, a storage color {:.1}, a stand-in {:.1}, a draw {:.1}; {:.1} split instances \
              recorded inline, {:.1} instances ended unrun; the replays' {:.1} render pass begins \
              and {:.1} secondary executions",
@@ -1806,6 +1831,11 @@ fn measure(runs: &[Run]) {
             per_frame(|c| c.passes_not_inline_layouts),
             per_frame(|c| c.passes_not_inline_memoryless),
             per_frame(|c| c.passes_not_inline_actions),
+            per_frame(|c| c.passes_not_inline_actions_dont_care_load),
+            per_frame(|c| c.passes_not_inline_actions_unequal_reach),
+            per_frame(|c| c.passes_not_inline_actions_nan_clear),
+            per_frame(|c| c.passes_not_inline_actions_resolve),
+            per_frame(|c| c.passes_not_inline_actions_store),
             per_frame(|c| c.passes_not_inline_buffer_textures),
             per_frame(|c| c.passes_not_inline_attachments),
             per_frame(|c| c.passes_not_inline_storage),
@@ -2068,6 +2098,18 @@ fn frame_costs_alternating() {
     measure(&[Run::shaped(Shape::Alternating {
         buffers: 40,
         draws: 16,
+    })]);
+}
+
+/// The guest's old image's passes over part of each layer ([`Shape::Part`]): 100 command buffers
+/// of one pass of one draw, over 500x300 of a 512x512 layer, loading as [`GUEST_LOADS`]; each
+/// clear reaches 512x320, which the inline path takes (`render/inline_first.rs`).
+#[test]
+#[ignore = "a measurement, not a check: run by name with --run-ignored all"]
+fn frame_costs_part_area() {
+    measure(&[Run::shaped(Shape::Part {
+        buffers: 100,
+        passes: 1,
     })]);
 }
 

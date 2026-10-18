@@ -270,6 +270,7 @@ use super::binding;
 use super::blit::TRANSFER;
 use super::buffer::Buffer;
 use super::clear_reach::{self, ReachClears};
+use super::color_list::ColorList;
 use super::color_reformat::{self, Routing};
 use super::color_resolve::{self, ShaderResolves};
 use super::command_buffer::CommandBuffer;
@@ -334,6 +335,7 @@ use super::used_resources::EncoderKind;
 use super::visibility::{self, Continuation, Visibility, VisibilityResultMode};
 use crate::device::functions::Vk;
 use crate::work_counts::Begun;
+use crate::work_counts::NotInline;
 use ash::vk;
 pub(super) use executions::DeferredPass;
 use executions::{PassInstance, PassStorage, RenderExecution, RunPasses};
@@ -396,6 +398,7 @@ mod vertex_reach;
 mod vertex_strides;
 
 use bound::{Bound, EqualShapes, Now, Recorded};
+pub(crate) use inline_splits::SpareKept;
 use replay::{
     DrawIndexed, DrawIndexedIndirect, DrawIndexedPatches, DrawIndexedPatchesIndirect, DrawPatches,
     DrawPatchesIndirect, Samplers,
@@ -1494,9 +1497,14 @@ impl CommandBuffer {
         // groups record after the first group's pass: its draws' secondary begins only where a
         // command records into it (`RenderCommandEncoder::begin_current_draws`).
         let extended = ExtendedShadows::of(descriptor, &layout, rate_map.is_some());
-        let inline = again.is_none()
-            && groups == 1
-            && inline_first::opens_inline(device, &layout, rate_map.is_some(), &extended);
+        let opens = match again.is_none() && groups == 1 {
+            true => inline_first::opens_inline(device, &layout, rate_map.is_some(), &extended),
+            false => Err(NotInline::Encoders),
+        };
+        if let Err(why) = opens {
+            device.shared().counts.pass_not_inline(why);
+        }
+        let inline = opens.is_ok();
         // And its instances after a split, where no attachment is a shadowed texture
         // (`render/inline_splits.rs`).
         let splits = inline && !shadows::attachments_shadowed(&layout);
@@ -4133,6 +4141,29 @@ impl RenderCommandEncoder {
         if let Some(copies) = &stand_ins_after_first {
             uses.extend(copies.uses().iter().cloned());
         }
+        // A memoryless color's backing, arriving later, where the first instance recorded inline
+        // and rendered its transient image: cleared after it to what that left, the clear its
+        // first instance loaded, which no draw of it wrote over (`render/inline_first.rs`). Where
+        // the instance after it recorded inline too, the backings arrived with it and were
+        // cleared before it (`render/inline_splits.rs`): their uses are these, recorded there.
+        let backings_after_first = match inline {
+            true => Clears::plan(
+                (layout.colors.iter().flatten())
+                    .filter(|c| {
+                        c.memoryless
+                            && c.load == LoadAction::Clear
+                            && c.stand_in
+                                .as_ref()
+                                .is_some_and(|s| s.cause == Cause::Backing)
+                    })
+                    .map(|c| (&c.target, c.clear)),
+            )?,
+            false => None,
+        };
+        if let Some(clears) = &backings_after_first {
+            uses.extend(clears.uses.iter().cloned());
+        }
+        let backings_after_first = backings_after_first.filter(|_| inlined == 1);
         let mut copied_back =
             scratch(&|index, c| stored(c) && !merged.iter().any(|&(at, _)| at == index));
         copied_back.extend(depth_stencil_copies(true));
@@ -4254,9 +4285,16 @@ impl RenderCommandEncoder {
                 }
             }
         }
-        let clears = Clears::plan(&clears)?;
+        let clears = Clears::plan(clears)?;
         let bounded = tiles.as_ref().map(|tiles| (&dont_care, tiles));
-        let reach_clears = ReachClears::plan(&device, &layout, called, &left_out, bounded)?;
+        // Where the first instance recorded inline, its own clears reached as far as Metal's (it
+        // rendered over their reach), and it had no other clear to make before it: no depth or
+        // stencil, storage color or `DontCare` load but a memoryless color's
+        // (`render/inline_first.rs`).
+        let reach_clears = match inline {
+            true => None,
+            false => ReachClears::plan(&device, &layout, called, &left_out, bounded)?,
+        };
         // An attachment the reach clear covers loads in the pass: that clear holds the render
         // area too, and a pass's own clear on a device that renders through Metal (MoltenVK)
         // reaches the whole attachment where the pass has no draw (`clear_reach.rs`). The pass
@@ -4717,8 +4755,14 @@ impl RenderCommandEncoder {
                 pieces,
                 before,
                 positioned,
+                kept,
                 ..
             } = instance;
+            // Its commands, kept as it recorded inline after a split, were recorded at the pass's
+            // end (`render/inline_splits.rs`): their room goes back to the device.
+            if let Some(kept) = kept {
+                device.shared().kept_rooms.give(kept);
+            }
             // An instance holding attachments out of `GENERAL` runs in one render pass instance
             // of its own pass: no execution of render commands joins it (`Piece`), whose runs
             // would begin others (`render/snapshot.rs`, the depth's layout above).
@@ -4822,6 +4866,9 @@ impl RenderCommandEncoder {
                             if let Some(copies) = &stand_ins_after_first {
                                 copies.record_in(raw, command_buffer);
                             }
+                            if let Some(clears) = &backings_after_first {
+                                clears.record_in(raw, command_buffer);
+                            }
                             steps.after(raw, command_buffer, last, tiles);
                         }
                         let later = drawn.iter().zip(&objects);
@@ -4878,6 +4925,9 @@ impl RenderCommandEncoder {
                         unsafe {
                             if let Some(copies) = &stand_ins_after_first {
                                 copies.record_in(raw, command_buffer);
+                            }
+                            if let Some(clears) = &backings_after_first {
+                                clears.record_in(raw, command_buffer);
                             }
                             // The tile dispatches after the last of them record with the later
                             // instances, once their pipelines are made (`render/pending_tile.rs`).
@@ -5380,6 +5430,21 @@ impl RenderCommandEncoder {
             && left_out.iter().all(|c| {
                 storage.contains(c) || 1u32.checked_shl(*c).is_none_or(|bit| written & bit == 0)
             })
+    }
+
+    /// Whether a draw of `pipeline`, its colors routed by `routing` (its variant zeroing the pass
+    /// colors at no place of its record where `zeroed`), writes a pass color of a memoryless
+    /// texture rendered in place, through no stand-in (`linear_attachment::pass_writes`): what no
+    /// instance recorded inline does (`render/inline_first.rs`).
+    fn writes_memoryless(&self, pipeline: &DrawingState, routing: &Routing, zeroed: bool) -> bool {
+        let writes = linear_attachment::writes(&pipeline.base().graphics.color_attachments);
+        let writes = linear_attachment::pass_writes(&writes, routing, zeroed);
+        (self.layout.colors.iter().zip(writes)).any(|(color, write)| {
+            write.is_some()
+                && color.as_ref().is_some_and(|color| {
+                    color.stand_in.is_none() && (color.memoryless || memoryless(&color.target))
+                })
+        })
     }
 
     /// Whether the pass's color `index` renders into its own target for the rest of the pass,
@@ -7625,7 +7690,14 @@ impl RenderCommandEncoder {
         let snapshot_split = snapshot.as_ref().is_some_and(|w| self.snapshot_apart(w));
         let storage_colors = self.storage_colors(&plan);
         let apart = snapshot_split || storage_colors & self.current.feedback.0 != 0;
+        // A draw that writes a memoryless color the pass renders in place, which no instance
+        // recorded inline writes: the pass's first draw that records keeps its first instance in
+        // a secondary, and a later one records into a new instance after the inline one
+        // (`render/inline_first.rs`).
+        let deciding = matches!(self.inline, inline_first::Inline::Open { .. });
+        let unheld_writes = (self.current.inline || deciding)
             && self.writes_memoryless(&pipeline, &routing, zeroes_colors);
+        let first_write = self.current.inline && unheld_writes;
         // A capture draw records into the capture's instance, the current one.
         let (next, stood) = match capture {
             Some(_) => (Next::Current, None),
@@ -7633,12 +7705,15 @@ impl RenderCommandEncoder {
                 (&fetched, Some(&pipeline)),
                 (stencil_use.is_some(), tests_use.is_some()),
                 views,
-                (ordered || after_barrier || apart) && !self.replaying,
+                (ordered || after_barrier || apart || first_write) && !self.replaying,
                 hidden,
                 &routing.locations,
                 &reformats,
             )?,
         };
+        if first_write && matches!(next, Next::New { split: true, .. }) {
+            device.shared().counts.inline_memoryless_write_split();
+        }
         if attached {
             device.shared().counts.attachment_read_through_copy();
         }
@@ -8697,6 +8772,12 @@ impl RenderCommandEncoder {
         let inline = self.inline_begin(
             &next,
             stood.as_deref(),
+            (
+                !empty && !culled,
+                made_ahead,
+                capture.is_some(),
+                unheld_writes,
+            ),
             feedback,
         )?;
         // And a later instance of such a pass after a split, where it can, the instance before's
@@ -8976,9 +9057,7 @@ impl RenderCommandEncoder {
                             match (made_now, &mut self.current.kept) {
                                 // An instance recorded inline after a split keeps its draws until
                                 // its copies are known (`render/inline_splits.rs`).
-                                (Some(made), Some(kept)) => {
-                                    kept.draw(recording.owned(), made);
-                                }
+                                (Some(made), Some(kept)) => kept.draw(&recording, made),
                                 // SAFETY: the secondary command buffer (or the pass's, inline) is
                                 // recording inside the compatible pass, and only this encoder records
                                 // it; every object recorded is live until the command buffer
@@ -9701,6 +9780,40 @@ impl Recording<'_> {
         }
     }
 
+    /// [`owned`](Self::owned), over `into`'s storage: where an earlier draw's recording left room
+    /// enough, it allocates nothing (`inline_splits::SpareKept`).
+    fn own_into(&self, into: &mut OwnedRecording) {
+        fn refill<T: Copy>(into: &mut Vec<T>, from: &[T]) {
+            into.clear();
+            into.extend_from_slice(from);
+        }
+        into.layout = self.layout;
+        into.shape = self.shape;
+        refill(&mut into.sets, self.sets);
+        refill(&mut into.pushed, self.pushed);
+        into.heap = self.heap;
+        into.push.truncate(self.push.len());
+        for (at, (stages, offset, bytes)) in self.push.iter().enumerate() {
+            match into.push.get_mut(at) {
+                Some(write) => {
+                    (write.0, write.1) = (*stages, *offset);
+                    refill(&mut write.2, bytes);
+                }
+                None => into.push.push((*stages, *offset, bytes.clone())),
+            }
+        }
+        refill(&mut into.vertex_buffers, self.vertex_buffers);
+        into.index = self.index;
+        into.indirect = self.indirect;
+        refill(&mut into.dynamic, self.dynamic);
+        into.topology = self.topology;
+        into.primitive_restart = self.primitive_restart;
+        into.state = self.state.clone();
+        into.extended = self.extended;
+        into.draw = self.draw;
+        into.pair = self.pair.clone();
+    }
+
     /// Record the draw, leaving out each state command that sets what `bound`, the record of its
     /// command buffer, holds (`render/bound.rs`); the state commands it recorded.
     ///
@@ -10034,23 +10147,24 @@ fn memoryless(target: &Target) -> bool {
     target.texture.storage_mode() == super::values::StorageMode::Memoryless
 }
 
-/// The clears of color attachments a pass's first instance leaves out, recorded before the pass.
+/// The clears of color attachments a pass's first instance leaves out, recorded before the pass,
+/// or of memoryless colors' backings (`render/inline_first.rs`): one allocation, the uses'.
 struct Clears {
-    /// `(image, clear value, level and layer)` of each clear.
-    clears: Vec<(vk::Image, vk::ClearColorValue, vk::ImageSubresourceRange)>,
+    /// `(image, clear value, level and layer)` of each clear, at most one per color attachment.
+    clears: ColorList<(vk::Image, vk::ClearColorValue, vk::ImageSubresourceRange)>,
     uses: Vec<Use<ResourceKey>>,
 }
 
 impl Clears {
-    /// The clears of `targets`' levels and layers to their values; `None` when there is none.
-    fn plan(targets: &[(&Target, vk::ClearColorValue)]) -> Result<Option<Clears>, Error> {
-        if targets.is_empty() {
-            return Ok(None);
-        }
+    /// The clears of `targets`' levels and layers to their values, color attachments of a pass;
+    /// `None` when there is none.
+    fn plan<'a>(
+        targets: impl IntoIterator<Item = (&'a Target, vk::ClearColorValue)>,
+    ) -> Result<Option<Clears>, Error> {
         let write = Access::new(TRANSFER, vk::AccessFlags2::TRANSFER_WRITE);
-        let mut clears = Vec::with_capacity(targets.len());
-        let mut uses = Vec::with_capacity(targets.len());
-        for &(target, value) in targets {
+        let mut clears = ColorList::new();
+        let mut uses = Vec::new();
+        for (target, value) in targets {
             let levels = target.level..target.level + 1;
             let layers = target.layer..target.layer + 1;
             uses.push(target.texture.image_use(levels, layers, write, true)?);
@@ -10061,9 +10175,35 @@ impl Clears {
                 base_array_layer: target.layer,
                 layer_count: 1,
             };
-            clears.push((target.texture.raw_image()?, value, range));
+            clears.push((target.texture.raw_image()?, value, range))?;
         }
-        Ok(Some(Clears { clears, uses }))
+        Ok((!clears.is_empty()).then_some(Clears { clears, uses }))
+    }
+
+    /// Record the clears into `command_buffer`, between barriers from everything before and to
+    /// everything after, as [`Clears::record`] records them in an encoder's command buffer: a
+    /// step of a pass recorded later, or after its instances recorded inline, whose uses the
+    /// pass took.
+    ///
+    /// # Safety
+    ///
+    /// `command_buffer` is recording outside a render pass, and only the caller records it; the
+    /// images are live until it completes, rest in `GENERAL` and take transfer writes.
+    unsafe fn record_in(&self, raw: &Vk, command_buffer: vk::CommandBuffer) {
+        // SAFETY: the caller's contract; each range is one level and layer of its image.
+        unsafe {
+            Barrier::everything().record(raw, command_buffer);
+            for (image, value, range) in &self.clears {
+                raw.cmd_clear_color_image(
+                    command_buffer,
+                    *image,
+                    vk::ImageLayout::GENERAL,
+                    value,
+                    &[*range],
+                );
+            }
+            Barrier::everything().record(raw, command_buffer);
+        }
     }
 
     /// Record the clears in `core`'s command buffer, between barriers from everything before

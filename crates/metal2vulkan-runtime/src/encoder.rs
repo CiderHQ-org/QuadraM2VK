@@ -1037,6 +1037,12 @@ impl EncoderCore {
             counts.shadow_texels_kept(kept);
         }
     }
+
+    /// Whether the encoder used a shadowed texture so far: where it did not, a command that uses
+    /// none takes no copy and notes no use ([`plan_shadows`](Self::plan_shadows),
+    /// [`shadows_used`](Self::shadows_used)).
+    pub(super) fn used_shadows(&self) -> bool {
+        !self.shadows.is_empty()
     }
 
     /// Note a recorded command that used the shadowed textures `shadows` and had `uses`, and

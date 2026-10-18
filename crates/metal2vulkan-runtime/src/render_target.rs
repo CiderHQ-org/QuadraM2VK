@@ -1961,6 +1961,21 @@ pub(super) fn framebuffer(
     views: ViewSetup,
     feedback: Feedback,
 ) -> Result<FramebufferObject, Error> {
+    framebuffer_over(device, pass, layout, shape, views, feedback, layout.extent)
+}
+
+/// [`framebuffer`]'s framebuffer, but over `extent` from the origin, which every attachment holds
+/// and which holds the render area: an instance whose `Clear` loads reach past the render area
+/// renders over their reach (`render/inline_first.rs`).
+pub(super) fn framebuffer_over(
+    device: &Device,
+    pass: &RenderPassObject,
+    layout: &PassLayout,
+    shape: &PassShape,
+    views: ViewSetup,
+    feedback: Feedback,
+    extent: [u32; 2],
+) -> Result<FramebufferObject, Error> {
     let colors = layout.colors.iter().flatten();
     let resolves = colors.clone().filter_map(|c| subpass_resolve(Some(c)));
     let mut targets = colors
@@ -1995,6 +2010,7 @@ pub(super) fn framebuffer(
                 .filter(|p: &&Arc<Placeholder>| p.is_of(target.format, target.samples))
                 .count();
             let of = (target.format, target.samples, place);
+            let (placeholder, view) = device.storage_placeholder(of, extent, layers)?;
             placeholders.push(placeholder);
             attachments.push(view);
             device.shared().counts.storage_placeholder_attachment();
@@ -2028,6 +2044,7 @@ pub(super) fn framebuffer(
     } else {
         1
     };
+    let mut made = made_framebuffer(device, pass, &attachments, extent, layers)?;
     made.placeholders = placeholders;
     Ok(made)
 }

@@ -19,6 +19,9 @@
 //!   that needs it (`WorkCounts::storage_placeholders_made`), as large as that framebuffer and of
 //!   as many layers, in memory of its own where binds wait for queued work, else in a pooled
 //!   block (`memory.rs`'s `Fit`). It rests in `GENERAL` like every runtime image: its
+//!   move there is first work the device's next submission records (`texture/first_move.rs`), and
+//!   no command ever reaches it, so it takes no use. A framebuffer larger, or of more layers,
+//!   makes one that covers both in its place. The framebuffers that hold the one before keep it
 //!   (`render_target::FramebufferObject`, which its holders keep until their command buffers
 //!   complete); the device destroys it at the next placeholder it gives once none holds it, and
 //!   every other as it is destroyed itself, idle.

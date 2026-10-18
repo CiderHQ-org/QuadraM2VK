@@ -132,6 +132,9 @@ pub(crate) struct Counters {
     inline_passes: AtomicU64,
     inline_passes_split: AtomicU64,
     inline_split_instances: AtomicU64,
+    inline_memoryless_write_splits: AtomicU64,
+    passes_not_inline: [AtomicU64; NotInline::COUNT],
+    passes_not_inline_actions_by: [AtomicU64; ActionsRefused::COUNT],
     commits_handed_off: AtomicU64,
     images_started_on_the_host: AtomicU64,
     host_texel_copies: AtomicU64,
@@ -276,6 +279,8 @@ pub(crate) struct Counters {
     dispatch_pipelines_pooled: AtomicU64,
     tile_pipelines_pooled: AtomicU64,
     upload_chunks_in_device_memory: AtomicU64,
+    tile_dispatches_recorded: AtomicU64,
+}
 
 /// How a render pass took a shadowed texture as a color attachment
 /// (`WorkCounts::shadow_attachment_loads_within` and kin).
@@ -321,6 +326,85 @@ impl Begun {
     pub(crate) const COUNT: usize = 8;
 }
 
+/// What kept a render pass's first instance from recording inline (`render/inline_first.rs`): the
+/// first check it failed, in this order. Counted (`WorkCounts::passes_not_inline_encoders` and
+/// kin), so a run names what sends its passes' draws to secondary command buffers.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum NotInline {
+    /// The encoder encodes an ended encoder's calls again, or the pass has several color groups.
+    Encoders,
+    /// The pass's layout: no color attachment, or more than one layer or sample, a depth or
+    /// stencil attachment, a visibility buffer, custom sample positions, a rasterization-rate map,
+    /// or extended-range shadows that keep its draws.
+    Layouts,
+    /// A memoryless color attachment not loaded and stored `DontCare`, or resolved.
+    Memoryless,
+    /// A color attachment's actions, the first ruled out ([`ActionsRefused`]).
+    Actions(ActionsRefused),
+    /// A color attachment that is a texture over a buffer the pass does not render through an
+    /// image over the buffer's bytes.
+    BufferTextures,
+    /// Another color attachment kind: a stand-in, planes, a clear made apart, an extended-range
+    /// format, or a bound linear image.
+    Attachments,
+    /// The pass's layout allowed it, and its first draw that records reads or writes a color
+    /// attachment as storage (a fetch in the pixel interlock leaves it out of the subpass).
+    Storage,
+    /// The pass's layout allowed it, and a stand-in arrives with its first draw that records (a
+    /// fetched attachment's scratch or backing).
+    StandIn,
+    /// The pass's layout allowed it, and its first draw that records writes a memoryless color
+    /// attachment, which no instance recorded inline writes.
+    MemorylessWrites,
+    /// The pass's layout allowed it, and its first draw that records did not otherwise.
+    Draws,
+}
+
+impl NotInline {
+    /// The kinds.
+    const COUNT: usize = 10;
+    /// [`Actions`](Self::Actions)' index.
+    const ACTIONS: usize = 3;
+
+    /// Its kind's index among the [`COUNT`](Self::COUNT), in the order of the checks.
+    fn index(self) -> usize {
+        match self {
+            NotInline::Encoders => 0,
+            NotInline::Layouts => 1,
+            NotInline::Memoryless => 2,
+            NotInline::Actions(_) => Self::ACTIONS,
+            NotInline::BufferTextures => 4,
+            NotInline::Attachments => 5,
+            NotInline::Storage => 6,
+            NotInline::StandIn => 7,
+            NotInline::MemorylessWrites => 8,
+            NotInline::Draws => 9,
+        }
+    }
+}
+
+/// The color attachment action that kept a render pass's first instance from recording inline
+/// ([`NotInline::Actions`]): the first ruled out, color by color in index order, and of one color
+/// in this order. Counted (`WorkCounts::passes_not_inline_actions_dont_care_load` and kin).
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum ActionsRefused {
+    /// Loaded `DontCare`.
+    DontCareLoad,
+    /// Reaching past the render area as another attachment does not: cleared where Metal's clear
+    /// of whole tiles (`clear_reach.rs`) reaches another extent than another color's, or loaded,
+    /// or a memoryless color smaller, where another's clear reaches past the render area.
+    UnequalReach,
+    /// Cleared to a NaN whose bits the device's clear would not keep (`clear_value::nan_texel`).
+    NanClear,
+    /// Resolved, into a resolve attachment or by a copy after the pass.
+    Resolve,
+    /// Stored other than by `Store`, or late (`storeActionOptions` set after the encoder).
+    Store,
+}
+
+impl ActionsRefused {
+    /// The kinds: the last's index and one.
+    const COUNT: usize = ActionsRefused::Store as usize + 1;
 }
 
 /// A command the runtime records that MoltenVK 1.4.1 encodes on Apple's GPUs through a pipeline it
@@ -541,6 +625,12 @@ impl Counters {
     /// (`pipeline/dispatch_making.rs`).
     pub(crate) fn dispatch_pipeline_pooled(&self) {
         self.dispatch_pipelines_pooled
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A render encoder recorded a tile dispatch (`render/tile_dispatch.rs`).
+    pub(crate) fn tile_dispatch_recorded(&self) {
+        self.tile_dispatches_recorded
             .fetch_add(1, Ordering::Relaxed);
     }
 
@@ -868,6 +958,14 @@ impl Counters {
         self.inline_passes.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// A render pass's first instance did not record inline, for `why` (`NotInline`).
+    pub(crate) fn pass_not_inline(&self, why: NotInline) {
+        self.passes_not_inline[why.index()].fetch_add(1, Ordering::Relaxed);
+        if let NotInline::Actions(action) = why {
+            self.passes_not_inline_actions_by[action as usize].fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
     /// A render pass whose first instance recorded inline ended with more than one instance.
     pub(crate) fn inline_pass_split(&self) {
         self.inline_passes_split.fetch_add(1, Ordering::Relaxed);
@@ -877,6 +975,13 @@ impl Counters {
     /// command buffer (`render/inline_splits.rs`).
     pub(crate) fn inline_split_instance(&self) {
         self.inline_split_instances.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A pass whose first instance recorded inline split before a draw that writes a memoryless
+    /// color attachment, which no instance recorded inline writes (`render/inline_first.rs`).
+    pub(crate) fn inline_memoryless_write_split(&self) {
+        self.inline_memoryless_write_splits
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     /// A render pass instance its pass replaced or gave up before running it had its draws
@@ -2268,6 +2373,63 @@ pub struct WorkCounts {
     /// same primary command buffer after the instance before, in place of a secondary
     /// (`render/inline_splits.rs`); the others record in secondaries, after them.
     pub inline_split_instances: u64,
+    /// The splits of passes whose first instance recorded inline before a draw that writes a
+    /// memoryless color attachment, which no instance recorded inline writes: the draw records
+    /// in a secondary, after them (`render/inline_first.rs`).
+    pub inline_memoryless_write_splits: u64,
+    /// Render passes whose first instance did not record inline, its draws in a secondary command
+    /// buffer, by the first check that ruled it out (`render/inline_first.rs`), counted as the pass
+    /// opens or at its first draw that records: here, the encoder encodes an ended encoder's calls
+    /// again, or the pass has several color groups.
+    pub passes_not_inline_encoders: u64,
+    /// Of them, those of a layout of no color attachment, or of more than one layer or sample, a
+    /// depth or stencil attachment, a visibility buffer, custom sample positions, a
+    /// rasterization-rate map, or extended-range shadows that keep their draws.
+    pub passes_not_inline_layouts: u64,
+    /// Of them, those with a memoryless color attachment not loaded and stored `DontCare`, or
+    /// resolved.
+    pub passes_not_inline_memoryless: u64,
+    /// Of them, those with a color attachment loaded `DontCare`, reaching past the render area as
+    /// another attachment does not, cleared to a NaN the device clears apart, resolved, or stored
+    /// other than `Store` or late; each counted once more below, by the first such action, color
+    /// by color in index order.
+    pub passes_not_inline_actions: u64,
+    /// Of those, the ones where that action is a `DontCare` load.
+    pub passes_not_inline_actions_dont_care_load: u64,
+    /// Of those, the ones where it is a reach past the render area that the pass's attachments do
+    /// not share: Metal's clear of whole 32-pixel tiles reaches past the render area on one color
+    /// attachment, and another is loaded, cleared to another extent (a smaller texture's), or a
+    /// smaller memoryless texture. A pass whose attachments share the reach records its first
+    /// instance inline over it.
+    pub passes_not_inline_actions_unequal_reach: u64,
+    /// Of those, the ones where it is a clear to a NaN whose bits the device's clear would not
+    /// keep.
+    pub passes_not_inline_actions_nan_clear: u64,
+    /// Of those, the ones where it is a resolve, into a resolve attachment or by a copy after the
+    /// pass.
+    pub passes_not_inline_actions_resolve: u64,
+    /// Of those, the ones where it is a store other than `Store`, or a late one.
+    pub passes_not_inline_actions_store: u64,
+    /// Of them, those with a color attachment that is a texture over a buffer they do not render
+    /// through an image over the buffer's bytes.
+    pub passes_not_inline_buffer_textures: u64,
+    /// Of them, those with a color attachment of another kind: a stand-in, planes, a clear made
+    /// apart, an extended-range format, or a bound linear image (`linear_attachment.rs`).
+    pub passes_not_inline_attachments: u64,
+    /// Of them, those whose layout allowed it and whose first draw that records reads or writes a
+    /// color attachment as storage: a fetch in the pixel interlock, which leaves it out of the
+    /// instance's subpass.
+    pub passes_not_inline_storage: u64,
+    /// Of them, those whose layout allowed it and with whose first draw that records a stand-in
+    /// arrives: a fetched attachment's scratch, or a memoryless one's backing.
+    pub passes_not_inline_stand_ins: u64,
+    /// Of them, those whose layout allowed it and whose first draw that records writes a
+    /// memoryless color attachment, which no instance recorded inline writes.
+    pub passes_not_inline_memoryless_writes: u64,
+    /// Of them, those whose layout allowed it and whose first draw that records did not
+    /// otherwise: a draw whose pipeline is being made, a shadow arriving with it, work the end
+    /// records inside the instance pending, a feedback loop, a split.
+    pub passes_not_inline_draws: u64,
     /// Commits that left their batches to the device's scheduler thread and returned at once,
     /// which submits them in commit order at its next pass (`scheduler/inbox.rs`): every commit,
     /// as no commit submits anything itself.
@@ -2887,6 +3049,10 @@ pub struct WorkCounts {
     /// unified memory, which the encoding thread then writes: none where the device has
     /// host-coherent, host-cached system memory (`upload.rs`).
     pub upload_chunks_in_device_memory: u64,
+    /// Tile dispatches render encoders recorded (`dispatchThreadsPerTile:` and its region forms):
+    /// each one the compute dispatch of the tile function over the pass's tiles, between the
+    /// pass's instances, with its attachments' scratch copies.
+    pub tile_dispatches_recorded: u64,
 }
 
 impl Device {
@@ -2897,6 +3063,11 @@ impl Device {
         let counters = &self.shared().counts;
         let group_end = |end: GroupEnd| counters.group_ends[end as usize].load(Ordering::Relaxed);
         let pending = |bucket: usize| counters.batches_by_pending[bucket].load(Ordering::Relaxed);
+        let not_inline =
+            |why: NotInline| counters.passes_not_inline[why.index()].load(Ordering::Relaxed);
+        let actions = |action: ActionsRefused| {
+            counters.passes_not_inline_actions_by[action as usize].load(Ordering::Relaxed)
+        };
         let read_apart = |reason: ReadApart| {
             counters.host_imports_read_apart_by[reason as usize].load(Ordering::Relaxed)
         };
@@ -3101,6 +3272,24 @@ impl Device {
             inline_passes: counters.inline_passes.load(Ordering::Relaxed),
             inline_passes_split: counters.inline_passes_split.load(Ordering::Relaxed),
             inline_split_instances: counters.inline_split_instances.load(Ordering::Relaxed),
+            inline_memoryless_write_splits: (counters.inline_memoryless_write_splits)
+                .load(Ordering::Relaxed),
+            passes_not_inline_encoders: not_inline(NotInline::Encoders),
+            passes_not_inline_layouts: not_inline(NotInline::Layouts),
+            passes_not_inline_memoryless: not_inline(NotInline::Memoryless),
+            passes_not_inline_actions: (counters.passes_not_inline[NotInline::ACTIONS])
+                .load(Ordering::Relaxed),
+            passes_not_inline_actions_dont_care_load: actions(ActionsRefused::DontCareLoad),
+            passes_not_inline_actions_unequal_reach: actions(ActionsRefused::UnequalReach),
+            passes_not_inline_actions_nan_clear: actions(ActionsRefused::NanClear),
+            passes_not_inline_actions_resolve: actions(ActionsRefused::Resolve),
+            passes_not_inline_actions_store: actions(ActionsRefused::Store),
+            passes_not_inline_buffer_textures: not_inline(NotInline::BufferTextures),
+            passes_not_inline_attachments: not_inline(NotInline::Attachments),
+            passes_not_inline_storage: not_inline(NotInline::Storage),
+            passes_not_inline_stand_ins: not_inline(NotInline::StandIn),
+            passes_not_inline_memoryless_writes: not_inline(NotInline::MemorylessWrites),
+            passes_not_inline_draws: not_inline(NotInline::Draws),
             commits_handed_off: counters.commits_handed_off.load(Ordering::Relaxed),
             images_started_on_the_host: counters.images_started_on_the_host.load(Ordering::Relaxed),
             host_texel_copies: counters.host_texel_copies.load(Ordering::Relaxed),
@@ -3352,6 +3541,7 @@ impl Device {
             tile_pipelines_pooled: counters.tile_pipelines_pooled.load(Ordering::Relaxed),
             upload_chunks_in_device_memory: (counters.upload_chunks_in_device_memory)
                 .load(Ordering::Relaxed),
+            tile_dispatches_recorded: counters.tile_dispatches_recorded.load(Ordering::Relaxed),
         }
     }
 }

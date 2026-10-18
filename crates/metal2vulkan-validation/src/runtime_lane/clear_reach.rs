@@ -24,7 +24,8 @@ use crate::air_library::AirLibrary;
 use crate::gpu::TEST_DEVICE;
 use metal2vulkan::metal::state::{DepthStencilDescriptor, StencilDescriptor};
 use metal2vulkan::metal::{
-    CompareFunction, PixelFormat, PrimitiveType, StencilOperation, TextureType, TextureUsage,
+    ColorWriteMask, CompareFunction, PixelFormat, PrimitiveType, StencilOperation, TextureType,
+    TextureUsage,
 };
 use metal2vulkan::pipeline::{ColorAttachmentDescriptor, RenderPipelineDescriptor, StageSource};
 use metal2vulkan_devtools::{engine_dir, llvm_assemble};
@@ -387,18 +388,23 @@ pub(super) fn quiet(lane: Lane, messages: &Messages) {
 }
 
 /// A case of `a_clear_reaches_past_the_render_area_as_metal_s`: its name, the render area, the
-/// load, the draw, and the reach Metal clears to.
-type ColorCase = (&'static str, [u64; 2], LoadAction, Draw, [u64; 2]);
+/// load, the draw, the reach Metal clears to, and whether the pass's first instance records inline.
+type ColorCase = (&'static str, [u64; 2], LoadAction, Draw, [u64; 2], bool);
 
-/// A color attachment's `Clear` load reaches past the render area as Metal's (EV
-/// RRS-probe-2's `c_rgba8_draw`, `c_rgba8_nodraw`, `c_rgba8_a40x24_draw`, `c_rgba8_nothing`,
-/// `c_rgba8_a100x100_draw`, `c_rgba8_small_depth_draw`, `c_rgba8_load_draw`; RRS-probe-5's
+/// How many of the device's passes recorded their first instance inline so far.
+fn inline_passes(lane: &Lane) -> u64 {
+    lane.device.work_counts().inline_passes
+}
+
 /// `c_rgba8_level1_draw`, `c_rgba8_layered_nodraw`, `c_rgba8_emptydraw`): to whole 32x32 tiles
 /// in a pass with a draw call (one wholly outside the target, or of no vertex, included), the
 /// whole attachment in one without, the smaller attachment's extent setting the render area
 /// alike, clipped to the attachment, at the attachment's level alone, and to the tiles of each
 /// layer of a layered pass without a draw call; a `Load` keeps the texels past the render area. So does a texture without
-/// `RenderTarget` usage, which renders through a stand-in.
+/// `RenderTarget` usage, which renders through a stand-in. A pass whose draw records renders its
+/// first instance inline over the reach where nothing else rules it out
+/// (`render/inline_first.rs`), and one without such a draw, or with a depth attachment or a
+/// stand-in, clears the reach before the pass: both Metal's answer.
 #[test]
 fn a_clear_reaches_past_the_render_area_as_metal_s() {
     let (messages, _cache, lane) = lane();
@@ -413,6 +419,7 @@ fn a_clear_reaches_past_the_render_area_as_metal_s() {
             LoadAction::Clear,
             Draw::Full,
             [64, 64],
+            true,
         ),
         (
             "c_rgba8_nodraw",
@@ -420,6 +427,7 @@ fn a_clear_reaches_past_the_render_area_as_metal_s() {
             LoadAction::Clear,
             Draw::None,
             [SIDE, SIDE],
+            false,
         ),
         (
             "c_rgba8_a40x24_draw",
@@ -427,6 +435,7 @@ fn a_clear_reaches_past_the_render_area_as_metal_s() {
             LoadAction::Clear,
             Draw::Full,
             [64, 32],
+            true,
         ),
         (
             "c_rgba8_nothing",
@@ -434,6 +443,7 @@ fn a_clear_reaches_past_the_render_area_as_metal_s() {
             LoadAction::Clear,
             Draw::Outside,
             [64, 64],
+            true,
         ),
         (
             "c_rgba8_emptydraw",
@@ -441,6 +451,7 @@ fn a_clear_reaches_past_the_render_area_as_metal_s() {
             LoadAction::Clear,
             Draw::Empty,
             [64, 64],
+            false,
         ),
         (
             "c_rgba8_a100x100_draw",
@@ -448,6 +459,7 @@ fn a_clear_reaches_past_the_render_area_as_metal_s() {
             LoadAction::Clear,
             Draw::Full,
             [SIDE, SIDE],
+            true,
         ),
         (
             "c_rgba8_load_draw",
@@ -455,11 +467,18 @@ fn a_clear_reaches_past_the_render_area_as_metal_s() {
             LoadAction::Load,
             Draw::Full,
             [AREA, AREA],
+            true,
         ),
     ];
-    for (name, area, load, draw, reach) in cases {
+    for (name, area, load, draw, reach, inline) in cases {
         let texture = lane.old_color(rgba8, PLAIN, target);
+        let before = inline_passes(&lane);
         lane.run(&color_pass(&texture, load, area), draw, Some(&pipeline));
+        assert_eq!(
+            inline_passes(&lane) - before,
+            u64::from(inline),
+            "{name}: inline"
+        );
         let drawn = (draw == Draw::Full).then_some(&DRAWN[..]);
         let cleared = if load == LoadAction::Clear {
             &RED
@@ -486,7 +505,13 @@ fn a_clear_reaches_past_the_render_area_as_metal_s() {
     descriptor.depth_attachment.texture = Some(depth);
     descriptor.depth_attachment.load_action = LoadAction::Clear;
     descriptor.depth_attachment.store_action = StoreAction::DontCare;
+    let before = inline_passes(&lane);
     lane.run(&descriptor, Draw::Full, Some(&small_depth));
+    assert_eq!(
+        inline_passes(&lane),
+        before,
+        "c_rgba8_small_depth_draw: not inline"
+    );
     assert_eq!(
         lane.read(&texture, (0, 0), 4, BlitOption::None),
         expected(SIDE, [AREA, AREA], [64, 64], (Some(&DRAWN), &RED, &OLD)),
@@ -501,7 +526,13 @@ fn a_clear_reaches_past_the_render_area_as_metal_s() {
     let texture = lane.old_color(rgba8, mipmapped, target);
     let mut descriptor = color_pass(&texture, LoadAction::Clear, [AREA, AREA]);
     descriptor.color_attachments[0].level = 1;
+    let before = inline_passes(&lane);
     lane.run(&descriptor, Draw::Full, Some(&pipeline));
+    assert_eq!(
+        inline_passes(&lane) - before,
+        1,
+        "c_rgba8_level1_draw: inline"
+    );
     assert_eq!(
         lane.read(&texture, (0, 0), 4, BlitOption::None),
         OLD.repeat((4 * SIDE * SIDE) as usize),
@@ -527,16 +558,101 @@ fn a_clear_reaches_past_the_render_area_as_metal_s() {
     }
     // A texture without `RenderTarget` usage, through its stand-in.
     let texture = lane.old_color(rgba8, PLAIN, TextureUsage::SHADER_READ);
+    let before = inline_passes(&lane);
     lane.run(
         &color_pass(&texture, LoadAction::Clear, [AREA, AREA]),
         Draw::Full,
         Some(&pipeline),
     );
     assert_eq!(
+        inline_passes(&lane),
+        before,
+        "a stand-in's texture: not inline"
+    );
+    assert_eq!(
         lane.read(&texture, (0, 0), 4, BlitOption::None),
         expected(SIDE, [AREA, AREA], [64, 64], (Some(&DRAWN), &RED, &OLD)),
         "a stand-in's texture"
     );
+    quiet(lane, &messages);
+}
+
+/// Two color attachments of a pass over a 40x24 render area, color 0 a 128x128 texture cleared,
+/// color 1 one the fragment function leaves alone (its write mask none), white drawn over the
+/// whole target: where both are 128x128 textures cleared, the clears reach alike, to 64x32, and
+/// the pass records its first instance inline over that reach (`render/inline_first.rs`); where
+/// color 1 is a 48x48 texture cleared, its clear reaches 48x32, and where it is loaded it keeps
+/// its texels past the render area: the pass records as before, counted by the reach the
+/// attachments do not share (`WorkCounts::passes_not_inline_actions_unequal_reach`). Each texture
+/// holds Metal's answer (the probe's `c_rgba8_a40x24_draw`, each attachment's reach its own).
+#[test]
+fn colors_whose_clears_reach_alike_record_inline_over_their_reach() {
+    let (messages, _cache, lane) = lane();
+    let rgba8 = PixelFormat::RGBA8Unorm;
+    let target = TextureUsage::RENDER_TARGET;
+    let mut descriptor = lane.descriptor(&[rgba8, rgba8], (None, None), 1);
+    let mut leaves = ColorAttachmentDescriptor::new(rgba8);
+    leaves.write_mask = ColorWriteMask::NONE;
+    descriptor.color_attachments[1] = Some(leaves);
+    let pipeline = lane
+        .device
+        .new_render_pipeline_state(&descriptor, &PipelineOptions::default())
+        .unwrap();
+    let area = [40, 24];
+    let unequal = |lane: &Lane| {
+        lane.device
+            .work_counts()
+            .passes_not_inline_actions_unequal_reach
+    };
+    let small = Shape { side: 48, ..PLAIN };
+    // Color 1's side, load, the reach Metal clears it to, and whether the pass records inline.
+    let cases = [
+        ("alike", PLAIN, LoadAction::Clear, [64, 32], true),
+        (
+            "a smaller texture",
+            small,
+            LoadAction::Clear,
+            [48, 32],
+            false,
+        ),
+        ("loaded", PLAIN, LoadAction::Load, area, false),
+    ];
+    for (name, shape, load, reach, inline) in cases {
+        let first = lane.old_color(rgba8, PLAIN, target);
+        let second = lane.old_color(rgba8, shape, target);
+        let mut pass = color_pass(&first, LoadAction::Clear, area);
+        let other = &mut pass.color_attachments[1];
+        other.texture = Some(second.clone());
+        other.load_action = load;
+        other.clear_color = ClearColor::new(0.5, 0.0, 0.0, 1.0);
+        other.store_action = StoreAction::Store;
+        let (before, unequal_before) = (inline_passes(&lane), unequal(&lane));
+        lane.run(&pass, Draw::Full, Some(&pipeline));
+        assert_eq!(
+            inline_passes(&lane) - before,
+            u64::from(inline),
+            "{name}: inline"
+        );
+        assert_eq!(
+            unequal(&lane) - unequal_before,
+            u64::from(!inline),
+            "{name}: counted by its reach"
+        );
+        assert_eq!(
+            lane.read(&first, (0, 0), 4, BlitOption::None),
+            expected(SIDE, area, [64, 32], (Some(&DRAWN), &RED, &OLD)),
+            "{name}: color 0"
+        );
+        let cleared = match load {
+            LoadAction::Clear => &RED,
+            _ => &OLD,
+        };
+        assert_eq!(
+            lane.read(&second, (0, 0), 4, BlitOption::None),
+            expected(shape.side, area, reach, (None, cleared, &OLD)),
+            "{name}: color 1"
+        );
+    }
     quiet(lane, &messages);
 }
 
