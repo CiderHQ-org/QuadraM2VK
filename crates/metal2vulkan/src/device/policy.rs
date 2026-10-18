@@ -62,6 +62,11 @@ pub struct DevicePolicy {
     /// or an EAC 11-bit one), samples a decoded twin of compact codes (the default) or of Metal's
     /// values exactly. The runtime's choice alone: no emitted code changes.
     pub decoded_texels: DecodedTexelsPolicy,
+    /// Whether a heap's colour texture that Metal keeps losslessly compressed, on a driver whose
+    /// compressed images hide writes through an alias, is the driver's compressed image (the
+    /// default) or one the driver keeps uncompressed in the heap's bytes. The runtime's choice
+    /// alone: no emitted code changes.
+    pub heap_compression: HeapCompressionPolicy,
     /// emitted code changes.
     /// Whether a render pass that loads a signed normalized or `RGB9E5Float` color attachment and
     /// draws keeps the texels its draws do not write as the device's load and store leave them
@@ -94,6 +99,7 @@ impl DevicePolicy {
         rounding_order: RoundingOrderPolicy::Native,
         half_blend: HalfBlendPolicy::Device,
         decoded_texels: DecodedTexelsPolicy::Compact,
+        heap_compression: HeapCompressionPolicy::Compressed,
         tile_store: TileStorePolicy::Device,
     };
 
@@ -115,6 +121,7 @@ impl DevicePolicy {
             rounding_order: RoundingOrderPolicy::Exact,
             half_blend: HalfBlendPolicy::Exact,
             decoded_texels: DecodedTexelsPolicy::Exact,
+            heap_compression: HeapCompressionPolicy::Uncompressed,
             tile_store: TileStorePolicy::Exact,
             ..self
         }
@@ -416,6 +423,32 @@ pub enum DecodedTexelsPolicy {
     /// (an EAC 11-bit texture's in `R32_SFLOAT` or `R32G32_SFLOAT`, 4 bytes a channel), where the
     /// device samples, filters and copies into the format (else the compact texels, announced).
     Exact,
+}
+
+/// The image of a heap's colour texture that Metal keeps losslessly compressed (with
+/// `allowGPUOptimizedContents`, no `ShaderWrite`, `PixelFormatView` or `ShaderAtomic` usage, and a
+/// level 0 of 16 texels or more a side), on a driver whose compressed images may keep their texels
+/// apart from the memory they are bound to (`DriverFact::CompressedImagesHideAliasedWrites`: ANV
+/// on Intel's GPUs). Metal's own texture shows no aliased write as written either: an M3 Max read
+/// opaque magenta (`0xffff00ff`) in every texel of drawn content a buffer's fill over the
+/// texture's bytes covered, and the fill's bytes where the texture held only a clear. A texture
+/// Metal keeps uncompressed takes the uncompressed image under either value. The runtime's choice
+/// alone: no emitted code changes.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum HeapCompressionPolicy {
+    /// The driver's compressed optimal image (the default), its fast clears, compression and
+    /// tiling kept: a write through a buffer or texture over its bytes may leave its texels as
+    /// they were or change them otherwise than Metal's, and its writes may show in those bytes
+    /// compressed. Announced `heap-texture-compressed` where such a texture is made.
+    #[default]
+    Compressed,
+    /// An image the driver keeps uncompressed in the heap's bytes, as for a texture Metal keeps
+    /// uncompressed: host-transfer usage where the device enabled `hostImageCopy`, else a linear
+    /// image, else the optimal one (each announced as such), so a write through a buffer over the
+    /// texture's bytes shows in its texels as written.
+    Uncompressed,
 }
 
 /// What a render pass that loads a single-sampled color attachment of a signed normalized format

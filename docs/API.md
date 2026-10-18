@@ -1430,6 +1430,17 @@ fast forms record, and each `PrecisionNote`'s rustdoc states its bound.
   near-equivalent recorded open. Cost: the driver may compress the texture's image: a write through
   a buffer or texture over its bytes may leave texels as they were, and its writes may show in those
   resources' bytes compressed, where Metal's texture aliases them byte for byte.
+- `metal2vulkan-degrade-heap-texture-compressed` (precision). `HeapTextureCompressed`: A colour
+  texture made in a heap on such a device that Metal keeps losslessly compressed too
+  (`allowGPUOptimizedContents`, no `ShaderWrite`, `PixelFormatView` or `ShaderAtomic` usage, 16
+  texels or more a side), under `HeapCompressionPolicy::Compressed`, the default: the driver's
+  compressed optimal image, its fast clears kept. Cost: the driver may compress the texture's image,
+  as Metal compresses the texture: a write through a buffer or texture over its bytes may leave
+  texels as they were, where Metal's texture reads opaque magenta (0xffff00ff) in every texel of
+  drawn content the write covered and the written bytes where it held only a clear (an M3 Max), and
+  its writes may show in those bytes compressed otherwise than Metal's;
+  HeapCompressionPolicy::Uncompressed keeps the image uncompressed in the heap's bytes, whose clears
+  then lose the driver's fast clear.
 - `metal2vulkan-degrade-combined-archive-stages` (precision). `CombinedArchiveStages`: A render
   creation that fails on a binary-archive miss, made from one add's vertex stage and another add's
   fragment stage: Metal's vertex key holds the vertex outputs its compiler finds the fragment
@@ -1469,12 +1480,13 @@ fast forms record, and each `PrecisionNote`'s rustdoc states its bound.
   kept the GPU's writes from the CPU (measured on an M4), where the runtime's reach it.
 - `metal2vulkan-degrade-optimized-depth-stencil-texture` (precision).
   `OptimizedDepthStencilTexture`: A depth or stencil texture with `allowGPUOptimizedContents` off
-  sized or made, outside memoryless storage, on a device whose driver keeps depth and stencil images
-  GPU-optimized whatever their create info: Metal lays the texture out without its compression
-  metadata, and the runtime's image keeps it. Cost: the texture keeps its GPU-optimized layout:
-  heap_texture_size_and_align answers Metal's size for the texture with the property on, larger than
-  Metal's with it off (16512 bytes for a 64x64 Depth32Float texture, where Metal answers 16384), so
-  a heap sized by Metal's answers holds fewer such textures.
+  sized or made in a heap (never a device's own texture, whose layout nothing shows), on a device
+  whose driver keeps depth and stencil images GPU-optimized whatever their create info: Metal lays
+  the texture out without its compression metadata, and the runtime's image keeps it. Cost: the
+  texture keeps its GPU-optimized layout: heap_texture_size_and_align answers Metal's size for the
+  texture with the property on, larger than Metal's with it off (16512 bytes for a 64x64
+  Depth32Float texture, where Metal answers 16384), so a heap sized by Metal's answers holds fewer
+  such textures.
 - `metal2vulkan-degrade-narrow-surface-rows` (precision). `NarrowSurfaceRows`: A texture of an
   IOSurface plane of more than one row under 16 bytes a row: Metal's GPU writes its rows 16 bytes
   apart and reads every row past the first as memory-dependent bytes (zeros in a fresh process;

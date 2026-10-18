@@ -551,6 +551,28 @@ pub(crate) fn metal_compresses(
         && !metal_keeps_uncompressed(colour, usage)
 }
 
+/// [`metal_compresses`] of a texture of `layout`: its level 0, a 1D texture's one row high, or a
+/// multisample texture's sample grid ([`sample_grid`]; Metal keeps no other sample count's
+/// texture compressed here).
+pub(crate) fn metal_compresses_layout(
+    layout: &TextureLayout,
+    usage: TextureUsage,
+    allow_gpu_optimized_contents: bool,
+) -> bool {
+    let [width, height, _] = layout.extent.map(u64::from);
+    let one_row = matches!(
+        layout.texture_type,
+        TextureType::Type1D | TextureType::Type1DArray
+    );
+    let level0 = [width, if one_row { 1 } else { height }];
+    let shape = match layout.samples {
+        1 => Some(level0),
+        samples => sample_grid(samples, level0),
+    };
+    let colour = !is_depth_stencil(layout.pixel_format);
+    shape.is_some_and(|shape| metal_compresses(colour, usage, allow_gpu_optimized_contents, shape))
+}
+
 /// Whether Metal keeps a texture of `usage` (the effective usage: `Unknown` is every usage)
 /// uncompressed whatever its size and `allowGPUOptimizedContents`: a colour texture (`colour`)
 /// of `ShaderWrite`, `PixelFormatView` or `ShaderAtomic` usage; never a depth or stencil texture,

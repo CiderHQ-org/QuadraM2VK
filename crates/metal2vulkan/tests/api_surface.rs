@@ -230,6 +230,7 @@ surface! {
         enum RoundingOrderPolicy N;
         enum HalfBlendPolicy N;
         enum DecodedTexelsPolicy N;
+        enum HeapCompressionPolicy N;
         enum TileStorePolicy N;
         struct DeviceProfile O;
         struct SpirvValidation N;

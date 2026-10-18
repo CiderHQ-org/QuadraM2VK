@@ -116,7 +116,6 @@ impl Device {
         if let Owner::Runtime { shareable, .. } = &mut image.owner {
             *shareable = true;
         }
-        self.degrade_optimized_layout(descriptor, &layout);
         let image = self.with_decoded_twin(image, &layout, descriptor, true)?;
         let record = ViewRecord::of_descriptor(&layout, descriptor);
         let storage = Storage::Image(image.shared());

@@ -116,18 +116,25 @@
 //! - **Compressed images**. On a driver whose compressed images may keep their texels apart from
 //!   the memory they are bound to ([`DriverFact::CompressedImagesHideAliasedWrites`]: ANV on
 //!   Intel's GPUs, measured), a heap's colour texture whose optimal image takes the heap's memory
-//!   takes, in order: that image with host-transfer usage, which the driver keeps uncompressed in
-//!   its memory ([`DriverFact::HostTransferImagesKeepTheirBytes`]), where the device enabled
-//!   `hostImageCopy` (the runtime on a device it creates, `device/create.rs`; the consumer on one
-//!   it adopts that says so, `device/adopt.rs`) and the format and shape take the usage; else a
-//!   linear image, where one serves as above; else the optimal image. The device announces the
-//!   first two once each as costs (`heap-texture-host-transfer`, `heap-texture-linear`) and the
-//!   last once as a near-equivalent (`heap-texture-hides-aliased-writes`). The first two keep
-//!   Metal's visibility contract, not a byte layout: a write through a buffer or texture over the
-//!   texture's bytes changes every texel it covers, and the texture's writes show in those
-//!   bytes, in the device's layout for the image, as Metal's are in its GPU's. Depth and stencil
-//!   images and depth twins keep their optimal images: a buffer's write over ANV's changed every
-//!   texel (the heap depth lane).
+//!   and that Metal keeps losslessly compressed too (`heap_tiled::metal_compresses_layout`) takes
+//!   that image, the driver's compression and fast clears kept, under the device's
+//!   `HeapCompressionPolicy::Compressed` (the default), announced once as a near-equivalent
+//!   (`heap-texture-compressed`): Metal's texture shows no aliased write as written either (an M3
+//!   Max read opaque magenta in every texel of drawn content a buffer's fill over the texture's
+//!   bytes covered). Any other such texture, and every one under
+//!   `HeapCompressionPolicy::Uncompressed`, takes, in order: that image with host-transfer usage,
+//!   which the driver keeps uncompressed in its memory
+//!   ([`DriverFact::HostTransferImagesKeepTheirBytes`]), where the device enabled `hostImageCopy`
+//!   (the runtime on a device it creates, `device/create.rs`; the consumer on one it adopts that
+//!   says so, `device/adopt.rs`) and the format and shape take the usage; else a linear image,
+//!   where one serves as above; else the optimal image. The device announces the first two once
+//!   each as costs (`heap-texture-host-transfer`, `heap-texture-linear`) and the last once as a
+//!   near-equivalent (`heap-texture-hides-aliased-writes`). The first two keep Metal's visibility
+//!   contract, not a byte layout: a write through a buffer or texture over the texture's bytes
+//!   changes every texel it covers, and the texture's writes show in those bytes, in the device's
+//!   layout for the image, as Metal's are in its GPU's. Depth and stencil images and depth twins
+//!   keep their optimal images: a buffer's write over ANV's changed every texel (the heap depth
+//!   lane).
 //! - **Texture buffers**. A heap's texture buffer is a buffer of the heap's at the texture's
 //!   offset, its row of texels long, with the texture buffer over its bytes as
 //!   `Buffer::new_texture` makes one: Metal's answers, measured (a Metal heap probe, an M3 Max and
@@ -140,8 +147,8 @@
 
 use super::first_move::FirstMove;
 use super::heap_tiled::{
-    metal_heap_layout, modelled_size, HeapLayout, HeapTiledCopies, TiledLayout, Untiled,
-    UNMEASURED_FORMAT,
+    metal_compresses_layout, metal_heap_layout, modelled_size, HeapLayout, HeapTiledCopies,
+    TiledLayout, Untiled, UNMEASURED_FORMAT,
 };
 use super::heap_two_planes::{HeapPlaneCopies, TwoPlaneHeapLayout};
 use super::stand_in::StandIn;
@@ -175,7 +182,7 @@ use crate::two_planes;
 use crate::values::{ResourceOptions, StorageMode};
 use crate::Device;
 use ash::vk;
-use metal2vulkan::device::DriverFact;
+use metal2vulkan::device::{DriverFact, HeapCompressionPolicy};
 use metal2vulkan::error::{Feature, LinearNeed, Unsupported};
 use metal2vulkan::metal::format::ycbcr_format;
 use metal2vulkan::metal::{PixelFormat, TextureType, TextureUsage};
@@ -408,6 +415,9 @@ enum AliasRoute {
     /// An optimal colour image the driver may compress, a near-equivalent
     /// (`heap-texture-hides-aliased-writes`).
     Hidden,
+    /// An optimal colour image the driver may compress, of a texture Metal keeps losslessly
+    /// compressed too, under `HeapCompressionPolicy::Compressed` (`heap-texture-compressed`).
+    Compressed,
     /// A depth or stencil image the driver lays apart from its memory, in memory of its own,
     /// whose texels the encoders copy from the heap's bytes and back: a shadow of them
     /// (`shadowed-texture`).
@@ -452,8 +462,9 @@ enum AliasRoute {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Mine {
     /// The texture's own; a shadow of the heap's bytes may serve it where the texture is held
-    /// with no depth twin.
-    Texture { shadows: bool },
+    /// with no depth twin (`shadows`), and Metal keeps it losslessly compressed where
+    /// `compressed` (`heap_tiled::metal_compresses_layout`).
+    Texture { shadows: bool, compressed: bool },
     /// The texture's depth twin.
     Twin,
 }
@@ -1173,6 +1184,11 @@ impl Device {
         // A shadowed image is no depth twin's texture: one held with a twin is not.
         let mine = Mine::Texture {
             shadows: twin.is_none(),
+            compressed: metal_compresses_layout(
+                &layout,
+                effective_usage(descriptor.usage),
+                descriptor.allow_gpu_optimized_contents,
+            ),
         };
         // A two-plane texture's image is larger than Metal's answer: it lies in memory of its
         // own, a shadow of its planes in the heap's bytes where Metal's layout of them is
@@ -1414,11 +1430,13 @@ impl Device {
     /// The texture's own colour image (`own`, not a depth twin) on a driver whose compressed
     /// images hide writes through an alias
     /// ([`DriverFact::CompressedImagesHideAliasedWrites`]), where its optimal image takes the
-    /// heap's memory, takes in order: `optimal` with host-transfer usage, where the device enabled
-    /// `hostImageCopy` (the driver keeps such an image's bytes,
-    /// [`DriverFact::HostTransferImagesKeepTheirBytes`]), the format takes the usage, and the
-    /// device makes such an image of the plan in that memory; else `linear`, where it serves as
-    /// above; else `optimal`, a near-equivalent ([`AliasRoute`]).
+    /// heap's memory, takes `optimal`, which the driver may compress, where Metal keeps the
+    /// texture losslessly compressed and the device's policy keeps the driver's compression
+    /// (`HeapCompressionPolicy::Compressed`, the default; [`AliasRoute::Compressed`]); else in
+    /// order: `optimal` with host-transfer usage, where the device enabled `hostImageCopy` (the
+    /// driver keeps such an image's bytes, [`DriverFact::HostTransferImagesKeepTheirBytes`]), the
+    /// format takes the usage, and the device makes such an image of the plan in that memory; else
+    /// `linear`, where it serves as above; else `optimal`, a near-equivalent ([`AliasRoute`]).
     fn heap_image(
         &self,
         optimal: ImagePlan,
@@ -1440,7 +1458,7 @@ impl Device {
             return match self.linear_heap_image(linear, texture_type, &takes, AliasRoute::Direct) {
                 Err(error)
                     if linear_refusal(&error)
-                        && mine == (Mine::Texture { shadows: true })
+                        && matches!(mine, Mine::Texture { shadows: true, .. })
                         && shadowable(&optimal, requirements.size) =>
                 {
                     Ok(HeapImage {
@@ -1484,6 +1502,22 @@ impl Device {
                 tiling: vk::ImageTiling::OPTIMAL,
                 requirements,
                 route: AliasRoute::Direct,
+            });
+        }
+        let compressed = matches!(
+            mine,
+            Mine::Texture {
+                compressed: true,
+                ..
+            }
+        );
+        let policy = self.compile_device().policy().heap_compression;
+        if compressed && policy == HeapCompressionPolicy::Compressed {
+            return Ok(HeapImage {
+                plan: optimal,
+                tiling: vk::ImageTiling::OPTIMAL,
+                requirements,
+                route: AliasRoute::Compressed,
             });
         }
         if let Some(image) = self.host_transfer_image(&optimal, texture_type, &takes)? {
@@ -2847,6 +2881,11 @@ impl Device {
                 Degradation::HeapTextureHidesAliasedWrites,
                 "and the texture's image takes neither host-transfer usage nor linear tiling on \
                  this device",
+            ),
+            AliasRoute::Compressed => (
+                Degradation::HeapTextureCompressed,
+                "and Metal keeps the texture losslessly compressed too, whose image the device's \
+                 policy keeps compressed (HeapCompressionPolicy::Compressed)",
             ),
         };
         self.degrade(kind, || {

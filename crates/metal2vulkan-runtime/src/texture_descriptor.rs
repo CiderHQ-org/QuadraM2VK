@@ -163,14 +163,15 @@ pub struct TextureDescriptor {
     /// `resourceOptions`: the storage mode, CPU cache mode and hazard tracking mode.
     pub resource_options: ResourceOptions,
     /// `allowGPUOptimizedContents`: whether the GPU may keep the texture in a layout of its own
-    /// (on Apple's GPUs, lossless compression with its metadata). Off, the runtime makes the
-    /// texture's image as it makes one of `PixelFormatView` usage (`MUTABLE_FORMAT` with no list
+    /// (on Apple's GPUs, lossless compression with its metadata). Off, the runtime sizes and makes
+    /// a heap's texture's image as one of `PixelFormatView` usage (`MUTABLE_FORMAT` with no list
     /// of formats): Metal lays out a color texture with the property off as one of
     /// `PixelFormatView` usage, and MoltenVK sizes that image as Metal does, so
     /// [`Device::heap_texture_size_and_align`](crate::Device::heap_texture_size_and_align)
     /// answers Metal's size there. A depth or stencil texture's answer on MoltenVK stays the
-    /// optimized texture's, announced once per device (`optimized-depth-stencil-texture`). The
-    /// texture's usage stays the descriptor's.
+    /// optimized texture's, announced once per device (`optimized-depth-stencil-texture`). A
+    /// device's own texture keeps the image of its usage, with the driver's compression, and
+    /// announces nothing: nothing shows its layout. The texture's usage stays the descriptor's.
     pub allow_gpu_optimized_contents: bool,
     /// `swizzle`: each channel's source as shaders read it; one other than the default is refused
     /// with `ShaderWrite` or `RenderTarget` usage, but with `write_swizzle_enabled`.
@@ -310,29 +311,46 @@ impl TextureDescriptor {
         }
     }
 
-    /// The usage the runtime makes a texture's image of this descriptor for (`image_plan`): its
-    /// usage ([`texture_usage`]), with `PixelFormatView` where it does not allow GPU-optimized
-    /// contents. Metal lays out a color texture with `allowGPUOptimizedContents` off as it lays
-    /// out the texture with `PixelFormatView` usage added and the property on: the same size and
-    /// alignment, without the compression metadata (each of 14 uncompressed color formats in 2D,
-    /// mipmapped, array, cube, 3D, 1D and multisample shapes, `Shared` and `Private`; an M3 Max
-    /// on macOS 26.7 and an M4 on 27.0.1 alike). MoltenVK makes a `PixelFormatView` Metal texture
-    /// of such an image (`MUTABLE_FORMAT` with no list of formats), sized as Metal sizes one. The
-    /// texture's own usage, which its views are checked against, stays the descriptor's.
+    /// The usage the runtime makes a heap's texture's image of this descriptor for, and sizes it by
+    /// (`image_plan`, `texture/heap.rs`): its usage ([`own_image_usage`](Self::own_image_usage)),
+    /// with `PixelFormatView` where it does not allow GPU-optimized contents. Metal lays out a
+    /// color texture with `allowGPUOptimizedContents` off as it lays out the texture with
+    /// `PixelFormatView` usage added and the property on: the same size and alignment, without the
+    /// compression metadata (each of 14 uncompressed color formats in 2D, mipmapped, array, cube,
+    /// 3D, 1D and multisample shapes, `Shared` and `Private`; an M3 Max on macOS 26.7 and an M4 on
+    /// 27.0.1 alike). MoltenVK makes a `PixelFormatView` Metal texture of such an image
+    /// (`MUTABLE_FORMAT` with no list of formats), sized as Metal sizes one. The texture's own
+    /// usage, which its views are checked against, stays the descriptor's.
     ///
     /// A descriptor of `write_swizzle_enabled` keeps its usage, swizzled or not, as Metal's
     /// texture reports it (`ShaderRead | ShaderWrite` of a `BGRA` swizzle, EV GSM2-nil-m4): the
     /// heap size query sizes it so.
     pub(super) fn image_usage(&self) -> TextureUsage {
-        let usage = if self.write_swizzle_enabled {
-            effective_usage(self.usage)
-        } else {
-            texture_usage(self.usage, self.swizzle)
-        };
+        let usage = self.own_image_usage();
         if self.allow_gpu_optimized_contents {
             usage
         } else {
             usage | TextureUsage::PIXEL_FORMAT_VIEW
+        }
+    }
+
+    /// The usage the runtime makes the image of a device's own texture of this descriptor for
+    /// (`Device::new_texture`): [`image_usage`](Self::image_usage) without the `PixelFormatView`
+    /// that `allowGPUOptimizedContents` off adds. The property changes the texture's layout alone,
+    /// which a device's own texture never shows: nothing answers its size, no other resource
+    /// aliases its bytes, and its views, blits and fresh contents follow the descriptor's own
+    /// usage and the property (`view_plan.rs`, `compressed_blit.rs`, `heap_tiled.rs`'s pattern).
+    /// So its image keeps the lossless compression a driver gives an image of the texture's usage,
+    /// which a driver that compresses drops from a `MUTABLE_FORMAT` image of no list of formats
+    /// (ANV). A heap's texture takes `image_usage`: the heap's size answer and its aliasing show
+    /// the layout. So does a device's own texture where the device's copies of the compressed
+    /// image would rewrite texels Metal keeps (`Device::copy_exact_usage`, MoltenVK's
+    /// `RG11B10Float` and `RGB9E5Float` images): there the compression shows in its blits.
+    pub(super) fn own_image_usage(&self) -> TextureUsage {
+        if self.write_swizzle_enabled {
+            effective_usage(self.usage)
+        } else {
+            texture_usage(self.usage, self.swizzle)
         }
     }
 

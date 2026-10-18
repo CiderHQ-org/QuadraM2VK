@@ -1116,7 +1116,7 @@ pub enum DriverFact {
     /// Vulkan leaves an image's layout and size to the driver. Metal's depth and stencil texture
     /// with the property off takes no metadata, so on such a driver a depth or stencil texture
     /// with it off answers a larger heap size than Metal's, and the runtime announces
-    /// `optimized-depth-stencil-texture` when it sizes or makes one.
+    /// `optimized-depth-stencil-texture` when it sizes one or makes one in a heap.
     DepthStencilImagesStayGpuOptimized,
     /// A fragment shader's `FragDepth`, given the depth a sample of a `D16_UNORM` depth aspect
     /// fetches as, is stored in a `D16_UNORM` attachment as that sample's code, for every code:

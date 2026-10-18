@@ -547,9 +547,11 @@ fn srgb_twins_share_one_mutable_image() {
     }
 }
 
-/// A texture without GPU-optimized contents takes the image of one of `PixelFormatView` usage
-/// (`MUTABLE_FORMAT`, no list of formats), as Metal lays out a color texture with the property
-/// off; with it on, the image of its usage, an sRGB twin's list kept. Its own usage stays the
+/// A heap's texture without GPU-optimized contents takes the image of one of `PixelFormatView`
+/// usage (`MUTABLE_FORMAT`, no list of formats), as Metal lays out a color texture with the
+/// property off; with it on, the image of its usage, an sRGB twin's list kept. A device's own
+/// texture takes the image of its usage either way (`TextureDescriptor::own_image_usage`): its
+/// layout shows nowhere, and the image keeps the driver's compression. Its own usage stays the
 /// descriptor's, `Unknown` taken as Metal takes it.
 #[test]
 fn textures_without_optimized_contents_take_pixel_format_view_images() {
@@ -595,6 +597,10 @@ fn textures_without_optimized_contents_take_pixel_format_view_images() {
                     plan_image(&l, usage, false, &facts).expect(&name),
                     "{name} {pf:?}"
                 );
+                assert_eq!(off.own_image_usage(), usage, "{name}");
+                assert_eq!(on.own_image_usage(), usage, "{name}");
+                let own = plan_image(&l, off.own_image_usage(), false, &facts).expect(&name);
+                assert_eq!(own, optimized, "{name} {pf:?}");
             }
         }
     }

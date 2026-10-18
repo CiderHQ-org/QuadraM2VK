@@ -38,7 +38,7 @@ use super::{
 use crate::air_library::AirLibrary;
 use crate::candidate::engine::ComputeOutput;
 use crate::gpu::TEST_DEVICE;
-use metal2vulkan::device::DriverFact;
+use metal2vulkan::device::{DriverFact, HeapCompressionPolicy};
 use metal2vulkan::error::{Feature, LinearNeed};
 use metal2vulkan::metal::format::is_depth_stencil;
 use metal2vulkan::metal::{
@@ -819,6 +819,166 @@ fn a_buffer_write_shows_in_an_overlapping_texture() {
     );
 }
 
+/// Under the default `HeapCompressionPolicy::Compressed`, where the device's driver may keep a
+/// compressed image's texels apart from its memory
+/// (`DriverFact::CompressedImagesHideAliasedWrites`: ANV), a heap's `RGBA8Unorm` texture that Metal
+/// keeps losslessly compressed (render-target and sampled-only usage, 64 and 1024 texels a side)
+/// takes the driver's compressed image, announced once (`heap-texture-compressed`); its texels the
+/// buffer's write may leave alone, as Metal's compressed texture shows such a write otherwise than
+/// as written: printed (`HEAPTEX compressed` lines), not asserted. One Metal keeps uncompressed
+/// (storage usage, or 8 texels a side) takes the uncompressed image it takes under
+/// `HeapCompressionPolicy::Uncompressed`, so the buffer's write changes every texel it reads
+/// ([`alias_round_trip`]). Elsewhere no route is announced.
+#[test]
+fn a_heap_texture_metal_compresses_keeps_the_driver_s_compression_by_default() {
+    let messages = Messages::default();
+    let cache = ScratchCache::new().unwrap();
+    let (hides, compressed_made, uncompressed_made) = {
+        let device = &validated_device_with(TEST_DEVICE, &messages, cache.path(), |options| {
+            options.policy.heap_compression = HeapCompressionPolicy::Compressed;
+        })
+        .unwrap();
+        let hides = device
+            .properties()
+            .driver_facts
+            .contains(&DriverFact::CompressedImagesHideAliasedWrites);
+        let (mut compressed_made, mut uncompressed_made) = (false, false);
+        let queue = device.new_command_queue().unwrap();
+        for storage in [StorageMode::Shared, StorageMode::Private] {
+            let options = tracked(storage);
+            let heap = heap(device, HeapType::Placement, 1 << 23, options);
+            for (side, usage, compressed) in [
+                (
+                    64,
+                    TextureUsage::SHADER_READ | TextureUsage::RENDER_TARGET,
+                    true,
+                ),
+                (1024, TextureUsage::SHADER_READ, true),
+                (
+                    64,
+                    TextureUsage::SHADER_READ | TextureUsage::SHADER_WRITE,
+                    false,
+                ),
+                (
+                    8,
+                    TextureUsage::SHADER_READ | TextureUsage::RENDER_TARGET,
+                    false,
+                ),
+            ] {
+                let mut descriptor = rgba8(side, options);
+                descriptor.usage = usage;
+                let what = format!("{storage:?} {side}x{side} {usage:?}");
+                let Some(unchanged) = alias_round_trip(&queue, &heap, &descriptor, &what) else {
+                    continue;
+                };
+                if compressed {
+                    compressed_made = true;
+                    eprintln!("HEAPTEX compressed {what}: {unchanged} texels unchanged");
+                } else {
+                    uncompressed_made = true;
+                    assert_eq!(unchanged, 0, "{what}: texels the buffer's write left alone");
+                }
+            }
+        }
+        (hides, compressed_made, uncompressed_made)
+    };
+    let notices = counts(&messages.take_notices());
+    let count = |kind: Degradation| notices.get(&kind).copied().unwrap_or(0);
+    let [transfer, linear, hidden] = ALIASES.map(count);
+    let [compressed] = COMPRESSED.map(count);
+    eprintln!(
+        "HEAPTEX default: {compressed} heap-texture-compressed, {transfer} \
+         heap-texture-host-transfer, {linear} heap-texture-linear, {hidden} \
+         heap-texture-hides-aliased-writes notices"
+    );
+    assert_eq!(compressed, usize::from(hides && compressed_made));
+    assert_eq!(hidden, 0);
+    assert_eq!(transfer + linear, usize::from(hides && uncompressed_made));
+    let failing = messages.take();
+    assert!(
+        failing.is_empty(),
+        "the validation layer reported: {failing:#?}"
+    );
+}
+
+/// What a 2048x2048 `RGBA8Unorm` render target in a `Private` placement heap costs the GPU under
+/// each `HeapCompressionPolicy`, without the validation layer: a pass that clears it and stores,
+/// and a blit copying it into another such texture, each its own command buffer, medians and the
+/// fastest of 40 after 8 untimed. On a driver whose compressed images hide aliased writes (ANV)
+/// the two policies give the texture its compressed and its uncompressed image; elsewhere the
+/// same image. Ignored by default: a measurement, not a check.
+#[test]
+#[ignore = "a measurement, not a check: run by name with --run-ignored all"]
+fn heap_compression_costs() {
+    const SIDE: u64 = 2048;
+    for policy in [
+        HeapCompressionPolicy::Compressed,
+        HeapCompressionPolicy::Uncompressed,
+    ] {
+        let messages = Messages::default();
+        let cache = ScratchCache::new().unwrap();
+        let device = validated_device_with(TEST_DEVICE, &messages, cache.path(), |options| {
+            options.layers.clear();
+            options.policy.heap_compression = policy;
+        })
+        .unwrap();
+        let options = ResourceOptions::private();
+        let mut descriptor = rgba8(SIDE, options);
+        descriptor.usage = TextureUsage::SHADER_READ | TextureUsage::RENDER_TARGET;
+        let size = device
+            .heap_texture_size_and_align(&descriptor)
+            .unwrap()
+            .size;
+        let heap = heap(&device, HeapType::Placement, 2 * size, options);
+        let target = heap.new_texture_at_offset(&descriptor, 0).unwrap();
+        let copy = heap.new_texture_at_offset(&descriptor, size).unwrap();
+        let notices = counts(&messages.take_notices());
+        let queue = device.new_command_queue().unwrap();
+        let time = |encode: &dyn Fn(&metal2vulkan_runtime::CommandBuffer)| {
+            let mut gpu = Vec::new();
+            for run in 0..48 {
+                let command_buffer = queue.command_buffer().unwrap();
+                encode(&command_buffer);
+                command_buffer.commit().unwrap();
+                command_buffer
+                    .wait_until_completed_for(super::WAIT)
+                    .unwrap();
+                assert_eq!(command_buffer.error(), None);
+                let start = command_buffer.gpu_start_time().unwrap();
+                let end = command_buffer.gpu_end_time().unwrap();
+                if run >= 8 {
+                    gpu.push((end - start) * 1e6);
+                }
+            }
+            gpu.sort_by(f64::total_cmp);
+            (gpu[gpu.len() / 2], gpu[0])
+        };
+        let clear = time(&|command_buffer| {
+            let mut pass = RenderPassDescriptor::new();
+            let color = &mut pass.color_attachments[0];
+            color.texture = Some(target.clone());
+            color.load_action = LoadAction::Clear;
+            color.store_action = StoreAction::Store;
+            let encoder = command_buffer.render_command_encoder(&pass).unwrap();
+            encoder.end_encoding().unwrap();
+        });
+        let blit = time(&|command_buffer| {
+            let mut blit = command_buffer.blit_command_encoder().unwrap();
+            blit.copy_texture(&target, &copy).unwrap();
+            blit.end_encoding().unwrap();
+        });
+        eprintln!(
+            "HEAP-COMPRESSION on {} ({policy:?}, notices {notices:?}): clear median {:.1} us, \
+             fastest {:.1} us; copy median {:.1} us, fastest {:.1} us",
+            device.name(),
+            clear.0,
+            clear.1,
+            blit.0,
+            blit.1
+        );
+    }
+}
+
 /// An adopted device whose consumer enabled `hostImageCopy` and says so
 /// (`RawDevice::host_image_copy`) gives its heaps' colour textures Metal's aliasing
 /// ([`alias_round_trip`]), a mipmapped one included: on ANV, whose compressed images hide writes
@@ -904,8 +1064,9 @@ pub(super) const OPTIMIZED: [Degradation; 1] = [Degradation::OptimizedDepthStenc
 /// A depth texture without GPU-optimized contents, sized, made in a placement heap and on the
 /// device, announces `optimized-depth-stencil-texture` once where the driver keeps depth and
 /// stencil images GPU-optimized (`DriverFact::DepthStencilImagesStayGpuOptimized`: MoltenVK on
-/// Apple's GPUs), its answer then Metal's with the property on; elsewhere nothing. A color
-/// texture without them, and a depth texture with them, announce nothing anywhere.
+/// Apple's GPUs), its answer then Metal's with the property on; elsewhere nothing. Made on the
+/// device first, it announces nothing there: nothing shows a device's own texture's layout. A
+/// color texture without them, and a depth texture with them, announce nothing anywhere.
 #[test]
 fn a_depth_texture_without_optimized_contents_is_announced_where_it_stays_optimized() {
     let messages = Messages::default();
@@ -932,6 +1093,15 @@ fn a_depth_texture_without_optimized_contents_is_announced_where_it_stays_optimi
         make(PixelFormat::RGBA8Unorm, false);
         let with = make(PixelFormat::Depth32Float, true);
         assert!(!counts(&messages.take_notices()).contains_key(&OPTIMIZED[0]));
+        let mut own = TextureDescriptor::texture_2d(PixelFormat::Depth32Float, 64, 64, false);
+        own.usage = target;
+        own.resource_options = options;
+        own.allow_gpu_optimized_contents = false;
+        device.new_texture(&own).unwrap();
+        assert!(
+            !counts(&messages.take_notices()).contains_key(&OPTIMIZED[0]),
+            "a device's own depth texture without optimized contents announced"
+        );
         let without = make(PixelFormat::Depth32Float, false);
         eprintln!(
             "HEAPTEX optimized depth: {} bytes with, {} without (fact {optimized})",
@@ -960,6 +1130,10 @@ pub(super) const ALIASES: [Degradation; 3] = [
     Degradation::HeapTextureLinear,
     Degradation::HeapTextureHidesAliasedWrites,
 ];
+
+/// The kind a heap's colour texture Metal compresses announces on such a driver, where it keeps
+/// the driver's compression under the default.
+pub(super) const COMPRESSED: [Degradation; 1] = [Degradation::HeapTextureCompressed];
 
 /// The usages the `Shared` heap sweep makes each format's texture with.
 const SWEPT_USAGES: [(&str, TextureUsage); 4] = [

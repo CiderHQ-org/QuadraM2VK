@@ -25,8 +25,9 @@
 //! MoltenVK, whose copies of a compressed image may already make the rewrite, it changes nothing
 //! more. There a CPU copy, which the runtime makes a Vulkan copy, would make it too
 //! (`RuntimeDriverDefect::CompressedImageCopiesRewriteTexels`: an `RG11B10Float` or
-//! `RGB9E5Float` image, EV FXR-cbl1-mvk4), so the image of a `Shared` or `Managed` texture that
-//! takes a rule is made uncompressed there (`Device::copy_exact_usage`; a heap's texture still
+//! takes a rule is made uncompressed there, and so is a device's own texture's without
+//! `allowGPUOptimizedContents`, whose blits Metal makes on an uncompressed texture: its image of
+//! the texture's own usage would be compressed (`Device::copy_exact_usage`; a heap's texture still
 //! takes the compressed image's bytes of the heap).
 //!
 //! **Not measured**: a texture of many samples (the runtime leaves its bytes), and a region
@@ -110,14 +111,17 @@ fn copies_rewrite(format: Format) -> bool {
 impl Device {
     /// `usage`, the usage of the image of `format` of a texture of `descriptor` (checked as
     /// `layout`), with `PixelFormatView` where this device's copies of the image would rewrite
-    /// texels a CPU copy of the texture keeps
-    /// (`RuntimeDriverDefect::CompressedImageCopiesRewriteTexels`): a `Shared` or `Managed`
-    /// texture of a format whose blits take a rule (`rule_for`). Metal keeps an image of that
-    /// usage uncompressed (MoltenVK makes a `PixelFormatView` Metal texture of a
-    /// `MUTABLE_FORMAT` image with no list of formats), so its copies keep the bytes, and the
-    /// runtime rewrites what a blit writes by Metal's rule (`rule_of`, which reads the texture's
-    /// own usage). `None` elsewhere: a `Private` texture's bytes no CPU copy reads or writes keep
-    /// the compression.
+    /// texels Metal keeps (`RuntimeDriverDefect::CompressedImageCopiesRewriteTexels`): an image
+    /// of a format whose copies rewrite, which the device's Metal keeps compressed (an image of
+    /// `usage` with GPU-optimized contents takes a rule, `rule_for`), of a texture whose bytes
+    /// Metal keeps through such a copy: a `Shared` or `Managed` texture, which CPU copies read
+    /// and write, or one without `allowGPUOptimizedContents`, which Metal keeps uncompressed, so
+    /// that its GPU blits keep the bytes too. Metal keeps an image of that usage uncompressed
+    /// (MoltenVK makes a `PixelFormatView` Metal texture of a `MUTABLE_FORMAT` image with no list
+    /// of formats), so its copies keep the bytes, and the runtime rewrites what a blit writes by
+    /// Metal's rule where Metal's texture takes one (`rule_of`, which reads the texture's own
+    /// usage and property). `None` elsewhere: a `Private` texture with GPU-optimized contents,
+    /// whose bytes no CPU copy reads or writes, keeps the compression.
     pub(super) fn copy_exact_usage(
         &self,
         descriptor: &TextureDescriptor,
@@ -132,18 +136,19 @@ impl Device {
             Ok(StorageMode::Shared | StorageMode::Managed)
         );
         let [width, height, _] = layout.extent;
-        let rule = rule_for(
+        let compressed = rule_for(
             layout.pixel_format,
             layout.texture_type,
             [u64::from(width), u64::from(height)],
             u64::from(layout.samples),
-            (descriptor.usage, descriptor.allow_gpu_optimized_contents),
+            (usage, true),
             properties.metal_level,
         );
+        let kept = reachable || !descriptor.allow_gpu_optimized_contents;
         let rewrites = properties.driver_defects.contains(&defect)
-            && reachable
+            && kept
             && copies_rewrite(format)
-            && rule.is_some();
+            && compressed.is_some();
         rewrites.then_some(usage | TextureUsage::PIXEL_FORMAT_VIEW)
     }
 }

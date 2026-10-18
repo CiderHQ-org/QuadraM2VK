@@ -70,6 +70,7 @@ fn choices() -> Vec<Choice> {
         rounding_order: _,
         half_blend: _,
         decoded_texels: _,
+        heap_compression: _,
         tile_store: _,
     } = p;
     vec![
@@ -84,6 +85,7 @@ fn choices() -> Vec<Choice> {
         choice!(p.rounding_order: RoundingOrderPolicy { Native, Exact }),
         choice!(p.half_blend: HalfBlendPolicy { Device, Exact }),
         choice!(p.decoded_texels: DecodedTexelsPolicy { Compact, Exact }),
+        choice!(p.heap_compression: HeapCompressionPolicy { Compressed, Uncompressed }),
         choice!(p.tile_store: TileStorePolicy { Device, Exact }),
     ]
 }
@@ -380,22 +382,24 @@ fn the_ledger_readers_read_names_and_switches() {
     );
 }
 
-/// The runtime's choice for a texture over padded rows that only reads (`padded_reads`) moves no
-/// committed profile's fingerprint: no profile carries it, so no translation, cache key or
-/// recorded row follows it, and the ledger's row is the runtime's alone.
+/// The runtime's choice of a heap's compressed texture's image (`heap_compression`) moves no
+/// committed profile's fingerprint: no profile carries it, so no translation follows it.
 #[test]
-fn the_runtime_s_padded_reads_choice_keys_no_profile() {
+fn the_runtime_s_heap_compression_choice_keys_no_profile() {
     use crate::spirv::testing::committed_profiles_with;
-    let alias = committed_profiles_with(DevicePolicy::UNTRUSTED).expect("profiles");
-    let shadow = committed_profiles_with(DevicePolicy {
-        padded_reads: PaddedReadsPolicy::Shadow,
+    let compressed = committed_profiles_with(DevicePolicy::UNTRUSTED).expect("profiles");
+    let uncompressed = committed_profiles_with(DevicePolicy {
+        heap_compression: HeapCompressionPolicy::Uncompressed,
         ..DevicePolicy::UNTRUSTED
     })
     .expect("profiles");
-    assert!(alias.len() >= 10, "{} profiles", alias.len());
-    assert_eq!(alias.len(), shadow.len());
-    for ((stem, a), (other, s)) in alias.iter().zip(&shadow) {
+    assert_eq!(compressed.len(), uncompressed.len());
+    for ((stem, c), (other, u)) in compressed.iter().zip(&uncompressed) {
         assert_eq!(stem, other);
+        assert_eq!(c.fingerprint(), u.fingerprint(), "{stem}");
+    }
+}
+
 /// The runtime's choice of a loaded attachment's tile store (`tile_store`) moves no committed
 /// profile's fingerprint: no profile carries it, so no translation follows it.
 #[test]

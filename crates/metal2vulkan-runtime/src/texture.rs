@@ -2035,10 +2035,10 @@ impl Device {
             .shared()
             .textures
             .facts(self.compile_device().profile());
-        let mut usage = descriptor.image_usage();
+        let mut usage = descriptor.own_image_usage();
         let (mut plan, mut twin) = plan_texture_images(&layout, usage, memoryless, &facts)
             .map_err(|refusal| image_error(call, refusal))?;
-        // An image whose copies would rewrite texels a CPU copy keeps is made uncompressed.
+        // An image whose copies would rewrite texels Metal keeps is made uncompressed.
         if let Some(exact) = self.copy_exact_usage(descriptor, &layout, plan.format, usage) {
             usage = exact;
             (plan, twin) = plan_texture_images(&layout, usage, memoryless, &facts)
@@ -2062,9 +2062,6 @@ impl Device {
             let twin = self.new_texture_image(twin, &layout, descriptor, hazard)?;
             image.twin = Some(Box::new(twin));
             self.degrade_depth_twin(&layout, &facts);
-        }
-        if !memoryless {
-            self.degrade_optimized_layout(descriptor, &layout);
         }
         let image = match memoryless {
             true => {
@@ -4158,10 +4155,12 @@ impl Device {
     }
 
     /// Announce `optimized-depth-stencil-texture` for a depth or stencil texture of `descriptor`
-    /// (checked as `layout`, not memoryless) sized or made without GPU-optimized contents on a
-    /// device whose driver keeps such images GPU-optimized
+    /// (checked as `layout`) sized or made in a heap without GPU-optimized contents on a device
+    /// whose driver keeps such images GPU-optimized
     /// (`DriverFact::DepthStencilImagesStayGpuOptimized`): Metal lays the texture out without its
-    /// compression metadata, which the image keeps.
+    /// compression metadata, which the image keeps, and the heap's size answer and its placement
+    /// show the layout. A device's own texture, or a shared one, announces nothing: nothing shows
+    /// its layout.
     pub(super) fn degrade_optimized_layout(
         &self,
         descriptor: &TextureDescriptor,

@@ -32,6 +32,7 @@
 //! spread ([`MIPMAPS`]), a heap's depth or stencil texture laid apart from the heap ([`APART`]),
 //! a depth or stencil texture without GPU-optimized contents that stays optimized ([`OPTIMIZED`]),
 //! a heap's colour texture on a driver whose compressed images hide aliased writes ([`ALIASES`]),
+//! one Metal compresses that keeps the driver's compression there ([`COMPRESSED`]),
 //! sparse textures on a device without strict residency ([`SPARSE`]), overlapping copies between textures over
 //! buffers ([`OVERLAPS`]), commands writing a shadowed texture's bytes two ways ([`MERGES`]),
 //! `Shared` buffers in system memory on a device without unified memory ([`SYSTEM_MEMORY`]),
@@ -164,7 +165,7 @@ use super::framebuffer_fetch::{FETCHES, PLANES, SHADER_DEPTH, STORAGE_FORMS};
 use super::fresh_contents::FRESH_PATTERNS;
 use super::heap_layouts::HEAP_LAYOUTS;
 use super::heap_metal_sizes::{PAST_METAL_SIZES, UNMODELLED_SIZES};
-use super::heap_textures::{ALIASES, APART, OPTIMIZED};
+use super::heap_textures::{ALIASES, APART, COMPRESSED, OPTIMIZED};
 use super::host_memory::{not_importable, Mapping, GUEST_PAGE};
 use super::index_fetches::INDEX_FETCHES;
 use super::indirect_command_buffers::{PAST_RECORD, UNMEASURED_IDENTIFIERS};
@@ -466,6 +467,7 @@ fn every_kind_has_a_site_a_lane_test_takes() {
         &APART,
         &OPTIMIZED,
         &ALIASES,
+        &COMPRESSED,
         &SPARSE,
         &OVERLAPS,
         &MERGES,

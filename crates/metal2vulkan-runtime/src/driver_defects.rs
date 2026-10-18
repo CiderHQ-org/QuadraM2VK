@@ -140,9 +140,11 @@ pub(super) struct Affected {
 ///   1.4.1 (driverVersion 10401) on an M4 under macOS 27.0.1
 ///   (`runtime_lane::compressed_blits`, EV FXR-cbl1-mvk4): known broken through 1.4.1. The
 ///   compression is Metal's, so no MoltenVK release is expected to fix it, but a probe of a
-///   later one decides. Nothing is refused: the image of such a texture a CPU copy reaches is
-///   made of `PixelFormatView` usage (`compressed_blit::copy_exact_usage`), which Metal keeps
-///   uncompressed, and the runtime rewrites what its blits write itself (`compressed_blit.rs`).
+///   later one decides. Nothing is refused: the image of such a texture a CPU copy reaches, and
+///   of a device's own one without `allowGPUOptimizedContents` (whose GPU blits keep the bytes
+///   on Metal), is made of `PixelFormatView` usage (`compressed_blit::copy_exact_usage`), which
+///   Metal keeps uncompressed, and the runtime rewrites what its blits write itself
+///   (`compressed_blit.rs`).
 ///
 /// `MultisampledCopiesConvertFloatNans`:
 /// - Mesa's RADV (`MESA_RADV`): `gfx_or_compute_copy_image` in `radv_meta_copy.c` gives the
