@@ -489,8 +489,8 @@ pub enum RuntimeFact {
         early_tests: bool,
         early_variant: bool,
     },
-    /// On a device that orders framebuffer fetch only through the ordered pixel interlock and
-    /// requires it ordered (`FramebufferFetchPolicy::RequireOrdered`), the fragment function writes
+    /// On a device that orders framebuffer fetch only through the ordered pixel interlock, the
+    /// fragment function writes
     /// a color through its first output and does not declare early fragment tests, and it
     /// discards, writes other memory, or returns depth, stencil, or a sample mask. A draw may move
     /// such a color into the interlocked storage form (`BindShape::interlocked_colors`, or an

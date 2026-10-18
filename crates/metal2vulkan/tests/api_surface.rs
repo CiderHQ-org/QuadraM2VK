@@ -242,7 +242,6 @@ surface! {
         struct ImageCaps N;
         struct FloatControls N;
         struct FloatWidthControls N;
-        enum FramebufferFetchPolicy N;
         enum DriverWorkaround N;
         enum DriverFact N;
         struct DriverDiagnostic N;

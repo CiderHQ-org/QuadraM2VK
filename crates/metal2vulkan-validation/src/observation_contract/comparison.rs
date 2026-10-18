@@ -278,7 +278,6 @@ pub fn allowance(note: PrecisionNote) -> Allowance {
         N::DeviceColorConversion => Allowance::Recorded,
         N::LinkedSamplerNumbering | N::ColorAttachmentGroups => Allowance::Recorded,
         N::GradFromBias
-        | N::UnorderedFramebufferFetch
         | N::DeviceTranscendentals
         | N::PixelSamplerScaling
         | N::ArgumentPixelSamplerScaling

@@ -1402,16 +1402,13 @@ fn a_vertex_pipeline_makes_its_input_assembly_dynamic_exactly_with_both_extended
 /// requires `rasterizationOrderColorAttachmentAccess` (enabled with its extension). With only the
 /// ordered pixel interlock it reads and writes the attachment as a storage image inside the
 /// interlock: no input attachment, no color attachment state for it, the interlock, the
-/// fragment-stage store, and the format's storage access required, under either policy. Where the
-/// pipeline's state blocks that form (a blending attachment), `RequireOrdered` refuses with the
-/// blocker and `AcceptUnordered` compiles it unordered: no flag, no requirement, and the stage's
-/// `UnorderedFramebufferFetch` note. With neither, `RequireOrdered` refuses naming both forms.
+/// fragment-stage store, and the format's storage access required. Where the pipeline's state
+/// blocks that form (a blending attachment), the pipeline is refused with the blocker; with
+/// neither form, refused naming both: an unordered read is never compiled.
 #[test]
 fn a_framebuffer_fetch_pipeline_is_ordered_exactly_where_the_device_orders_it() {
-    use crate::device::profile::FramebufferFetchPolicy;
     use crate::device::requirements::{FormatUsage, VkExtension, VkFeature};
     use crate::error::Capability;
-    use crate::pipeline::artifact::PrecisionNote;
     use crate::pipeline::RenderPipeline;
     const ORDERED: VkFeature = VkFeature::RasterizationOrderColorAttachmentAccess;
     const INTERLOCK: VkFeature = VkFeature::FragmentShaderPixelInterlock;
@@ -1447,33 +1444,15 @@ fn a_framebuffer_fetch_pipeline_is_ordered_exactly_where_the_device_orders_it() 
             .expect("the requirements are the device's");
         Ok::<RenderPipeline, Error>(pipe)
     };
-    let lenient = || DevicePolicy {
-        framebuffer_fetch: FramebufferFetchPolicy::AcceptUnordered,
-        ..DevicePolicy::default()
-    };
-    let unordered = |pipe: &RenderPipeline| {
-        pipe.stages.iter().any(|s| {
-            s.precision_notes
-                .contains(&PrecisionNote::UnorderedFramebufferFetch)
-        })
-    };
-    let read_unordered = |pipe: &RenderPipeline| {
-        assert_eq!(pipe.graphics.input_attachments.len(), 1);
-        assert!(pipe.graphics.storage_attachments.is_empty());
-        assert!(!pipe.graphics.rasterization_order_attachment_access);
-        assert!(!pipe.requirements.features.contains(&ORDERED));
-        assert!(unordered(pipe));
-    };
 
     let lavapipe = description("lavapipe");
     assert!(lavapipe.has(ORDERED));
-    for policy in [DevicePolicy::default(), lenient()] {
-        let pipe = compile(&lavapipe, policy, &d).expect("lavapipe");
+    {
+        let pipe = compile(&lavapipe, DevicePolicy::default(), &d).expect("lavapipe");
         assert_eq!(pipe.graphics.input_attachments.len(), 1);
         assert!(pipe.graphics.storage_attachments.is_empty());
         assert!(pipe.graphics.rasterization_order_attachment_access);
         assert!(pipe.requirements.features.contains(&ORDERED));
-        assert!(!unordered(&pipe));
         let enables = lavapipe
             .required_enables(&pipe.requirements)
             .expect("enables");
@@ -1486,8 +1465,8 @@ fn a_framebuffer_fetch_pipeline_is_ordered_exactly_where_the_device_orders_it() 
     let mut interlocked = lavapipe.clone();
     interlocked.features.remove(&ORDERED);
     assert!(interlocked.has(INTERLOCK));
-    for policy in [DevicePolicy::default(), lenient()] {
-        let pipe = compile(&interlocked, policy, &d).expect("interlocked");
+    {
+        let pipe = compile(&interlocked, DevicePolicy::default(), &d).expect("interlocked");
         assert!(pipe.graphics.input_attachments.is_empty());
         assert!(pipe.graphics.color_attachments.iter().all(Option::is_none));
         let [s] = pipe.graphics.storage_attachments.as_slice() else {
@@ -1511,7 +1490,6 @@ fn a_framebuffer_fetch_pipeline_is_ordered_exactly_where_the_device_orders_it() 
             .requirements
             .formats
             .contains(&(vk::Format::R32_SFLOAT, FormatUsage::StorageImage)));
-        assert!(!unordered(&pipe));
     }
     match compile(&interlocked, DevicePolicy::default(), &blended) {
         Err(Error::Unsupported(u)) => assert_eq!(
@@ -1520,7 +1498,6 @@ fn a_framebuffer_fetch_pipeline_is_ordered_exactly_where_the_device_orders_it() 
         ),
         other => panic!("{:?}", other.map(|_| ())),
     }
-    read_unordered(&compile(&interlocked, lenient(), &blended).expect("unordered"));
 
     let mut without = interlocked.clone();
     without.features.remove(&INTERLOCK);
@@ -1537,7 +1514,6 @@ fn a_framebuffer_fetch_pipeline_is_ordered_exactly_where_the_device_orders_it() 
         ),
         other => panic!("{:?}", other.map(|_| ())),
     }
-    read_unordered(&compile(&without, lenient(), &d).expect("unordered"));
 }
 
 /// The SPIR-V `OpTypeImage`s of `words` as `(dim, arrayed, ms)` operand triples, and whether a

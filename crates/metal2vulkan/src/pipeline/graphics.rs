@@ -56,9 +56,8 @@ pub struct GraphicsState {
     /// `VK_SUBPASS_DESCRIPTION_RASTERIZATION_ORDER_ATTACHMENT_COLOR_ACCESS_BIT_EXT` and the
     /// pipeline's color blend state with
     /// `VK_PIPELINE_COLOR_BLEND_STATE_CREATE_RASTERIZATION_ORDER_ATTACHMENT_ACCESS_BIT_EXT`, and
-    /// the pipeline's requirements name the feature. `false` with input attachments only under
-    /// `FramebufferFetchPolicy::AcceptUnordered` on a device without the feature, whose fragment
-    /// stage records `PrecisionNote::UnorderedFramebufferFetch`.
+    /// the pipeline's requirements name the feature. A device without the feature takes no input
+    /// attachment: a fetch there is the interlocked storage form or refused.
     pub rasterization_order_attachment_access: bool,
     /// Metal's `maxVertexAmplificationCount` (1 without vertex amplification): a draw with this
     /// pipeline amplifies each vertex by a count in `[1, max_vertex_amplification_count]`, or,

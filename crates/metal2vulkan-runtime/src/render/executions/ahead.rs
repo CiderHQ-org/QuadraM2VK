@@ -214,6 +214,7 @@ fn backed(
             device,
             &objects[0],
             own,
+            &instance.shape,
             ViewSetup::default(),
             Feedback::NONE,
         )?;

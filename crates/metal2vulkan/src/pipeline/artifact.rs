@@ -480,8 +480,6 @@ pub enum PrecisionNote {
     /// `min_lod_clamp` or an offset through samplers without a bias of their own, which there are
     /// Metal's own sample.
     GradFromBias,
-    /// Framebuffer fetch without rasterization-order attachment access.
-    UnorderedFramebufferFetch,
     /// Transcendentals answer within Apple's stated bound, not Metal's bits: the device's own
     /// functions, or the translation's routines where a device's instruction may leave the bound
     /// (and, for the functions no routine covers yet, the device's precision). Not recorded by

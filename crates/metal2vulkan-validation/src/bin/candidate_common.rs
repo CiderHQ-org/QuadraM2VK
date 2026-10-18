@@ -57,7 +57,6 @@ fn run(backend: Backend) -> Result<(), ExecutorError> {
     let mut device_type = None;
     let mut profiles_layer = None;
     let mut robustness_off = false;
-    let mut accept_unordered_fetch = false;
     let mut without_generated_commands = false;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -80,7 +79,6 @@ fn run(backend: Backend) -> Result<(), ExecutorError> {
             }
             "--profiles-layer" => profiles_layer = Some(required(&mut args, "--profiles-layer")?),
             "--robustness-off" => robustness_off = true,
-            "--accept-unordered-fetch" => accept_unordered_fetch = true,
             "--without-generated-commands" => without_generated_commands = true,
             "--gpu-wait-timeout" => set_wait_timeout(parse_wait_timeout(&required(
                 &mut args,
@@ -91,7 +89,7 @@ fn run(backend: Backend) -> Result<(), ExecutorError> {
                     "usage: corpus-{} [--corpus DIR] [--private-corpus DIR] --case-id HASH --metal-environment-id ID --environment-id ID --device-type cpu|gpu \\\n\
                      [--air-sha256 HASH] [--source-index FILE] \\\n\
                      [--gpu-wait-timeout SECONDS] [--profiles-layer P] \\\n\
-                     [--robustness-off] [--accept-unordered-fetch] [--without-generated-commands]\n\
+                     [--robustness-off] [--without-generated-commands]\n\
                      cpu matches only a CPU Vulkan implementation.\n\
                      --air-sha256 HASH, the case's AIR, reads the case from only the case shard HASH\n\
                      selects (refused if the case there is over another AIR); without it every case\n\
@@ -119,12 +117,6 @@ fn run(backend: Backend) -> Result<(), ExecutorError> {
                      one it states. --robustness-off enables none of them, so the\n\
                      product compiles the in-shader encodings; the row is stored in the slot's\n\
                      +robustness-off form (ID@engine+robustness-off, ID@engine@P+robustness-off).\n\
-                     --accept-unordered-fetch: compile under the recorded opt-in\n\
-                     (FramebufferFetchPolicy::AcceptUnordered): on a device without rasterization-order\n\
-                     attachment access a framebuffer fetch is an unordered input-attachment read\n\
-                     (PrecisionNote::UnorderedFramebufferFetch) instead of the default policy's\n\
-                     refusal. The run is compared and printed but not stored: it is the\n\
-                     near-equivalent's evidence, not the default policy's.\n\
                      It enables VK_EXT_device_generated_commands where the device supports it,\n\
                      so an indirect command buffer's device replay is the extension's token stream.\n\
                      --without-generated-commands leaves it disabled, so the\n\
@@ -157,9 +149,6 @@ fn run(backend: Backend) -> Result<(), ExecutorError> {
     if robustness_off {
         metal2vulkan_validation::candidate::run_robustness_off()?;
     }
-    if accept_unordered_fetch {
-        metal2vulkan_validation::candidate::accept_unordered_fetch()?;
-    }
     if without_generated_commands {
         metal2vulkan_validation::candidate::run_without_generated_commands()?;
     }
@@ -176,18 +165,6 @@ fn run(backend: Backend) -> Result<(), ExecutorError> {
         "{:?} {} candidate_output_sha256={}",
         observation.status, observation.case_id, observation.candidate_output_sha256
     );
-    if accept_unordered_fetch {
-        println!(
-            "not stored: --accept-unordered-fetch (the opt-in) slot={} precision={:?}",
-            observation.environment_id,
-            observation
-                .census
-                .iter()
-                .flat_map(|census| census.modules.iter())
-                .flat_map(|module| module.precision.iter())
-                .collect::<Vec<_>>()
-        );
-    }
     if without_generated_commands {
         println!(
             "not stored: --without-generated-commands slot={} command_replay={}",

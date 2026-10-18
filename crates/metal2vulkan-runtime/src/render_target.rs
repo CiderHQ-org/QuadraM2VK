@@ -17,8 +17,11 @@
 //!   (`VK_ATTACHMENT_UNUSED`) until a stand-in that has it takes its place
 //!   (`attachment_stand_in.rs`). A color attachment the draws
 //!   read and write as a storage image in the pixel interlock is left out of the subpass
-//!   (`VK_ATTACHMENT_UNUSED`) and keeps its attachment description, whose operations Vulkan then
-//!   ignores; so every instance of a split pass has the same attachments in the same order.
+//!   (`VK_ATTACHMENT_UNUSED`) and keeps its attachment description, which loads and stores
+//!   nothing (`DONT_CARE`, what Vulkan does for an attachment no subpass uses in any case), so
+//!   every instance of a split pass has the same attachments in the same order; its framebuffer
+//!   view is of a placeholder image the device keeps, never of the image the draws write
+//!   (`storage_placeholder.rs`).
 //! - **The sample planes' anchor.** A multisampled subpass that would so be left with no
 //!   attachment (every color attachment it has read as sample planes, `sample_planes.rs`, and no
 //!   depth/stencil attachment) keeps the first of them ([`PassShape::anchor`]): a subpass without
@@ -145,6 +148,7 @@ use super::render_pass::{
 use super::render_values::{LoadAction, StoreAction};
 use super::resolve::{Resolve, ResolveMode, ResolveStep};
 use super::resource::ResourceKey;
+use super::storage_placeholder::Placeholder;
 use super::texture::TextureMemory;
 use super::tracker::{Access, LegacyBarrier, Use};
 use super::Device;
@@ -446,6 +450,16 @@ const ANCHORED: Ops = Ops {
     stencil_store: vk::AttachmentStoreOp::DONT_CARE,
 };
 
+/// The operations of a color the draws' subpass leaves out for the pixel interlock (the module
+/// docs), which no subpass uses: neither loaded nor stored, as such an attachment is in any case
+/// (`storage_placeholder.rs`).
+const LEFT_OUT: Ops = Ops {
+    load: vk::AttachmentLoadOp::DONT_CARE,
+    store: vk::AttachmentStoreOp::DONT_CARE,
+    stencil_load: vk::AttachmentLoadOp::DONT_CARE,
+    stencil_store: vk::AttachmentStoreOp::DONT_CARE,
+};
+
 /// A color resolve attachment's operations: the resolve writes the render area.
 const RESOLVED: Ops = Ops {
     load: vk::AttachmentLoadOp::DONT_CARE,
@@ -544,10 +558,12 @@ impl Drop for RenderPassObject {
     }
 }
 
-/// A `VkFramebuffer` the runtime made, destroyed with its last holder.
+/// A `VkFramebuffer` the runtime made, destroyed with its last holder, and the placeholders whose
+/// views it holds (`storage_placeholder.rs`), which outlive it.
 pub(super) struct FramebufferObject {
     device: Device,
     pub(super) raw: vk::Framebuffer,
+    placeholders: Vec<Arc<Placeholder>>,
 }
 
 impl Drop for FramebufferObject {
@@ -810,9 +826,10 @@ pub(super) unsafe fn between_draws(raw: &ash::Device, draws: vk::CommandBuffer, 
 /// (`fragment_imageblock.rs`) or an interlocked color's storage image (`framebuffer_fetch.rs`).
 /// Its scopes are the fragment shader's (`STORAGE_SELF_DEPENDENCY`), within the draws' subpass's
 /// dependency on itself and with its flags (`self_dependency_flags`: by region, and view by view
-/// under multiview). RADV on an AMD 780M (Mesa 26.2.4) did not order such draws by the interlock
+/// under multiview). RADV on an AMD 780M (Mesa 26.2.4) does not order such draws by the interlock
 /// alone, as Vulkan's rasterization order promises: a later draw, of the same pipeline or
-/// another, read texels as they were before the earlier one's writes.
+/// another, read texels as they were before the earlier one's writes. A driver measured to order
+/// them takes none between draws that reach only colors (`DriverFact::InterlockOrdersDraws`).
 ///
 /// # Safety
 ///
@@ -1172,8 +1189,14 @@ pub(super) fn final_pass(
         .colors
         .iter()
         .enumerate()
-        .filter_map(|(index, color)| Some((index, color.as_ref()?)))
-        .map(|(index, color)| color_ops(color, anchor == Some(index as u32), at, dont_care))
+        .filter_map(|(index, color)| Some((index as u32, color.as_ref()?)))
+        .map(|(index, color)| match shape.storage.contains(&index) {
+            // A color its draws read and write as a storage image: the sample planes' anchor,
+            // which the subpass keeps, or one it leaves out.
+            true if anchor == Some(index) => ANCHORED,
+            true => LEFT_OUT,
+            false => color_ops(color, at, dont_care),
+        })
         .collect();
     let depth_stencil = layout
         .depth_stencil
@@ -1200,12 +1223,12 @@ pub(super) fn final_pass(
     )
 }
 
-/// The operations of color attachment `color` in an instance at `at`, the sample planes'
-/// `anchor` or not, its `DontCare` `dont_care`'s, but the image a texture over a buffer keeps for
+/// The operations of color attachment `color` of the draws' subpass in an instance at `at`, its
+/// `DontCare` `dont_care`'s, but the image a texture over a buffer keeps for
 /// a pass that does not store it, which nothing reads after the pass (`kept_bytes.rs`). An
 /// attachment the exact resolve reads after the pass keeps its samples for it, and one whose
 /// texels are copied as its resolve its texels.
-fn color_ops(color: &ColorTarget, anchor: bool, at: Position, dont_care: DontCare) -> Ops {
+fn color_ops(color: &ColorTarget, at: Position, dont_care: DontCare) -> Ops {
     let exact = color.resolve.as_ref().is_some_and(|r| r.shader.is_some())
         || color.copied_resolve.is_some();
     let unheld = color.memoryless
@@ -1213,18 +1236,14 @@ fn color_ops(color: &ColorTarget, anchor: bool, at: Position, dont_care: DontCar
             .stand_in
             .as_ref()
             .is_some_and(|s| s.cause == Cause::KeptBytes);
-    if anchor {
-        ANCHORED
-    } else {
-        Ops {
-            load: load_at(color.load, at),
-            store: match exact {
-                true => vk::AttachmentStoreOp::STORE,
-                false => store_at(color.store, at, dont_care.unless(unheld)),
-            },
-            stencil_load: vk::AttachmentLoadOp::DONT_CARE,
-            stencil_store: vk::AttachmentStoreOp::DONT_CARE,
-        }
+    Ops {
+        load: load_at(color.load, at),
+        store: match exact {
+            true => vk::AttachmentStoreOp::STORE,
+            false => store_at(color.store, at, dont_care.unless(unheld)),
+        },
+        stencil_load: vk::AttachmentLoadOp::DONT_CARE,
+        stencil_store: vk::AttachmentStoreOp::DONT_CARE,
     }
 }
 
@@ -1279,7 +1298,6 @@ pub(super) fn handed_dont_care(
         first: true,
         last: true,
     };
-    let anchor = shape.anchor(device.compile_device().profile());
     let dont_care = DontCare::of(device);
     let colors = layout
         .colors
@@ -1289,8 +1307,7 @@ pub(super) fn handed_dont_care(
             let index = index as u32;
             color.as_ref().is_some_and(|color| {
                 !shape.storage.contains(&index)
-                    && color_ops(color, anchor == Some(index), only, dont_care).store
-                        == vk::AttachmentStoreOp::DONT_CARE
+                    && color_ops(color, only, dont_care).store == vk::AttachmentStoreOp::DONT_CARE
             })
         })
         .collect();
@@ -1932,11 +1949,15 @@ pub(super) fn covers(views: ViewSetup, layers: u32) -> bool {
 /// VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT or VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT usage flags
 /// set, and either the VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT or VK_IMAGE_USAGE_SAMPLED_BIT usage
 /// flags set", and `-07001`: "the VK_IMAGE_USAGE_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT usage flag
-/// set"), which its image has (`texture::feedback_candidate`).
+/// set"), which its image has (`texture::feedback_candidate`). A color an instance of `shape`
+/// leaves out of its subpass for the pixel interlock, but for one whose draws read and write sample
+/// planes, has a view of the device's placeholder of its format and sample count, which the
+/// framebuffer holds, in place of one of the image its draws write (`storage_placeholder.rs`).
 pub(super) fn framebuffer(
     device: &Device,
     pass: &RenderPassObject,
     layout: &PassLayout,
+    shape: &PassShape,
     views: ViewSetup,
     feedback: Feedback,
 ) -> Result<FramebufferObject, Error> {
@@ -1955,12 +1976,30 @@ pub(super) fn framebuffer(
         return Err(internal("views past their pass's layers"));
     }
     let viewed = |target: &Target| viewed(target, views);
+    let anchor = shape.anchor(device.compile_device().profile());
+    let mut placeholders = Vec::new();
     let mut attachments = Vec::new();
     for (index, color) in layout.colors.iter().enumerate() {
         let Some(color) = color else {
             continue;
         };
         let target = viewed(&color.target);
+        let left_out = shape.storage.contains(&(index as u32))
+            && anchor != Some(index as u32)
+            && color.planes.is_none();
+        if left_out {
+            let layers = target.layer - color.target.layer
+                ..target.layer - color.target.layer + target.layers;
+            // Each its own: no two attachments alias.
+            let place = (placeholders.iter())
+                .filter(|p: &&Arc<Placeholder>| p.is_of(target.format, target.samples))
+                .count();
+            let of = (target.format, target.samples, place);
+            placeholders.push(placeholder);
+            attachments.push(view);
+            device.shared().counts.storage_placeholder_attachment();
+            continue;
+        }
         attachments.push(match feedback.has(index) {
             true => attachment_view(&target, FEEDBACK_VIEW)?,
             false => color_view(&target, layout.fetch_inputs)?,
@@ -1989,7 +2028,8 @@ pub(super) fn framebuffer(
     } else {
         1
     };
-    made_framebuffer(device, pass, &attachments, layout.extent, layers)
+    made.placeholders = placeholders;
+    Ok(made)
 }
 
 /// The framebuffer of `pass`, a pass without attachments (`attachmentless.rs`), over `extent`
@@ -2025,6 +2065,7 @@ fn made_framebuffer(
     Ok(FramebufferObject {
         device: device.clone(),
         raw,
+        placeholders: Vec::new(),
     })
 }
 

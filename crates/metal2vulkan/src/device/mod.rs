@@ -76,8 +76,8 @@ pub use profile::{DeviceProfile, SpirvValidation};
 // The vocabulary the device surface reaches: description and policy inputs, and the requirement
 // vocabulary of `Requirements`, `Capability`, and `DeviceDescription`.
 pub use profile::{
-    EnabledCaps, FloatControls, FloatWidthControls, FragmentCaps, FramebufferFetchPolicy,
-    GuestIsolation, HandleDomain, ImageCaps, Independence, Limits, MeshLimits, PointerDomain,
+    EnabledCaps, FloatControls, FloatWidthControls, FragmentCaps, GuestIsolation, HandleDomain,
+    ImageCaps, Independence, Limits, MeshLimits, PointerDomain,
 };
 // The profile's facts a consumer or a validation tool reads: its descriptor capabilities, its
 // subgroup model and simdgroup tiers, how it contains an out-of-bounds access, and the Function

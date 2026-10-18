@@ -84,7 +84,6 @@ compile does. `DevicePolicy::default()` is `DevicePolicy::UNTRUSTED`:
   and guest shaders cannot reach each other's resources. Where the device enables
   `robustBufferAccess`, buffer accesses and vertex input are left to it. (MoltenVK advertises the
   feature without implementing it; there such accesses are not contained, as on native Metal.)
-- **Ordered framebuffer fetch required** (`FramebufferFetchPolicy::RequireOrdered`).
 - **Fast native forms off Apple's GPUs.** The device's own sampler (its filter of a two-plane
   YCbCr texture among them), maths library, divisions, fused multiply-adds, texel conversions,
   `half` rounding, NaN bits, min/max, rounding order of `dot`/`mix`/`fast::sqrt`, and blend of a
@@ -383,7 +382,9 @@ Where Metal's rules differ from Vulkan's, the pipeline gives Metal's answer:
   a blend, or a mask of some of its channels, is refused as the device lacking the format; a
   color input or resolve of one is `NotImplemented(Format)`.
 - A fragment function that reads a color attachment (framebuffer fetch) reads it in an ordered
-  form wherever the device has one: rasterization-order attachment access, or the interlocked
+  form wherever the device has one, and is refused (`Unsupported{FramebufferFetch}`) where it has
+  none: an unordered read could see a pixel before an earlier fragment's write, which Metal never
+  shows. The ordered forms are rasterization-order attachment access, or the interlocked
   storage form, which binds the attachment as a storage image viewed in
   `StorageAttachmentUse::view_format()`: its own format, an 8-bit sRGB format's unsigned-integer
   view, or, where the device declares a BGRA-order format neither typed nor without a format, its
@@ -2096,9 +2097,6 @@ fast forms record, and each `PrecisionNote`'s rustdoc states its bound.
   anisotropic sampler applies to its footprint's minor axis alone. On a device without
   `maintenance8`, a fragment's implicit-level sample with a dynamic texel offset samples with its
   derivatives too, taken before the switch over the offset's values (`docs/FAST-PATHS.md`).
-- `metal2vulkan-degrade-unordered-framebuffer-fetch` (precision).
-  `PrecisionNote::UnorderedFramebufferFetch`: Framebuffer fetch without rasterization-order
-  attachment access.
 - `metal2vulkan-degrade-device-transcendentals` (precision). `PrecisionNote::DeviceTranscendentals`:
   Transcendentals answer within Apple's stated bound, not Metal's bits: the device's own functions,
   or the translation's routines where a device's instruction may leave the bound (and, for the
@@ -2563,6 +2561,9 @@ fast forms record, and each `PrecisionNote`'s rustdoc states its bound.
   keeps them.
 - `metal2vulkan-degrade-deallocator-after-release` (retired). No replacement: a no-copy buffer's
   deallocator runs in its release, on the releasing thread, as Metal runs it.
+- `metal2vulkan-degrade-unordered-framebuffer-fetch` (retired). No replacement: the opt-in
+  unordered framebuffer fetch is removed; a fetch no ordered form serves on the device is refused
+  (Unsupported FramebufferFetch).
 - `metal2vulkan-degrade-unrestored-first-move-bytes` (retired). No replacement: a texture over a
   no-copy buffer's host pages is a shadow, which takes no first move over them.
 

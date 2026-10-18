@@ -10,12 +10,9 @@
 //! - **Storage attachments in the ordered pixel interlock** (`GraphicsState::storage_attachments`),
 //!   where it has `fragmentShaderPixelInterlock` alone (RADV, ANV, NVIDIA and MoltenVK).
 //!
-//! Under `FramebufferFetchPolicy::AcceptUnordered`, which a caller may pass in
-//! `DeviceOptions::policy`, the compile layer also emits input attachments without that access
-//! where neither form is open to the pipeline (a device with neither feature, or a pipeline
-//! state the storage form cannot keep exact, such as a blending fetched attachment), recording
-//! `PrecisionNote::UnorderedFramebufferFetch`. The runtime runs only the ordered forms, which
-//! are Metal's, so it refuses such a pipeline where it makes it ([`ordered`]).
+//! Where neither form is open to the pipeline (a device with neither feature, or a pipeline state
+//! the storage form cannot keep exact, such as a blending fetched attachment), the compile layer
+//! refuses the pipeline: an unordered read could see a pixel before an earlier fragment's write.
 //!
 //! The input attachment form ([`through_inputs`]): a pass cannot foresee which of its draws
 //! fetch, so on such a device every color render target is also an input attachment
@@ -42,13 +39,16 @@
 //! image that has it (`attachment_stand_in.rs`). A texture Metal may write from a shader has
 //! `STORAGE` anyway.
 //!
-//! The interlock orders the overlapping fragments of a draw; between two draws of one render pass
-//! instance, a draw that reads or writes a color in the storage form after an earlier draw of the
-//! instance wrote one there records after a barrier from the fragment shader's writes
-//! (`render_target::between_storage_draws`), as a draw that reaches the fragment imageblock's
-//! storage does: RADV on an AMD 780M (Mesa 26.2.4) did not order such draws by the interlock alone,
-//! and a memoryless color's copy through a fetch read texels as they were before the blends of the
-//! draws just before it.
+//! The interlock orders the overlapping fragments of a draw, and Vulkan orders those of
+//! consecutive draws of a subpass alike (`render.rs`'s `InterlockedStorage`, which quotes the
+//! sentences). Even so, between two draws of one render pass instance, a draw that reads or writes
+//! a color in the storage form after an earlier draw of the instance wrote one there records after
+//! a barrier from the fragment shader's writes (`render_target::between_storage_draws`), as a draw
+//! that reaches the fragment imageblock's storage does: RADV on an AMD 780M (Mesa 26.2.4) does not
+//! order such draws by the interlock alone, and a memoryless color's copy through a fetch read
+//! texels as they were before the blends of the draws just before it. Not on a driver measured to
+//! order them (`DriverFact::InterlockOrdersDraws`: ANV on the Iris Xe), where the colors' barrier
+//! goes, about 15,000 GPU cycles a draw there.
 //!
 //! An 8-bit sRGB attachment (with the compile form) is read and written through a storage view in
 //! the unsigned-integer format of its texel size ([`storage_view_format`]): Metal's tile keeps the
@@ -97,9 +97,11 @@ use super::error::Error;
 use super::image_plan::{hiz_candidate, ImagePlan};
 use super::Device;
 use metal2vulkan::bind::PlanesCopy;
+use metal2vulkan::device::{DeviceProfile, DriverFact, FormatUsage, VkProperty};
+use metal2vulkan::error::Capability;
 use metal2vulkan::metal::format::WordAttachment;
 use metal2vulkan::metal::TextureType;
-use metal2vulkan::pipeline::{GraphicsState, StorageAttachmentUse};
+use metal2vulkan::pipeline::StorageAttachmentUse;
 use metal2vulkan::vk::{Format, ImageCreateFlags, ImageUsageFlags, NumericFormat};
 use std::collections::VecDeque;
 
@@ -449,18 +451,4 @@ impl Device {
         };
         Ok(if free { candidate } else { plan })
     }
-}
-
-/// Refuse a pipeline of `graphics` whose framebuffer fetch the compile layer left unordered:
-/// input attachments without rasterization-order attachment access. The refusal names that
-/// access, with which the compile layer orders every fetch; compiling under `RequireOrdered`
-/// names each alternative the device lacks.
-pub(crate) fn ordered(graphics: &GraphicsState) -> Result<(), Error> {
-    if graphics.input_attachments.is_empty() || graphics.rasterization_order_attachment_access {
-        return Ok(());
-    }
-    Err(Error::Unsupported(Unsupported::needs(
-        Feature::FramebufferFetch,
-        Capability::Feature(VkFeature::RasterizationOrderColorAttachmentAccess),
-    )))
 }

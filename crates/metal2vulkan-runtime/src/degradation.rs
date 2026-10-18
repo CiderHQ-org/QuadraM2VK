@@ -1843,7 +1843,6 @@ degradations! {
         F16FmaDoubleRounding = "f16-fma-double-rounding";
         F16IntConvDoubleRounding = "f16-int-conv-double-rounding";
         GradFromBias = "grad-from-bias";
-        UnorderedFramebufferFetch = "unordered-framebuffer-fetch";
         DeviceTranscendentals = "device-transcendentals";
         ReductionOrder = "reduction-order";
         DeviceDenormals = "device-denormals";
@@ -2137,6 +2136,14 @@ impl Degradation {
             "metal2vulkan-degrade-deallocator-after-release",
             "none: a no-copy buffer's deallocator runs in its release, on the releasing thread, \
              as Metal runs it",
+        ),
+        (
+            // A stage compiled under the opt-in `FramebufferFetchPolicy::AcceptUnordered` read a
+            // color attachment unordered where the device has no ordered form, and announced it.
+            // The policy is gone: such a fetch is refused.
+            "metal2vulkan-degrade-unordered-framebuffer-fetch",
+            "none: the opt-in unordered framebuffer fetch is removed; a fetch no ordered form \
+             serves on the device is refused (Unsupported FramebufferFetch)",
         ),
         (
             // An aliasing image's first move over a no-copy buffer's host pages changed bytes the

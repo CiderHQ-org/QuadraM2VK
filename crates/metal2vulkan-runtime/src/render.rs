@@ -706,12 +706,21 @@ impl DrawStates {
 /// barrier. A draw that reaches a kind an earlier draw of its instance wrote records after the
 /// barrier from the fragment shader's writes to its reads and writes
 /// (`render_target::between_storage_draws`). The interlock orders the overlapping fragments of a
-/// draw, and Vulkan orders those of consecutive draws in a subpass too (rasterization order
-/// follows primitive order, submission order first), but RADV on an AMD 780M (Mesa 26.2.4) did
-/// not: a later draw, of the same pipeline or another, read texels as they were before an
-/// earlier one's writes (for the imageblock and for a color, with a synthetic repro). No device is
-/// measured to order them, so every device takes the barrier. Another kind of storage a draw reads
-/// and writes inside the interlock joins as a field here and in [`InterlockedStorage::of`].
+/// draw, and Vulkan orders those of consecutive draws in a subpass too: in the ordered modes
+/// "interlocked operations in a fragment shader must happen before interlocked operations in
+/// fragment shader invocations that execute later in rasterization order and cover at least one
+/// sample in the same pixel" (Fragment Operations, "Interlocked Operations"), rasterization order
+/// follows primitive order through a subpass, submission order first ("Primitive Order"), and
+/// every access inside the critical section is coherent (`lower::sync::memory_model`), as the
+/// Memory Model appendix has interlock shaders "declare the relevant resources as coherent to get
+/// implicit per-instruction availability and visibility operations". RADV on an
+/// AMD 780M (Mesa 26.2.4) does not: a later draw, of the same pipeline or another, read texels as
+/// they were before an earlier one's writes (for the imageblock and for a color). So every device
+/// takes the barrier but where its driver is measured to order such draws' colors by the
+/// interlock alone (`DriverFact::InterlockOrdersDraws`, by
+/// `runtime_lane::interlocked_draw_order`): there a draw's colors are no kind of it
+/// ([`InterlockedStorage::of`]). Another kind of storage a draw reads and writes inside the
+/// interlock joins as a field here and in [`InterlockedStorage::of`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct InterlockedStorage {
     /// The pass's fragment imageblock storage (`fragment_imageblock.rs`).
@@ -739,19 +748,25 @@ impl InterlockedStorage {
     };
 
     /// What a draw of `graphics` whose colors in the interlocked storage form are `storage`
-    /// reaches, and what it writes. A draw that reaches the imageblock may write it, and one that
-    /// tests the depth in the shader may write the depth's stand-in.
-    fn of(graphics: &GraphicsState, storage: &[StorageAttachmentUse]) -> (Self, Self) {
+    /// reaches, and what it writes, on a device whose driver orders interlocked draws' colors by
+    /// the interlock alone where `colors_ordered` (then no color is a kind of it). A draw that
+    /// reaches the imageblock may write it, and one that tests the depth in the shader may write
+    /// the depth's stand-in.
+    fn of(
+        graphics: &GraphicsState,
+        storage: &[StorageAttachmentUse],
+        colors_ordered: bool,
+    ) -> (Self, Self) {
         let imageblock = graphics.fragment_imageblock.is_some();
         let depth = graphics.shader_tests.is_some();
         let reaches = Self {
             imageblock,
-            colors: !storage.is_empty(),
+            colors: !colors_ordered && !storage.is_empty(),
             depth,
         };
         let writes = Self {
             imageblock,
-            colors: storage.iter().any(|s| s.writes),
+            colors: !colors_ordered && storage.iter().any(|s| s.writes),
             depth,
         };
         (reaches, writes)
@@ -4251,8 +4266,14 @@ impl RenderCommandEncoder {
                 general,
             )?;
             let views = ViewSetup::default();
-            let framebuffer =
-                render_target::framebuffer(&device, &pass, resolving_layout, views, none)?;
+            let framebuffer = render_target::framebuffer(
+                &device,
+                &pass,
+                resolving_layout,
+                &resolving,
+                views,
+                none,
+            )?;
             Some((pass, framebuffer))
         } else {
             None
@@ -4620,6 +4641,14 @@ impl RenderCommandEncoder {
             }
             let shape = &instance.shape;
             let pass = render_target::final_pass(&device, own, shape, at, feedback, depth)?;
+            let framebuffer = render_target::framebuffer(
+                &device,
+                &pass,
+                &viewed,
+                shape,
+                instance.views,
+                feedback,
+            )?;
             later_moved.push(render_target::moved_images(
                 &viewed,
                 instance.views,
@@ -7491,7 +7520,10 @@ impl RenderCommandEncoder {
         // The instance the draw records into, and what stands in for the pass's attachments from
         // the draw on: the encoder's layout once the draw is recorded.
         let storage = self.storage_attachments(graphics)?;
-        let (interlocked, interlocked_writes) = InterlockedStorage::of(graphics, &storage);
+        let colors_ordered =
+            (device.properties().driver_facts).contains(&DriverFact::InterlockOrdersDraws);
+        let (interlocked, interlocked_writes) =
+            InterlockedStorage::of(graphics, &storage, colors_ordered);
         let failing = match &failing_state {
             None => None,
             Some(state) => {

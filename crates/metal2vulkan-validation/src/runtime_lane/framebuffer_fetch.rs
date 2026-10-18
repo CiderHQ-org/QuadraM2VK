@@ -601,6 +601,95 @@ fn a_dont_care_memoryless_attachment_reads_zero() {
     quiet(lane, &messages);
 }
 
+/// The colors a pass's fetching draws read and write as storage images in the pixel interlock,
+/// which their subpass leaves out: the framebuffer of each instance holds a view of a placeholder
+/// the device keeps for each such color, never one of the image the draws write
+/// (`storage_placeholder.rs`, `WorkCounts::storage_placeholder_attachments`): one per format and
+/// sample count and per further color of them a framebuffer leaves out, however many passes take
+/// it, and a larger one only for a larger framebuffer (`WorkCounts::storage_placeholders_made`).
+/// Over a count cleared to (1, 2, 3, 4) and a tag cleared to (5, 6, 7, 8), both `RGBA32Uint` and
+/// stored, `exf2_fetch_unwritten` once: `3 c + t`, in a pass of the lane's size, again, in one of
+/// twice its side, and in one of the first size once more, each its own command buffer. In the
+/// interlock the pass leaves both colors out: two placeholders, then two larger ones. Through
+/// input attachments no subpass leaves a color out, and none is made. The validation layer
+/// stays quiet either way.
+#[test]
+fn a_left_out_color_s_framebuffer_view_is_a_placeholder() {
+    let (messages, cache, lane) = lane();
+    let vertices = library(&lane, "rt6_resolves");
+    let unwritten = library(&lane, "exf2_fetch_unwritten");
+    let pf = PixelFormat::RGBA32Uint;
+    let counted = || {
+        let counts = lane.device.work_counts();
+        let attachments = counts.storage_placeholder_attachments;
+        (counts.storage_placeholders_made, attachments)
+    };
+    let before = counted();
+    let mut after = Vec::new();
+    let sides: [u64; 4] = [1, 1, 2, 1];
+    let ran = (|| {
+        let fold = pipeline(
+            &lane,
+            &vertices,
+            (&unwritten, "exf2_fetch_unwritten"),
+            &[pf, pf],
+            1,
+        )?;
+        let mut read = Vec::new();
+        for side in sides {
+            let shape = Shape {
+                size: ONE.size * side,
+                ..ONE
+            };
+            let count = lane.texture(pf, shape, TextureUsage::RENDER_TARGET);
+            let tag = lane.texture(pf, shape, TextureUsage::RENDER_TARGET);
+            let targets = [
+                (
+                    &count,
+                    ClearColor::new(1.0, 2.0, 3.0, 4.0),
+                    StoreAction::Store,
+                ),
+                (
+                    &tag,
+                    ClearColor::new(5.0, 6.0, 7.0, 8.0),
+                    StoreAction::Store,
+                ),
+            ];
+            steps(&lane, &pass(&targets, None), &[&fold])?;
+            read.extend(lane.read(&count, (0, 0), 16, BlitOption::None));
+            let (made, attachments) = counted();
+            after.push((made - before.0, attachments - before.1));
+        }
+        Ok(read)
+    })();
+    let texel: Vec<u8> = [8u32, 12, 16, 20]
+        .iter()
+        .flat_map(|c| c.to_le_bytes())
+        .collect();
+    let texels: usize = (sides.iter())
+        .map(|&side| TEXELS * (side * side) as usize)
+        .sum();
+    expect(
+        &lane,
+        "a left-out color's placeholder",
+        ran,
+        &texel.repeat(texels),
+    );
+    eprintln!(
+        "a left-out color's placeholder on {} through {}: placeholders made and attachments \
+         taken after each pass {after:?}",
+        lane.device.name(),
+        form(&lane)
+    );
+    let expected = match through_inputs(&lane) {
+        true => vec![(0, 0); sides.len()],
+        false => vec![(2, 2), (2, 4), (4, 6), (4, 8)],
+    };
+    assert_eq!(after, expected, "placeholders made, and attachments taken");
+    drop(cache);
+    quiet(lane, &messages);
+}
+
 /// Draw `step` three times in each pass of `descriptors`, in order, in one command buffer of
 /// `lane`'s queue; the first refusal of a pass, a pipeline or a draw, if any.
 fn passes(

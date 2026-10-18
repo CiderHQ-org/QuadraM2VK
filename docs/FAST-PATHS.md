@@ -91,10 +91,6 @@ known. The rest of the differences are docs/API.md section 9's precision notes.
   Unorm8LinearFilterPolicy::DeviceWithinOneCode` hands it to a device measured within one code
   (`DeviceUnorm8LinearFilter`, `device-unorm8-linear-filter`): it bought no GPU time on the
   consumer's fragments and cost module size and making time.
-- `framebuffer_fetch = FramebufferFetchPolicy::RequireOrdered` (the default) refuses a framebuffer
-  fetch without rasterization-order attachment access; `framebuffer_fetch =
-  FramebufferFetchPolicy::AcceptUnordered` accepts it unordered (`UnorderedFramebufferFetch`,
-  `unordered-framebuffer-fetch`). A coverage choice, not a speed one.
 - `pointer_domain`, `handle_domain`, `containment` and `isolation` choose how resources resolve and
   how guests are contained, not an answer of Metal's arithmetic or sampling.
 
@@ -194,6 +190,17 @@ recorded here.
   texture keeps, the buffer's texels copied in first (`dont-care-stand-in`), so the buffer keeps its
   bytes as Metal's does: about 10 µs a pass on the Iris Xe (ANV). A pass that clears and stores
   `DontCare` costs no more, and one that stores renders in place.
+- **A fetching draw in the pixel interlock waits for the draw before it.** Between two draws of a
+  render pass instance where the later one reaches a color in the fetch's interlocked storage form
+  (or an extended-range color's `half` shadow) that the earlier one wrote, the runtime records a
+  barrier from the fragment shader's writes (`render_target::between_storage_draws`). Vulkan orders
+  such draws by the interlock alone, but RADV on the Radeon 780M does not. On the Iris Xe the
+  barrier costs about 15,000 GPU cycles a draw, 9 to 20 µs at the clocks measured: a 1920x1080
+  pass of 27 such draws took 1.46 against 1.08 million cycles without it
+  (`runtime_lane::tile_path_costs`, `wide blended in the function`). Not on a driver measured to
+  order them (`DriverFact::InterlockOrdersDraws`: ANV on the Iris Xe;
+  `runtime_lane::interlocked_draw_order`). The imageblock's storage and a depth stand-in keep
+  theirs on every device.
 - **A shadow over bytes another writer may write is merged back, not copied back.** Metal writes
   only the texels a command writes, and another writer writing bytes no command touches while a
   command buffer runs is valid under its contract. On an M3 Max under macOS 27.0.1, a CPU write to

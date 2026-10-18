@@ -16,7 +16,6 @@ use std::path::Path;
 
 use crate::bind::{BindState, WriteSource};
 use crate::budget::Budget;
-use crate::device::profile::FramebufferFetchPolicy;
 use crate::device::requirements::VkFeature;
 use crate::device::subgroup::OpBits;
 use crate::device::{Device, DeviceDescription};
@@ -473,11 +472,8 @@ fn fetch_state(read: &[u32], formats: &[PixelFormat], blending: bool) -> Lowerin
 /// fact. With only the ordered pixel interlock it is one storage image read (and written) inside
 /// the interlock, under its pipeline's state (standalone, the function needs that state); where
 /// that state blocks the storage form (a blend of a format whose blend the shader does not compute),
-/// `RequireOrdered` refuses with the blocker and `AcceptUnordered` reads an input attachment
-/// unordered with a precision note; a 16-bit float or 8-bit unorm attachment's blend the shader
-/// computes. With neither,
-/// `RequireOrdered` refuses naming both and `AcceptUnordered` reads unordered. Every compiled
-/// module passes L3.
+/// it is refused with the blocker; a 16-bit float or 8-bit unorm attachment's blend the shader
+/// computes. With neither, it is refused naming both. Every compiled module passes L3.
 #[test]
 fn framebuffer_fetch_reads_in_an_ordered_form_where_the_device_has_one() {
     let Some(bc) = fixture("fragment_fetch") else {
@@ -498,23 +494,19 @@ fn framebuffer_fetch_reads_in_an_ordered_form_where_the_device_has_one() {
         ("fetch_scalar", &[0], &[PixelFormat::R32Float]),
         ("fetch_ordered", &[0], &[PixelFormat::RGBA16Float]),
     ];
-    let unordered = |a: &crate::library::FunctionArtifact| {
-        a.precision
-            .contains(&PrecisionNote::UnorderedFramebufferFetch)
-    };
     let mut forms = [0usize; 3];
     for (stem, strict) in committed_profiles().expect("profiles") {
-        let policy = DevicePolicy {
-            framebuffer_fetch: FramebufferFetchPolicy::AcceptUnordered,
-            ..Default::default()
-        };
-        let lenient = profile(&stem, policy).expect("profile");
         let frag = strict.fields().fragment;
         for (entry, colors, formats) in entries {
-            // A color input in a raster order group needs the interlock.
-            if entry == "fetch_ordered" && !frag.pixel_interlock {
+            // A color input in a raster order group needs the interlock, where rasterization-order
+            // access orders the read; with neither ordered form the read is refused first, naming
+            // both (below).
+            if entry == "fetch_ordered"
+                && !frag.pixel_interlock
+                && frag.rasterization_order_color_access
+            {
                 assert_eq!(
-                    refusal(&bc, entry, &lenient),
+                    refusal(&bc, entry, &strict),
                     (Feature::RasterOrderGroups, pixel_interlock()),
                     "{stem}"
                 );
@@ -536,55 +528,47 @@ fn framebuffer_fetch_reads_in_an_ordered_form_where_the_device_has_one() {
                             a.facts
                         );
                     }
-                    assert!(!unordered(&a), "{entry} on {stem}");
                 }
             } else if frag.pixel_interlock {
                 forms[1] += 1;
-                for p in [&strict, &lenient] {
-                    assert!(
-                        matches!(
-                            compile(&bc, entry, p),
-                            Err(Error::NeedsInput(RuntimeInput::FramebufferFetch))
-                        ),
-                        "{entry} on {stem}"
-                    );
-                    let a = compile_with(&bc, entry, p, &clean)
-                        .unwrap_or_else(|e| panic!("{entry} on {stem}: {e}"));
-                    link_and_validate(&a, p)
-                        .unwrap_or_else(|e| panic!("{entry} on {stem}: L3: {e}"));
-                    assert_eq!(storage_attachments(&a), colors, "{entry} on {stem}");
-                    assert!(attachments(&a).is_empty(), "{entry} on {stem}");
-                    assert!(!unordered(&a), "{entry} on {stem}");
-                }
+                assert!(
+                    matches!(
+                        compile(&bc, entry, &strict),
+                        Err(Error::NeedsInput(RuntimeInput::FramebufferFetch))
+                    ),
+                    "{entry} on {stem}"
+                );
+                let a = compile_with(&bc, entry, &strict, &clean)
+                    .unwrap_or_else(|e| panic!("{entry} on {stem}: {e}"));
+                link_and_validate(&a, &strict)
+                    .unwrap_or_else(|e| panic!("{entry} on {stem}: L3: {e}"));
+                assert_eq!(storage_attachments(&a), colors, "{entry} on {stem}");
+                assert!(attachments(&a).is_empty(), "{entry} on {stem}");
                 // Blending the written color 0 blocks its storage form where the shader computes
-                // no blend of its format (`R32Float`): refused with that reason, or read
-                // unordered. A 16-bit float or 8-bit unorm one's blend the shader computes, as
-                // Metal's.
+                // no blend of its format (`R32Float`): refused with that reason. A 16-bit float or
+                // 8-bit unorm one's blend the shader computes, as Metal's.
                 let blended = fetch_state(colors, formats, true);
                 if matches!(
                     formats[0],
                     PixelFormat::RGBA16Float | PixelFormat::RGBA8Unorm
                 ) {
-                    for p in [&strict, &lenient] {
-                        let a = compile_with(&bc, entry, p, &blended)
-                            .unwrap_or_else(|e| panic!("{entry} on {stem}: blended: {e}"));
-                        link_and_validate(&a, p)
-                            .unwrap_or_else(|e| panic!("{entry} on {stem}: blended: L3: {e}"));
-                        assert_eq!(storage_attachments(&a), colors, "{entry} on {stem}");
-                        assert!(
-                            a.facts.iter().any(|f| matches!(
-                                f,
-                                RuntimeFact::InterlockedFramebufferFetch {
-                                    color: 0,
-                                    blend: Some(_),
-                                    ..
-                                }
-                            )),
-                            "{entry} on {stem}: {:?}",
-                            a.facts
-                        );
-                        assert!(!unordered(&a), "{entry} on {stem}");
-                    }
+                    let a = compile_with(&bc, entry, &strict, &blended)
+                        .unwrap_or_else(|e| panic!("{entry} on {stem}: blended: {e}"));
+                    link_and_validate(&a, &strict)
+                        .unwrap_or_else(|e| panic!("{entry} on {stem}: blended: L3: {e}"));
+                    assert_eq!(storage_attachments(&a), colors, "{entry} on {stem}");
+                    assert!(
+                        a.facts.iter().any(|f| matches!(
+                            f,
+                            RuntimeFact::InterlockedFramebufferFetch {
+                                color: 0,
+                                blend: Some(_),
+                                ..
+                            }
+                        )),
+                        "{entry} on {stem}: {:?}",
+                        a.facts
+                    );
                     continue;
                 }
                 match compile_with(&bc, entry, &strict, &blended) {
@@ -595,13 +579,6 @@ fn framebuffer_fetch_reads_in_an_ordered_form_where_the_device_has_one() {
                     ),
                     other => panic!("{entry} on {stem}: {:?}", other.map(|_| ())),
                 }
-                let a = compile_with(&bc, entry, &lenient, &blended)
-                    .unwrap_or_else(|e| panic!("{entry} on {stem}: {e}"));
-                link_and_validate(&a, &lenient)
-                    .unwrap_or_else(|e| panic!("{entry} on {stem}: L3: {e}"));
-                assert!(attachments(&a).contains(&0), "{entry} on {stem}");
-                assert!(!storage_attachments(&a).contains(&0), "{entry} on {stem}");
-                assert!(unordered(&a), "{entry} on {stem}");
             } else {
                 forms[2] += 1;
                 // Each entry writes the color it reads first: the interlock's alternative names
@@ -624,12 +601,6 @@ fn framebuffer_fetch_reads_in_an_ordered_form_where_the_device_has_one() {
                     ),
                     "{entry} on {stem}"
                 );
-                let a = compile(&bc, entry, &lenient)
-                    .unwrap_or_else(|e| panic!("{entry} on {stem}: {e}"));
-                link_and_validate(&a, &lenient)
-                    .unwrap_or_else(|e| panic!("{entry} on {stem}: L3: {e}"));
-                assert_eq!(attachments(&a), colors, "{entry} on {stem}");
-                assert!(unordered(&a), "{entry} on {stem}");
             }
         }
     }
@@ -1168,9 +1139,8 @@ fn fetch_with_discard() -> Option<Vec<u8>> {
 /// writes in the storage form without them (a discarded fragment writes nothing). Beside a depth
 /// attachment, where its write precedes the depth test, it states `TestedStorageWrites` without
 /// early tests, whose draws' plans check their tests, and under `read_only_tests` declares early
-/// tests and states it with them; under `AcceptUnordered` it reads unordered, as before, stating
-/// nothing. A stage compiled without a depth attachment declares no early tests, so it links into
-/// no pipeline with one: `NeedsInput(FramebufferFetch)`.
+/// tests and states it with them. A stage compiled without a depth attachment declares no early
+/// tests, so it links into no pipeline with one: `NeedsInput(FramebufferFetch)`.
 #[test]
 fn the_storage_form_declares_early_tests_only_where_they_keep_metals_writes() {
     let (Some(plain), Some(discarding)) = (fixture("fragment_fetch"), fetch_with_discard()) else {
@@ -1229,16 +1199,6 @@ fn the_storage_form_declares_early_tests_only_where_they_keep_metals_writes() {
             );
         }
     }
-    let lenient = profile(
-        "moltenvk-m3",
-        DevicePolicy {
-            framebuffer_fetch: FramebufferFetchPolicy::AcceptUnordered,
-            ..Default::default()
-        },
-    )
-    .expect("profile");
-    let a = compile_with(&discarding, "fetch_scalar", &lenient, &state(true)).expect("unordered");
-    assert_eq!((early(&a), tested(&a)), (None, None), "{:?}", a.facts);
     // Compiled without a depth attachment, into a pipeline with one.
     let Some(io) = fixture("stage_io") else {
         return;
@@ -3923,9 +3883,8 @@ fn kills_after_the_interlock(stages: &[crate::pipeline::artifact::StageModule]) 
 /// storage form refuses its writes where the module declares early tests, naming the defect. Beside
 /// a depth attachment, where the module would declare them only for its own sake, it declares none:
 /// it stores before the tests and states `TestedStorageWrites` without the early-tests variant, so
-/// the plan runs only its draws whose tests drop no fragment. `AcceptUnordered` reads the
-/// attachment unordered instead, as before; without a depth attachment, or at one sample, it
-/// compiles as before. A device of the same form without the defect (`intel-arl-anv`: sample
+/// the plan runs only its draws whose tests drop no fragment. Without a depth attachment, or at
+/// one sample, it compiles as before. A device of the same form without the defect (`intel-arl-anv`: sample
 /// planes too) compiles the per-sample form with early tests.
 #[test]
 fn the_per_sample_form_refuses_early_tests_writes_on_a_driver_that_drops_them() {
@@ -4001,16 +3960,6 @@ fn the_per_sample_form_refuses_early_tests_writes_on_a_driver_that_drops_them() 
             other => panic!("{:?}", other.map(|_| ())),
         }
     }
-    let policy = DevicePolicy {
-        framebuffer_fetch: FramebufferFetchPolicy::AcceptUnordered,
-        ..Default::default()
-    };
-    let lenient = profile("moltenvk-m3", policy).expect("profile");
-    let a = compile_with(&bc, "fetch_scalar", &lenient, &state(true, true)).expect("unordered");
-    assert_eq!(early(&a), None);
-    assert!(a
-        .precision
-        .contains(&PrecisionNote::UnorderedFramebufferFetch));
     let a = compile_with(&bc, "fetch_scalar", &anv, &state(true, true)).expect("anv");
     assert_eq!(early(&a), Some(true));
 }

@@ -1,7 +1,7 @@
 //! `DevicePolicy`: the consumer's product choices that, together with a `DeviceDescription`,
 //! decide a `DeviceProfile`.
 
-use crate::device::profile::{FramebufferFetchPolicy, GuestIsolation, HandleDomain, PointerDomain};
+use crate::device::profile::{GuestIsolation, HandleDomain, PointerDomain};
 
 /// Policy inputs of `Device::new`. Every field but `decoded_texels`, `heap_compression`,
 /// `completion`, `tile_store`, `resolve` and `batch_order` can change emitted code, so the profile
@@ -22,8 +22,6 @@ pub struct DevicePolicy {
     pub containment: ContainmentPolicy,
     /// Whether guest shaders are isolated from each other's resources.
     pub isolation: GuestIsolation,
-    /// Framebuffer-fetch ordering without rasterization-order attachment access.
-    pub framebuffer_fetch: FramebufferFetchPolicy,
     /// Whether an 8-bit unsigned normalized texture's linear sample may be the device's own
     /// filter on a device measured within one code of Metal; by default it is Metal's filter,
     /// emulated exactly.
@@ -94,9 +92,8 @@ pub struct DevicePolicy {
 }
 
 impl DevicePolicy {
-    /// The untrusted-guest production policy: containment and isolation on,
-    /// ordered framebuffer fetch required, Metal's 8-bit linear filter emulated exactly where the
-    /// emulation runs, native device sampling (a two-plane YCbCr texture's samples among them),
+    /// The untrusted-guest production policy: containment and isolation on, Metal's 8-bit linear
+    /// filter emulated exactly where the emulation runs, native device sampling (a two-plane YCbCr texture's samples among them),
     /// native device maths, the device's own texel
     /// conversions, native half rounding, the device's NaN and minimum and maximum, the device's
     /// rounding order, the device's blend of a `half` output into a 16-bit float attachment,
@@ -110,7 +107,6 @@ impl DevicePolicy {
         handle_domain: HandleDomain::Table,
         containment: ContainmentPolicy::Contained,
         isolation: GuestIsolation::On,
-        framebuffer_fetch: FramebufferFetchPolicy::RequireOrdered,
         unorm8_linear_filter: Unorm8LinearFilterPolicy::Exact,
         sampling: SamplingPolicy::NativeDevice,
         ycbcr_filter: YCbCrFilterPolicy::Device,

@@ -1331,7 +1331,7 @@ codec_enum! {
     StandInView { Image, SamplePlanes { layers } }
     PrecisionNote {
         F16FmaDoubleRounding, F16IntConvDoubleRounding, GradFromBias,
-        UnorderedFramebufferFetch, DeviceTranscendentals, ReductionOrder, DeviceDenormals,
+        DeviceTranscendentals, ReductionOrder, DeviceDenormals,
         PixelSamplerScaling, DeviceArithmetic, DeviceSignedZeroInfNan, DeviceRayIntersection,
         FastMathRewrites,
         TessellationWinding, TessellationFactorEdgeCases, TessellationFactorScale,

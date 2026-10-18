@@ -2460,35 +2460,6 @@ fn replay_templates_skip_another_familys_literal_and_map_both_families_of_a_mixe
     }
 }
 
-/// A run under the unordered-fetch opt-in is never stored, and the default policy's is: the store
-/// decision follows the process's policy, never the run's outcome.
-#[test]
-fn only_the_default_fetch_policys_runs_are_stored() {
-    use metal2vulkan::device::FramebufferFetchPolicy;
-    assert_eq!(
-        DevicePolicy::default().framebuffer_fetch,
-        FramebufferFetchPolicy::RequireOrdered
-    );
-    assert!(stores_runs_under(
-        FramebufferFetchPolicy::RequireOrdered,
-        true
-    ));
-    assert!(!stores_runs_under(
-        FramebufferFetchPolicy::AcceptUnordered,
-        true
-    ));
-    // A run without generated commands is K14c's path measured on a device whose default run
-    // takes the generated-commands path.
-    assert!(!stores_runs_under(
-        FramebufferFetchPolicy::RequireOrdered,
-        false
-    ));
-    assert!(!stores_runs_under(
-        FramebufferFetchPolicy::AcceptUnordered,
-        false
-    ));
-}
-
 /// An allocation's guest address names a buffer whatever device address it has: NVIDIA's lie
 /// below 2^32 (a vertex buffer at 0x5020000 on an RTX 3090), where a guest address equal to it
 /// was a nil buffer's offset to a record, and RADV's sign-extended upper half

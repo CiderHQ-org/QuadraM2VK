@@ -12,8 +12,9 @@
 //!   every runtime image, holding pixel `(x, y)`'s `half` values at texel `(x, y)`; made at the
 //!   draw where it starts, one per color and pass, bound where the plan writes
 //!   `WriteSource::ExtendedShadow`. Each draw that binds it reads and writes it in the fragment
-//!   shader, inside the pixel interlock that orders the color's own storage form, so the barrier
-//!   between such draws (`InterlockedStorage`'s colors) orders it too.
+//!   shader, inside the pixel interlock that orders the color's own storage form, so what orders
+//!   that form between draws orders it too (`InterlockedStorage`'s colors: a barrier, or the
+//!   interlock alone on a driver measured to order such draws).
 //! - **The start.** The pass's instances keep their draws for recording again
 //!   (`render/reroute.rs`) on every device while the pass has such a color, single-sampled, of
 //!   one layer, without a rasterization-rate map, fetching in the pixel interlock. At the draw

@@ -86,7 +86,7 @@ use metal2vulkan::bind::{
     FunctionTableWords, ImageblockSize, MetalInstance, ReplayVariant, StageTable, StatusReport,
 };
 use metal2vulkan::cache::Hash256;
-use metal2vulkan::device::{DevicePolicy, DeviceProfile, FramebufferFetchPolicy};
+use metal2vulkan::device::DeviceProfile;
 use metal2vulkan::error::{BindError, Error};
 use metal2vulkan::library::{FunctionConstantValue, FunctionConstantValues};
 use metal2vulkan::metal::{PixelFormat, RenderStages};
@@ -3061,10 +3061,9 @@ fn replay_variant_request<'a>(
 }
 
 /// [`execute_case`] of a case [`prepare_case`] accepted: the device half in a device worker
-/// (`run_on_device`), the comparison and the row here. Under the unordered-fetch opt-in
-/// (`candidate::accept_unordered_fetch`), or without generated commands
-/// (`candidate::run_without_generated_commands`), the row is compared and returned but not stored:
-/// each is another configuration's evidence, and the slot is the defaults'.
+/// (`run_on_device`), the comparison and the row here. Without generated commands
+/// (`candidate::run_without_generated_commands`) the row is compared and returned but not stored:
+/// it measures another path, and the slot is the default's.
 pub fn execute_prepared(
     root: &Path,
     prepared: PreparedCase,
@@ -3120,7 +3119,6 @@ pub fn execute_prepared(
         wait_timeout_ms: u64::try_from(wait_timeout().as_millis()).unwrap_or(u64::MAX),
         restricted_to,
         leg: super::requested_leg(),
-        framebuffer_fetch: super::requested_framebuffer_fetch(),
         generated_commands: super::requested_generated_commands(),
         venue,
         source_index: crate::source::source_index(),
@@ -3129,12 +3127,10 @@ pub fn execute_prepared(
     let run = match result {
         Ok(run) => run,
         // A typed refusal on an opened device is evidence too: stored in the slot the row would
-        // have taken, with that device's facts. Under the unordered-fetch opt-in or without
-        // generated commands nothing is stored, as for a row.
+        // have taken, with that device's facts. Without generated commands nothing is stored, as
+        // for a row.
         Err(ExecutorError::NotSupported(not_supported)) => {
-            if let Some(opened) = refused_on
-                .filter(|_| stores_runs_under(input.framebuffer_fetch, input.generated_commands))
-            {
+            if let Some(opened) = refused_on.filter(|_| input.generated_commands) {
                 store.upsert_refusal(RefusalObservation {
                     case_id: case.case_id.clone(),
                     air_sha256: case.air_sha256.clone(),
@@ -3209,25 +3205,13 @@ pub fn execute_prepared(
     if !observation.dependency_matches(&dependencies) {
         return Err("constructed candidate observation failed its own dependency check".into());
     }
-    if stores_runs_under(
-        super::requested_framebuffer_fetch(),
-        super::requested_generated_commands(),
-    ) {
+    // A run without generated commands (`--without-generated-commands`) measures the device
+    // replay's other path on a device whose default run takes the generated-commands path:
+    // compared and returned, never stored over the default's evidence in the same slot.
+    if super::requested_generated_commands() {
         store.upsert_candidate(observation.clone())?;
     }
     Ok(observation)
-}
-
-/// Whether a run under the framebuffer-fetch `policy`, on contexts that enable
-/// `VK_EXT_device_generated_commands` where supported or not (`generated_commands`), is stored:
-/// only the defaults'. A run under the unordered-fetch opt-in (`--accept-unordered-fetch`) is the
-/// near-equivalent's evidence, compared and returned but never stored, since its slot is the
-/// default policy's and the default refuses what the opt-in compiles. A run without generated
-/// commands (`--without-generated-commands`) measures K14c's device replay on a device whose
-/// default run takes the generated-commands path: compared and returned, never stored over the
-/// default's evidence in the same slot.
-pub(crate) fn stores_runs_under(policy: FramebufferFetchPolicy, generated_commands: bool) -> bool {
-    policy == DevicePolicy::default().framebuffer_fetch && generated_commands
 }
 
 /// The bytes of `output` from the final buffer contents and the final texture contents, by Metal

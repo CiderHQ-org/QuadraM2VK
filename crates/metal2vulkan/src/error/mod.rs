@@ -1051,8 +1051,9 @@ pub enum Feature {
     // ---- Stages and fragment (lowering B7, B9) ----
     /// Raster order groups without fragment shader interlock.
     RasterOrderGroups,
-    /// Framebuffer fetch without ordered attachment access under `RequireOrdered`, or in a
-    /// multisampled pipeline (not implemented).
+    /// Framebuffer fetch without an ordered form on the device (rasterization-order attachment
+    /// access, or the pixel interlock's storage form where the pipeline's state lets it be
+    /// exact), or in a shape not implemented.
     FramebufferFetch,
     /// `[[primitive_id]]` in a fragment function: behind a mesh function on a device without
     /// geometry or tessellation shaders, whose fragment stage reads it from a varying no mesh

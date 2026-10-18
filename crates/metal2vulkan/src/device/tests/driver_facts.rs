@@ -534,6 +534,7 @@ const SAMPLED_HIZ: DriverFact = DriverFact::SampledDepthKeepsHiZ;
 const MSAA_DEPTH: DriverFact = DriverFact::MultisampledDepthFasterOutOfGeneral;
 const TILE_STORE: DriverFact = DriverFact::TileStoreIsMetals;
 const FOLLOWS: DriverFact = DriverFact::PointerImportsFollowTheirAddress;
+const INTERLOCK_ORDER: DriverFact = DriverFact::InterlockOrdersDraws;
 
 /// Every committed profile's driver has exactly its measured facts (on a measured identity those
 /// its rows name, on any other its driver's defects alone). A profile of a measured identity: the
@@ -558,6 +559,7 @@ const FOLLOWS: DriverFact = DriverFact::PointerImportsFollowTheirAddress;
 /// copy in with its keep on the RPL-S alone, and a copy of rows
 /// linear-tiling attachment features uninitialized; NVIDIA's stalls a submission per thousand
 /// semaphore operations on the RTX 5080 Laptop GPU; pointer imports follow their address on the
+/// 780M, the RPL-P and lavapipe 26.0.8; the RPL-P's interlock orders consecutive draws. Every other
 /// profile is an unmeasured identity and takes its driver's defects alone: the GTX 1060
 /// (580.178.04) and the RTX 5080 desktop GPU (another GPU at 615.71.09) NVIDIA's custom-position
 /// depth, the ARL (26.2.3) and the Tiger Lake Iris Xe (26.2.2) ANV's hidden aliased writes; the
@@ -618,6 +620,7 @@ fn the_committed_profiles_drivers_have_their_facts() {
                 SAMPLED_HIZ,
                 MSAA_DEPTH,
                 FOLLOWS,
+                INTERLOCK_ORDER,
             ],
         ),
         (

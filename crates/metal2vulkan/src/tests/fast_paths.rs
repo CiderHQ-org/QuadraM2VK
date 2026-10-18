@@ -60,7 +60,6 @@ fn choices() -> Vec<Choice> {
         containment: _,
         isolation: _,
         // The accuracy choices, below.
-        framebuffer_fetch: _,
         unorm8_linear_filter: _,
         sampling: _,
         ycbcr_filter: _,
@@ -82,7 +81,6 @@ fn choices() -> Vec<Choice> {
         batch_order: _,
     } = p;
     vec![
-        choice!(p.framebuffer_fetch: FramebufferFetchPolicy { RequireOrdered, AcceptUnordered }),
         choice!(p.unorm8_linear_filter: Unorm8LinearFilterPolicy { Exact, DeviceWithinOneCode }),
         choice!(p.sampling: SamplingPolicy { NativeDevice, Exact }),
         choice!(p.ycbcr_filter: YCbCrFilterPolicy { Device, Exact }),
@@ -151,7 +149,7 @@ fn notes() -> Vec<(&'static str, Ledger)> {
             ExtendedRangeFloatBlendSource,
             BicubicFilterArithmetic,
         ],
-        OptIn: [DeviceUnorm8LinearFilter, UnorderedFramebufferFetch],
+        OptIn: [DeviceUnorm8LinearFilter],
         DeviceGap: [
             DeviceDenormals,
             DeviceTexelDenormals,

@@ -19,7 +19,6 @@ fn input(device: DeviceType) -> DeviceInput {
         wait_timeout_ms: 7_000,
         restricted_to: None,
         leg: Leg::Stated,
-        framebuffer_fetch: FramebufferFetchPolicy::RequireOrdered,
         generated_commands: true,
         venue: None,
         source_index: None,
@@ -97,7 +96,6 @@ fn output(result: Result<DeviceRun, ExecutorError>) -> DeviceOutput {
     DeviceOutput {
         product_fingerprint: TRANSLATOR_FINGERPRINT.into(),
         validation_fingerprint: VALIDATION_FINGERPRINT.into(),
-        framebuffer_fetch: FramebufferFetchPolicy::RequireOrdered,
         generated_commands: true,
         result,
         refused_on: None,
@@ -279,10 +277,6 @@ fn the_input_and_every_typed_result_cross_the_boundary() {
             ..restricted(DeviceType::Cpu, "vk12-floor")
         },
         DeviceInput {
-            framebuffer_fetch: FramebufferFetchPolicy::AcceptUnordered,
-            ..restricted(DeviceType::Cpu, "vk12-floor")
-        },
-        DeviceInput {
             generated_commands: false,
             ..restricted(DeviceType::Cpu, "gate-lavapipe")
         },
@@ -293,7 +287,6 @@ fn the_input_and_every_typed_result_cross_the_boundary() {
         for result in results {
             let scratch = ScratchDir::new("device-worker-test").unwrap();
             let report = DeviceOutput {
-                framebuffer_fetch: input.framebuffer_fetch,
                 generated_commands: input.generated_commands,
                 ..output(result.clone())
             };
@@ -531,51 +524,6 @@ fn a_crash_names_its_signal() {
     assert_eq!(crash(6).outcome(), "device_crash{SIGABRT}");
     assert_eq!(crash(4).outcome(), "device_crash{SIGILL}");
     assert_eq!(crash(99).outcome(), "device_crash{signal99}");
-}
-
-/// A worker that reports another framebuffer-fetch policy than its parent asked for compiled
-/// under it: its run, or its refusal (the default policy refuses a fetch the opt-in compiles), is
-/// not the parent's evidence, and a run under the opt-in would be stored only under the default.
-#[cfg(unix)]
-#[test]
-fn a_worker_run_under_another_fetch_policy_is_refused() {
-    let refused: Result<DeviceRun, ExecutorError> =
-        Err(
-            NotSupported::NotEnabled(vec!["rasterizationOrderColorAttachmentAccess".into()]).into(),
-        );
-    for (asked, reported) in [
-        (
-            FramebufferFetchPolicy::RequireOrdered,
-            FramebufferFetchPolicy::AcceptUnordered,
-        ),
-        (
-            FramebufferFetchPolicy::AcceptUnordered,
-            FramebufferFetchPolicy::RequireOrdered,
-        ),
-    ] {
-        let input = DeviceInput {
-            framebuffer_fetch: asked,
-            ..input(DeviceType::Cpu)
-        };
-        for result in [Ok(run()), refused.clone()] {
-            let scratch = ScratchDir::new("device-worker-test").unwrap();
-            let report = DeviceOutput {
-                framebuffer_fetch: reported,
-                ..output(result)
-            };
-            let worker = reporting(&scratch, &report);
-            match ran(worker, &input, no_tripwire) {
-                Err(ExecutorError::Failed(error)) => {
-                    assert!(
-                        error.starts_with("the device worker compiled under framebuffer-fetch"),
-                        "{error}"
-                    );
-                    assert!(error.contains("not this tool's evidence"), "{error}");
-                }
-                other => panic!("{other:?}"),
-            }
-        }
-    }
 }
 
 /// A worker that opened its devices on the other generated-commands path than its parent asked

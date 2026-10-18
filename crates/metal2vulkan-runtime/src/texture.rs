@@ -101,6 +101,7 @@ use super::sparse::emulated::TileMapBuffer;
 use super::sparse::texture::{sparse_refusal, SparseExtras, SparseImage, SparseShape};
 use super::sparse::SparsePageSize;
 use super::sparse::SparseProblem;
+use super::storage_placeholder::Placeholders;
 use super::texture_descriptor::{
     memoryless_two_plane_cube, texture_usage, TextureDescriptor, TextureLayout, TextureProblem,
     TextureSwizzleChannels,
@@ -189,6 +190,9 @@ pub(super) struct TextureState {
     pub(super) mipmaps: Mutex<MipmapChecks>,
     /// The neutral images and samplers bindings take where nothing is bound (`neutral.rs`).
     pub(super) neutrals: Mutex<Neutrals>,
+    /// The placeholder images of the colors a render pass instance leaves out of its subpass for
+    /// the pixel interlock (`storage_placeholder.rs`).
+    pub(super) storage_placeholders: Mutex<Placeholders>,
     /// Whether the usage a framebuffer fetch's form needs costs a color render target's image
     /// nothing, by its description (`framebuffer_fetch.rs`).
     pub(super) usage_answers: Mutex<UsageAnswers>,
@@ -237,6 +241,7 @@ impl TextureState {
             ),
             mipmaps: Mutex::new(MipmapChecks::new()),
             neutrals: Mutex::new(Neutrals::default()),
+            storage_placeholders: Mutex::new(Placeholders::default()),
             usage_answers: Mutex::new(UsageAnswers::default()),
             format_answers: Mutex::new(HashMap::new()),
             #[cfg(unix)]

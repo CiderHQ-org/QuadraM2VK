@@ -1,6 +1,6 @@
 use crate::gpu::DeviceType;
 use crate::observation::Backend;
-use metal2vulkan::device::{DevicePolicy, FramebufferFetchPolicy};
+use metal2vulkan::device::DevicePolicy;
 use std::sync::OnceLock;
 
 /// The exit statuses of the candidate executors' processes (`corpus-vulkan`, `corpus-moltenvk`):
@@ -92,42 +92,6 @@ pub fn requested_leg() -> crate::coverage::Leg {
     platform::requested_leg()
 }
 
-/// The framebuffer-fetch policy every engine `Device` this process compiles for is created
-/// under: decided once, by [`accept_unordered_fetch`] (or a device worker's
-/// [`decide_framebuffer_fetch`]) or by the first read without it.
-static FRAMEBUFFER_FETCH: OnceLock<FramebufferFetchPolicy> = OnceLock::new();
-
-/// Create every engine `Device` this process compiles for under the recorded unordered-fetch
-/// opt-in, `FramebufferFetchPolicy::AcceptUnordered` (a command's `--accept-unordered-fetch`): on a
-/// device without rasterization-order attachment access the product compiles a framebuffer fetch as
-/// an unordered input-attachment read, with `PrecisionNote::UnorderedFramebufferFetch`, where the
-/// default policy refuses it. A run under it is evidence for the near-equivalent, never for the
-/// default policy: the engine executor compares and returns its observation but does not store
-/// it. Call it once, before any device opens.
-pub fn accept_unordered_fetch() -> Result<(), String> {
-    decide_framebuffer_fetch(FramebufferFetchPolicy::AcceptUnordered)
-}
-
-/// Decide this process's framebuffer-fetch policy ([`accept_unordered_fetch`]); a device worker
-/// takes its parent's. Refused once it is decided otherwise.
-pub(crate) fn decide_framebuffer_fetch(policy: FramebufferFetchPolicy) -> Result<(), String> {
-    if *FRAMEBUFFER_FETCH.get_or_init(|| policy) == policy {
-        Ok(())
-    } else {
-        Err(
-            "the framebuffer-fetch policy is already decided: pass --accept-unordered-fetch \
-             once, before any device opens"
-                .into(),
-        )
-    }
-}
-
-/// The framebuffer-fetch policy of this process ([`accept_unordered_fetch`]); reading it decides
-/// that it is the default policy's if none was set.
-pub fn requested_framebuffer_fetch() -> FramebufferFetchPolicy {
-    *FRAMEBUFFER_FETCH.get_or_init(|| DevicePolicy::default().framebuffer_fetch)
-}
-
 /// Whether every engine context this process opens enables `VK_EXT_device_generated_commands`
 /// where its device supports it, so the device replay takes the generated-commands path: decided
 /// once, by [`run_without_generated_commands`] (or a device worker's
@@ -163,14 +127,12 @@ pub fn requested_generated_commands() -> bool {
 }
 
 /// The policy an engine `Device` of this process is created under: the default policy with
-/// this process's framebuffer-fetch policy ([`requested_framebuffer_fetch`]), Metal's sampler
-/// emulated exactly (`SamplingPolicy::Exact`), and Metal's answer wherever the policy offers the
+/// Metal's sampler emulated exactly (`SamplingPolicy::Exact`), and Metal's answer wherever the policy offers the
 /// device's instead (`DevicePolicy::exact_answers`, Metal's texel conversions; its maths; its
 /// `half` rounding; its NaN and minimum and maximum and its rounding order), as Metal's answers are
 /// what the candidate is compared with.
 pub fn requested_policy() -> DevicePolicy {
     let mut policy = DevicePolicy::default().exact_answers();
-    policy.framebuffer_fetch = requested_framebuffer_fetch();
     policy.sampling = metal2vulkan::device::SamplingPolicy::Exact;
     policy
 }

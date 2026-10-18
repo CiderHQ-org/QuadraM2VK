@@ -25,7 +25,6 @@ use std::path::Path;
 use crate::bind::{BindState, FragmentTests};
 use crate::budget::Budget;
 use crate::cache::VariantKey;
-use crate::device::profile::FramebufferFetchPolicy;
 use crate::device::{Device, DeviceDescription, DevicePolicy};
 use crate::error::BindError;
 use crate::library::Library;
@@ -97,16 +96,12 @@ fn stage(library: &Library, name: &str) -> StageSource {
     ))
 }
 
-/// The committed profiles that order fetch through the pixel interlock and require it ordered,
-/// each with its device.
+/// The committed profiles that order fetch through the pixel interlock, each with its device.
 fn ordering_devices() -> Vec<(String, Device)> {
     let profiles = committed_profiles().expect("profiles");
     profiles
         .iter()
-        .filter(|(_, profile)| {
-            interlock_orders(profile)
-                && profile.fields().framebuffer_fetch == FramebufferFetchPolicy::RequireOrdered
-        })
+        .filter(|(_, profile)| interlock_orders(profile))
         .map(|(stem, _)| (stem.clone(), device(stem)))
         .collect()
 }

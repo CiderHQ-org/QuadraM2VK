@@ -1,90 +1,19 @@
-//! Which framebuffer-fetch pipelines the runtime makes: the compile layer's ordered forms, never
-//! the unordered one `AcceptUnordered` admits; and which color render targets may take `STORAGE`
-//! usage for the interlock form, or the sample planes' copies' usage, and the answers remembered
-//! for them (`framebuffer_fetch.rs`).
-//!
-//! The graphics states are the compile layer's three fetch outputs as
-//! `pipeline::compile::tests::a_framebuffer_fetch_pipeline_is_ordered_exactly_where_the_device_orders_it`
-//! compiles them from `fragment_fetch.ll`'s `fetch_scalar` into an `R32Float` attachment:
-//! ordered input attachments on a device with rasterization-order access, the interlocked
-//! storage attachment on one with the pixel interlock alone, and, under `AcceptUnordered`,
-//! unordered input attachments on a synthetic profile with neither feature (or a blending
-//! attachment on the interlock alone). Compiling them here would assemble the fixture through
-//! test infrastructure the runtime may not reach (`api_surface`'s public-layer check).
+//! Which color render targets may take `STORAGE` usage for framebuffer fetch's interlock form, or
+//! the sample planes' copies' usage, and the answers remembered for them (`framebuffer_fetch.rs`).
 
 use super::image_plan::{committed, facts};
 use super::texture_descriptor::APPLE;
-use crate::error::Error;
 use crate::framebuffer_fetch::{
-    fetch_candidate, ordered, planes_candidate, planes_copies, planes_copies_gap,
-    storage_candidate, stores_samples, through_inputs, through_multisampled_storage,
-    through_planes, through_storage, UsageAnswers,
+    fetch_candidate, planes_candidate, planes_copies, planes_copies_gap, storage_candidate,
+    stores_samples, through_inputs, through_multisampled_storage, through_planes, through_storage,
+    UsageAnswers,
 };
 use crate::image_plan::{plan_image, ImagePlan};
 use crate::texture_descriptor::{TextureDescriptor, TextureLayout};
 use metal2vulkan::bind::PlanesCopy;
-use metal2vulkan::device::{FormatUsage, VkFeature};
-use metal2vulkan::error::{Capability, Feature, Needs};
+use metal2vulkan::device::FormatUsage;
 use metal2vulkan::metal::{PixelFormat, TextureType, TextureUsage};
-use metal2vulkan::pipeline::{
-    ColorAttachmentState, GraphicsState, InputAttachmentUse, SampledType, StorageAttachmentUse,
-    StorageAttachmentView,
-};
-use metal2vulkan::vk::ImageCreateFlags;
-use metal2vulkan::vk::{
-    ColorComponentFlags, Format, ImageUsageFlags, PrimitiveTopology, SampleCountFlags,
-};
-
-/// The graphics state of a fetching pipeline: `input` for an input attachment, ordered by
-/// rasterization-order access where `access`; otherwise the storage attachment.
-fn fetching(input: bool, access: bool) -> GraphicsState {
-    let write_mask = ColorComponentFlags::R
-        | ColorComponentFlags::G
-        | ColorComponentFlags::B
-        | ColorComponentFlags::A;
-    let color = ColorAttachmentState::new(Format::R32_SFLOAT, write_mask, None);
-    let mut state = GraphicsState::new(PrimitiveTopology::TRIANGLE_LIST, SampleCountFlags::COUNT_1);
-    state.color_attachments = vec![input.then_some(color)];
-    state.input_attachments = input
-        .then_some(InputAttachmentUse::new(0, 0, SampledType::Float))
-        .into_iter()
-        .collect();
-    state.rasterization_order_attachment_access = input && access;
-    state.storage_attachments = (!input)
-        .then_some(StorageAttachmentUse::new(
-            0,
-            Format::R32_SFLOAT,
-            true,
-            false,
-            StorageAttachmentView::Attachment,
-        ))
-        .into_iter()
-        .collect();
-    state
-}
-
-/// The ordered forms are made, as is a pipeline that fetches nothing; the unordered input
-/// attachment is refused, naming the access that orders it.
-#[test]
-fn only_ordered_framebuffer_fetch_is_made() {
-    let mut plain = fetching(true, false);
-    plain.input_attachments.clear();
-    assert_eq!(ordered(&plain), Ok(()));
-    assert_eq!(ordered(&fetching(true, true)), Ok(()));
-    assert_eq!(ordered(&fetching(false, false)), Ok(()));
-    match ordered(&fetching(true, false)) {
-        Err(Error::Unsupported(u)) => assert_eq!(
-            (u.feature, u.needs),
-            (
-                Feature::FramebufferFetch,
-                Needs::AnyOf(vec![vec![Capability::Feature(
-                    VkFeature::RasterizationOrderColorAttachmentAccess
-                )]])
-            )
-        ),
-        other => panic!("the unordered fetch is made: {other:?}"),
-    }
-}
+use metal2vulkan::vk::{Format, ImageCreateFlags, ImageUsageFlags};
 
 /// A checked layout of a 2D texture of `pf`, `width` by 8, with `samples` (a multisample type
 /// above 1).

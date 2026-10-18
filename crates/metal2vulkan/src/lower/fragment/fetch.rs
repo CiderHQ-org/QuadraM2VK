@@ -44,7 +44,7 @@
 //!   no discard, exports no depth, stencil, or coverage, and writes no other memory), so a fragment
 //!   the tests fail never runs. Without a depth or stencil attachment no test can fail, and the
 //!   module declares none (unless Metal's function does). A function that only its discard keeps
-//!   from them, under `RequireOrdered`, stores before the tests, which each draw's plan checks
+//!   from them stores before the tests, which each draw's plan checks
 //!   (`RuntimeFact::TestedStorageWrites`): a draw whose tests drop no fragment runs it, one whose
 //!   tests write neither attachment and count nothing runs the variant that declares them
 //!   (`LoweringInputs::read_only_tests`), and any other is refused. A function that writes other
@@ -241,9 +241,8 @@
 //! (EV FB8-r8-m3: Metal sums those in forms of their own), an output of fewer lanes, and a second
 //! (index 1) output are not built.
 //!
-//! A blocked attachment is refused under `RequireOrdered` with the blocker's reason (what the
-//! device lacks, or `NotImplemented`), and read unordered as before under `AcceptUnordered`
-//! (`PrecisionNote::UnorderedFramebufferFetch`): no exact path exists there. The storage form
+//! A blocked attachment is refused with the blocker's reason (what the device lacks, or
+//! `NotImplemented`): no ordered path exists there. The storage form
 //! stores Vulkan's texel output conversion of the output, the rule a color attachment write
 //! states for the same formats.
 
@@ -252,7 +251,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::air::abi::{AbiInt, OutputRole, ParamRole};
 use crate::air::intrinsics::{AirIntrinsic, Fragment, PackDir, PackFormat};
 use crate::air::ir::{Callee, InstKind, Type as AirType, TypeId as AirTypeId, Value};
-use crate::device::profile::{DriverWorkaround, FramebufferFetchPolicy};
+use crate::device::profile::DriverWorkaround;
 use crate::device::requirements::{FormatUsage, VkFeature};
 use crate::device::DeviceProfile;
 use crate::device::HalfBlendPolicy;
@@ -1216,24 +1215,18 @@ struct StoredBeforeTests {
 }
 
 /// [`StoredBeforeTests`] of a function whose body holds `body`, that Metal runs under early tests
-/// where `declared_early` and returns depth, stencil, or a sample mask where `exports`, on `p`,
-/// in a pipeline with a depth or stencil attachment where `depth_or_stencil`, where early tests
-/// would drop its storage writes where `dropped`. Under `AcceptUnordered` neither: the function
-/// reads unordered, which no draw's tests refuse.
+/// where `declared_early` and returns depth, stencil, or a sample mask where `exports`, in a
+/// pipeline with a depth or stencil attachment where `depth_or_stencil`, where early tests would
+/// drop its storage writes where `dropped`.
 fn stored_before_tests(
-    p: &DeviceProfile,
     body: &BodyFacts,
     (declared_early, exports): (bool, bool),
     (depth_or_stencil, dropped): (bool, bool),
 ) -> StoredBeforeTests {
-    let ordered = p.fields().framebuffer_fetch == FramebufferFetchPolicy::RequireOrdered;
     let testable = depth_or_stencil && !(exports || body.side_effects);
     StoredBeforeTests {
-        tested: !declared_early && testable && body.discards && ordered,
-        untested: !declared_early
-            && depth_or_stencil
-            && (exports || body.side_effects || dropped)
-            && ordered,
+        tested: !declared_early && testable && body.discards,
+        untested: !declared_early && depth_or_stencil && (exports || body.side_effects || dropped),
     }
 }
 
@@ -1325,9 +1318,8 @@ pub(super) fn blended_extended_range(cx: &SelectCx<'_>) -> Result<Vec<(u32, AirT
 /// names that it writes (a color its draw's instance keeps out of its subpass), before the stage
 /// interface is planned (its outputs to a storage-form attachment are not interface variables): on
 /// a device that orders fetch only through the interlock ([`interlock_orders`]), the storage form
-/// where it is exact; elsewhere, and where it is blocked under `AcceptUnordered`, the input
-/// attachment (`color`), or the output an extended-range attachment's blend refuses. A blocked
-/// attachment under `RequireOrdered` refuses the function.
+/// where it is exact; elsewhere the input attachment (`color`), or the output an extended-range
+/// attachment's blend refuses. A blocked attachment refuses the function.
 pub(super) fn plan(cx: &mut SelectCx<'_>) -> Result<(), Error> {
     if cx.stage != Stage::Fragment || !interlock_orders(cx.profile) {
         return Ok(());
@@ -1353,7 +1345,7 @@ pub(super) fn plan(cx: &mut SelectCx<'_>) -> Result<(), Error> {
     // shadow the instance holds (`VariantKey::extended_shadows`), both single-sampled, so no
     // driver drops their writes under early tests. The plan of the pipeline as compiled, which
     // stores no color so, selects the tests such a draw's variant needs from this.
-    let movable = stored_before_tests(cx.profile, &body, (declared_early, exports), (true, false));
+    let movable = stored_before_tests(&body, (declared_early, exports), (true, false));
     if (movable.tested || movable.untested)
         && returns(|r| matches!(r, OutputRole::RenderTarget { index: 0, .. }))
     {
@@ -1456,9 +1448,7 @@ pub(super) fn plan(cx: &mut SelectCx<'_>) -> Result<(), Error> {
     // those its tests then drop included, and tests what it returns (measured on Apple's M4), which
     // early tests would not, so its storage writes before the tests are Metal's where its draws'
     // tests drop no fragment, which the plan of each draw checks; it has no early-tests variant.
-    // Under `AcceptUnordered` it reads unordered, as before, which no draw's tests refuse.
     let StoredBeforeTests { tested, untested } = stored_before_tests(
-        cx.profile,
         &body,
         (declared_early, exports),
         (inputs.depth_or_stencil, dropped),
@@ -1659,11 +1649,7 @@ pub(super) fn plan(cx: &mut SelectCx<'_>) -> Result<(), Error> {
                     cx.precision.insert(PrecisionNote::DeviceNanEncoding);
                 }
             }
-            Err(blocked) => match cx.profile.fields().framebuffer_fetch {
-                FramebufferFetchPolicy::RequireOrdered => return Err(tied(blocked.into())),
-                // No exact path: the input attachment reads unordered (`color`).
-                FramebufferFetchPolicy::AcceptUnordered => {}
-            },
+            Err(blocked) => return Err(tied(blocked.into())),
         }
     }
     if !cx.families.fragment.fetch.is_empty() {

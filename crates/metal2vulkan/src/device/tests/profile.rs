@@ -1,9 +1,7 @@
 //! `Device::new`, profile derivation, the fingerprint, and `requirements ⊆ profile`.
 
 use super::*;
-use crate::device::profile::{
-    BufferAccess, Containment, FramebufferFetchPolicy, GuestIsolation, Independence, Robustness,
-};
+use crate::device::profile::{BufferAccess, Containment, GuestIsolation, Independence, Robustness};
 use crate::device::requirements::{Requirements, StageCreateFlag, VkLimit, VkProperty};
 use crate::error::{Capability, Feature, Needs};
 
@@ -418,9 +416,6 @@ fn fingerprint_covers_every_policy_field() {
     variants.push(("isolation", p));
     p.containment = ContainmentPolicy::UnsafeOff;
     variants.push(("containment", p));
-    let mut p = base;
-    p.framebuffer_fetch = FramebufferFetchPolicy::AcceptUnordered;
-    variants.push(("framebuffer_fetch", p));
     // Metal's sampler emulated exactly in place of native device sampling.
     let mut p = base;
     p.sampling = crate::device::SamplingPolicy::Exact;

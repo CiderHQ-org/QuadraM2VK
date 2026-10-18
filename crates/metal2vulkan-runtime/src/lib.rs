@@ -190,6 +190,7 @@ mod sorted_chunks;
 mod spares;
 mod sparse;
 mod stencil_copy;
+mod storage_placeholder;
 mod tessellation;
 mod texture;
 mod texture_descriptor;

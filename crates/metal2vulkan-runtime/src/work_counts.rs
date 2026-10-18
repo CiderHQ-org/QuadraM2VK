@@ -62,6 +62,8 @@ pub(crate) struct Counters {
     ahead_framebuffers_made: AtomicU64,
     kept_backings_made: AtomicU64,
     pooled_backings_made: AtomicU64,
+    storage_placeholders_made: AtomicU64,
+    storage_placeholder_attachments: AtomicU64,
     color_resolve_passes_made: AtomicU64,
     color_resolve_passes_kept: AtomicU64,
     ahead_nanos: AtomicU64,
@@ -624,6 +626,20 @@ impl Counters {
     /// (`attachment_stand_in::pooled_backing`).
     pub(crate) fn pooled_backing_made(&self) {
         self.pooled_backings_made.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// The device made a placeholder image for the colors render pass instances leave out of
+    /// their subpass for the pixel interlock (`storage_placeholder.rs`).
+    pub(crate) fn storage_placeholder_made(&self) {
+        self.storage_placeholders_made
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A framebuffer took a placeholder's view for a color its render pass instance leaves out
+    /// of its subpass for the pixel interlock (`storage_placeholder.rs`).
+    pub(crate) fn storage_placeholder_attachment(&self) {
+        self.storage_placeholder_attachments
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     /// A pass made the objects of its exact color resolves (`color_resolve.rs`).
@@ -1869,6 +1885,16 @@ pub struct WorkCounts {
     /// texture (`attachment_stand_in::pooled_backing`): one per shape a queue renders so (and per
     /// attachment of a pass that renders several of one shape so), not one per pass.
     pub pooled_backings_made: u64,
+    /// Placeholder images the device made for the color attachments render pass instances leave
+    /// out of their subpass for the pixel interlock, which their framebuffers hold in place of
+    /// the images the draws read and write as storage images (`storage_placeholder.rs`): one per
+    /// format and sample count, and another only where a larger framebuffer, or one of more
+    /// layers, needs it, not one per pass.
+    pub storage_placeholders_made: u64,
+    /// Framebuffer attachments that took a placeholder's view (`storage_placeholder.rs`): one per
+    /// left-out color of each framebuffer of a render pass instance whose draws read and write
+    /// colors in the pixel interlock.
+    pub storage_placeholder_attachments: u64,
     /// Passes that made the descriptor sets and framebuffers of their exact color resolves
     /// (`color_resolve.rs`).
     pub color_resolve_passes_made: u64,
@@ -2919,6 +2945,10 @@ impl Device {
             ahead_framebuffers_made: counters.ahead_framebuffers_made.load(Ordering::Relaxed),
             kept_backings_made: counters.kept_backings_made.load(Ordering::Relaxed),
             pooled_backings_made: counters.pooled_backings_made.load(Ordering::Relaxed),
+            storage_placeholders_made: counters.storage_placeholders_made.load(Ordering::Relaxed),
+            storage_placeholder_attachments: counters
+                .storage_placeholder_attachments
+                .load(Ordering::Relaxed),
             color_resolve_passes_made: counters.color_resolve_passes_made.load(Ordering::Relaxed),
             color_resolve_passes_kept: counters.color_resolve_passes_kept.load(Ordering::Relaxed),
             ahead_nanos: counters.ahead_nanos.load(Ordering::Relaxed),

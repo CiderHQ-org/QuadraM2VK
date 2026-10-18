@@ -55,7 +55,6 @@ use crate::color_reformat::Routing;
 use crate::degradation::{BoundFormats, Degradation, Occurrence};
 use crate::device::{device_error, lock};
 use crate::error::{internal, invalid, ArchivedPipeline, Error, Problem, RuntimeGap};
-use crate::framebuffer_fetch;
 use crate::render_pass::MAX_COLOR_ATTACHMENTS;
 use crate::render_target::RenderPassObject;
 use crate::residency::{every_render_stage, handle_stages};
@@ -539,9 +538,8 @@ impl Device {
     /// `NotImplemented(Textures)`). A vertex
     /// function that writes `[[point_size]]` under the line or triangle input primitive topology
     /// class is `Invalid` (`PointSizeTopology`), as Metal's creation answers an error for it
-    /// (measured on an M3 Max and an M4). A framebuffer fetch the compile layer left unordered
-    /// (the device's policy is `AcceptUnordered`) is `Unsupported`, naming rasterization-order
-    /// attachment access: the runtime runs only Metal's ordered fetch. Each stage's imports come
+    /// (measured on an M3 Max and an M4). A framebuffer fetch no ordered form serves on the device
+    /// is `Unsupported{FramebufferFetch}`, naming what each form needs. Each stage's imports come
     /// from its own dynamic libraries (`vertexPreloadedLibraries` in the vertex stage's
     /// function descriptor, `fragmentPreloadedLibraries` in the fragment's, then those its
     /// libraries' install names name), as a compute state's do
@@ -2288,8 +2286,7 @@ impl RenderVariant {
     }
 
     /// The variant of `key` of what the memo or a compile `found`: the live variant, or one made
-    /// of the pipeline, its objects made, which the memo then knows live. A pipeline whose
-    /// framebuffer fetch is unordered is refused first (`framebuffer_fetch::ordered`).
+    /// of the pipeline, its objects made, which the memo then knows live.
     fn of(
         device: &Device,
         key: VariantKey,
@@ -2306,7 +2303,6 @@ impl RenderVariant {
             }
             Remembered::Compiled(pipeline) => pipeline,
         };
-        framebuffer_fetch::ordered(&pipeline.graphics)?;
         // Before the variant's shader modules, whose creation the layer reports.
         device.degrade_render(&pipeline, Occurrence::Made);
         // Where the creation log is on, the stages' SPIR-V it names hashed on a thread of its

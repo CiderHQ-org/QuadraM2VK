@@ -340,8 +340,8 @@ fn a_multisampled_stencil_output_case_plans_a_shadow_of_its_samples() {
 /// attachment 0 through an input-attachment write, and the pipeline states rasterization-order
 /// access and requires the feature. On moltenvk-m3, which lacks the feature but has the pixel
 /// interlock, it plans the interlocked storage form: one storage write of the attachment, which is
-/// no color attachment of the subpass. Without the interlock too, the product refuses the fetch
-/// under the default `RequireOrdered`, naming both forms.
+/// no color attachment of the subpass. Without the interlock too, the product refuses the fetch,
+/// naming both forms.
 #[test]
 fn a_framebuffer_fetch_case_plans_its_ordered_input_attachment() {
     use metal2vulkan::bind::WriteSource;
@@ -416,8 +416,7 @@ fn a_framebuffer_fetch_case_plans_its_ordered_input_attachment() {
             .count(),
         1
     );
-    // Without the interlock either, the default `RequireOrdered` refuses the fetch, naming both
-    // ordered forms.
+    // Without the interlock either, the product refuses the fetch, naming both ordered forms.
     let path = crate::engine::profiles_dir().join("moltenvk-m3.json");
     let mut description =
         DeviceDescription::from_khronos_json(&std::fs::read_to_string(path).unwrap(), None)
@@ -2151,38 +2150,18 @@ fn public_framebuffer_fetch_cases_plan_their_ordered_input_attachments() {
     );
 }
 
-/// On `lunarg-desktop-baseline-2023` and `vk12-floor`, which have no rasterization-order attachment
-/// access, every installed public framebuffer-fetch case is refused `FramebufferFetch` under the
-/// default policy, and under `FramebufferFetchPolicy::AcceptUnordered` none is (but a multisampled
-/// one, which these profiles may refuse for what its per-sample form needs): each that plans reads
-/// its color inputs as
-/// unordered input attachments (no rasterization-order flag, no such feature required), records
-/// `PrecisionNote::UnorderedFramebufferFetch`, and is compared byte for byte
-/// (`ComparisonClass::Unbounded`), which is what `corpus-vulkan --accept-unordered-fetch` runs.
-/// Each profile plans at least one.
+/// On `lunarg-desktop-baseline-2023` and `vk12-floor`, which offer no ordered form of framebuffer
+/// fetch (no rasterization-order attachment access), every installed public framebuffer-fetch case
+/// is refused `FramebufferFetch`: an unordered read is never compiled.
 #[test]
-fn public_framebuffer_fetch_cases_plan_unordered_reads_under_the_opt_in() {
+fn public_framebuffer_fetch_cases_are_refused_without_an_ordered_form() {
     use crate::air::reflect::ResourceKind;
-    use crate::observation_contract::ComparisonClass;
-    use metal2vulkan::bind::WriteSource;
-    use metal2vulkan::device::FramebufferFetchPolicy;
-    use metal2vulkan::device::VkFeature;
-    use metal2vulkan::pipeline::PrecisionNote;
-    let opted = |stem: &str| {
-        let path = crate::engine::profiles_dir().join(format!("{stem}.json"));
-        let text = std::fs::read_to_string(path).unwrap();
-        let description = DeviceDescription::from_khronos_json(&text, None).unwrap();
-        let mut policy = DevicePolicy::default();
-        policy.framebuffer_fetch = FramebufferFetchPolicy::AcceptUnordered;
-        Device::new(description, policy).unwrap()
-    };
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("corpus");
     let store = CorpusStore::new(&root);
     let sources = public_sources().unwrap();
     for stem in ["lunarg-desktop-baseline-2023", "vk12-floor"] {
-        let (ordered, unordered) = (device(stem), opted(stem));
+        let ordered = device(stem);
         let mut fetches = 0;
-        let mut planned = 0;
         for shard in 0..64 {
             for case in store.read_case_shard(shard).unwrap() {
                 let Some(row) = sources
@@ -2208,7 +2187,7 @@ fn public_framebuffer_fetch_cases_plan_unordered_reads_under_the_opt_in() {
                     continue;
                 }
                 fetches += 1;
-                let scratch = crate::ScratchDir::new("public-fetch-opt-in").unwrap();
+                let scratch = crate::ScratchDir::new("public-fetch-refused").unwrap();
                 let ll = scratch.path().join("case.ll");
                 std::fs::write(&ll, &row.air_ll).unwrap();
                 let Some(bitcode) = assembled(&ll) else {
@@ -2240,100 +2219,9 @@ fn public_framebuffer_fetch_cases_plan_unordered_reads_under_the_opt_in() {
                     ),
                     other => panic!("{stem} {}: {other:?}", case.name),
                 }
-                let (pipeline, plan, _) = match planned_draw(&unordered, &render, libraries) {
-                    Ok(planned) => planned,
-                    // The per-sample form reads at `SampleId`, which needs `sampleRateShading`
-                    // (`vk12-floor` lacks it), and a case may read the pixel's coverage beside it
-                    // or draw at a count the device lacks.
-                    Err(Error::Unsupported(_)) if case.raster_sample_count.is_some() => continue,
-                    Err(Error::Unsupported(refusal)) => {
-                        assert_ne!(
-                            refusal.feature,
-                            metal2vulkan::error::Feature::FramebufferFetch,
-                            "{stem} {}",
-                            case.name
-                        );
-                        eprintln!(
-                            "{stem} {}: refused under the opt-in: {refusal:?}",
-                            case.name
-                        );
-                        continue;
-                    }
-                    Err(error) => panic!("{stem} {}: {error:?}", case.name),
-                };
-                assert!(
-                    !pipeline.graphics.rasterization_order_attachment_access,
-                    "{stem} {}",
-                    case.name
-                );
-                assert!(!pipeline
-                    .requirements
-                    .features
-                    .contains(&VkFeature::RasterizationOrderColorAttachmentAccess));
-                let notes: Vec<PrecisionNote> = pipeline
-                    .stages
-                    .iter()
-                    .flat_map(|stage| stage.precision_notes.iter().copied())
-                    .collect();
-                assert!(
-                    notes.contains(&PrecisionNote::UnorderedFramebufferFetch),
-                    "{stem} {}: {notes:?}",
-                    case.name
-                );
-                assert!(
-                    matches!(
-                        ComparisonClass::derive(notes, std::iter::empty()),
-                        ComparisonClass::Unbounded(unbounded)
-                            if unbounded.contains(&PrecisionNote::UnorderedFramebufferFetch)
-                    ),
-                    "{stem} {}",
-                    case.name
-                );
-                let mut read: Vec<u32> = plan
-                    .descriptors
-                    .iter()
-                    .filter_map(|write| match write.source {
-                        WriteSource::Attachment { color_index } => Some(color_index),
-                        _ => None,
-                    })
-                    .collect();
-                read.sort_unstable();
-                let mut expected = colors.clone();
-                expected.sort_unstable();
-                assert_eq!(read, expected, "{stem} {}", case.name);
-                // The reads are input attachments in ordinary sets (no heap, so no
-                // `UPDATE_AFTER_BIND_POOL` set), within the profile's ordinary input-attachment
-                // limits. The layout VUIDs 03027 and 03043 bound them by the larger of the
-                // ordinary and update-after-bind limits; a validation layer that compares with
-                // the update-after-bind limit alone (vk12-floor's is 0) is wrong.
-                let sets = &pipeline.layout.sets;
-                assert!(
-                    sets.iter().all(|set| set.flags.is_empty()),
-                    "{stem} {}: {sets:?}",
-                    case.name
-                );
-                let inputs: u32 = sets
-                    .iter()
-                    .flat_map(|set| &set.bindings)
-                    .filter(|binding| binding.ty == vk::DescriptorType::INPUT_ATTACHMENT)
-                    .map(|binding| binding.count)
-                    .sum();
-                assert_eq!(inputs as usize, colors.len(), "{stem} {}", case.name);
-                let limits = unordered.profile().limits();
-                assert!(
-                    inputs <= limits.max_per_stage_descriptor_input_attachments
-                        && inputs <= limits.max_descriptor_set_input_attachments,
-                    "{stem} {}: {inputs} input attachments",
-                    case.name
-                );
-                planned += 1;
             }
         }
-        assert!(fetches > 0, "no public framebuffer-fetch case");
-        assert!(
-            planned > 0,
-            "{stem}: no public framebuffer-fetch case planned"
-        );
+        assert!(fetches > 0, "{stem}: no public framebuffer-fetch case");
     }
 }
 

@@ -115,8 +115,8 @@ pub struct LoweringInputs {
     /// a device that orders a fetch only through the ordered pixel interlock (no
     /// `rasterizationOrderColorAttachmentAccess`, with `fragmentShaderPixelInterlock`): there each
     /// color attachment the function reads is read, and written, as a storage image inside the
-    /// interlock where the pipeline's state lets that form be exact, and otherwise is refused
-    /// (`RequireOrdered`) or read unordered (`AcceptUnordered`). `Device::compile_render_pipeline`
+    /// interlock where the pipeline's state lets that form be exact, and otherwise is refused.
+    /// `Device::compile_render_pipeline`
     /// sets it for a `Function` fragment stage that declares a `[[color(n)]]` input on such a
     /// device, and a fragment compiled on its own for such a pipeline compiles under the same
     /// state; without it such a function is `NeedsInput(FramebufferFetch)`. On a device that orders

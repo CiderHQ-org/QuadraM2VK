@@ -26,7 +26,7 @@
 //!   prints its own stage's module words, which are what the translation sweep (`corpus-triage
 //!   --audit translation`) counts for it, a render row's other stages' apart as `companion_words`,
 //!   and a kernel's representative imageblock extent as `imageblock=WxH`, then the pipeline's
-//!   precision notes as `precision=[...]` (the `--accept-unordered-fetch`). `--robustness-off`
+//!   precision notes as `precision=[...]`. `--robustness-off`
 //!   compiles and creates every row in profile P's robustness-off leg, which the summary's `leg`
 //!   names. `--driver-caches-on` leaves the drivers' shader disk caches as the environment sets
 //!   them, so a creation may hit what an earlier process compiled: run twice, the second run times
@@ -132,17 +132,13 @@ fn main() {
 fn usage() -> String {
     "usage: corpus-pipeline --profile P [--corpus DIR] [--private-corpus DIR] [--limit N]\n\
      \x20      [--after HASH | --hash HASH | --fixtures] [--partition K/N] [--attempting PATH]\n\
-     \x20      [--pulled] [--robustness-off] [--accept-unordered-fetch] [--driver-caches-on]\n\
+     \x20      [--pulled] [--robustness-off] [--driver-caches-on]\n\
      \x20      [--keep-modules DIR] [--specializations FILE | --draws FILE]\n\
      \x20      (--device-type cpu|gpu [--gpu-wait-timeout SECONDS] [--profiles-layer P]\n\
      \x20       | --compile-only)\n\
      It runs the engine. --profile P names a committed profile describing the device; it may take\n\
      --fixtures, --pulled (every vertex attribute pulled in the shader), or --compile-only\n\
      (compile every row, open no device).\n\
-     --accept-unordered-fetch compiles under the recorded opt-in\n\
-     (FramebufferFetchPolicy::AcceptUnordered): on a profile without rasterization-order\n\
-     attachment access a framebuffer fetch is an unordered input-attachment read\n\
-     (PrecisionNote::UnorderedFramebufferFetch) instead of the default policy's refusal.\n\
      --driver-caches-on leaves the drivers' shader disk caches as the environment sets them (warm\n\
      creations, when an earlier run compiled the same pipelines); every other run compiles cold.\n\
      --keep-modules DIR writes each compiled row's stage modules into DIR (a diagnostic): per stage\n\
@@ -209,7 +205,6 @@ fn run() -> Result<(), String> {
     let mut compile_only = false;
     let mut leg = Leg::Stated;
     let mut projection = Projection::Derived;
-    let mut accept_unordered_fetch = false;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         let mut value = || args.next().ok_or_else(|| format!("{arg} needs a value"));
@@ -235,7 +230,6 @@ fn run() -> Result<(), String> {
             "--profiles-layer" => options.profiles_layer = Some(value()?),
             "--pulled" => projection = Projection::Pulled,
             "--robustness-off" => leg = Leg::RobustnessOff,
-            "--accept-unordered-fetch" => accept_unordered_fetch = true,
             DRIVER_CACHES_ON => options.driver_caches = true,
             "--keep-modules" => options.keep_modules = Some(PathBuf::from(value()?)),
             "--draws" => {
@@ -309,10 +303,7 @@ fn run() -> Result<(), String> {
                 .into(),
         );
     }
-    // Both process-wide settings are decided before any device opens.
-    if accept_unordered_fetch {
-        metal2vulkan_validation::candidate::accept_unordered_fetch()?;
-    }
+    // The process-wide leg is decided before any device opens.
     let compiler = enter_leg(&profile, leg)?;
     let worker = CompileWorker::current()?;
     sweep_new(
@@ -333,8 +324,7 @@ fn run() -> Result<(), String> {
 /// decided here, before the sweep opens any device: in the robustness-off leg every Vulkan context
 /// of the process enables no robustness feature, and the rows compile for the profile without its
 /// robustness features ([`leg_description`]). The device is created under the process's policy
-/// (`candidate::requested_policy`), so a framebuffer-fetch opt-in decided before it
-/// (`--accept-unordered-fetch`) reaches every row's compile.
+/// (`candidate::requested_policy`).
 fn enter_leg(stem: &str, leg: Leg) -> Result<WorkerDevice, String> {
     let description = leg_description(stem, leg)?;
     if leg == Leg::RobustnessOff {
@@ -608,8 +598,7 @@ fn set_label(set: &Specialization) -> String {
 /// sweep does not compile; then `imageblock=WxH` for a kernel with an explicit imageblock, the
 /// representative extent its pipeline was created with (`acceptance::dispatch`): another extent is
 /// another specialization, which can be refused where this one is created; then `precision=[...]`
-/// when any stage of the pipeline carries a precision note, such as `UnorderedFramebufferFetch`
-/// under `--accept-unordered-fetch`.
+/// when any stage of the pipeline carries a precision note.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct RowDetail {
     own: u64,
@@ -1285,12 +1274,12 @@ mod tests {
         );
         // A pipeline whose stages carry precision notes names them.
         let noted = RowDetail {
-            precision: vec![PrecisionNote::UnorderedFramebufferFetch],
+            precision: vec![PrecisionNote::DeviceArithmetic],
             ..fragment
         };
         assert_eq!(
             noted.to_string(),
-            "words=1148 companion_words=276 precision=[UnorderedFramebufferFetch]"
+            "words=1148 companion_words=276 precision=[DeviceArithmetic]"
         );
     }
 
@@ -1421,20 +1410,6 @@ mod tests {
         enter_leg("moltenvk-m3", Leg::RobustnessOff).unwrap();
         assert_eq!(requested_leg(), Leg::RobustnessOff);
         assert!(run_robustness_off().is_err());
-    }
-
-    /// `--accept-unordered-fetch`, decided before the compile device is built, reaches the policy
-    /// every row compiles under.
-    #[test]
-    fn the_unordered_fetch_opt_in_reaches_the_compile_devices_policy() {
-        use metal2vulkan::device::FramebufferFetchPolicy;
-        use metal2vulkan_validation::candidate::accept_unordered_fetch;
-        accept_unordered_fetch().unwrap();
-        let compiler = enter_leg("moltenvk-m3", Leg::Stated).unwrap();
-        assert_eq!(
-            compiler.device().policy().framebuffer_fetch,
-            FramebufferFetchPolicy::AcceptUnordered
-        );
     }
 
     #[test]

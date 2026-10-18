@@ -2750,7 +2750,7 @@ impl DeferredPass {
                         let pass =
                             render_target::final_pass(device, own, shape, position, none, general)?;
                         let framebuffer =
-                            render_target::framebuffer(device, &pass, own, views, none)?;
+                            render_target::framebuffer(device, &pass, own, shape, views, none)?;
                         let raw = (pass.raw, framebuffer.raw);
                         made.0.push(pass);
                         made.1.push(framebuffer);

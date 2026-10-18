@@ -16,22 +16,21 @@
 //!    the corpus root, the device type and backend, the bound of every device wait
 //!    ([`wait_timeout()`]), the committed profile its contexts are restricted to
 //!    (`--profiles-layer P`), the robustness leg they run under (`--robustness-off`), the
-//!    framebuffer-fetch policy its devices are created under (`--accept-unordered-fetch`), the
 //!    read-only source index its private sources are read through (`--source-index`), and the
 //!    digest of the input its own check produced. That is every process-wide setting the device
 //!    half reads; the environment (the loader's and the layers' variables, `METAL2VULKAN_*`,
 //!    `HOME`) is inherited.
 //! 2. The child ([`serve_if_requested`]) sets the wait bound, reads private sources through the
 //!    parent's source index if it was handed one, restricts its contexts to P and
-//!    sets their leg and its framebuffer-fetch policy before it opens any device, turns on the
+//!    sets their leg and its generated-commands setting before it opens any device, turns on the
 //!    validation layer's echo (`candidate::echo_validation_messages`: each failing message goes
 //!    to stderr as the layer reports it, at most as many as a row keeps, so a crash still shows
 //!    them), admits and prepares the case again, requires the parent's input digest, runs it,
 //!    and reports `Result<DeviceRun, ExecutorError>` with its build identity: its product
 //!    fingerprint ([`TRANSLATOR_FINGERPRINT`]) and its validation-crate fingerprint
 //!    ([`VALIDATION_FINGERPRINT`]), since it runs this crate's executor (binding, readback, the
-//!    comparison class, the census, the environment) as well as the product; and with the
-//!    framebuffer-fetch policy its devices were created under.
+//!    comparison class, the census, the environment) as well as the product; and with whether its
+//!    contexts enabled `VK_EXT_device_generated_commands`.
 //! 3. The parent waits without a deadline or a memory ceiling: a GPU child is never killed while
 //!    it may have work in flight. The run is therefore bounded only as far as the child bounds
 //!    itself: every device wait (`gpu::wait`) and its compile (its compile worker) are; a driver
@@ -39,7 +38,7 @@
 //!    held the tool before the device moved out. The parent then classifies the exit (`Ended`)
 //!    before it writes anything, so a GPU child's crash writes the tripwire first; only then does
 //!    it relay the child's stderr, ignoring a closed stream. A report is decoded and refused
-//!    unless the child's build identity and framebuffer-fetch policy are the parent's and its
+//!    unless the child's build identity and generated-commands setting are the parent's and its
 //!    census names the parent's restriction and leg; the hang protocol's exit comes back to
 //!    `execute`, which leaves with the same status once the scratch files are gone, as the
 //!    in-process wait did; a signal is a [`DeviceCrash`]; any other exit is `Failed`, with the
@@ -59,7 +58,6 @@ use crate::gpu::DeviceType;
 use crate::observation::{Backend, TRANSLATOR_FINGERPRINT};
 use crate::observation_contract::ComparisonClass;
 use crate::ScratchDir;
-use metal2vulkan::device::FramebufferFetchPolicy;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{Read as _, Write};
@@ -97,10 +95,6 @@ pub(crate) struct DeviceInput {
     /// The robustness leg the parent's contexts run under (`--robustness-off`): the worker runs its
     /// own under it, and the census of its run must name it.
     pub(crate) leg: Leg,
-    /// The framebuffer-fetch policy the parent's devices are created under
-    /// (`--accept-unordered-fetch`): the worker creates its own under it, and its
-    /// report must name it.
-    pub(crate) framebuffer_fetch: FramebufferFetchPolicy,
     /// Whether the parent's contexts enable `VK_EXT_device_generated_commands` where their device
     /// supports it (`--without-generated-commands` clears it): the worker opens its own the same
     /// way, and its report must name it.
@@ -179,9 +173,6 @@ struct DeviceOutput {
     product_fingerprint: String,
     /// The worker's [`VALIDATION_FINGERPRINT`]: it may run another executor.
     validation_fingerprint: String,
-    /// The framebuffer-fetch policy the worker's devices were created under: a run or refusal
-    /// under another policy than the parent's is not the parent's evidence.
-    framebuffer_fetch: FramebufferFetchPolicy,
     /// Whether the worker's contexts enable `VK_EXT_device_generated_commands` where their device
     /// supports it: a run on the other path than the parent's is not the parent's evidence.
     generated_commands: bool,
@@ -345,7 +336,7 @@ fn start(
 }
 
 /// The outcome a worker that exited 0 reported in `stdout_path`, refused unless the worker is this
-/// build and ran under `input`'s framebuffer-fetch policy, restriction, and leg. A device it names
+/// build and ran under `input`'s generated-commands setting, restriction, and leg. A device it names
 /// beside a refusal must have run under the same restriction and leg, and only a typed refusal
 /// names one.
 fn reported(stdout_path: &Path, input: &DeviceInput) -> DeviceOutcome {
@@ -374,14 +365,6 @@ fn reported_run(
              {TRANSLATOR_FINGERPRINT} {VALIDATION_FINGERPRINT}; its run is not this tool's \
              evidence (rebuild and rerun)",
             result.product_fingerprint, result.validation_fingerprint
-        )
-        .into());
-    }
-    if result.framebuffer_fetch != input.framebuffer_fetch {
-        return Err(format!(
-            "the device worker compiled under framebuffer-fetch policy {:?}, and this tool asked \
-             for {:?}; its run is not this tool's evidence",
-            result.framebuffer_fetch, input.framebuffer_fetch
         )
         .into());
     }
@@ -559,14 +542,12 @@ fn serve() -> Result<(), String> {
     if input.leg == Leg::RobustnessOff {
         crate::candidate::run_robustness_off()?;
     }
-    crate::candidate::decide_framebuffer_fetch(input.framebuffer_fetch)?;
     crate::candidate::decide_generated_commands(input.generated_commands)?;
     crate::candidate::echo_validation_messages();
     let DeviceOutcome { result, refused_on } = crate::candidate::engine::run_on_device(&input);
     report(&DeviceOutput {
         product_fingerprint: TRANSLATOR_FINGERPRINT.into(),
         validation_fingerprint: VALIDATION_FINGERPRINT.into(),
-        framebuffer_fetch: crate::candidate::requested_framebuffer_fetch(),
         generated_commands: crate::candidate::requested_generated_commands(),
         result,
         refused_on,

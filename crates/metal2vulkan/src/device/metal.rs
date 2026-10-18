@@ -2,7 +2,7 @@
 //! drives translation.
 
 use crate::device::description::AllocationLimits;
-use crate::device::profile::{BufferAccess, DeviceProfile, FramebufferFetchPolicy};
+use crate::device::profile::{BufferAccess, DeviceProfile};
 use crate::device::requirements::{FormatUsage, VkFeature};
 use crate::device::subgroup::{tier, OpBits, SimdClass};
 use crate::error::{Capability, Feature, Unsupported};
@@ -248,10 +248,7 @@ fn unsupported_features(profile: &DeviceProfile) -> Vec<Unsupported> {
         ));
     }
     // Ordered by rasterization-order access, or by the pixel interlock's storage form.
-    if f.framebuffer_fetch == FramebufferFetchPolicy::RequireOrdered
-        && !f.fragment.rasterization_order_color_access
-        && !f.fragment.pixel_interlock
-    {
+    if !f.fragment.rasterization_order_color_access && !f.fragment.pixel_interlock {
         out.push(Unsupported::needs_any_of(
             Feature::FramebufferFetch,
             vec![

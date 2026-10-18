@@ -1493,6 +1493,18 @@ pub enum DriverFact {
     /// 7.0.0, about a quarter of that a page on the Radeon 780M under Linux 7.2.9. Elsewhere such
     /// an import stays imported, as the driver may keep the pages it was made over.
     PointerImportsFollowTheirAddress,
+    /// Consecutive draws of a subpass whose fragment shaders read and write a storage image in
+    /// the ordered pixel interlock, every access coherent, are ordered by the interlock alone, as
+    /// Vulkan states: each fragment's interlocked operations happen before those of a later draw's
+    /// fragment of the same pixel ("Interlocked Operations", rasterization order following
+    /// primitive order through the subpass), so a draw reads what the draw before it wrote with no
+    /// pipeline barrier between them. On a driver with it the runtime records no barrier between
+    /// two draws of a render pass instance where the later one reaches a color in the fetch's
+    /// interlocked storage form (or an extended-range color's `half` shadow) that the earlier one
+    /// wrote (`render.rs`'s `InterlockedStorage`); elsewhere it records one from the fragment
+    /// shader's writes to its reads and writes, which RADV on the Radeon 780M needs (a later draw
+    /// read texels from before an earlier one's writes without it).
+    InterlockOrdersDraws,
 }
 
 impl DriverFact {
@@ -1935,6 +1947,19 @@ const DYNAMIC_RESTART_WARNING: DriverDiagnostic = DriverDiagnostic {
 /// Linux 7.0.0, which answered the same, but are unmeasured identities (`MEASURED_DEVICES`).
 /// `tests::pointer_residency` in the runtime checks it on a device with it. Every other driver is
 /// unmeasured, and keeps its pointer imports.
+///
+/// `InterlockOrdersDraws`, measured with no barrier between such draws on any driver (a scratch
+/// build of the commit that adds it), by `runtime_lane::interlocked_draw_order` (passes of 84
+/// draws, fullscreen and held to bands, of two read-modify-writes of an `R32Uint` color that do
+/// not commute, at one sample over 1920x1080 and 64x36 and at four over 960x540 and 64x36, every
+/// texel read back) and by `runtime_lane::extended_range_blend_table`'s
+/// `a_memoryless_color_2_blends_as_a_stored_color_does` (99 banded blends into a memoryless
+/// extended-range color in the interlock, then a fetching copy of it): ANV, Mesa 26.2.4 on the
+/// Iris Xe (RPL-P), every texel of every pass right in three runs of the first, every band right
+/// in the second, and the `extended_range_blend_table` and `framebuffer_fetch` lanes passing.
+/// Measured not to have it: RADV, Mesa 26.2.4 on the Radeon 780M, which passes the first but
+/// leaves 19 of the second's 495 bands wrong. Every other driver is unmeasured, and takes the
+/// barrier.
 pub(crate) const MEASURED: &[Measured<DriverFact>] = &[
     Measured {
         fact: DriverFact::RobustIndexFetchReadsZero,
@@ -2464,6 +2489,10 @@ pub(crate) const MEASURED: &[Measured<DriverFact>] = &[
         first: mesa(26, 0, 8),
         last: mesa(26, 2, 4),
     },
+    Measured {
+        fact: DriverFact::InterlockOrdersDraws,
+        driver: DriverId::INTEL_OPEN_SOURCE_MESA,
+        vendor: Some(INTEL_VENDOR_ID),
         device: Some(INTEL_IRIS_XE_RPL_P),
         first: mesa(26, 2, 4),
         last: mesa(26, 2, 4),

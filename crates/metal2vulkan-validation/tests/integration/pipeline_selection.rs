@@ -66,11 +66,11 @@ fn engine_selection_reads_only_the_selected_row_and_names_its_engine() {
     }
 }
 
-/// The unordered-fetch opt-in: a fragment function that fetches its color attachment is refused on
-/// a profile without rasterization-order attachment access, and compiles with
-/// `UnorderedFramebufferFetch` under `--accept-unordered-fetch`.
+/// A fragment function that fetches its color attachment is refused on a profile with no ordered
+/// form of the fetch, and no flag compiles it unordered (`--accept-unordered-fetch` is no
+/// argument).
 #[test]
-fn the_unordered_fetch_opt_in_compiles_a_fetch_the_default_refuses() {
+fn a_fetch_without_an_ordered_form_is_refused() {
     let scratch = poisoned_corpus();
     let hash = sha256_bytes(include_bytes!(
         "../../fixtures/public/engine/exf_fetch_blend.ll"
@@ -105,13 +105,7 @@ fn the_unordered_fetch_opt_in_compiles_a_fetch_the_default_refuses() {
     assert!(refused.contains("\tNOT_COMPILED\t"), "{refused}");
     assert!(refused.contains("FramebufferFetch"), "{refused}");
     let output = new(&["--accept-unordered-fetch"]);
-    let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert_eq!(stdout.lines().count(), 1, "{stdout}");
-    assert!(stdout.contains("\tCOMPILED\t"), "{stdout}");
-    assert!(stdout.contains("UnorderedFramebufferFetch"), "{stdout}");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("unrecognized argument"), "{stderr}");
 }

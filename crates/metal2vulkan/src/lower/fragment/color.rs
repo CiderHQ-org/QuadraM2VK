@@ -14,10 +14,10 @@
 //! Vulkan orders an input-attachment read so only with rasterization-order color attachment
 //! access. Without it, a device with `fragmentShaderPixelInterlock` reads (and writes) the
 //! attachment as a storage image inside the ordered interlock where the pipeline's state lets
-//! that be exact (`fetch`). Everywhere else the policy decides: `RequireOrdered` refuses, naming
-//! what either ordered form needs (`Unsupported{FramebufferFetch, ...}`; the storage form's own
-//! reason where it alone was blocked), and `AcceptUnordered` reads unordered and records
-//! `PrecisionNote::UnorderedFramebufferFetch`. The function states
+//! that be exact (`fetch`). Everywhere else the function is refused, naming what either ordered
+//! form needs (`Unsupported{FramebufferFetch, ...}`; the storage form's own reason where it alone
+//! was blocked): an unordered read could see the attachment before an earlier overlapping
+//! fragment's write, which Metal never shows. The function states
 //! `RuntimeFact::FramebufferFetch{color}` for every index it reads as an input attachment, so
 //! link can set the pipeline's rasterization-order flags and the render pass can provide the
 //! self-dependency.
@@ -70,7 +70,6 @@ use std::collections::BTreeMap;
 use crate::air::abi::{AbiInt, OutputRole, ParamBinding, ParamRole};
 use crate::air::intrinsics::{PackDir, PackFormat};
 use crate::air::ir::{ArgIdx, TypeId as AirTypeId, Value};
-use crate::device::profile::FramebufferFetchPolicy;
 use crate::device::requirements::VkFeature;
 use crate::error::{Attachment, Capability, DescriptorError, Error, Feature, Unsupported};
 use crate::lower::arith::legal::{form_on, refuse_int64_interface};
@@ -78,7 +77,6 @@ use crate::lower::arith::{extended_range, math, narrow, ops, srgb, Form, Held};
 use crate::lower::emit::EmitCx;
 use crate::lower::select::SelectCx;
 use crate::metal::format::ExtendedRange;
-use crate::pipeline::artifact::PrecisionNote;
 use crate::pipeline::facts::RuntimeFact;
 use crate::pipeline::sym::{ResourceKind, ResourceSlot, Stage};
 use crate::spirv::builder::{FunctionBuilder, ModuleBuilder};
@@ -180,16 +178,10 @@ pub(super) fn select_param(cx: &mut SelectCx<'_>, b: &ParamBinding) -> Result<Co
         super::fetch::select_read(cx, input)?;
         return Ok(input);
     }
+    // On a device with the pixel interlock `fetch::plan` refused a blocked attachment already;
+    // here neither ordered form exists.
     if !frag.rasterization_order_color_access {
-        match cx.profile.fields().framebuffer_fetch {
-            FramebufferFetchPolicy::AcceptUnordered => {
-                cx.precision
-                    .insert(PrecisionNote::UnorderedFramebufferFetch);
-            }
-            // On a device with the pixel interlock `fetch::plan` refused a blocked attachment
-            // already; here neither ordered form exists.
-            FramebufferFetchPolicy::RequireOrdered => return Err(unordered(cx, color)),
-        }
+        return Err(unordered(cx, color));
     }
     // Two reads of one attachment must agree on its numeric class (one image declaration).
     let known = &cx.families.fragment.colors;

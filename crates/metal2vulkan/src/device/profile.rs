@@ -407,7 +407,6 @@ pub struct ProfileFields {
     pub handle_domain: HandleDomain,
     pub containment: Containment,
     pub isolation: GuestIsolation,
-    pub framebuffer_fetch: FramebufferFetchPolicy,
     /// Whether a texel's value is the device's conversion or Metal's (the policy's).
     pub texel_conversion: crate::device::policy::TexelConversionPolicy,
     /// Whether a `half4` output of a module without fast math blends into a 16-bit float
@@ -757,17 +756,6 @@ pub enum Robustness {
 pub enum GuestIsolation {
     On,
     Off,
-}
-
-/// Framebuffer-fetch ordering policy.
-#[non_exhaustive]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub enum FramebufferFetchPolicy {
-    /// Refuse without rasterization-order attachment access.
-    RequireOrdered,
-    /// Accept unordered input-attachment reads and record a precision note.
-    AcceptUnordered,
 }
 
 /// Leaf arithmetic, storage, and atomic capabilities.

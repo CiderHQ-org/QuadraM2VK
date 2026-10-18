@@ -729,13 +729,9 @@ fn required_features_are_cumulative() {
 #[cfg(feature = "serde")]
 #[test]
 fn descriptions_and_policies_round_trip_through_serde() {
-    use crate::device::profile::FramebufferFetchPolicy;
     let policies = [
         DevicePolicy::default(),
-        DevicePolicy {
-            framebuffer_fetch: FramebufferFetchPolicy::AcceptUnordered,
-            ..DevicePolicy::default()
-        },
+        DevicePolicy::default().exact_answers(),
     ];
     for (stem, text) in committed_profiles() {
         let description = DeviceDescription::from_khronos_json(&text, None).unwrap();
