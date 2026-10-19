@@ -104,6 +104,14 @@ pub struct TgShape {
 }
 
 impl TgShape {
+    /// The `FragCoord` stage-IO object of a fragment function whose arena is its tile's memory in
+    /// the pass's buffer ([`declare_threadgroup`] declares it so, with `SpecKey::TileGridWidth`): a
+    /// fragment function's arena with a region or an imageblock.
+    pub fn fragment_tile(&self) -> Option<usize> {
+        self.fragment
+            .filter(|_| !self.regions.is_empty() || self.imageblock.is_some())
+    }
+
     /// The shape of the plan's threadgroup arena, before any imageblock use.
     pub fn of(layout: &ArenaLayout) -> TgShape {
         TgShape {
@@ -272,9 +280,9 @@ pub struct TgDecl {
 }
 
 /// What places a fragment's tile in the pass's tile memory buffer (the module docs): the
-/// `FragCoord` input's stage-IO object, and the specialization constants `SpecKey::TileGridWidth`
-/// (the tiles across the render area) and `SpecKey::ImageblockWidth` and
-/// `SpecKey::ImageblockHeight` (the pass's tile size).
+/// `FragCoord` input's stage-IO object, the constant `SpecKey::TileGridWidth` (the tiles across
+/// the render area, read as data: `lower::specialized`), and the specialization constants
+/// `SpecKey::ImageblockWidth` and `SpecKey::ImageblockHeight` (the pass's tile size).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FragmentTile {
     pub coord: usize,
@@ -340,7 +348,7 @@ pub fn declare_threadgroup(mb: &mut ModuleBuilder, shape: &TgShape) -> BResult<T
             fragment: None,
         });
     }
-    if let Some(coord) = shape.fragment {
+    if let Some(coord) = shape.fragment_tile() {
         return declare_fragment(mb, shape, coord);
     }
     let base = shape

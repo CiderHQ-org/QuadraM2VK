@@ -2414,7 +2414,7 @@ fn metal_fmin(
 /// `fmin(fmax(x, lo), hi)`. `float` compares the operands [`flushed`] (an `f32` denormal compares
 /// as a zero) but returns the operand itself. `NMin` and `NMax` leave two NaNs, a tie of zeros,
 /// and a denormal's comparison to the device.
-pub(super) fn metal_min_max(
+pub(crate) fn metal_min_max(
     fb: &mut FunctionBuilder<'_>,
     op: FloatFn,
     f: Form,

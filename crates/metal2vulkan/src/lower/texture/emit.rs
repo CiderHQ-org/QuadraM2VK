@@ -1,11 +1,12 @@
 //! Emission of the texture strategies.
 
+use crate::air::intrinsics::MemFlags;
 use crate::air::ir::{InstId, ValueId};
 use crate::lower::access::imageblock;
 use crate::lower::arith::nan::NanTest;
 use crate::lower::arith::narrow;
 use crate::lower::emit::EmitCx;
-use crate::lower::sync::barrier::{memory_model, BarrierModel};
+use crate::lower::sync::barrier::{self, memory_model, BarrierModel};
 use crate::pipeline::lower_inputs::StorageImageClass;
 use crate::spirv::builder::constructs::{ArmEnd, ArmFn, LoopFn, LoopSpec, Merged};
 use crate::spirv::builder::FunctionBuilder;
@@ -17,7 +18,7 @@ use crate::spirv::ir::{
 };
 
 use super::half::{HalfForm, TexelLanes};
-use super::slice::Slice;
+use super::slice::{Cooperative, Slice};
 use super::{
     Coord, ImageDecl, ImageRef, QueryKind, QueryOp, Read, TexelClass, TexelConv, TexelForm,
 };
@@ -3895,10 +3896,35 @@ fn slice_texel(fb: &mut FunctionBuilder<'_>, form: TexelForm, v: SValue) -> BRes
     }
 }
 
-/// Copy imageblock slice `s` to its texture: a counted loop over the block's cells, `k` the cell
-/// `(k mod bw, k / bw)` of a `bw · bh` block clipped to the imageblock, whose element at the
-/// field's offset is written at `coord + (x, y)`, discarded outside the texture.
-fn slice<'c>(cx: &mut EmitCx<'c>, fb: &mut FunctionBuilder<'_>, s: &Slice) -> BResult<()> {
+/// What the copy of a slice reads once, before its cells: the image, whether the write lands (its
+/// level and handle), the block's origin and size clipped to the imageblock, and the forms its
+/// texels take.
+#[derive(Clone, Copy)]
+struct SliceTarget {
+    decl: ImageDecl,
+    img: SValue,
+    within: Option<SValue>,
+    origin: SValue,
+    bw: SValue,
+    bh: SValue,
+    mem: TexelMemory,
+    /// A `float` slice through a heap handle rounds where the handle's class is a half-float
+    /// format's.
+    is_half: Option<(SValue, StorageImageClass)>,
+    /// And its NaNs are quieted where the class is a small float's.
+    is_small: Option<(SValue, StorageImageClass)>,
+    /// Whether a `half` element keeps its half.
+    kept: Option<SValue>,
+    /// Whether the handle names a member the unsigned integer twin holds, and the twin's image.
+    twin: Option<(SValue, SValue)>,
+}
+
+/// The [`SliceTarget`] of slice `s`, emitted in the open block.
+fn slice_target(
+    cx: &mut EmitCx<'_>,
+    fb: &mut FunctionBuilder<'_>,
+    s: &Slice,
+) -> BResult<SliceTarget> {
     let Loaded {
         decl,
         img,
@@ -3922,23 +3948,13 @@ fn slice<'c>(cx: &mut EmitCx<'c>, fb: &mut FunctionBuilder<'_>, s: &Slice) -> BR
         }
         None => (w, h),
     };
-    let n = fb.binary(BinOp::IMul, bw, bh)?;
-    let u = u32_ty(fb)?;
-    let zero = fb.u32_const(0)?;
-    let var = fb.local_var(u, Some(zero))?;
-    let counter = fb.var_ptr(var)?;
-    let dims = coord_len(&decl);
-    let s = *s;
     let mem = texel_memory(cx, fb, &s.image)?;
-    // A `float` slice through a heap handle rounds where the handle's class is a half-float
-    // format's: the class is read once, outside the loop.
     let is_half = match (s.heap_half, s.image) {
         (Some(class), ImageRef::Heap { handle, .. }) => {
             Some((heap_half_format(cx, fb, handle)?, class))
         }
         _ => None,
     };
-    // And whether its NaNs are quieted, a small float's class: read once too.
     let is_small = match (s.heap_small_floats, s.image) {
         (true, ImageRef::Heap { handle, .. }) => Some((
             heap_small_float_format(cx, fb, handle)?,
@@ -3946,14 +3962,120 @@ fn slice<'c>(cx: &mut EmitCx<'c>, fb: &mut FunctionBuilder<'_>, s: &Slice) -> BR
         )),
         _ => None,
     };
-    // Whether a `half` element keeps its half, read once, outside the loop.
     let kept = half_kept(cx, fb, s.half_nans, &s.image)?;
-    // Whether the handle names a member the unsigned integer twin holds, and the twin's image,
-    // read once, outside the loop.
     let twin = match (s.heap_bits, s.image) {
         (true, ImageRef::Heap { group, handle }) => Some(heap_twin(cx, fb, group, handle)?),
         _ => None,
     };
+    Ok(SliceTarget {
+        decl,
+        img,
+        within,
+        origin,
+        bw,
+        bh,
+        mem,
+        is_half,
+        is_small,
+        kept,
+        twin,
+    })
+}
+
+/// Copy cell `(x, y)` of slice `s`'s block to `t`'s texel `origin + (x, y)`: the element at the
+/// field's offset in the cell, converted to the texture's texel, discarded outside the texture.
+fn slice_cell<'c>(
+    cx: &mut EmitCx<'c>,
+    fb: &mut FunctionBuilder<'_>,
+    (s, t): (&Slice, &SliceTarget),
+    (x, y): (SValue, SValue),
+) -> BResult<()> {
+    let cell = imageblock::cell_offset(cx, fb, x, y, s.cell_bytes)?;
+    let field = u32s(fb, 1, s.field)?;
+    let off = fb.binary(BinOp::IAdd, cell, field)?;
+    let v = imageblock::load(cx, fb, s.leaf, s.contained, off)?;
+    let held = slice_texel(fb, s.texel, v)?;
+    let form = TexelForm {
+        conv: s.texel.conv,
+        lanes: 4,
+    };
+    let test = NanTest::for_modes(&cx.plan.families.arith.modes);
+    let texel = to_image(fb, &t.decl, form, held, cx.decl.families.arith.srgb, test)?;
+    let twin = match t.twin {
+        Some((is_bits, img)) => Some(TwinWrite {
+            is_bits,
+            img,
+            bits: half_bits(fb, form, held)?,
+        }),
+        None => None,
+    };
+    let texel = match t.is_half {
+        Some(half) => heap_halves(fb, half, form, texel)?,
+        None => texel,
+    };
+    let texel = match t.is_small {
+        Some(small) => heap_halves(fb, small, form, texel)?,
+        None => texel,
+    };
+    let texel = half_nan_texel(fb, (s.half_nans, t.kept), form, texel)?;
+    let dims = coord_len(&t.decl);
+    let u = u32_ty(fb)?;
+    let ty = vec(fb, u, dims)?;
+    let delta = if dims == 2 {
+        fb.composite_construct(ty, &[x, y])?
+    } else {
+        let z = u32s(fb, 1, 0)?;
+        fb.composite_construct(ty, &[x, y, z])?
+    };
+    let at = fb.binary(BinOp::IAdd, t.origin, delta)?;
+    let (img, mem) = (t.img, t.mem);
+    if !s.guard {
+        // A level the texture lacks drops the slice, as the null heap element does.
+        let Some(within) = t.within else {
+            return store(fb, (img, at, texel), mem, twin);
+        };
+        let then: ArmFn<'_, EmitCx<'c>> = Box::new(move |fb, _| {
+            store(fb, (img, at, texel), mem, twin)?;
+            Ok(ArmEnd::FallThrough(Vec::new()))
+        });
+        fb.if_(cx, within, then, None)?;
+        return Ok(());
+    }
+    let size = fb.query(ImageQuery::Size, img)?;
+    let lt = fb.binary(BinOp::ULessThan, at, size)?;
+    let mut inb = fb.unary(UnOp::All, lt)?;
+    if let Some(within) = t.within {
+        inb = fb.binary(BinOp::LogicalAnd, inb, within)?;
+    }
+    let then: ArmFn<'_, EmitCx<'c>> = Box::new(move |fb, _| {
+        store(fb, (img, at, texel), mem, twin)?;
+        Ok(ArmEnd::FallThrough(Vec::new()))
+    });
+    fb.if_(cx, inb, then, None)?;
+    Ok(())
+}
+
+/// Copy imageblock slice `s` to its texture: by the whole threadgroup where it is
+/// [`Slice::cooperative`], else by the writing invocation.
+fn slice(cx: &mut EmitCx<'_>, fb: &mut FunctionBuilder<'_>, s: &Slice) -> BResult<()> {
+    match s.cooperative {
+        Some(c) => slice_shared(cx, fb, s, c),
+        None => slice_serial(cx, fb, s),
+    }
+}
+
+/// The writing invocation's copy of slice `s`: a counted loop over the block's cells, `k` the cell
+/// `(k mod bw, k / bw)` of a `bw · bh` block clipped to the imageblock ([`slice_cell`]). The
+/// counter starts at 0 on every execution of the write.
+fn slice_serial<'c>(cx: &mut EmitCx<'c>, fb: &mut FunctionBuilder<'_>, s: &Slice) -> BResult<()> {
+    let t = slice_target(cx, fb, s)?;
+    let n = fb.binary(BinOp::IMul, t.bw, t.bh)?;
+    let u = u32_ty(fb)?;
+    let var = fb.local_var(u, None)?;
+    let counter = fb.var_ptr(var)?;
+    let zero = u32s(fb, 1, 0)?;
+    fb.store(counter, zero, MemAccess::default())?;
+    let s = *s;
     let body: LoopFn<'_, EmitCx<'c>> = Box::new(move |fb, cx, lc| {
         let k = fb.load(counter, MemAccess::default())?;
         let done = fb.binary(BinOp::UGreaterThanEqual, k, n)?;
@@ -3965,70 +4087,154 @@ fn slice<'c>(cx: &mut EmitCx<'c>, fb: &mut FunctionBuilder<'_>, s: &Slice) -> BR
         let one = u32s(fb, 1, 1)?;
         let next = fb.binary(BinOp::IAdd, k, one)?;
         fb.store(counter, next, MemAccess::default())?;
-        let x = fb.binary(BinOp::UMod, k, bw)?;
-        let y = fb.binary(BinOp::UDiv, k, bw)?;
-        let cell = imageblock::cell_offset(cx, fb, x, y, s.cell_bytes)?;
-        let field = u32s(fb, 1, s.field)?;
-        let off = fb.binary(BinOp::IAdd, cell, field)?;
-        let v = imageblock::load(cx, fb, s.leaf, s.contained, off)?;
-        let held = slice_texel(fb, s.texel, v)?;
-        let form = TexelForm {
-            conv: s.texel.conv,
-            lanes: 4,
-        };
-        let test = NanTest::for_modes(&cx.plan.families.arith.modes);
-        let texel = to_image(fb, &decl, form, held, cx.decl.families.arith.srgb, test)?;
-        let twin = match twin {
-            Some((is_bits, img)) => Some(TwinWrite {
-                is_bits,
-                img,
-                bits: half_bits(fb, form, held)?,
-            }),
-            None => None,
-        };
-        let texel = match is_half {
-            Some(half) => heap_halves(fb, half, form, texel)?,
-            None => texel,
-        };
-        let texel = match is_small {
-            Some(small) => heap_halves(fb, small, form, texel)?,
-            None => texel,
-        };
-        let texel = half_nan_texel(fb, (s.half_nans, kept), form, texel)?;
-        let ty = vec(fb, u, dims)?;
-        let delta = if dims == 2 {
-            fb.composite_construct(ty, &[x, y])?
-        } else {
-            let z = u32s(fb, 1, 0)?;
-            fb.composite_construct(ty, &[x, y, z])?
-        };
-        let at = fb.binary(BinOp::IAdd, origin, delta)?;
-        if !s.guard {
-            // A level the texture lacks drops the slice, as the null heap element does.
-            let Some(within) = within else {
-                return store(fb, (img, at, texel), mem, twin);
-            };
-            let then: ArmFn<'_, EmitCx<'c>> = Box::new(move |fb, _| {
-                store(fb, (img, at, texel), mem, twin)?;
-                Ok(ArmEnd::FallThrough(Vec::new()))
-            });
-            fb.if_(cx, within, then, None)?;
-            return Ok(());
-        }
-        let size = fb.query(ImageQuery::Size, img)?;
-        let lt = fb.binary(BinOp::ULessThan, at, size)?;
-        let mut inb = fb.unary(UnOp::All, lt)?;
-        if let Some(within) = within {
-            inb = fb.binary(BinOp::LogicalAnd, inb, within)?;
-        }
-        let then: ArmFn<'_, EmitCx<'c>> = Box::new(move |fb, _| {
-            store(fb, (img, at, texel), mem, twin)?;
-            Ok(ArmEnd::FallThrough(Vec::new()))
-        });
-        fb.if_(cx, inb, then, None)?;
-        Ok(())
+        let x = fb.binary(BinOp::UMod, k, t.bw)?;
+        let y = fb.binary(BinOp::UDiv, k, t.bw)?;
+        slice_cell(cx, fb, (&s, &t), (x, y))
     });
     fb.loop_(cx, LoopSpec::default(), body)
+}
+
+/// The whole threadgroup's copy of slice `s` (`slice` module docs), emitted where every invocation
+/// of the workgroup runs it: outside a predicated walk, or as one of its synchronizations
+/// (`EmitCx::live`). The writers are every invocation outside a walk, and in a walk's uniform block
+/// the live ones (all or none), after a workgroup barrier that makes every invocation's cells
+/// visible. In a divergent block the threadgroup copies where any invocation is live, which a vote
+/// finds (its barriers make the cells visible), the live invocations then publishing `c`'s
+/// operands. Where the invocations write, each copies its share ([`slice_copy`]); a last workgroup
+/// barrier keeps every later access of the cells after the copy.
+fn slice_shared<'c>(
+    cx: &mut EmitCx<'c>,
+    fb: &mut FunctionBuilder<'_>,
+    s: &Slice,
+    c: Cooperative,
+) -> BResult<()> {
+    let flags = MemFlags {
+        threadgroup_imageblock: true,
+        ..MemFlags::default()
+    };
+    let sem = barrier::semantics(flags, MemoryOrder::AcquireRelease, memory_model(cx.plan));
+    let mut rebound: Vec<(ValueId, Option<SValue>)> = Vec::new();
+    let writes = match (cx.live, cx.active) {
+        (_, Some(live)) => {
+            let any = crate::lower::simd::workgroup::vote(cx, fb, live)?;
+            for (v, lanes) in c.published.into_iter().flatten() {
+                let x = cx.operand(fb, v)?;
+                let y = publish(cx, fb, live, (x, lanes))?;
+                rebound.push((v, cx.rebind(v, y)));
+            }
+            Some(any)
+        }
+        (live, None) => {
+            fb.control_barrier(Scope::Workgroup, Scope::Workgroup, sem)?;
+            live
+        }
+    };
+    let t = slice_target(cx, fb, s);
+    for (v, was) in rebound.into_iter().rev() {
+        cx.restore(v, was);
+    }
+    slice_copy(cx, fb, (s, &t?), writes)?;
+    fb.control_barrier(Scope::Workgroup, Scope::Workgroup, sem)
+}
+
+/// The calling invocation's share of slice `s`'s block (`t`), copied where `writes` holds (every
+/// invocation alike; `None`, always): of the `n` threads, invocation `lin` copies the cells of
+/// row-major index `m` over rows `W` cells wide (the imageblock's width) with
+/// `m ≡ lin - c (mod n)`, `c` the block's first texel's `u + v · W`, which are the cells whose
+/// texel `(u, v)` has `(u + v · W) mod n = lin` ([`slice_cell`]).
+fn slice_copy<'c>(
+    cx: &mut EmitCx<'c>,
+    fb: &mut FunctionBuilder<'_>,
+    (s, t): (&Slice, &SliceTarget),
+    writes: Option<SValue>,
+) -> BResult<()> {
+    let (lin, n) = crate::lower::dispatch::linear_index(cx, fb)?;
+    let (w, _) = imageblock::extent(fb)?;
+    let ox = fb.composite_extract(t.origin, &[0])?;
+    let oy = fb.composite_extract(t.origin, &[1])?;
+    let row = fb.binary(BinOp::IMul, oy, w)?;
+    let first = fb.binary(BinOp::IAdd, ox, row)?;
+    let first = fb.binary(BinOp::UMod, first, n)?;
+    let ahead = fb.binary(BinOp::IAdd, lin, n)?;
+    let ahead = fb.binary(BinOp::ISub, ahead, first)?;
+    let m0 = fb.binary(BinOp::UMod, ahead, n)?;
+    let end = fb.binary(BinOp::IMul, w, t.bh)?;
+    let u = u32_ty(fb)?;
+    let var = fb.local_var(u, None)?;
+    let at = fb.var_ptr(var)?;
+    fb.store(at, m0, MemAccess::default())?;
+    let (s, t) = (*s, *t);
+    let share = move |cx: &mut EmitCx<'c>, fb: &mut FunctionBuilder<'_>| -> BResult<()> {
+        let body: LoopFn<'_, EmitCx<'c>> = Box::new(move |fb, cx, lc| {
+            let m = fb.load(at, MemAccess::default())?;
+            let done = fb.binary(BinOp::UGreaterThanEqual, m, end)?;
+            let exit: ArmFn<'_, EmitCx<'c>> = Box::new(move |fb, _| {
+                lc.break_(fb)?;
+                Ok(ArmEnd::Exits)
+            });
+            fb.if_(cx, done, exit, None)?;
+            let next = fb.binary(BinOp::IAdd, m, n)?;
+            fb.store(at, next, MemAccess::default())?;
+            let x = fb.binary(BinOp::UMod, m, w)?;
+            let y = fb.binary(BinOp::UDiv, m, w)?;
+            // A cell past the block's width is not the block's.
+            let inside = fb.binary(BinOp::ULessThan, x, t.bw)?;
+            let cell: ArmFn<'_, EmitCx<'c>> = Box::new(move |fb, cx| {
+                slice_cell(cx, fb, (&s, &t), (x, y))?;
+                Ok(ArmEnd::FallThrough(Vec::new()))
+            });
+            fb.if_(cx, inside, cell, None)?;
+            Ok(())
+        });
+        fb.loop_(cx, LoopSpec::default(), body)
+    };
+    let Some(writes) = writes else {
+        return share(cx, fb);
+    };
+    let arm: ArmFn<'_, EmitCx<'c>> = Box::new(move |fb, cx| {
+        share(cx, fb)?;
+        Ok(ArmEnd::FallThrough(Vec::new()))
+    });
+    fb.if_(cx, writes, arm, None)?;
+    Ok(())
+}
+
+/// Operand `x` of `lanes` 32-bit integer lanes as the invocations where `live` holds hold it, read
+/// by every invocation of the workgroup, lane by lane ([`publish_lane`]).
+fn publish(
+    cx: &mut EmitCx<'_>,
+    fb: &mut FunctionBuilder<'_>,
+    live: SValue,
+    (x, lanes): (SValue, u8),
+) -> BResult<SValue> {
+    if lanes == 1 {
+        return publish_lane(cx, fb, live, x);
+    }
+    let ty = fb.value_ty(x)?;
+    let mut parts = Vec::with_capacity(usize::from(lanes));
+    for i in 0..u32::from(lanes) {
+        let v = fb.composite_extract(x, &[i])?;
+        parts.push(publish_lane(cx, fb, live, v)?);
+    }
+    fb.composite_construct(ty, &parts)
+}
+
+/// 32-bit integer `v` as the invocations where `live` holds hold it, read by every invocation of
+/// the workgroup (`simd::workgroup::publish`), in `v`'s type.
+fn publish_lane(
+    cx: &mut EmitCx<'_>,
+    fb: &mut FunctionBuilder<'_>,
+    live: SValue,
+    v: SValue,
+) -> BResult<SValue> {
+    let u = u32_ty(fb)?;
+    let held = fb.value_ty(v)?;
+    if held == u {
+        return crate::lower::simd::workgroup::publish(cx, fb, live, v);
+    }
+    let word = fb.convert(ConvOp::Bitcast, v, u)?;
+    let y = crate::lower::simd::workgroup::publish(cx, fb, live, word)?;
+    fb.convert(ConvOp::Bitcast, y, held)
 }
 
 fn query(cx: &mut EmitCx<'_>, fb: &mut FunctionBuilder<'_>, q: &QueryOp) -> BResult<SValue> {

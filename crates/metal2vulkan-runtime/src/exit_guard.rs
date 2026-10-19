@@ -36,10 +36,14 @@
 //!     new entry point in a section goes into the table and the priming, or fails the lane.
 //!
 //!   The program's own calls on its own threads (making objects, encoding) take no section:
-//!   their race with an exit is the program's.
-//! - **A host step makes no image, render pass, framebuffer or neutral**. Those are outside the
-//!   table, and a host step ([`host_step`]) runs inside a section: what one may need is made before
-//!   it, on the program's thread. Their one door (`creation.rs`, and `neutral.rs` for the neutrals)
+//!   their race with an exit is the program's. A device's resolver, which encodes the program's
+//!   calls on its behalf after they returned (`resolver.rs`), encodes each piece inside a
+//!   section that is otherwise the program's call ([`on_programs_behalf`]): an exit waits for it,
+//!   and what it calls is the program's encoding's.
+//! - **A host step makes no image, render pass, framebuffer or neutral**. Those are outside its
+//!   entry points ([`HOST_STEP`]; the table holds the first three for the device's checks thread
+//!   alone), and a host step ([`host_step`]) runs inside a section: what one may need is made
+//!   before it, on the program's thread. Their one door (`creation.rs`, and `neutral.rs` for the neutrals)
 //!   refuses one in a host step before any Vulkan call, `Error::HostStepObject`, in every build; a
 //!   source test fails when another file makes such an object.
 //! - **The hook.** A device made or adopted registers an exit handler ([`register_device`]), once
@@ -265,33 +269,93 @@ static SECTIONS: AtomicU64 = AtomicU64::new(0);
 /// The entry points ([`Call`]) called in sections that ended since the hook was last registered
 /// at a device after a load of a shared object ([`register_device`], they were the process's), one
 /// bit each.
-static CALLED: CalledWord = CalledWord([AtomicU64::new(0), AtomicU64::new(0)]);
+static CALLED: CalledWords = CalledWords([const { AtomicU64::new(0) }; CALL_WORDS]);
 
-/// One bit per entry point of the table ([`Call::bit`]), as two atomic halves: the table
-/// outgrew 64 bits with the render host step's entry points.
-struct CalledWord([AtomicU64; 2]);
+/// How many 64-bit words a set of the table's entry points ([`Calls`]) has: room for 256 entry
+/// points, of which the table fills 122. A table that outgrows them fails to compile (below): add
+/// a word.
+const CALL_WORDS: usize = 4;
 
-impl CalledWord {
+const _: () = assert!(
+    Call::ALL.len() <= CALL_WORDS * 64,
+    "the table outgrew its words"
+);
+
+/// A set of the table's entry points, one bit each ([`Call::bit`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Calls([u64; CALL_WORDS]);
+
+impl Calls {
+    /// No entry point.
+    pub(crate) const NONE: Calls = Calls([0; CALL_WORDS]);
+
+    /// Whether `call` is in the set.
+    pub(crate) fn contains(self, call: Call) -> bool {
+        !(self & call.bit()).is_empty()
+    }
+
+    /// Whether the set is empty.
+    pub(crate) fn is_empty(self) -> bool {
+        self == Calls::NONE
+    }
+
+    /// How many entry points are in the set.
+    #[cfg(test)]
+    pub(crate) fn count(self) -> u32 {
+        self.0.iter().map(|word| word.count_ones()).sum()
+    }
+}
+
+impl std::ops::BitOr for Calls {
+    type Output = Calls;
+    fn bitor(self, other: Calls) -> Calls {
+        Calls(std::array::from_fn(|i| self.0[i] | other.0[i]))
+    }
+}
+
+impl std::ops::BitOrAssign for Calls {
+    fn bitor_assign(&mut self, other: Calls) {
+        *self = *self | other;
+    }
+}
+
+impl std::ops::BitAnd for Calls {
+    type Output = Calls;
+    fn bitand(self, other: Calls) -> Calls {
+        Calls(std::array::from_fn(|i| self.0[i] & other.0[i]))
+    }
+}
+
+impl std::ops::Not for Calls {
+    type Output = Calls;
+    fn not(self) -> Calls {
+        Calls(self.0.map(|word| !word))
+    }
+}
+
+/// One bit per entry point of the table ([`Call::bit`]), as [`CALL_WORDS`] atomic words.
+struct CalledWords([AtomicU64; CALL_WORDS]);
+
+impl CalledWords {
     /// Set `calls`; the bits set before.
-    fn fetch_or(&self, calls: u128) -> u128 {
-        let low = self.0[0].fetch_or(calls as u64, Ordering::Relaxed);
-        let high = self.0[1].fetch_or((calls >> 64) as u64, Ordering::Relaxed);
-        u128::from(low) | (u128::from(high) << 64)
+    fn fetch_or(&self, calls: Calls) -> Calls {
+        Calls(std::array::from_fn(|i| {
+            self.0[i].fetch_or(calls.0[i], Ordering::Relaxed)
+        }))
     }
 
     /// Clear every bit: a load of a shared object since (a driver or layer loaded again makes
     /// its statics again at each entry point's first call).
     fn clear(&self) {
-        self.0[0].store(0, Ordering::Relaxed);
-        self.0[1].store(0, Ordering::Relaxed);
+        for word in &self.0 {
+            word.store(0, Ordering::Relaxed);
+        }
     }
 
     /// The bits set.
     #[cfg(test)]
-    fn load(&self) -> u128 {
-        let low = self.0[0].load(Ordering::Relaxed);
-        let high = self.0[1].load(Ordering::Relaxed);
-        u128::from(low) | (u128::from(high) << 64)
+    fn load(&self) -> Calls {
+        Calls(std::array::from_fn(|i| self.0[i].load(Ordering::Relaxed)))
     }
 }
 
@@ -415,6 +479,15 @@ calls! {
     CreateDescriptorSetLayout => c"vkCreateDescriptorSetLayout",
     CreatePipelineLayout => c"vkCreatePipelineLayout",
     CreateComputePipelines => c"vkCreateComputePipelines",
+    // A device's checks of its driver on its checks thread (`device_checks/kit.rs`): what a check
+    // that settles in the background makes beside the above, its images, render passes,
+    // framebuffers and timestamp queries. No host step makes those (`creation.rs`).
+    CreateImage => c"vkCreateImage",
+    GetImageMemoryRequirements => c"vkGetImageMemoryRequirements",
+    BindImageMemory => c"vkBindImageMemory",
+    CreateRenderPass2 => c"vkCreateRenderPass2",
+    CreateFramebuffer => c"vkCreateFramebuffer",
+    CreateQueryPool => c"vkCreateQueryPool",
     // A render host step's ([`HOST_STEP`]): an executed render command's draw into a secondary
     // command buffer, and the pass that executes the secondaries.
     CmdBeginRenderPass => c"vkCmdBeginRenderPass",
@@ -573,11 +646,13 @@ pub(crate) const HOST_STEP: &[Call] = &[
 ];
 
 impl Call {
-    /// Its bit. The table fills 113 of the word's 128 (widened from 64): when it next outgrows the
-    /// word, widen the word (here, [`CALLED`], `PENDING` and the priming's calls); do not add a
-    /// second table.
-    pub(crate) fn bit(self) -> u128 {
-        1 << self as u32
+    /// Its bit: the set of it alone. The sets have room for [`CALL_WORDS`] words of entry points;
+    /// a table that outgrows them takes another word there, never a second table.
+    pub(crate) fn bit(self) -> Calls {
+        let at = self as usize;
+        let mut words = [0; CALL_WORDS];
+        words[at / 64] = 1 << (at % 64);
+        Calls(words)
     }
 }
 
@@ -585,7 +660,7 @@ thread_local! {
     /// The sections in progress on this thread (of every guard).
     static OWN: Cell<usize> = const { Cell::new(0) };
     /// The entry points ([`Call`]) this thread called since its last section ended.
-    static PENDING: Cell<u128> = const { Cell::new(0) };
+    static PENDING: Cell<Calls> = const { Cell::new(Calls::NONE) };
     /// This thread is one of the runtime's own ([`spawn`]).
     static RUNTIME: Cell<bool> = const { Cell::new(false) };
     /// The program's code this thread is running ([`program`]).
@@ -734,10 +809,10 @@ impl Drop for Busy<'_> {
             // After the section's Vulkan calls, which may have registered a destructor.
             let calls = PENDING.with(|pending| {
                 let calls = pending.get();
-                pending.set(0);
+                pending.set(Calls::NONE);
                 calls
             });
-            let first = calls & !CALLED.fetch_or(calls) != 0;
+            let first = !(calls & !CALLED.fetch_or(calls)).is_empty();
             let ended = SECTIONS.fetch_add(1, Ordering::Relaxed) + 1;
             if (first || ended.is_power_of_two()) && !self.guard.is_closed() {
                 register_again();
@@ -1071,6 +1146,26 @@ pub(crate) fn program(f: impl FnOnce()) {
     PROGRAM.with(|program| program.set(program.get() - 1));
 }
 
+/// Run `f`, the encoding of the program's calls that a device's resolver makes on the program's
+/// behalf (`resolver.rs`), inside a section, so an exit waits for it as for the runtime's other
+/// Vulkan calls, and as the program's call itself: the device's functions are all of them and the
+/// spare pools are taken ([`in_section`] is false inside), and notices and the device's maps go as
+/// in the program's call ([`in_program_call`]). `None`, `f` not run, once the process is exiting.
+pub(crate) fn on_programs_behalf<T>(f: impl FnOnce() -> T) -> Option<T> {
+    /// Ends the mark as `f` returns or unwinds: the sections before it are the thread's again.
+    struct Mark(usize);
+    impl Drop for Mark {
+        fn drop(&mut self) {
+            BASE.with(|base| base.set(self.0));
+            PROGRAM.with(|program| program.set(program.get() - 1));
+        }
+    }
+    let _busy = enter()?;
+    PROGRAM.with(|program| program.set(program.get() + 1));
+    let _mark = Mark(BASE.with(|base| base.replace(OWN.with(Cell::get))));
+    Some(f())
+}
+
 /// Whether this thread is in one of the runtime's sections now, not in the program's code a
 /// section called (a message sink): the device's functions are then the table's alone
 /// ([`Call`], `device/functions.rs`).
@@ -1085,6 +1180,11 @@ pub(crate) fn in_section() -> bool {
 /// ([`program_release`]).
 pub(crate) fn serves_completion() {
     SERVES_COMPLETION.with(|serves| serves.set(true));
+}
+
+/// Whether this thread is one command buffers' completion depends on ([`serves_completion`]).
+pub(crate) fn serving_completion() -> bool {
+    SERVES_COMPLETION.with(Cell::get)
 }
 
 /// Run `f`, the program's code a release runs (a no-copy buffer's deallocator, the drop of its
@@ -1460,5 +1560,5 @@ pub(crate) fn sections() -> u64 {
 /// Whether a section that ended called `call`.
 #[cfg(test)]
 pub(crate) fn was_called(call: Call) -> bool {
-    CALLED.load() & call.bit() != 0
+    CALLED.load().contains(call)
 }

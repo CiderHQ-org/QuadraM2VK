@@ -714,7 +714,8 @@ fn identity_differences(
 }
 
 /// `description`'s capability members as JSON: everything but its identity, its sets (features
-/// and extensions), and its format table, which are compared typed.
+/// and extensions), and its format table, which are compared typed, and its checks' answers, which
+/// are no capability.
 fn capability_members(description: &DeviceDescription) -> Value {
     let mut value = serde_json::to_value(description).expect("a description serializes");
     if let Some(object) = value.as_object_mut() {
@@ -727,6 +728,9 @@ fn capability_members(description: &DeviceDescription) -> Value {
             "extensions",
             "features",
             "formats",
+            // What the device's checks of its driver found as it was made: the device's own
+            // answers, never a capability a profile states.
+            "checks",
         ] {
             object.remove(key);
         }

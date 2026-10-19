@@ -94,6 +94,9 @@ pub struct Uses {
     /// class is not measured (a `short`, `ushort` or `ulong` one): the slot states no
     /// `RuntimeFact::CrossClassReads`.
     pub narrow_result: bool,
+    /// Written by a texel write (`write`), not only by imageblock slices: its slices are not
+    /// shared out to the threadgroup (`super::slice::cooperate`).
+    pub texel_write: bool,
 }
 
 /// The `OpTypeImage` a slot is declared as, and the conversion a storage image's class needs.

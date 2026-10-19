@@ -1,17 +1,22 @@
-//! The bound texture values a function reads as data.
+//! The bound values a function reads as data (`SpecKey::read_as_data`).
 //!
-//! The format class of the texture bound at a slot (`SpecKey::TexelFormat`) was a
-//! specialization constant, so each new format a guest bound made a new `VkPipeline`, a whole
-//! driver compile each. A function reads it from its own push field, `PushField::Specialized(key)`,
-//! and declares no specialization constant for it:
+//! The format class of the texture bound at a slot (`SpecKey::TexelFormat`), and the render
+//! pass's extent a tile function stages its tile within (`SpecKey::RenderAreaWidth`,
+//! `SpecKey::RenderAreaHeight`) and a tile or fragment function places its tile's threadgroup
+//! memory by (`SpecKey::TileGridWidth`), were specialization constants, so each new format a guest
+//! bound, and each new pass size a tile function ran in, made a new `VkPipeline`, a whole driver
+//! compile each (a guest's tile function over passes 64 to 1984 pixels wide made 32). A function
+//! reads them from its own push fields, `PushField::Specialized(key)`, and declares no
+//! specialization constant for them:
 //!
-//! - `select` asks a field for each such key the texture family declares ([`request`]);
-//! - the family still declares each key's constant and builds its operations over it as
+//! - `select` asks a field for each such key the function's families declare ([`request`]);
+//! - the families still declare each key's constant and build their operations over it as
 //!   before, so every arm and every test reads the value it read;
 //! - the entry hook ([`emit_entry`]) reads each field in the function's first block, right
 //!   after the push fields load, and computes there each specialization-constant operation over
-//!   them, as instructions;
-//! - once the module is finalized, every read in the function takes its local value
+//!   them, as instructions; a tile function's entry wrapper, which stages its tile before and
+//!   after the function (`access::tile::wrap_entry`), runs the same hook in its own first block;
+//! - once the module is finalized, every read in each of those functions takes its local value
 //!   (`TypedModule::localize_specs`), and the constants nothing else reads leave the module.
 //!
 //! The field holds the value the binder specialized the constant to before, so the module
@@ -20,6 +25,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::lower::access::tile;
 use crate::lower::emit::EmitCx;
 use crate::lower::select::{FamilyPlans, SelectCx};
 use crate::pipeline::sym::{PushField, SpecKey};
@@ -30,15 +36,29 @@ use crate::spirv::ir::{BinOp, ConstKind, SpecOp, Type};
 
 /// The keys `families` declare constants of that a function reads as data
 /// (`SpecKey::read_as_data`): the format class of every texture slot whose texture family
-/// declares one.
+/// declares one; a tile function's render area where it stages its tile's pixels, and its tile
+/// grid's width where it stages its tile's threadgroup memory (`access::tile::declare`); a
+/// fragment function's tile grid's width where its arena is its tile's memory
+/// (`memory::arena::declare_threadgroup`).
 fn keys(families: &FamilyPlans) -> BTreeSet<SpecKey> {
-    families
+    let access = &families.access;
+    let texel = families
         .texture
         .slots
         .values()
         .filter(|s| s.declares_texel_format())
-        .map(|s| SpecKey::TexelFormat(s.slot))
-        .collect()
+        .map(|s| SpecKey::TexelFormat(s.slot));
+    let area = tile::stages(access.tile.as_ref())
+        .then_some([SpecKey::RenderAreaWidth, SpecKey::RenderAreaHeight])
+        .into_iter()
+        .flatten();
+    let fragment_tile = access
+        .local
+        .tg
+        .as_ref()
+        .is_some_and(|s| s.fragment_tile().is_some());
+    let grid = (tile::has_memory(access) || fragment_tile).then_some(SpecKey::TileGridWidth);
+    texel.chain(area).chain(grid).collect()
 }
 
 /// Ask a push field for each key the function reads as data, once the texture and sampler
@@ -49,11 +69,11 @@ pub(crate) fn request(cx: &mut SelectCx<'_>) {
 }
 
 /// The entry hook: read each field the plan places for a key the function reads as data, and
-/// compute from it, in the function's first block, the value of the key's constant and of every
-/// specialization-constant operation over such constants, recording them for
-/// `TypedModule::localize_specs`. A placed field whose key the module does not declare, or a
-/// declared constant of such a key without its field, is the plan and the declarations
-/// disagreeing: an invariant failure.
+/// compute from it, in the first block of `fb`'s function (the function's own, or its entry
+/// wrapper's), the value of the key's constant and of every specialization-constant operation over
+/// such constants, recording them in `cx` for `TypedModule::localize_specs`. A placed field whose
+/// key the module does not declare, or a declared constant of such a key without its field, is
+/// the plan and the declarations disagreeing: an invariant failure.
 pub(crate) fn emit_entry(cx: &mut EmitCx<'_>, fb: &mut FunctionBuilder<'_>) -> BResult<()> {
     let placed: BTreeSet<SpecKey> = cx
         .plan

@@ -4732,6 +4732,46 @@ fn an_operation_over_the_active_lanes_records_the_split_quads_note() {
     }
 }
 
+/// Quads of a clipped primitive's pixels exist only in a fragment function: on a device holding
+/// `DriverWorkaround::ClippedTrianglesSplitPixelFragments` (the M3 Max capture with its check's
+/// other answer recorded, as a check cache recorded it), a fragment function's quad sum records
+/// `PrecisionNote::QuadsSplitByClipping`, and a kernel's simdgroup ballot (`simd_ops`'
+/// `simd_ballot_k`) and a vertex function's sum and ballot (`rvc_simd_vertex`), operations over
+/// the active lanes too, record none.
+#[test]
+fn only_a_fragment_function_records_the_split_quads_note() {
+    use crate::device::{CheckAnswer, DeviceFact, DriverWorkaround};
+    let note = PrecisionNote::QuadsSplitByClipping;
+    let split = DriverWorkaround::ClippedTrianglesSplitPixelFragments;
+    let mut desc =
+        crate::pipeline::testing::description("moltenvk-m3").expect("the M3 Max capture");
+    desc.checks.insert(
+        DeviceFact::Workaround(split),
+        CheckAnswer::NotMetals("29 pixels ran with part of their mask".to_owned()),
+    );
+    let device = Device::new(desc, DevicePolicy::default()).expect("device");
+    let p = device.profile();
+    assert!(p.workarounds().contains(&split));
+    let body = "  %r = tail call i32 @air.quad_sum.u.i32(i32 %x) #1";
+    let decls = "declare i32 @air.quad_sum.u.i32(i32) local_unnamed_addr #1";
+    let (Some(fragment), Some(kernels), Some(vertex)) = (
+        varying_fragment("split quad sum", r#"!"air.flat""#, body, decls),
+        fixture("simd_ops"),
+        fixture("rvc_simd_vertex"),
+    ) else {
+        return;
+    };
+    let a = compile(&fragment, "f", p).expect("the fragment function");
+    assert!(a.precision.contains(&note), "the fragment function");
+    for (bc, entry) in [
+        (&kernels, "simd_ballot_k"),
+        (&vertex, "simd_functions_in_a_vertex_function"),
+    ] {
+        let a = compile(bc, entry, p).unwrap_or_else(|e| panic!("{entry}: {e}"));
+        assert!(!a.precision.contains(&note), "{entry}");
+    }
+}
+
 /// A fragment function blended into an `RGB10A8_2P_XR10` attachment (premultiplied over) records
 /// `PrecisionNote::ExtendedRangeBlendSource` exactly where Metal may round the blend's source
 /// otherwise than the computed blend: a `float4` output whose lanes are not each a load

@@ -27,6 +27,8 @@
 //! cells (a cell past the render area, `SpecKey::RenderAreaWidth`/`Height`, is zeroed: Metal leaves
 //! it undefined), runs a workgroup barrier, calls the function, runs a second barrier, and stores
 //! the cells of every attachment the function may write back to the pixels inside the render area.
+//! The render area and the tile grid's width are read as data (`lower::specialized`), from the
+//! function's push fields in the wrapper's first block, so one `VkPipeline` serves every pass size.
 //! The threads share the cells round robin by thread index, each loading and storing the same
 //! pixels, so no pixel is accessed by two invocations; tiles are disjoint. An implicit access is
 //! the arena leaf of the attachment's texel at its cell's offset, contained as every threadgroup
@@ -1066,7 +1068,8 @@ pub struct TileDecl {
 }
 
 /// Declare the staged attachments' images and the render area's constants, and the tile
-/// threadgroup memory's buffer and grid width.
+/// threadgroup memory's buffer and grid width: constants the function reads as data
+/// (`lower::specialized`), which declare no specialization constant once the module is final.
 pub fn declare(mb: &mut ModuleBuilder, access: &super::AccessPlan) -> BResult<TileDecl> {
     let mut d = TileDecl::default();
     if has_memory(access) {
@@ -1473,6 +1476,9 @@ pub fn wrap_entry(cx: &mut EmitCx<'_>, mb: &mut ModuleBuilder, body: FuncId) -> 
     let slots = slots_with_images(cx)?;
     let void = mb.ty(SType::Void)?;
     let mut fb = mb.function(void)?;
+    // The render area and the tile grid's width the passes read, from their push fields
+    // (`lower::specialized`): the wrapper's own reads, as the body's are its.
+    crate::lower::specialized::emit_entry(cx, &mut fb)?;
     if cells {
         cells_pass(cx, &mut fb, Pass::Load, &slots)?;
     }

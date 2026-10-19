@@ -5,14 +5,16 @@
 //! <root>/v1/<build>/<first byte of name, hex>/<name, hex>
 //! ```
 //!
-//! - `<build>` names the build ([`Directory::build`]); a build reads only its own directory.
-//! - One directory beside the builds', the content directory ([`content`]), holds records no build
-//!   owns, named by the content they describe: the driver's pipeline cache data (It was the
-//!   build's; one record per pipeline making), named by what each making reads and read as an entry
-//!   is, with its counts (`driver.rs`); the scans bound them with the rest.
+//! - `<build>` names the build ([`Directory::build`]); a build reads only its own directory. Its
+//!   records (the driver's pipeline cache data of each making, `driver.rs`, and each compute
+//!   variant's region keys) lie there beside its entries, so a new build reads none an older one
+//!   wrote, whose compiled output may have been wrong. The directory where records of every
+//!   build lay before goes as another build's does, once nothing in it was used for
+//!   [`UNUSED_BUILD`].
 //! - An entry's name is the SHA-256 of a domain tag, the build, the entry's kind, its key and the
-//!   profile fingerprint ([`entry_name`]). The decoder the caller hands to [`Store::load`] checks
-//!   the contents against the request byte for byte; contents it refuses are removed.
+//!   profile fingerprint ([`entry_name`]); a record's has the digest of what the device enabled in
+//!   the profile's place (`driver.rs`). The decoder the caller hands to [`Store::load`] checks the
+//!   contents against the request byte for byte; contents it refuses are removed.
 //! - A writer writes a temporary file beside the entry (named for the entry, the process and a
 //!   sequence number), flushes it and renames it over the entry, so a reader never sees part of
 //!   one. A temporary file a crashed writer left is removed by the next scan that finds it old.
@@ -45,16 +47,6 @@ const LOW_WATER: u64 = 90;
 
 /// The domain tag of an entry's name.
 const NAME_TAG: &[u8] = b"metal2vulkan shader cache entry\0";
-
-/// The domain tag of the content directory's name.
-const CONTENT_TAG: &[u8] = b"metal2vulkan shader cache content\0";
-
-/// The name the content directory has among the builds' (the module docs): a build's name is a
-/// SHA-256 too, so the scans take it as one, and remove it once nothing in it was used for
-/// [`UNUSED_BUILD`].
-pub(crate) fn content() -> Hash256 {
-    Sha256::digest(CONTENT_TAG).into()
-}
 
 /// An opened cache directory: its build's directory exists and takes writes.
 #[derive(Clone, Debug)]
@@ -94,7 +86,7 @@ impl Directory {
     }
 
     /// The build this directory serves.
-    pub(super) fn build(&self) -> &Hash256 {
+    pub(crate) fn build(&self) -> &Hash256 {
         &self.build
     }
 
@@ -112,14 +104,6 @@ impl Directory {
     pub(crate) fn entry_path(&self, name: &str) -> PathBuf {
         self.build_dir().join(&name[..2]).join(name)
     }
-
-    /// The path of the record named `name` in the content directory.
-    pub(crate) fn record_path(&self, name: &str) -> PathBuf {
-        self.layout_dir()
-            .join(hex(&content()))
-            .join(&name[..2])
-            .join(name)
-    }
 }
 
 /// A directory that cannot be used, and why.
@@ -129,8 +113,8 @@ pub(crate) struct Failed {
     pub(crate) error: io::Error,
 }
 
-/// The name of the entry of `kind` under `key` for `profile`, in `build`: the hex SHA-256 of
-/// all of them after a domain tag.
+/// The name of the entry of `kind` under `key` for `profile` (a record's: the digest of what the
+/// device enabled, `driver.rs`), in `build`: the hex SHA-256 of all of them after a domain tag.
 pub(crate) fn entry_name(
     build: &Hash256,
     kind: EntryKind,
@@ -315,15 +299,15 @@ impl Store {
         self.load_at(&self.directory.entry_path(name), decode)
     }
 
-    /// The entry named `name` in the content directory, read and counted as [`Store::load`]
-    /// reads and counts a build's entry: a making's pipeline cache data, which no build owns.
-    /// `decode` takes the bytes read, which the value may keep.
-    pub(crate) fn load_content<T>(
+    /// The record named `name` (a making's pipeline cache data, a variant's region keys), read
+    /// and counted as [`Store::load`] reads and counts an entry. `decode` takes the bytes read,
+    /// which the value may keep.
+    pub(crate) fn load_record<T>(
         &self,
         name: &str,
         decode: impl FnOnce(Vec<u8>) -> Option<T>,
     ) -> Lookup<T> {
-        let path = self.directory.record_path(name);
+        let path = self.directory.entry_path(name);
         match self.read(&path) {
             Found::Absent => Lookup::Absent,
             Found::Failed => {
@@ -366,12 +350,10 @@ impl Store {
         }
     }
 
-    /// Write `bytes` as the record named `name` in the content directory, as an entry is
-    /// written, counted in no statistic but the bytes the directory holds.
+    /// Write `bytes` as the record named `name`, as an entry is written, counted in no statistic
+    /// but the bytes the directory holds.
     pub(crate) fn write_record(&self, name: &str, bytes: &[u8]) -> io::Result<u64> {
-        self.write_at(&self.directory.record_path(name), name, |out| {
-            out.write_all(bytes)
-        })
+        self.write(name, |out| out.write_all(bytes))
     }
 
     /// Read the file at `path`. A file larger than any entry is removed and found absent.

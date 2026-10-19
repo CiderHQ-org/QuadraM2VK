@@ -558,6 +558,9 @@ impl Device {
         release: HostRelease,
         heap: Option<&Heap>,
     ) -> Result<(), Error> {
+        // The pages the commands handed to the device's resolver name are theirs first: each
+        // call's encoding holds the pages its call saw (`resolver.rs`).
+        self.shared().drain_resolver(crate::resolver::Drain::Object);
         let class = match buffer.storage_mode() {
             StorageMode::Shared => MemoryClass::Shared,
             StorageMode::Managed => MemoryClass::Managed,

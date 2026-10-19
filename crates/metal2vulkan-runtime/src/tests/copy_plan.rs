@@ -516,3 +516,48 @@ fn a_host_upload_holds_a_negative_or_nan_depth_only_in_its_rows() {
         );
     }
 }
+
+/// A host upload's 16-byte blocks hold a BC7 block of the reserved mode (`compressed-texel-decode`'s
+/// scan) where a block a row the layout reads holds has a first byte of 0; a block of any mode
+/// bit, a zero byte past a block's first, and a zero block between rows hold none.
+#[test]
+fn a_host_upload_holds_a_reserved_bc7_block_only_in_its_rows() {
+    // Two rows of two blocks, 48 bytes apart: the third block of each row lies between them.
+    let layout = HostLayout {
+        row_bytes: 32,
+        rows: 2,
+        images: 1,
+        bytes_per_row: 48,
+        bytes_per_image: 96,
+    };
+    let bytes = |firsts: [u8; 6]| -> Vec<u8> {
+        firsts
+            .iter()
+            .flat_map(|&first| std::iter::once(first).chain([0; 15]))
+            .collect()
+    };
+    for at in [0, 1, 3, 4] {
+        for mode in 0..8 {
+            let mut firsts = [0x40; 6];
+            firsts[at] = 1 << mode;
+            assert!(
+                !layout.holds_zero_led_block(&bytes(firsts)),
+                "mode {mode} at {at}"
+            );
+        }
+        let mut firsts = [0x40; 6];
+        firsts[at] = 0;
+        assert!(
+            layout.holds_zero_led_block(&bytes(firsts)),
+            "reserved at {at}"
+        );
+    }
+    for at in [2, 5] {
+        let mut firsts = [0x40; 6];
+        firsts[at] = 0;
+        assert!(
+            !layout.holds_zero_led_block(&bytes(firsts)),
+            "between rows at {at}"
+        );
+    }
+}

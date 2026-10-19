@@ -42,7 +42,7 @@
 //!   does it make an image, a render pass or a framebuffer (`creation.rs`): one it needs that
 //!   nothing made before fails the command buffer `CommandBufferError::HostStepObject`.
 //! - **Each command** draws as the encoder's `draw_primitives`, `draw_indexed_primitives` or
-//!   `draw_patches` would, through the same steps (`RenderCommandEncoder::draw`; part 5c for the
+//!   `draw_patches` would, through the same steps (`RenderEncoding::draw`; part 5c for the
 //!   indexed and patch draws), into the instance the execution was encoded in, with the
 //!   encoder's state as the call found it: its depth-stencil and raster state, viewports and
 //!   scissors and amplification, and its pipeline state and bound tables where the
@@ -253,9 +253,10 @@ use super::pending_tile::TilePipelines;
 use super::shadows::InstanceShadows;
 use super::tile_memory::TileMemory;
 use super::RenderCall;
+use super::RenderCommandEncoder;
 use super::{
     index_size, Assembly, Before, DrawBuffers, DrawingState, IndexedDraw, Instance,
-    InterlockedStorage, Next, PatchDraw, PendingDraw, Piece, RenderCommandEncoder, RenderStateKind,
+    InterlockedStorage, Next, PatchDraw, PendingDraw, Piece, RenderEncoding, RenderStateKind,
     PASS_DRAW_STAGES,
 };
 use crate::amplification::Amplification;
@@ -312,7 +313,7 @@ mod ahead;
 /// The call an execution's refusals name.
 const CALL: &str = "execute_commands_in_buffer";
 
-/// The pipeline state an execution runs with (`RenderCommandEncoder::inherited_pipeline`).
+/// The pipeline state an execution runs with (`RenderEncoding::inherited_pipeline`).
 enum Inherited {
     /// Each command's own: the buffer does not inherit it.
     Commands,
@@ -352,30 +353,7 @@ impl RenderCommandEncoder {
         icb: &IndirectCommandBuffer,
         range: Range<u64>,
     ) -> Result<(), Error> {
-        self.log(|_| RenderCall::Execute(icb.clone(), range.clone()));
-        self.core.check_device(CALL, icb.device())?;
-        if !icb.is_render() {
-            if !icb.runs_nothing_in_a_pass() {
-                return Err(Error::NotImplemented(RuntimeGap::IndirectRenderCommands));
-            }
-            icb.command_range(CALL, range)?;
-            return Ok(());
-        }
-        let range = icb.command_range(CALL, range)?;
-        // An empty range runs nothing before the inherited pipeline state is looked at, as plain
-        // Metal's: an unset state, or one without the support, faults only a range that runs.
-        if range.is_empty() {
-            return Ok(());
-        }
-        // Not in a pass of several color groups (`render/color_groups.rs`).
-        self.check_group_execution()?;
-        let pipeline = match self.inherited_pipeline(CALL, icb)? {
-            Inherited::Faults => return Ok(()),
-            Inherited::Commands => None,
-            Inherited::Encoder(state) => Some(state),
-        };
-        self.degrade_repeated_start(icb, &range);
-        self.defer_execution(icb, ExecutionRange::Fixed(range), pipeline)
+        self.on(|encoding| encoding.execute_commands_in_buffer(icb, range))
     }
 
     /// `executeCommandsInBuffer:indirectBuffer:indirectBufferOffset:`: run the render commands
@@ -403,6 +381,50 @@ impl RenderCommandEncoder {
     /// inherited state made without `supportIndirectCommandBuffers`, whatever the range, `{0, 0}`
     /// included, the encoder faults as `execute_commands_in_buffer`'s does.
     pub fn execute_commands_in_buffer_indirect(
+        &mut self,
+        icb: &IndirectCommandBuffer,
+        range_buffer: &Buffer,
+        offset: u64,
+    ) -> Result<(), Error> {
+        self.on(|encoding| encoding.execute_commands_in_buffer_indirect(icb, range_buffer, offset))
+    }
+}
+
+impl RenderEncoding {
+    /// [`RenderCommandEncoder::execute_commands_in_buffer`]'s encoding.
+    pub(crate) fn execute_commands_in_buffer(
+        &mut self,
+        icb: &IndirectCommandBuffer,
+        range: Range<u64>,
+    ) -> Result<(), Error> {
+        self.log(|_| RenderCall::Execute(icb.clone(), range.clone()));
+        self.core.check_device(CALL, icb.device())?;
+        if !icb.is_render() {
+            if !icb.runs_nothing_in_a_pass() {
+                return Err(Error::NotImplemented(RuntimeGap::IndirectRenderCommands));
+            }
+            icb.command_range(CALL, range)?;
+            return Ok(());
+        }
+        let range = icb.command_range(CALL, range)?;
+        // An empty range runs nothing before the inherited pipeline state is looked at, as plain
+        // Metal's: an unset state, or one without the support, faults only a range that runs.
+        if range.is_empty() {
+            return Ok(());
+        }
+        // Not in a pass of several color groups (`render/color_groups.rs`).
+        self.check_group_execution()?;
+        let pipeline = match self.inherited_pipeline(CALL, icb)? {
+            Inherited::Faults => return Ok(()),
+            Inherited::Commands => None,
+            Inherited::Encoder(state) => Some(state),
+        };
+        self.degrade_repeated_start(icb, &range);
+        self.defer_execution(icb, ExecutionRange::Fixed(range), pipeline)
+    }
+
+    /// [`RenderCommandEncoder::execute_commands_in_buffer_indirect`]'s encoding.
+    pub(crate) fn execute_commands_in_buffer_indirect(
         &mut self,
         icb: &IndirectCommandBuffer,
         range_buffer: &Buffer,
@@ -630,6 +652,7 @@ impl RenderCommandEncoder {
             rate_map: self.rate_map.clone(),
             residency: self.residency.clone(),
             tile_imageblock: self.tile_imageblock,
+            robust_index_fetch: self.robust_index_fetch(),
             shape: self.current.shape.clone(),
             compatible: Arc::clone(&self.current.compatible),
             tile_memory: self.tile_memory.arguments(),
@@ -761,6 +784,9 @@ struct Snapshot {
     rate_map: Option<RateMappedPass>,
     residency: Residency,
     tile_imageblock: bool,
+    /// Whether the encoder's indexed draws took the robust index fetch (`render.rs`): the
+    /// commands' draws take it as the call's did.
+    robust_index_fetch: bool,
     shape: PassShape,
     compatible: Arc<RenderPassObject>,
     /// The encoder's tile threadgroup arguments (`render/tile_memory.rs`), over no buffer.
@@ -775,7 +801,7 @@ struct Snapshot {
     geometry_writes: GeometryWrites<ResourceKey>,
     /// The tracked uses of the encoder's draws before the call, in the stages a draw runs in
     /// inside its pass: an emulated mesh command's dispatches, recorded before the pass, must not
-    /// touch them but as Metal orders them (`RenderCommandEncoder::drawn_before`).
+    /// touch them but as Metal orders them (`RenderEncoding::drawn_before`).
     drawn: Vec<Use<ResourceKey>>,
     /// What the encoder's draws before the call noted of the bytes the pass's fragment stages
     /// read and wrote (`render/pass_start_reads.rs`), which the commands' draws start from.
@@ -1155,7 +1181,7 @@ struct Run {
     framed: Vec<(usize, Target)>,
     /// What records before it, after the runs before it, in order: the dispatches of its first
     /// draw, an emulated mesh command's behind its barrier whose compute work uses what an
-    /// earlier draw's stages before its fragments touched (`RenderCommandEncoder::draw_resident`).
+    /// earlier draw's stages before its fragments touched (`RenderEncoding::draw_resident`).
     /// A command's barrier begins every run that has them.
     before: Vec<Before>,
 }
@@ -1546,7 +1572,7 @@ fn reads_vertex_stride(pipeline: &RenderPipelineState, index: u32) -> bool {
 /// it. The command buffer holds them until it completes.
 pub(crate) type SettledDraw = (Arc<RenderVariant>, Option<Arc<RawPipeline>>);
 
-impl RenderCommandEncoder {
+impl RenderEncoding {
     /// Make, into `made`, what a command's draw of `pipeline` under the encoder's state (an
     /// execution's at its call, `RenderExecution::settle`) compiles at the host step: for each
     /// primitive type its input primitive topology class holds (every type for the unspecified
@@ -1930,7 +1956,7 @@ impl RenderExecution {
         // left begins and ends there, empty.
         encoder.visibility.end(raw, encoder.current.draws);
         encoder.visibility.close_spares(raw, encoder.current.draws);
-        let RenderCommandEncoder {
+        let RenderEncoding {
             core,
             earlier,
             current,
@@ -2026,12 +2052,13 @@ impl RenderExecution {
         (draws, visibility): (vk::CommandBuffer, Visibility),
         (storage, layout, residency): (PassStorage, PassLayout, &Residency),
         forms: BufferForms,
-    ) -> RenderCommandEncoder {
+    ) -> RenderEncoding {
         let snapshot = &self.snapshot;
         // The draws use only the shadowed textures the call gathered.
         let mut shadows = InstanceShadows::default();
         shadows.add(&self.shadows, &[]);
-        RenderCommandEncoder {
+        RenderEncoding {
+            robust_index_fetch: snapshot.robust_index_fetch,
             core,
             earlier: Vec::new(),
             current: Instance {
@@ -2160,7 +2187,7 @@ impl RenderExecution {
     }
 
     /// Settle at commit, through an encoder of `core` that records nothing, what the host step's
-    /// draws of the commands compile ([`RenderCommandEncoder::settle_draws`]) for each state a
+    /// draws of the commands compile ([`RenderEncoding::settle_draws`]) for each state a
     /// record may name, into `made`: the encoder's where the buffer inherits it, else each of
     /// `states`, those made with `supportIndirectCommandBuffers` alive at the commit; over the
     /// pass's `storage`, with `residency`, the command buffer's. Nothing where the buffer holds
@@ -2192,7 +2219,7 @@ impl RenderExecution {
         for pipeline in named {
             encoder.settle_draws(pipeline, made);
         }
-        let RenderCommandEncoder { core, .. } = encoder;
+        let RenderEncoding { core, .. } = encoder;
         core
     }
 

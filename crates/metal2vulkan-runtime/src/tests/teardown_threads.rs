@@ -59,8 +59,8 @@ use crate::pipeline::objects::{shader_module, words_digest};
 use crate::pipeline::pool::held;
 use crate::trails::blocked;
 use crate::{
-    Buffer, ClearColor, CommandBufferStatus, DebugMessage, Device, DeviceKind, DeviceOptions,
-    LoadAction, MessageSeverity, MessageSink, PipelineOptions, RenderPassDescriptor,
+    Buffer, ClearColor, CommandBufferStatus, DebugMessage, Device, DeviceChecksOptions, DeviceKind,
+    DeviceOptions, LoadAction, MessageSeverity, MessageSink, PipelineOptions, RenderPassDescriptor,
     RenderPipelineState, ResourceOptions, ShaderCacheOptions, Size, StoreAction, Submission,
     TextureDescriptor,
 };
@@ -205,6 +205,12 @@ fn watched(cache: &Path) -> (Device, Ending) {
         },
         layers: validation_layer().into_iter().collect(),
         messages: Some(sink),
+        // Every check of the driver runs as the device is made: no checks thread holds the
+        // device, so each case's holders are its own.
+        device_checks: DeviceChecksOptions {
+            wait: true,
+            ..DeviceChecksOptions::default()
+        },
         ..DeviceOptions::default()
     };
     // The options' share of the sink goes as this returns: the instance's is the last.

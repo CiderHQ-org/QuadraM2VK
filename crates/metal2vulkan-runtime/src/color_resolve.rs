@@ -13,8 +13,9 @@
 //! the pass, as does, under either value, a format without a closed rule at its count (the 16-bit
 //! float, `RG11B10Float` and `RGB9E5Float` formats past 4 samples, and a format no rule covers):
 //! Metal's own resolve where the fact holds ([`average_is_metals`]: MoltenVK resolves every such
-//! format by Metal's multisample resolve store action), elsewhere a recorded near-equivalent,
-//! announced as `device-rounded-resolve`.
+//! format by Metal's multisample resolve store action; the device checks the fact over the
+//! formats of Metal's rules, and a format without them takes it only where the tables hold it
+//! too), elsewhere a recorded near-equivalent, announced as `device-rounded-resolve`.
 //!
 //! The choice is made with the attachment's resolve ([`exact`], `resolve.rs`), so the pass's
 //! shape (`render_target.rs`) leaves such a resolve out of its subpass from its first instance:
@@ -111,18 +112,19 @@ pub(super) fn exact(device: &Device, format: Format, samples: u32) -> Option<Col
     }
     // Rules that hold at that count: the float formats' at 2 and 4 samples only.
     let rules = ColorResolveFormat::of(format).filter(|rules| rules.resolves(samples))?;
-    (samples > 1 && !average_is_metals(device, samples)).then_some(rules)
+    (samples > 1 && !average_is_metals(device, format, samples)).then_some(rules)
 }
 
-/// Whether `device`'s own `AVERAGE` resolve of a color attachment of `samples` samples writes
-/// Metal's resolve, whatever its format: `DriverFact::ColorResolveAverageIsMetals`, at a count
-/// Apple's GPUs make (MoltenVK's resolve is Metal's multisample resolve store action).
-pub(super) fn average_is_metals(device: &Device, samples: u32) -> bool {
+/// Whether `device`'s own `AVERAGE` resolve of a color attachment of `format` at `samples`
+/// writes Metal's resolve: `DriverFact::ColorResolveAverageIsMetals`, at a count Apple's GPUs
+/// make (MoltenVK's resolve is Metal's multisample resolve store action). The device's check
+/// compares the formats of Metal's rules ([`from_planes`], `device_checks/resolve_average.rs`),
+/// whose answer is read as it stands now (`Device::driver_fact`); a format without such rules at
+/// the count, which no check compares, takes the fact only where the curated tables hold it too.
+pub(super) fn average_is_metals(device: &Device, format: Format, samples: u32) -> bool {
     samples <= METAL_SAMPLES
-        && device
-            .properties()
-            .driver_facts
-            .contains(&DriverFact::ColorResolveAverageIsMetals)
+        && device.driver_fact(DriverFact::ColorResolveAverageIsMetals)
+        && (from_planes(format, samples) || device.shared().average_resolve_by_tables)
 }
 
 /// The exact resolve of the color attachment `source`, where the runtime resolves it so: [`exact`]

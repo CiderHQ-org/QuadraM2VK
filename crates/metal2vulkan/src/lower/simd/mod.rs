@@ -469,7 +469,7 @@ fn regroups_vertices(profile: &crate::device::DeviceProfile) -> bool {
 /// (`SubgroupLocalInvocationId`, or `LocalInvocationIndex` in the `Emulated` tier), the
 /// `SubgroupSize` builtin a divergent multiply-add reads on the `PartialFragment` tier, the
 /// emulated tier's thread count and scratch, and outside that tier the workgroup word a predicated
-/// kernel's loops vote in.
+/// kernel's loops and threadgroup slice copies vote in.
 #[derive(Clone, Debug, Default)]
 pub struct Declared {
     pub lane: Option<GlobalId>,

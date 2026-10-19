@@ -463,12 +463,13 @@ pub(crate) fn twin_plan(
 
 impl Device {
     /// How a texture of `layout` decodes into a twin on this device: a BC1 to BC5 format of one
-    /// sample whose decode the driver is not measured to make as Metal does; `None` elsewhere.
+    /// sample whose decode the device does not take as Metal's (its check's answer or its
+    /// driver's row, as it holds as the texture is made, `Device::driver_fact`); `None` elsewhere.
+    /// The texture keeps what this answers for it.
     fn twin_decode(&self, layout: &TextureLayout) -> Option<BlockDecode> {
         let decode = BlockDecode::of(layout.pixel_format)?;
         let fact = block_decode_fact(layout.pixel_format)?;
-        let measured = self.properties().driver_facts.contains(&fact);
-        (!measured && layout.samples == 1).then_some(decode)
+        (!self.driver_fact(fact) && layout.samples == 1).then_some(decode)
     }
 
     /// The texels of the decoded twin of an ASTC texture of `decode` on this device: an sRGB
@@ -659,9 +660,10 @@ impl Device {
             let placed =
                 |bytes: Option<u64>| bytes.map_or_else(String::new, |n| format!(", {n} placed"));
             let why = format!(
-                "the device's driver is not measured to decode the format's blocks as Metal \
-                 does{fact}: its samples read a decoded twin of {texels} bytes of {:?} texels{} \
-                 beside its {blocks} bytes of blocks{}, decoded after each write into it",
+                "the device's driver is neither checked nor measured to decode the format's \
+                 blocks as Metal does{fact}: its samples read a decoded twin of {texels} bytes \
+                 of {:?} texels{} beside its {blocks} bytes of blocks{}, decoded after each \
+                 write into it",
                 decoded.decode.texel_format(),
                 placed(decoded.placed()),
                 placed(image),

@@ -26,6 +26,9 @@ mod blit_holds;
 mod blit_plan;
 mod buffer_texture;
 mod capabilities;
+#[cfg(any(m2v_gpu, m2v_cpu_icd))]
+mod captured_answers;
+mod captured_keys;
 mod color_reformat;
 mod command_buffer;
 #[cfg(any(m2v_gpu, m2v_cpu_icd))]
@@ -44,6 +47,7 @@ mod descriptor_arena;
 #[cfg(any(m2v_gpu, m2v_cpu_icd))]
 mod detach_lost;
 mod device;
+mod device_checks;
 #[cfg(any(m2v_gpu, m2v_cpu_icd))]
 mod dispatch_pending;
 mod driver_defects;
@@ -94,6 +98,7 @@ mod keeper;
 mod kept_barriers;
 #[cfg(any(m2v_gpu, m2v_cpu_icd))]
 mod kept_images;
+mod learned;
 mod left;
 mod linear_attachment;
 mod linear_plan;

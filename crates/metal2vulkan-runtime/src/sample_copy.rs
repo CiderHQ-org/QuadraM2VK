@@ -32,14 +32,14 @@
 //! them and a colour texture of another format through a view, not its broken temporary buffer.
 //! The plane draws are exact; the bits draws read each sample as the lanes' readbacks do; the
 //! `FragDepth` draw is exact only where the driver stores every depth unchanged
-//! (`depth_copy::copies_exactly`: lavapipe's measured releases). Elsewhere a copy into a 32-bit
-//! float depth runs as a near-equivalent, announced once (`drawn-depth-copy`, `depth_copy::drawn`):
-//! its reason names the values the driver's fragment depth is measured to change (MoltenVK,
-//! NVIDIA's; the orchestrator's ruling of 2026-10-07), or, on a driver not measured, the values
-//! Vulkan leaves to it (outside `[0, 1]`, denormals, -0). Refused as before, `Unsupported` naming
-//! `Feature::Format` and the missing maintenance8 or the defect: every copy of a 16-bit depth,
-//! whose conversions the draws would make (unmeasured), a depth or stencil source the draws
-//! cannot sample, and a destination they cannot render to.
+//! (`depth_copy::copies_exactly`, as the device's check finds it: lavapipe's). Elsewhere a copy
+//! into a 32-bit float depth runs as a near-equivalent, announced once (`drawn-depth-copy`,
+//! `depth_copy::drawn`): its reason names the values the driver's fragment depth is measured to
+//! change (MoltenVK, NVIDIA's; the orchestrator's ruling of 2026-10-07), or, on a driver not
+//! measured, the values Vulkan leaves to it (outside `[0, 1]`, denormals, -0). Refused as before,
+//! `Unsupported` naming `Feature::Format` and the missing maintenance8 or the defect: every copy of
+//! a 16-bit depth, whose conversions the draws would make (unmeasured), a depth or stencil source
+//! the draws cannot sample, and a destination they cannot render to.
 //!
 //! Refused, typed, naming `Feature::Format`: a copy of a combined format's two aspects (not
 //! implemented); on a device whose copies go by draws, what the draws cannot copy (above); and
@@ -49,7 +49,7 @@ use super::blit::TRANSFER;
 use super::command_buffer::CommandBuffer;
 use super::copy_plan::ImageRegion;
 use super::depth_copy::{self, DepthDraw, Drawn};
-use super::depth_stencil_scratch::{colour_copies_refused, colour_image, colour_twin};
+use super::depth_stencil_scratch::{colour_copies_refused, colour_image, colour_twin, copies_risk};
 use super::error::{internal, Error};
 use super::image_plan::{sample_count, ImagePlan};
 use super::render_pass::Target;
@@ -217,7 +217,10 @@ pub(super) fn plan(
         from.aspect
     };
     match colour_copies_refused(device, Feature::Format, aspects) {
-        None => by_copies(maker, regions, from, to, samples),
+        None => {
+            maker.took(copies_risk(aspects));
+            by_copies(maker, regions, from, to, samples)
+        }
         Some(refused) => by_draws(maker, regions, from, to, samples, refused),
     }
 }

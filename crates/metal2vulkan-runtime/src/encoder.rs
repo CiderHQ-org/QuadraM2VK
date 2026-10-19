@@ -42,11 +42,14 @@ use super::residency::Residency;
 use super::resource::ResourceKey;
 use super::retained::Retained;
 use super::row_copies::RowCopies;
-use super::shadow::{CopyCause, ShadowCopy, ShadowSync, ShadowUse, Step, Within};
+use super::shadow::{
+    CopyCause, ShadowCopies, ShadowCopy, ShadowSync, ShadowTarget, ShadowUse, Step, Within,
+};
 use super::shadow_copy_in::CopyIn;
 use super::shadow_merge::ShadowMerge;
 use super::sparse::encoder::SparseUpdate;
 use super::texture::decoded_twin::TwinWrite;
+use super::texture::heap_tiled_scratch::{ScratchNeed, TiledScratch};
 use super::texture::kept_image::KeptLease;
 use super::tracker::{Barrier, EncoderUses, Summary, Use, UseRange};
 use super::used_resources::EncoderKind;
@@ -219,6 +222,9 @@ pub(super) struct EncoderCore {
     /// Its holds on the kept images its merges took from its queue (`texture/kept_image.rs`):
     /// no keep of another encoder takes one before this one ends, its merges done.
     kept_leases: Vec<KeptLease>,
+    /// The scratch its staged tiled moves go through, its queue's as it last took it, the
+    /// largest (`texture/heap_tiled_scratch.rs`); the command buffer holds every one it took.
+    tiled_scratch: Option<Arc<TiledScratch>>,
     /// The heaps its commands used through what the encoder made resident; `end` hands them,
     /// and those of `keys`, to the command buffer, whose commit marks them used.
     heaps: Vec<Heap>,
@@ -246,6 +252,9 @@ pub(super) struct EncoderCore {
     /// It encodes an ended encoder's calls again, its command buffer committed (`replay.rs`):
     /// its commands take what they use without holding it (`Rebinds::pin`).
     replaying: bool,
+    /// A captured render encoder's, on the device's resolver ([`open_captured`](Self::open_captured)):
+    /// its end leaves the command buffer's open encoder to the program's encoder.
+    captured: bool,
     _not_sync: PhantomData<std::cell::Cell<()>>,
 }
 
@@ -291,9 +300,39 @@ impl EncoderCore {
         call: &'static str,
         ordered: bool,
     ) -> Result<EncoderCore, Error> {
+        EncoderCore::open_as(command_buffer, Some(call), ordered)
+    }
+
+    /// A captured render encoder's core, opened on the device's resolver (`render/captured.rs`):
+    /// the program's call refused what [`open`](Self::open) refuses, marked the command buffer's
+    /// encoder open and counted the encoder, and this core leaves that state to the program's
+    /// encoder at its open, its end and its drop.
+    pub(super) fn open_captured(
+        command_buffer: &CommandBuffer,
+        ordered: bool,
+    ) -> Result<EncoderCore, Error> {
+        EncoderCore::open_as(command_buffer, None, ordered)
+    }
+
+    /// [`open`](Self::open) for Metal's `call`, or [`open_captured`](Self::open_captured).
+    fn open_as(
+        command_buffer: &CommandBuffer,
+        call: Option<&'static str>,
+        ordered: bool,
+    ) -> Result<EncoderCore, Error> {
+        // An encoder at the call follows what the device's resolver was handed: its commands, and
+        // what it reads, come after theirs (`resolver.rs`).
+        if call.is_some() {
+            command_buffer
+                .device()
+                .shared()
+                .drain_resolver(crate::resolver::Drain::Encoder);
+        }
         let mut state = command_buffer.state();
-        if let Some(problem) = state.refusal() {
-            return Err(invalid(call, problem));
+        if let Some(call) = call {
+            if let Some(problem) = state.refusal() {
+                return Err(invalid(call, problem));
+            }
         }
         // The pool's primary begun ahead where it holds one (`spares.rs`).
         let (raw, begun) = command_buffer.encoder_primary(&mut state)?;
@@ -310,17 +349,19 @@ impl EncoderCore {
         }
         // The first encoder of a timed command buffer writes its start first (`gpu_time.rs`).
         command_buffer.open_start(&mut state, raw);
-        state.encoder_open = true;
+        let captured = call.is_none();
+        if !captured {
+            state.encoder_open = true;
+            state.at_call_work = true;
+        }
         drop(state);
-        command_buffer
-            .device()
-            .shared()
-            .identifiers
-            .encoder_opened();
+        if !captured {
+            shared.identifiers.encoder_opened();
+        }
         Ok(EncoderCore {
             open: OpenGuard {
                 command_buffer: command_buffer.clone(),
-                ended: false,
+                ended: captured,
             },
             raw,
             recorded: false,
@@ -336,6 +377,7 @@ impl EncoderCore {
             attachment_shadows: Vec::new(),
             first_copies: Vec::new(),
             kept_leases: Vec::new(),
+            tiled_scratch: None,
             heaps: Vec::new(),
             holds: Holds::new(command_buffer.device()),
             taken: Taken::default(),
@@ -345,6 +387,7 @@ impl EncoderCore {
             aliased_uses: Vec::new(),
             id: CORES.fetch_add(1, Ordering::Relaxed),
             replaying: false,
+            captured,
             _not_sync: PhantomData,
         })
     }
@@ -414,6 +457,7 @@ impl EncoderCore {
             attachment_shadows: Vec::new(),
             first_copies: Vec::new(),
             kept_leases: Vec::new(),
+            tiled_scratch: None,
             heaps: Vec::new(),
             holds: Holds::new(command_buffer.device()),
             taken: Taken::default(),
@@ -423,6 +467,7 @@ impl EncoderCore {
             aliased_uses: Vec::new(),
             id: CORES.fetch_add(1, Ordering::Relaxed),
             replaying: false,
+            captured: false,
             _not_sync: PhantomData,
         })
     }
@@ -980,6 +1025,14 @@ impl EncoderCore {
         let device = self.device().clone();
         let aliased = self.aliased(uses);
         let uses = aliased.as_deref().unwrap_or(uses);
+        // Every staged tiled texture's moves and merges go through the encoder's scratch.
+        let need = (shadows.iter())
+            .filter_map(|shadow| match shadow.copies.target() {
+                Some(ShadowTarget::Tiled { tiles, .. }) => Some(tiles.needs()),
+                _ => None,
+            })
+            .reduce(ScratchNeed::max);
+        let scratch = need.map(|need| self.tiled_scratch(need)).transpose()?;
         // The kept images its merges take are held to the encoder's end, those of a refused
         // command let go of here.
         let images = self.open.command_buffer.command_queue().kept_images();
@@ -988,17 +1041,21 @@ impl EncoderCore {
         let planned = self
             .shadows
             .before(shadows, uses, |copies, two_ways, area| {
-                let (merge, lease) = ShadowMerge::new(&device, copies, (two_ways, area), images)?;
+                let both = (images, scratch.as_ref());
+                let (merge, lease) = ShadowMerge::new(&device, copies, (two_ways, area), both)?;
                 leases.extend(lease);
                 Ok(Arc::new(merge))
             });
-        let copies = match planned {
+        let mut copies = match planned {
             Ok(copies) => copies,
             Err(refused) => {
                 self.kept_leases.truncate(held);
                 return Err(refused);
             }
         };
+        for copy in &mut copies {
+            copy.scratch = self.scratch_of(copy);
+        }
         self.count_shadow_copies(&copies);
         for copy in &copies {
             if let Step::Keep(merge) = &copy.step {
@@ -1009,6 +1066,35 @@ impl EncoderCore {
             }
         }
         Ok(copies)
+    }
+
+    /// The scratch for staged tiled moves holding `need` (`texture/heap_tiled_scratch.rs`): the
+    /// encoder's last where that holds it, else its queue's, grown to hold it where it does not,
+    /// which the command buffer holds until it completes. A queue's scratch only grows, so the
+    /// last holds every one the encoder took before. Refused as `new_buffer` refuses it.
+    fn tiled_scratch(&mut self, need: ScratchNeed) -> Result<Arc<TiledScratch>, Error> {
+        let last = self.tiled_scratch.as_ref();
+        if let Some(scratch) = last.filter(|scratch| scratch.holds(need)) {
+            return Ok(Arc::clone(scratch));
+        }
+        let queue = self.open.command_buffer.command_queue();
+        let scratch = Arc::new(queue.tiled_scratches().take(self.device(), need)?);
+        self.retain_shared(Arc::clone(&scratch) as Arc<dyn Any + Send + Sync>);
+        self.tiled_scratch = Some(Arc::clone(&scratch));
+        Ok(scratch)
+    }
+
+    /// The scratch `copy` goes through: its own, else the encoder's last where it is a staged
+    /// tiled heap texture's copy in or back, which holds every such texture the encoder planned
+    /// (`plan_shadows`); `None` for any other.
+    fn scratch_of(&self, copy: &ShadowCopy) -> Option<Arc<TiledScratch>> {
+        let staged = matches!(copy.copies.target(), Some(ShadowTarget::Tiled { .. }))
+            && matches!(copy.step, Step::Into | Step::Back);
+        match (&copy.scratch, staged) {
+            (Some(scratch), _) => Some(Arc::clone(scratch)),
+            (None, true) => self.tiled_scratch.clone(),
+            (None, false) => None,
+        }
     }
 
     /// Note that the encoder's pass takes the shadowed texture `key` as an attachment.
@@ -1022,9 +1108,10 @@ impl EncoderCore {
     /// their copies in and back of buffers' textures' images move, each copy in's texels by why
     /// it is made and what holds its truth (`WorkCounts::shadow_texels_first_copied_in` and kin),
     /// those copies in of what changed within a rectangle alone
-    /// (`WorkCounts::bounded_shadow_copies`), and the keeps and merges whose copies of the shadow
-    /// into the scratch dispatch (`WorkCounts::shadow_merge_copies_dispatched`), and the texels the
-    /// keeps copy (`WorkCounts::shadow_texels_kept`).
+    /// (`WorkCounts::bounded_shadow_copies`), the keeps and merges whose copies of the shadow into
+    /// the scratch dispatch (`WorkCounts::shadow_merge_copies_dispatched`), the texels the keeps
+    /// copy (`WorkCounts::shadow_texels_kept`), and the copies, keeps and merges of tiled heap
+    /// textures through their views (`WorkCounts::heap_tiled_view_moves`).
     fn count_shadow_copies(&self, copies: &[ShadowCopy]) {
         let texels_in = copies.iter().map(ShadowCopy::texels_in).sum();
         let texels_back = copies.iter().map(ShadowCopy::texels_back).sum();
@@ -1059,6 +1146,12 @@ impl EncoderCore {
             .sum();
         if kept > 0 {
             counts.shadow_texels_kept(kept);
+        }
+        let through_views = (copies.iter())
+            .filter(|copy| matches!(copy.copies.target(), Some(ShadowTarget::TiledWords { .. })))
+            .count();
+        if through_views > 0 {
+            counts.heap_tiled_view_moves(through_views);
         }
     }
 
@@ -1098,7 +1191,8 @@ impl EncoderCore {
     /// ([`ShadowRun`]) between a barrier from everything before its first copy and one to
     /// everything after its last. A copy back the device runs faster as a dispatch is that
     /// dispatch (`shadow_copy_back.rs`), a merged texture's copy in and its keep are one dispatch
-    /// at the copy in where the device takes it (`shadow_copy_in.rs`), and the rows a copy back
+    /// at the copy in where the device takes it (`shadow_copy_in.rs`) or the texture is a tiled
+    /// heap texture's through its views (`texture/heap_tiled_words.rs`), and the rows a copy back
     /// moves out of a staging buffer are a copy of rows (`row_copies.rs`); the command buffer
     /// retains each until it completes.
     pub(super) fn shadow_copies(&mut self, copies: &[ShadowCopy]) {
@@ -1110,19 +1204,35 @@ impl EncoderCore {
             if taken.contains(&i) {
                 continue;
             }
+            // A staged tiled copy in or back goes through the encoder's scratch.
+            let given;
+            let copy = match (&copy.scratch, self.scratch_of(copy)) {
+                (None, Some(scratch)) => {
+                    given = ShadowCopy {
+                        scratch: Some(scratch),
+                        ..copy.clone()
+                    };
+                    &given
+                }
+                _ => copy,
+            };
             if let Some((keep, both, uses)) = keep_with_copy_in(&device, copies, i) {
                 taken.push(keep);
                 let record = |device: &Vk, raw: vk::CommandBuffer| {
                     // SAFETY: the encoder's command buffer is recording outside a render pass;
-                    // its commands retain the shadowed texture (and its view), the merge's scratch
-                    // and the dispatch until it completes, and every image rests in the `GENERAL`
-                    // layout.
+                    // its commands retain the shadowed texture (and its views), the merge's
+                    // scratch and the dispatch until it completes, and every image rests in the
+                    // `GENERAL` layout.
                     unsafe { both.record(device, raw) }
                 };
-                let stages = vk::PipelineStageFlags2::COMPUTE_SHADER;
+                let stages = both.stages();
                 self.shadow_command(&mut run, (stages, &uses, false), record);
-                device.shared().counts.shadow_copy_in_dispatched();
-                self.retain(both);
+                // A tiled heap texture's merge, which holds the dispatch, is retained with its
+                // keep (`plan_shadows`).
+                if let CopyInKeep::Words(both) = both {
+                    device.shared().counts.shadow_copy_in_dispatched();
+                    self.retain(both);
+                }
                 continue;
             }
             // A shadow takes the view a dispatch reads on a device that dispatches alone.
@@ -1215,6 +1325,18 @@ impl EncoderCore {
         let raw = device.shared().vk();
         let mut run = ShadowRun::after_barrier();
         for copy in copies {
+            // A staged tiled copy in or back goes through the encoder's scratch.
+            let given;
+            let copy = match (&copy.scratch, self.scratch_of(copy)) {
+                (None, Some(scratch)) => {
+                    given = ShadowCopy {
+                        scratch: Some(scratch),
+                        ..copy.clone()
+                    };
+                    &given
+                }
+                _ => copy,
+            };
             let rows = copy.staged_back(&device);
             let uses = copy.uses_with(rows.as_ref());
             if self.skips(uses.iter().map(|used| used.key)) {
@@ -1414,6 +1536,7 @@ impl EncoderCore {
             fails_command_buffer,
             faults,
             twin_writes,
+            captured,
             ..
         } = self;
         ended.push(raw);
@@ -1490,7 +1613,7 @@ impl EncoderCore {
                 false => Vec::new(),
             };
             state.end_encoder(
-                &open.command_buffer,
+                (&open.command_buffer, captured),
                 Recorded {
                     encoder,
                     raws,
@@ -1718,18 +1841,68 @@ fn meets(earlier: &[Use<ResourceKey>], later: &[Use<ResourceKey>]) -> bool {
     })
 }
 
+/// A copy in and its texture's keep after it, taken together as one dispatch
+/// ([`keep_with_copy_in`]).
+enum CopyInKeep {
+    /// A merged texture's over a buffer's rows (`shadow_copy_in.rs`).
+    Words(CopyIn),
+    /// A tiled heap texture's through the views of its shadow, `ShadowCopies`, which its merge
+    /// records (`ShadowMerge::record_tiled_keep_in`).
+    Tiled(Arc<ShadowMerge>, Arc<ShadowCopies>),
+    /// A staged tiled heap texture's through its merge's scratch, the bytes its copy in moves
+    /// copied on into the kept part (`ShadowMerge::record_staged_keep_in`).
+    Staged(Arc<ShadowMerge>, Arc<ShadowCopies>),
+}
+
+impl CopyInKeep {
+    /// Record the dispatch into `command_buffer`.
+    ///
+    /// # Safety
+    ///
+    /// `command_buffer` is recording, outside a render pass; the shadow, its views, the bytes
+    /// and the merge's scratch are live until it completes, and the shadow is in the `GENERAL`
+    /// layout.
+    unsafe fn record(&self, device: &Vk, command_buffer: vk::CommandBuffer) {
+        // SAFETY: the caller's contract.
+        unsafe {
+            match self {
+                CopyInKeep::Words(both) => both.record(device, command_buffer),
+                CopyInKeep::Tiled(merge, copies) => {
+                    merge.record_tiled_keep_in(device, command_buffer, copies);
+                }
+                CopyInKeep::Staged(merge, copies) => {
+                    merge.record_staged_keep_in(device, command_buffer, copies);
+                }
+            }
+        }
+    }
+
+    /// The stages it runs in: a dispatch's, or a staged move's copies and dispatch.
+    fn stages(&self) -> vk::PipelineStageFlags2 {
+        match self {
+            CopyInKeep::Words(_) | CopyInKeep::Tiled(..) => vk::PipelineStageFlags2::COMPUTE_SHADER,
+            CopyInKeep::Staged(..) => {
+                vk::PipelineStageFlags2::TRANSFER | vk::PipelineStageFlags2::COMPUTE_SHADER
+            }
+        }
+    }
+}
+
 /// The dispatch that takes the copy in at `copies[i]` and its texture's keep after it together
-/// (`ShadowMerge::keep_in`, `shadow_copy_in.rs`), where `device` takes one: the keep's place in
-/// `copies`, the dispatch and its uses. The copies between them are of other textures' shadows,
-/// so the keep's texels are the copy in's wherever it is recorded. `None` where the two stay
-/// apart.
+/// (`ShadowMerge::keep_in`, `shadow_copy_in.rs`; a tiled heap texture's through its views,
+/// `ShadowMerge::tiled`, or through its encoder's scratch, `ShadowMerge::keeps_staged_copy_in`),
+/// where `device` takes one: the keep's place in `copies`, the dispatch
+/// and its uses. The copies between them are of other textures' shadows, so the keep's texels
+/// are the copy in's wherever it is recorded. `None` where the two stay apart.
 fn keep_with_copy_in(
     device: &Device,
     copies: &[ShadowCopy],
     i: usize,
-) -> Option<(usize, CopyIn, Vec<Use<ResourceKey>>)> {
+) -> Option<(usize, CopyInKeep, Vec<Use<ResourceKey>>)> {
     let copy = &copies[i];
-    let region = copy.copied_region()?;
+    if !matches!(copy.step, Step::Into) {
+        return None;
+    }
     let shadow = copy.copies.shadow_key;
     let (j, merge) = copies
         .iter()
@@ -1740,6 +1913,22 @@ fn keep_with_copy_in(
             Step::Keep(merge) => Some((j, merge)),
             _ => None,
         })?;
+    if merge.staged() {
+        // A staged keep moves the image's elements back unless they are the bytes the copy in
+        // moved.
+        if !merge.keeps_staged_copy_in(&copy.copies) {
+            return None;
+        }
+        let uses = merge.staged_keep_in_uses(&copy.copies);
+        let staged = CopyInKeep::Staged(Arc::clone(merge), Arc::clone(&copy.copies));
+        return Some((j, staged, uses));
+    }
+    let uses = merge.keep_in_uses(&copy.copies);
+    if merge.tiled() {
+        let tiled = CopyInKeep::Tiled(Arc::clone(merge), Arc::clone(&copy.copies));
+        return Some((j, tiled, uses));
+    }
+    let region = copy.copied_region()?;
     let both = merge.keep_in(device, &copy.copies, &region)?;
-    Some((j, both, merge.keep_in_uses(&copy.copies)))
+    Some((j, CopyInKeep::Words(both), uses))
 }

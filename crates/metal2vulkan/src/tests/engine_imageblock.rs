@@ -21,6 +21,9 @@
 //! - An integer slice names no signedness: its class is the numeric type of the format bound at
 //!   the slot, the slot's storage-format input on every profile, which a formatless choice keeps
 //!   and the binder then keys; with a signed format, it is written signed.
+//! - A slice whose operands the threadgroup holds alike is copied by the whole threadgroup, its
+//!   operands published from under a one-thread branch; one in a loop under the branch keeps the
+//!   one-thread copy, from its first cell on every pass.
 //! - The binder specializes the extent, refuses an unset or unanswerable one, charges the
 //!   imageblock to `maxComputeSharedMemorySize` after the threadgroup regions, and plans a narrow
 //!   slice against any bound format: its texel is the element's lanes and zeros.
@@ -544,6 +547,152 @@ fn array_slices_land_at_their_layer() {
             ran += 1;
         }
         assert!(ran > 0, "{fixture}");
+    }
+}
+
+/// A 4x4 threadgroup stages `float(x + 4 y)` in each cell of its 4x4 imageblock, then writes the
+/// 3x2 block at the imageblock's origin at `4 · threadgroup_position + (1 + 4 k, 2)` for each
+/// `k < copies` (a loop when `copies > 1`): its first thread does where `guarded`, else every
+/// thread (each writing the same block).
+fn group_slice_kernel(guarded: bool, copies: u32) -> String {
+    let branch = if guarded {
+        "  %first = icmp eq <2 x i16> %lid, zeroinitializer\n  %all = call i1 @air.all.v2i1(<2 x i1> %first)\n  br i1 %all, label %write, label %done"
+    } else {
+        "  br label %write"
+    };
+    let body = if copies > 1 {
+        format!(
+            r#"  br label %copy
+
+copy:
+  %k = phi i32 [ 0, %write ], [ %k1, %copy ]
+  %dx = mul i32 %k, 4
+  %d0 = add i32 %dx, 1
+  %d = insertelement <2 x i32> <i32 0, i32 2>, i32 %d0, i64 0
+  %at = add <2 x i32> %base, %d
+  call void @air.write_imageblock_slice_to_texture_2d.f32(ptr addrspace(1) %out, ptr addrspace(4) %origin, i1 true, <2 x i16> zeroinitializer, <2 x i16> <i16 3, i16 2>, <2 x i32> %at, i32 0, i1 false, i32 2)
+  %k1 = add i32 %k, 1
+  %again = icmp ult i32 %k1, {copies}
+  br i1 %again, label %copy, label %done"#
+        )
+    } else {
+        r#"  %at = add <2 x i32> %base, <i32 1, i32 2>
+  call void @air.write_imageblock_slice_to_texture_2d.f32(ptr addrspace(1) %out, ptr addrspace(4) %origin, i1 true, <2 x i16> zeroinitializer, <2 x i16> <i16 3, i16 2>, <2 x i32> %at, i32 0, i1 false, i32 2)
+  br label %done"#
+            .to_string()
+    };
+    format!(
+        r#"%"struct.metal::_imageblock_base" = type {{ ptr addrspace(4) }}
+
+define void @group_slice(ptr addrspace(1) %out, %"struct.metal::_imageblock_base" %img, <2 x i16> %lid, <2 x i32> %tg) {{
+entry:
+  %cell = call ptr addrspace(4) @air.imageblock_data(<2 x i16> %lid, i32 0, i16 0)
+  %x = extractelement <2 x i16> %lid, i64 0
+  %y = extractelement <2 x i16> %lid, i64 1
+  %x32 = zext i16 %x to i32
+  %y32 = zext i16 %y to i32
+  %row = mul i32 %y32, 4
+  %i = add i32 %row, %x32
+  %v = uitofp i32 %i to float
+  store float %v, ptr addrspace(4) %cell, align 4
+  call void @air.wg.barrier(i32 8, i32 1)
+{branch}
+
+write:
+  %origin = call ptr addrspace(4) @air.imageblock_data(<2 x i16> zeroinitializer, i32 0, i16 0)
+  %base = shl <2 x i32> %tg, <i32 2, i32 2>
+{body}
+
+done:
+  ret void
+}}
+
+declare ptr addrspace(4) @air.imageblock_data(<2 x i16>, i32, i16)
+declare void @air.wg.barrier(i32, i32)
+declare i1 @air.all.v2i1(<2 x i1>)
+declare void @air.write_imageblock_slice_to_texture_2d.f32(ptr addrspace(1), ptr addrspace(4), i1, <2 x i16>, <2 x i16>, <2 x i32>, i32, i1, i32)
+
+!air.kernel = !{{!0}}
+!0 = !{{ptr @group_slice, !1, !2}}
+!1 = !{{}}
+!2 = !{{!3, !4, !6, !7}}
+!3 = !{{i32 0, !"air.texture", !"air.location_index", i32 0, i32 1, !"air.write", !"air.arg_type_name", !"texture2d<float, write>", !"air.arg_name", !"out"}}
+!4 = !{{i32 1, !"air.imageblock", !"explicit", !"air.imageblock_data_size", i32 4, !"air.struct_type_info", !5, !"air.arg_type_align_size", i32 4, !"air.arg_type_name", !"imageblock<Cell, layout_explicit>", !"air.arg_name", !"img"}}
+!5 = !{{i32 0, i32 4, i32 0, !"float", !"value"}}
+!6 = !{{i32 2, !"air.thread_position_in_threadgroup", !"air.arg_type_name", !"ushort2", !"air.arg_name", !"lid"}}
+!7 = !{{i32 3, !"air.threadgroup_position_in_grid", !"air.arg_type_name", !"uint2", !"air.arg_name", !"tg"}}
+"#
+    )
+}
+
+/// The uses of the slice forms in `plan`: the whole threadgroup's copies, and the writing
+/// invocation's.
+fn slice_forms(plan: &Plan) -> (u32, u32) {
+    let census = plan.census();
+    let count = |shared: bool| {
+        census
+            .iter()
+            .filter(|(k, _)| {
+                k.starts_with("texture.imageblock_slice")
+                    && k.starts_with("texture.imageblock_slice_cooperative") == shared
+            })
+            .map(|(_, (n, _))| *n)
+            .sum()
+    };
+    (count(true), count(false))
+}
+
+/// A slice whose every operand the threadgroup holds alike is copied by the whole threadgroup
+/// (`lower::texture::slice`): written by the first thread, its coordinate computed under the
+/// branch and published to the others; or written by every thread, in a loop. Its operand from a
+/// loop phi under the branch is not proven alike, so the first thread copies it, its counter from 0
+/// on every pass. Every form lands each block's cells at its texels, each pass's block included,
+/// and nothing else.
+#[test]
+fn a_threadgroup_copies_a_slice_whose_operands_it_holds_alike() {
+    let cases = [
+        ("published", true, 1u32, true),
+        ("every_thread", false, 2, true),
+        ("looped", true, 2, false),
+    ];
+    for (name, guarded, copies, shared) in cases {
+        let Some(bc) = assemble_text(name, &group_slice_kernel(guarded, copies)) else {
+            return;
+        };
+        let mut ran = 0;
+        for (stem, p) in committed_profiles().expect("profiles") {
+            let Some((plan, m)) = module(&bc, "group_slice", &stem, &p) else {
+                continue;
+            };
+            let want = if shared { (1, 0) } else { (0, 1) };
+            assert_eq!(slice_forms(&plan), want, "{name} on {stem}");
+            let d = Dispatch {
+                local: [4, 4],
+                block: [4, 4],
+                buffers: &[],
+                threadgroup: &[],
+            };
+            let (_, imgs) = run(&plan, &m, &d, &[poisoned(0, [8, 4], 1)]);
+            for y in 0..4u32 {
+                for x in 0..8u32 {
+                    let block = (0..copies).find(|k| (1 + 4 * k..4 + 4 * k).contains(&x));
+                    let want = match block {
+                        Some(k) if (2..4).contains(&y) => {
+                            let (cx, cy) = (x - 1 - 4 * k, y - 2);
+                            [fl((cx + 4 * cy) as f32), 0, 0, 0]
+                        }
+                        _ => POISON,
+                    };
+                    assert_eq!(
+                        texel(&imgs[0], 0, x, y),
+                        want,
+                        "{name} on {stem} ({x}, {y})"
+                    );
+                }
+            }
+            ran += 1;
+        }
+        assert!(ran > 0, "{name}");
     }
 }
 

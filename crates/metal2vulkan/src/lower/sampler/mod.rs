@@ -180,6 +180,7 @@ mod select;
 mod shared;
 
 pub use constexpr::{address_modes, constexpr_desc, state_of, state_words};
+pub(crate) use emit::cube_footprint;
 pub use emit::{hoisted_gradients, sampling_value};
 pub use select::{select_heap_sampling, select_sampling};
 pub(crate) use shared::{shared_value, Candidates};

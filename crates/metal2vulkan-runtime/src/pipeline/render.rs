@@ -1811,6 +1811,11 @@ impl GraphicsState {
         self.0.clone()
     }
 
+    /// The state's address, [`held`](Self::held)'s: no other object's while it lives.
+    pub(crate) fn address(&self) -> usize {
+        Arc::as_ptr(&self.0) as usize
+    }
+
     /// Its routing into a pass of the colors `pass` (`RenderCommandEncoder::routing`), as `route`
     /// finds it: a function of the state and the pass's colors alone, so it is found once for the
     /// latest pass colors and kept, and a pass of other colors finds it again.
@@ -2619,6 +2624,7 @@ impl RenderVariant {
             (Begun::Pending(pending), _) => match self.residual_made(key) {
                 Some(drawn) => {
                     device.shared().counts.residual_form_drawn();
+                    crate::device::unsettled();
                     DrawPipeline::Made(drawn)
                 }
                 None => DrawPipeline::Making(pending),
@@ -2631,6 +2637,7 @@ impl RenderVariant {
                         Some(drawn) => {
                             device.shared().counts.residual_form_making();
                             device.shared().counts.residual_form_drawn();
+                            crate::device::unsettled();
                             DrawPipeline::Made(drawn)
                         }
                         None => DrawPipeline::Making(pending),

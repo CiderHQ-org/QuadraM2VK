@@ -188,7 +188,7 @@ fn read_back(
 /// the clears. The passes' degrade is announced once.
 ///
 /// On lavapipe and MoltenVK, whose drivers copy multisampled depth/stencil images to and from
-/// colour ones wrong (`driver_defects.rs`), and on a device without maintenance8, the aspects are
+/// colour ones wrong (the device's driver defects), and on a device without maintenance8, the aspects are
 /// copied by draws instead (on NVIDIA's Ampere GA10x, which loses the device copying the stencil
 /// aspect, the stencil alone), where the depth's draw is exact (the driver fact
 /// `FragmentDepthStoresUnchanged`, lavapipe from the release measured) or measured to change some

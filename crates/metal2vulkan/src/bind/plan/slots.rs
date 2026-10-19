@@ -218,10 +218,27 @@ pub(crate) fn bound_value(
     }))
 }
 
+/// The value of `key` for a dispatch or draw in `shape`'s render pass, where the pass decides it
+/// and a function reads it as data (`SpecKey::read_as_data`): the render area a tile function
+/// stages its tile within, and the tiles across it, the stride of a tile row in the pass's tile
+/// memory (`TileMemoryPlan::grid`, of the same tile). `None` for any other key, and for a tile
+/// of no width, which planning refuses first (`BindError::InvalidImageblockSize`).
+fn pass_value(key: SpecKey, shape: &BindShape) -> Option<u64> {
+    let [width, height] = shape.render_area;
+    let tile = shape.imageblock_size.width;
+    match key {
+        SpecKey::RenderAreaWidth => Some(u64::from(width)),
+        SpecKey::RenderAreaHeight => Some(u64::from(height)),
+        SpecKey::TileGridWidth => (tile > 0).then(|| u64::from(width.div_ceil(tile))),
+        _ => None,
+    }
+}
+
 /// Record in `resources`' template the value of each key `push` places as a push field
 /// (`PushField::Specialized`), the value its specialization constant would take
-/// ([`bound_value`]), which instantiation writes there (`instantiate::slot_field`). A key the
-/// bound resources do not decide is not one a function pushes: an internal error.
+/// ([`bound_value`], or for a pass's extent [`pass_value`]), which instantiation writes there
+/// (`instantiate::slot_field`). A key neither decides is not one a function pushes: an internal
+/// error.
 pub(crate) fn record_specialized(
     push: &super::PushTemplate,
     shape: &BindShape,
@@ -231,8 +248,14 @@ pub(crate) fn record_specialized(
         let PushField::Specialized(key) = placed.field else {
             continue;
         };
-        let value = bound_value(key, shape, resources)?.ok_or_else(|| {
-            internal(format!("a pushed {key:?}, which no bound resource decides"))
+        let value = match bound_value(key, shape, resources)? {
+            Some(value) => Some(value),
+            None => pass_value(key, shape),
+        }
+        .ok_or_else(|| {
+            internal(format!(
+                "a pushed {key:?}, which neither the bound resources nor the pass decide"
+            ))
         })?;
         let value = u32::try_from(value)
             .map_err(|_| internal(format!("a pushed {key:?} of {value}, past a push word")))?;

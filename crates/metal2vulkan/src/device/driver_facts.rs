@@ -4,8 +4,8 @@
 //! `driverVersion`. One table type serves both kinds of fact: the description's deviations, which
 //! translation reads and the compile profile holds
 //! ([`DriverDeviation`](crate::error::DriverDeviation)), and the runtime's driver facts, which no
-//! translation reads ([`DriverFact`], in this table as `MEASURED`): a description names its
-//! driver's through [`DeviceDescription::driver_facts`], which the runtime puts in its device's
+//! translation reads ([`DriverFact`], in this table as `MEASURED` and on the known-driver list): a
+//! description names its driver's through [`DeviceDescription::driver_facts`], which the runtime puts in its device's
 //! properties. None of those is in the compile profile, a cache key or a digest.
 //!
 //! Each row names a driver and the first and last releases measured with the fact (the
@@ -19,27 +19,37 @@
 //! - **Unmeasured**: a release older than the first, or another driver or vendor. The fact is not
 //!   taken: the reader takes its conservative route, the exact path where one exists.
 //!
-//! The runtime's driver facts follow one rule instead (the owner's "correct by default"): **a
-//! device whose identity was not measured is unmeasured**. An identity is the exact quadruple
-//! `driverID`, `vendorID`, `deviceID` and `driverVersion`; `MEASURED_DEVICES` lists the ones the
-//! lanes measure (a driver at one release on one GPU: the device class is the GPU's `deviceID`,
-//! never a host's name), and [`DeviceDescription::measured_identity`] answers whether a description
-//! is one. A GPU that reports more than one `deviceID` is one device class under each: every table
-//! here names it by the ID it was measured under, and a description is read by its
+//! The runtime's driver facts come from two tables instead. `MEASURED` holds the facts a check on
+//! the device may settle, by **measured identity**: the exact quadruple `driverID`, `vendorID`,
+//! `deviceID` and `driverVersion`. `MEASURED_DEVICES` lists the ones the lanes measure (a driver at
+//! one release on one GPU: the device class is the GPU's `deviceID`, never a host's name), and
+//! [`DeviceDescription::measured_identity`] answers whether a description is one. A GPU that
+//! reports more than one `deviceID` is one device class under each: every table here names it by
+//! the ID it was measured under, and a description is read by its
 //! [`DeviceDescription::canonical_device_id`].
-//! - **On a measured identity** a fact is taken where a row of its driver names the identity's
-//!   release (from the first through the last) and, where it names them, its vendor and GPU: as
-//!   measured.
+//! - **On a measured identity** a fact of `MEASURED` is taken where a row of its driver names the
+//!   identity's release (from the first through the last) and, where it names them, its vendor and
+//!   GPU: as measured.
 //! - **On any other identity** (another release of a measured driver, newer or older, another
-//!   GPU of it, or another driver) no answer fact is taken: the runtime takes the exact path that
-//!   needs none. A defect fact ([`DriverFact::assumed_where_unmeasured`], the driver doing
-//!   otherwise than Metal where the runtime has a workaround) is taken wherever a row of the
-//!   same driver names it, at any release and on any GPU: the workaround, never the path a
-//!   measurement has not cleared. The runtime says so once as such a device is made, in an
-//!   informational message (`metal2vulkan-unmeasured-driver`; no degrade notice, as the paths it
-//!   takes are exact).
+//!   GPU of it, or another driver) none is: the runtime takes the exact path that needs none.
+//!
+//! The known-driver list (`device::listed`) holds the facts no check settles: the defects that
+//! one clean run does not rule out, and the answers and costs whose discriminating inputs a check
+//! cannot run. Each entry names a driver, a range of its releases and a GPU family, and holds on
+//! every device it names, measured identity or not. A device of an identity not measured says so
+//! once as it is made, in its feature status (the informational message
+//! `metal2vulkan-feature-status`; no degrade notice, as the paths it takes are exact).
+//!
+//! These tables are every fact's baseline. A fact the device checks itself (`device::checks`,
+//! [`CHECKED`](crate::device::CHECKED)) takes its check's answer once one is found, and its
+//! baseline until then: every reader below goes through [`decide`]. A device's feature status
+//! ([`DeviceDescription::fact_status`]) lists every fact the tables or the checks decide, and how.
 
+use crate::device::checks::{
+    decide, Baseline, Decided, DeviceChecks, DeviceFact, FactStatus, CHECKED,
+};
 use crate::device::description::APPLE_VENDOR_ID;
+use crate::device::listed::{listed, LISTED_FACTS};
 use crate::device::profile::DriverWorkaround;
 use crate::device::DeviceDescription;
 use crate::error::DriverDeviation;
@@ -118,7 +128,10 @@ pub(crate) fn among<F: Copy + Ord>(
 ///   through MoltenVK; on both chips, every word of a function the device's instruction answers, in
 ///   both math modes.
 /// - `MetalCanonicalNans`: every class-A NaN Metal's canonical one through MoltenVK.
-/// - `MetalSampler`: Metal's bytes on the 12 linear `half` cases through MoltenVK.
+/// - `MetalSampler`: Metal's bytes on the 12 linear `half` cases through MoltenVK; and on every
+///   Apple GPU by MoltenVK's structure: each `VkSampler` is a Metal sampler state (`MVKSampler`)
+///   and SPIRV-Cross writes each sample as Metal's own `sample` call, so Metal filters and converts
+///   it.
 /// - `CubeGradientRoute`, a kernel's: our probe (cases `a54af728` and `315ca8b0` match
 ///   through MoltenVK on the M3 Max), and the same cases against the M4's own Metal rows on the M4;
 ///   under macOS 27.0.1 the M3 Max's MoltenVK rows of all eight committed cube-gradient cases
@@ -786,7 +799,7 @@ pub(crate) const DEVIATIONS: &[Measured<DriverDeviation>] = &[
 ];
 
 /// NVIDIA's `vendorID`.
-const NVIDIA_VENDOR_ID: u32 = 0x10de;
+pub(crate) const NVIDIA_VENDOR_ID: u32 = 0x10de;
 
 /// The `deviceID` of the GeForce RTX 3090.
 pub(crate) const NVIDIA_RTX_3090: u32 = 0x2204;
@@ -808,7 +821,7 @@ const fn nvidia_61571(fact: DriverDeviation, device: u32) -> Measured<DriverDevi
 }
 
 /// AMD's `vendorID`.
-const AMD_VENDOR_ID: u32 = 0x1002;
+pub(crate) const AMD_VENDOR_ID: u32 = 0x1002;
 
 /// The `deviceID` of the Radeon 780M it was measured under, Phoenix's (the committed capture
 /// `amd-780m-radv`); Hawk Point's 0x1900 is the same GPU, so it takes these rows too
@@ -873,8 +886,10 @@ const fn moltenvk_141(fact: DriverDeviation) -> Measured<DriverDeviation> {
 /// not assumed at an older one or of another driver.
 /// - `BothBarycentricFormsRejected`: MoltenVK 1.4.1 (`driverVersion` 10401, SPIRV-Cross
 ///   `adec7acb`) refused `tail_fragment_barycentric` (`engine/stage_io_tail`) at pipeline
-///   creation on an Apple M4. SPIRV-Cross throws in its MSL backend's interface
-///   pass whatever the GPU, so the row names no vendor.
+///   creation on an Apple M4, and the device check's pair on the Apple M3 Max under macOS 27
+///   ("Cannot declare both BaryCoordNV and BaryCoordNoPerspNV in same shader in MSL."). SPIRV-Cross
+///   throws in its MSL backend whatever the GPU, so the row names no vendor, and MoltenVK's
+///   identity holds the defect at every other release too (`derive`'s `by_identity`).
 /// - `MemoryWritingFragmentsRunPerSample`: MoltenVK 1.4.1 on the Apple M3 Max and the M4 ran the
 ///   loop over the covered samples of a memory-writing fragment shader without sample shading once
 ///   per covered sample, every pass repeated per covered sample. Metal runs a function that writes
@@ -1012,33 +1027,162 @@ pub(crate) const DEFECTS: &[Measured<DriverWorkaround>] = &[
     },
 ];
 
-/// The defects of [`DEFECTS`] the driver `description` names has at its release, measured or
-/// newer.
-pub(crate) fn defects(description: &DeviceDescription) -> BTreeSet<DriverWorkaround> {
-    among(
-        DEFECTS,
-        description.driver_id,
-        (description.vendor_id, description.canonical_device_id()),
-        description.driver_version,
-    )
-    .into_keys()
-    .collect()
+/// The checks of `description` the readers take: none where `trusted` is false, the policy
+/// distrusting checks (`DeviceChecksPolicy::Distrusted`).
+fn checks_of(description: &DeviceDescription, trusted: bool) -> Option<&DeviceChecks> {
+    trusted.then_some(&description.checks)
 }
 
-/// The deviations of the driver `description` names, on its GPU's vendor, at its release.
-pub(crate) fn deviations(description: &DeviceDescription) -> BTreeMap<DriverDeviation, Standing> {
-    among(
+/// Whether `fact`, held by the tables where `listed`, is held on the device by the reader order
+/// (`device::checks`), with what decided it.
+fn held(fact: DeviceFact, listed: bool, checks: Option<&DeviceChecks>) -> (bool, Decided) {
+    let baseline = Baseline {
+        holds: listed,
+        decided: Decided::Unlisted,
+    };
+    let status = decide(fact, baseline, checks);
+    (status.holds, status.decided)
+}
+
+/// The defects of [`DEFECTS`] the driver `description` names has at its release, measured or
+/// newer, each with the row that gives it, as a feature status names it: the rows' alone, a
+/// baseline of the reader order ([`checked_workarounds`]).
+pub(crate) fn defect_rows(description: &DeviceDescription) -> BTreeMap<DriverWorkaround, String> {
+    let identity = (description.vendor_id, description.canonical_device_id());
+    let (driver, version) = (description.driver_id, description.driver_version);
+    among(DEFECTS, driver, identity, version)
+        .into_keys()
+        .filter_map(|workaround| {
+            row_of(DEFECTS, workaround, driver, identity, version)
+                .map(|row| (workaround, entry(row)))
+        })
+        .collect()
+}
+
+/// The workarounds `description` takes by the reader order (the module docs): `baseline`, the
+/// tables' (`derive::baseline_workarounds`: [`defect_rows`], then by its identity and by its
+/// rasterizer), each checked one as its check found it where `trusted`.
+pub(crate) fn checked_workarounds(
+    description: &DeviceDescription,
+    baseline: BTreeSet<DriverWorkaround>,
+    trusted: bool,
+) -> BTreeSet<DriverWorkaround> {
+    let checks = checks_of(description, trusted);
+    let mut found = baseline;
+    for entry in CHECKED {
+        let DeviceFact::Workaround(workaround) = entry.fact else {
+            continue;
+        };
+        match held(entry.fact, found.contains(&workaround), checks).0 {
+            true => found.insert(workaround),
+            false => found.remove(&workaround),
+        };
+    }
+    found
+}
+
+/// The deviations of the driver `description` names, on its GPU's vendor, at its release, each
+/// checked one as its check found it where `trusted` (the module docs): a deviation a check found
+/// Metal's is measured on the device.
+pub(crate) fn deviations(
+    description: &DeviceDescription,
+    trusted: bool,
+) -> BTreeMap<DriverDeviation, Standing> {
+    let mut found = among(
         DEVIATIONS,
         description.driver_id,
         (description.vendor_id, description.canonical_device_id()),
         description.driver_version,
+    );
+    for entry in CHECKED {
+        let DeviceFact::Deviation(deviation) = entry.fact else {
+            continue;
+        };
+        let checks = checks_of(description, trusted);
+        match held(entry.fact, found.contains_key(&deviation), checks) {
+            (true, Decided::CheckedMetals) => {
+                found.insert(deviation, Standing::Measured);
+            }
+            (true, _) => {
+                found.entry(deviation).or_insert(Standing::Measured);
+            }
+            (false, _) => {
+                found.remove(&deviation);
+            }
+        }
+    }
+    found
+}
+
+/// The row of `table` that gives `fact` to the driver `driver` on GPU `device` of `vendor` at
+/// release `version`, as [`among`] reads it: the first of the best standing.
+fn row_of<F: Copy + Ord>(
+    table: &[Measured<F>],
+    fact: F,
+    driver: Option<DriverId>,
+    (vendor, device): (u32, u32),
+    version: u32,
+) -> Option<&Measured<F>> {
+    let ours = |row: &&Measured<F>| {
+        row.fact == fact
+            && Some(row.driver) == driver
+            && row.vendor.is_none_or(|v| v == vendor)
+            && row.device.is_none_or(|d| d == device)
+            && version >= row.first
+    };
+    let rows = || table.iter().filter(ours);
+    rows()
+        .find(|row| version <= row.last)
+        .or_else(|| rows().next())
+}
+
+/// A row as a feature status names it: its driver, releases and GPU.
+fn entry<F>(row: &Measured<F>) -> String {
+    let gpu = match (row.vendor, row.device) {
+        (Some(vendor), Some(device)) => format!(" on {vendor:04x}:{device:04x}"),
+        (Some(vendor), None) => format!(" on vendor {vendor:04x}'s GPUs"),
+        (None, _) => String::new(),
+    };
+    let driver = Some(row.driver);
+    format!(
+        "{:?} {} through {}{gpu}",
+        row.driver,
+        release_name(driver, row.first),
+        release_name(driver, row.last)
     )
+}
+
+/// The release `version` (`driverVersion`) of driver `driver` as its vendor numbers it:
+/// NVIDIA's major, minor and patch from bits 22, 14 and 6, MoltenVK's from its decimal
+/// digits, every other driver's from `VK_MAKE_API_VERSION`'s fields (Mesa's).
+pub fn release_name(driver: Option<DriverId>, version: u32) -> String {
+    match driver {
+        Some(DriverId::NVIDIA_PROPRIETARY) => format!(
+            "{}.{}.{}",
+            version >> 22,
+            (version >> 14) & 0xff,
+            (version >> 6) & 0xff
+        ),
+        Some(DriverId::MOLTENVK) => format!(
+            "{}.{}.{}",
+            version / 10000,
+            version / 100 % 100,
+            version % 100
+        ),
+        _ => format!(
+            "{}.{}.{}",
+            (version >> 22) & 0x7f,
+            (version >> 12) & 0x3ff,
+            version & 0xfff
+        ),
+    }
 }
 
 /// A driver's measured answer where Vulkan leaves the result undefined, or its measured cost of
 /// two exact forms (a cost fact, the module docs).
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum DriverFact {
     /// Under `robustBufferAccess2`, an index fetched past the bound index buffer range reads
     /// zero, to which the draw adds its vertex offset: Metal's answer past the buffer (which finds
@@ -1136,14 +1280,6 @@ pub enum DriverFact {
     /// buffer first. The integer carriers of the extended-range formats are read in place on
     /// every driver: their fetch returns the bits.
     SampledFetchRecoversCodes,
-    /// A cost fact (the module docs): a render pass whose draws fetch a color through the pixel
-    /// interlock after plain draws wrote it ran no slower split into two render pass instances
-    /// there, as the runtime runs it on every device, than kept whole, the plain draws writing the
-    /// color through the interlocked storage form (`VariantKey::interlocked_colors`). On a driver
-    /// with it the runtime announces no `render-pass-split`, nor `memoryless-backed` for the
-    /// split, where the interlock's attachments alone split a pass: the device's faster form.
-    /// Elsewhere such a split is announced.
-    InterlockedPassSplitNoSlower,
     /// A driver diagnostic (the module docs): the driver reports a warning as it creates a
     /// graphics pipeline that makes the primitive restart dynamic with its topology dynamic or a
     /// strip or fan, whatever restart the draws set later: a `VALIDATION` message named
@@ -1158,8 +1294,8 @@ pub enum DriverFact {
     /// such a pipeline's creation). On a driver with it the runtime withholds exactly that message
     /// from the device's message sink inside that pipeline's creation, and counts it
     /// (`WorkCounts::driver_diagnostics_withheld`); any other message, this one anywhere else, and
-    /// this one from an unmeasured release relay as before. MoltenVK's own code on every GPU, so
-    /// the row names no vendor; held on the release measured alone (the module docs).
+    /// this one from a release before 1.4.1 relay as before. MoltenVK's own code on every GPU, so
+    /// the list names every GPU of the driver from 1.4.1 on (`device::listed`).
     DynamicRestartWarns,
     /// A cost fact (the module docs): the driver runs `vkCmdFillBuffer` as a compute dispatch of
     /// a pipeline it compiles at the first fill each `VkCommandPool`'s command buffers encode,
@@ -1170,8 +1306,8 @@ pub enum DriverFact {
     /// a pool's first fill waited 250 to 330 ms in that submit (sampled). On
     /// a driver with it the runtime records each fill as transfers the driver compiles nothing
     /// for: `vkCmdUpdateBuffer` of the first words, then copies of the filled words onto the rest
-    /// (`word_fill.rs`); elsewhere `vkCmdFillBuffer`. MoltenVK's own code on every GPU, so the row
-    /// names no vendor; held on the release measured alone.
+    /// (`word_fill.rs`); elsewhere `vkCmdFillBuffer`. MoltenVK's own code on every GPU, so the list
+    /// names every GPU of the driver from 1.4.1 on.
     FillCompiledPerCommandPool,
     /// A render pass's attachment stored `DONT_CARE` is stored as Metal's own `DontCare` on the
     /// same GPU, `MultisampleResolve` where it resolves in the subpass: MoltenVK hands the
@@ -1184,8 +1320,9 @@ pub enum DriverFact {
     /// and draws nothing before `MultisampleResolve` leaves the clear where Metal compresses the
     /// texture. Vulkan leaves the attachment's contents undefined. On a driver with it the runtime
     /// announces no `dont-care-store` for a pass recorded as one render pass instance in which it
-    /// records none of those (`Device::degrade_pass`). Held on the release measured alone (the
-    /// module docs): MoltenVK's code decides it. Measured on the M4 and the M3 Max.
+    /// records none of those (`Device::degrade_pass`). Listed on the Apple9 family measured from
+    /// 1.4.1 on (`device::listed`): MoltenVK's code and the GPU's tiler decide it. Measured on the
+    /// M4 and the M3 Max.
     DontCareStoreIsMetals,
     /// A cost fact (the module docs): the driver samples each `vkCmdWriteTimestamp` in a Metal
     /// blit pass of its own, which waits for the work before it and writes a byte of one buffer
@@ -1201,7 +1338,7 @@ pub enum DriverFact {
     /// us with them). On a driver with it the runtime answers command buffers' GPU times from the
     /// host's clock and writes no timestamps (`gpu_time.rs`, announced once as
     /// `gpu-times-from-host`); elsewhere it writes them unless told otherwise. MoltenVK's own code
-    /// on Apple's GPUs; held on the release measured alone.
+    /// on Apple's GPUs, so the list names every one from 1.4.1 on.
     TimestampsWaitForEveryQueue,
     /// The driver decodes each texel of a BC1 to BC3 texture (`BC1_RGBA`, `BC2_RGBA`,
     /// `BC3_RGBA`) to Metal's value, and each texel of their sRGB forms to Metal's code before
@@ -1244,13 +1381,17 @@ pub enum DriverFact {
     /// (`attachment_stand_in.rs`), announced as `positions-through-scratch`; elsewhere its own
     /// image renders them.
     PositionedDepthReadAtStandardPositions,
-    /// The depth test compares a denormal a `D32_SFLOAT` image holds as Metal's does: a positive
-    /// one above zero, a negative one not below zero (a fragment at depth 0 passes `Less`
-    /// against a stored positive denormal and fails `Greater` against a stored negative one).
-    /// Vulkan states no such rule: NVIDIA's, ANV's and lavapipe's depth tests compare a stored
-    /// positive denormal as zero, and RADV's a stored negative one (and a stored -0) below zero.
-    /// On a driver without it a write that may store a denormal in a 32-bit float depth image
-    /// announces `depth-denormals`.
+    /// The depth test compares a denormal a `D32_SFLOAT` image holds as Metal's does: as a value
+    /// other than zero, a positive one above zero and a negative one, by its magnitude
+    /// (`DepthTestComparesMagnitudes`), not below zero (a fragment at depth 0 passes `Less`
+    /// against a stored positive denormal and `NotEqual` against a stored negative one). Vulkan
+    /// states no such rule: NVIDIA's, ANV's and lavapipe's depth tests compare a stored positive
+    /// denormal as zero. RADV's compares each one it holds as a value other than zero (a negative
+    /// one, and -0, below zero: the signed order of a driver without
+    /// `DepthTestComparesMagnitudes`), but its copies store them as zeros (no
+    /// `DepthImageKeepsDenormals`), so its check is not run and no row names it. On a driver
+    /// without it a write that may store a denormal in a 32-bit float depth image announces
+    /// `depth-denormals`.
     DepthTestKeepsDenormals,
     /// The depth test compares a fragment's depth with the value a `D32_SFLOAT` image holds as
     /// Metal's does: by magnitude, as the integers of their low 31 bits, so the sign is dropped
@@ -1273,20 +1414,29 @@ pub enum DriverFact {
     /// runs after its queue's earlier work. Vulkan orders no creation with queue work, and Metal
     /// makes a sparse texture without waiting for the GPU. On a driver with it the runtime
     /// announces `first-sparse-resource-wait` where it makes the device's first sparse texture. A
-    /// cost fact: held on the releases measured alone.
+    /// cost fact, listed on the GPUs measured from that release on (`device::listed`).
     FirstSparseResourceWaitsForQueues,
     /// The driver decodes each texel of a BC6H texture (`BC6H_RGBFloat`, `BC6H_RGBUfloat`) to
     /// Metal's value. Direct3D specifies BC6H's decode bit for bit, but Vulkan leaves a
-    /// compressed format's decode to the implementation, so it is measured, not assumed. On a
+    /// compressed format's decode to the implementation, so the device checks it
+    /// ([`CHECKED`](crate::device::CHECKED)), not assumed. On a
     /// driver without it a texture of such a format announces `compressed-texel-decode` where
     /// the runtime makes it: the runtime has no decoded twin of BC6H.
     Bc6hBlockDecodeIsMetals,
-    /// The driver decodes each texel of a BC7 texture (`BC7_RGBAUnorm`, and `BC7_RGBAUnorm_sRGB`
-    /// through its unorm view and Metal's table, `metal::texel_format::srgb_raw`) to Metal's
-    /// value. lavapipe (Mesa 26.0.8) answers some a `float` ulp off. On a driver without it a
-    /// texture of such a format announces `compressed-texel-decode` where the runtime makes it:
-    /// the runtime has no decoded twin of BC7.
+    /// The driver decodes each texel of a BC7 block of a defined mode (its first byte not 0)
+    /// of a BC7 texture (`BC7_RGBAUnorm`, and `BC7_RGBAUnorm_sRGB` through its unorm view and
+    /// Metal's table, `metal::texel_format::srgb_raw`) to Metal's value. lavapipe (Mesa 26.0.8)
+    /// answers some a `float` ulp off. On a driver without it a texture of such a format announces
+    /// `compressed-texel-decode` where the runtime makes it: the runtime has no decoded twin of
+    /// BC7. A block of the reserved mode is [`DriverFact::Bc7ReservedBlockIsMetals`]'s.
     Bc7BlockDecodeIsMetals,
+    /// The driver decodes each texel of a BC7 block of the reserved mode (its first byte 0, no
+    /// mode bit set) to Metal's `(0, 0, 0, 1)`, opaque black. NVIDIA's 615.71.09, RADV's and
+    /// ANV's (Mesa 26.2.4) read `(0, 0, 0, 0)`. Real encoders write no such block. On a driver without it a
+    /// `replace_region` of a BC7 texture whose bytes hold one announces `compressed-texel-decode`
+    /// (each block's first byte is read as the bytes are copied in); the blocks a GPU copy or a
+    /// heap's bytes give a texture are not read (`docs/FAST-PATHS.md`'s known gaps).
+    Bc7ReservedBlockIsMetals,
     /// Each timestamp query pool the driver makes is one Metal counter sample buffer
     /// (`MVKTimestampQueryPool`, `MVKQueryPool.mm` at 1.4.1), of at most 4096 timestamps, and
     /// Metal keeps at most 32 of those live per GPU (through MoltenVK 1.4.1 on an M3 Max and an
@@ -1316,8 +1466,8 @@ pub enum DriverFact {
     /// pass a frame over a 1920x1080 `BGRA8Unorm` shadow over anonymous pages, six rounds, GPU time
     /// the rounds' median), a pass that loads, draws and stores took 1.68 ms with the dispatches
     /// against 1.81 ms with the copies, one that clears 1.04 against 1.14 ms, and one drawn in a
-    /// centred region of half the width and height 446 against 476 us. The driver's copy cost, so
-    /// the row names no GPU: it holds on each measured identity of ANV at the release. On a driver
+    /// centred region of half the width and height 446 against 476 us. The driver's copy cost,
+    /// listed on the two GPUs measured from that release on (`device::listed`). On a driver
     /// with it a shadowed texture's copy back is such a dispatch (`shadow_copy_back.rs` in the
     /// runtime), and so is a merge's copy of the shadow into its scratch before the commands
     /// (`shadow_merge.rs`), its shadow made `MUTABLE_FORMAT` with that view, through which the
@@ -1360,9 +1510,9 @@ pub enum DriverFact {
     /// 1.13 ms as the dispatch, 16 rows 0.24-0.27 ms and 97-100 us against 0.12-0.17 ms and 30 us,
     /// and 2 rows the same CPU time and 21.9 us against 14.8 us; on the UHD 770 of RPL-S, 1080 rows
     /// 0.77-0.83 ms and 3.3-5.3 ms against 0.04-0.11 ms and 0.59-0.91 ms, and 2 rows the same CPU
-    /// time and 8.8-14.2 us against 3.1-4.3 us. ANV's per-region cost, so its row names no GPU: it
-    /// holds on each measured identity of ANV at the release. NVIDIA's 615.71.09 on the RTX 5080
-    /// Laptop GPU, the GPU its row names (the same probe, two rounds each): 1080 rows took
+    /// time and 8.8-14.2 us against 3.1-4.3 us. ANV's per-region cost, listed on the two GPUs
+    /// measured from that release on (`device::listed`). NVIDIA's 615.71.09 on the RTX 5080
+    /// Laptop GPU, the GPU its entry names (the same probe, two rounds each): 1080 rows took
     /// 0.19-0.21 ms of CPU and 2.03-2.05 ms of GPU time as regions against 0.12-0.13 ms and
     /// 0.42-0.43 ms as the dispatch, 16 rows 34-40 us of GPU time against 13 us, and 2 rows the
     /// same CPU time and 9.1-9.8 us against 8.7-8.8 us. On a driver with it a copy of two or more
@@ -1395,8 +1545,8 @@ pub enum DriverFact {
     /// batch with work starts with a command buffer of barriers that makes what completed work
     /// wrote visible, and waits for no timeline the host saw complete; elsewhere it waits for
     /// those timelines instead, which saves that command buffer (about 12 us of an Iris Xe's GPU
-    /// a batch) for about 1 us of CPU a wait (`command_buffer/submit.rs` in the runtime). Held on
-    /// the GPUs and release measured alone.
+    /// a batch) for about 1 us of CPU a wait (`command_buffer/submit.rs` in the runtime). Listed on
+    /// the GPUs measured, from that release on (`device::listed`).
     SemaphoreOperationsStallSubmits,
     /// A cost fact (the module docs): the driver keeps a single-sample depth image's
     /// hierarchical depth, with which its depth test rejects hidden fragments a block at a time,
@@ -1507,15 +1657,15 @@ pub enum DriverFact {
 }
 
 impl DriverFact {
-    /// Whether the fact is a defect the runtime works around (the module docs): the driver does
-    /// otherwise than Metal, so a device of the driver whose identity was not measured takes the
-    /// workaround, never the path a measurement has not cleared. Its depth and stencil images lie
-    /// apart from their memory or keep their GPU-optimized layout (MoltenVK), its compressed
-    /// images hide aliased writes (ANV), a depth rendered at custom positions reads at the
-    /// standard ones (NVIDIA's), its timestamp pools are Metal's scarce counter sample buffers
-    /// (MoltenVK), or its linear-tiling attachment features are read uninitialized (MoltenVK).
-    /// Every other fact is an answer fact (Metal's answer, a cost or a diagnostic), taken on a
-    /// measured identity alone.
+    /// Whether the fact is a defect the runtime works around: the driver does otherwise than
+    /// Metal, so the known-driver list (`device::listed`) names it at every release and on every
+    /// GPU of its driver where no fixed release is known, never only where it was measured. Its
+    /// depth and stencil images lie apart from their memory or keep their GPU-optimized layout
+    /// (MoltenVK), its compressed images hide aliased writes (ANV), a depth rendered at custom
+    /// positions reads at the standard ones (NVIDIA's), its timestamp pools are Metal's scarce
+    /// counter sample buffers (MoltenVK), or its linear-tiling attachment features are read
+    /// uninitialized (MoltenVK). Every other fact is an answer fact (Metal's answer, a cost or a
+    /// diagnostic).
     pub const fn assumed_where_unmeasured(self) -> bool {
         matches!(
             self,
@@ -1572,8 +1722,8 @@ impl DriverFact {
 /// A message a driver reports through `VK_EXT_debug_utils` where Vulkan states nothing wrong, at
 /// `WARNING` severity as a `VALIDATION` message, as a driver diagnostic fact measures it (the
 /// module docs; [`DriverFact::pipeline_creation_diagnostic`]). The runtime withholds it from the
-/// device's message sink only inside the call the fact names, on a release measured with the
-/// fact, where it matches every field exactly; anywhere else it relays.
+/// device's message sink only inside the call the fact names, on a release the fact holds on
+/// (`device::listed`), where it matches every field exactly; anywhere else it relays.
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct DriverDiagnostic {
@@ -1595,7 +1745,9 @@ const DYNAMIC_RESTART_WARNING: DriverDiagnostic = DriverDiagnostic {
     text: "VK_ERROR_FEATURE_NOT_PRESENT: Metal does not support disabling primitive restart.",
 };
 
-/// Every measured fact, by driver.
+/// Every measured fact a check on the device may settle, by driver, taken on a measured identity
+/// alone (the module docs): the baseline a device takes until its checks answer. The facts no
+/// check settles are on the known-driver list (`device::listed`).
 ///
 /// `RobustIndexFetchReadsZero`, measured by `runtime_lane::index_fetches` (at
 /// e89919c3, 2026-10-06): indexed indirect draws past their index buffer, from a buffer placed in
@@ -1612,26 +1764,7 @@ const DYNAMIC_RESTART_WARNING: DriverDiagnostic = DriverDiagnostic {
 /// its fetch past the range has no one answer; MoltenVK, which enables no
 /// `robustBufferAccess2`; and every driver and release not measured.
 ///
-/// `DepthImageKeepsDenormals` and `DepthImageKeepsValuesOutsideUnitRange`, measured by
-/// `runtime_lane::texture_blits::depth_images_keep_what_their_drivers_claim` (at
-/// d0c9878a, 2026-10-06): 11 denormals of both signs and 5 values outside `[0, 1]` through
-/// `replace_region` into a render target's `Depth32Float` depth image, read back by `get_bytes`:
-/// - NVIDIA's from 615.71.09 keeps every denormal, with `VK_EXT_depth_range_unrestricted`: the
-///   GeForce RTX 3090 and the RTX 5080 Laptop GPU, both 615.71.09.
-/// - lavapipe from Mesa 26.0.8 keeps every denormal, with the extension: arm64, Mesa 26.0.8 with
-///   LLVM 21.1.8, in `scripts/linux-gate` on an M4 mini; x86, Mesa 26.2.4
-///   with LLVM 23.1.1, on an Iris Xe (RPL-P) host.
-/// - MoltenVK from 1.4.1 (`driverVersion` 10401) keeps both, without the extension: an Apple M4
-///   mini and the M3 Max.
-///
-/// Measured to keep neither, so not listed: RADV (`MESA_RADV`), Mesa 26.2.4 on the Radeon 780M
-/// (no denormal; every value outside `[0, 1]` under the extension), and ANV
-/// (`INTEL_OPEN_SOURCE_MESA`), Mesa 26.2.4 on Intel Graphics (RPL-S) and the Iris Xe (RPL-P)
-/// without the extension (no denormal, every value outside `[0, 1]` clamped). A driver with the
-/// extension is not measured for `DepthImageKeepsValuesOutsideUnitRange`, which only a device
-/// without it reads.
-///
-/// `DepthImageKeepsDenormals` again and `DepthTestKeepsDenormals`, measured by
+/// `DepthTestKeepsDenormals`, with `DepthImageKeepsDenormals` (listed), measured by
 /// `runtime_lane::depth_denormals` (2026-10-10): the smallest and largest denormal of each sign,
 /// beside the smallest normal and 0.5, stored into a 4x4 render target's `Depth32Float` by a clear
 /// (positive ones), `replace_region`, a blit from a buffer and a draw at that depth (positive
@@ -1639,7 +1772,8 @@ const DYNAMIC_RESTART_WARNING: DriverDiagnostic = DriverDiagnostic {
 /// positive one, `Greater` against a negative one):
 /// - MoltenVK 1.4.1 on an Apple M4 keeps each one the clear, the copy and
 ///   the CPU store, and its test passes against every positive one and fails against every
-///   negative one: Metal's answers, as Metal's own depth test makes them. Its draw at a denormal
+///   negative one, compared by its magnitude (`DepthTestComparesMagnitudes`): Metal's answers, as
+///   Metal's own depth test makes them. Its draw at a denormal
 ///   depth stores 0, as Metal's rasterizer makes it, so a draw's is no difference anywhere. On the
 ///   M3 Max under macOS 27.0.1, of the M4's identity ([`APPLE_M4`]), the same, 16 of 16 texels
 ///   each (2026-10-14, with the fact taken: no `depth-denormals` announced).
@@ -1651,37 +1785,9 @@ const DYNAMIC_RESTART_WARNING: DriverDiagnostic = DriverDiagnostic {
 /// - ANV, Mesa 26.2.4 on the Iris Xe (RPL-P), stores the clear's and the copy's as +0 and keeps the
 ///   CPU store's, and its test fails against every one.
 ///
-/// `DepthTestComparesMagnitudes`, measured by a probe of ours (not committed; 2026-10-15) on a
-/// runtime that renders every depth in place: 18 values (+-2, +-0.5, the smallest and largest
-/// denormal of each sign, +-0, the smallest normal, 0.25, 1, the next `float` above 1, 1.5, +-inf
-/// and a quiet NaN) each stored by `replace_region` into a 4x4 render target's `Depth32Float`,
-/// read back by `get_bytes`, and tested by a draw at depth 0, 0.5 and 1 under `Less`,
-/// `LessEqual`, `Equal`, `GreaterEqual` and `Greater`:
-/// - MoltenVK 1.4.1 on the M3 Max under macOS 27.0.1, of the M4's identity ([`APPLE_M4`]): every
-///   value kept, and 270 of 270 outcomes Metal's magnitude rule (225 of them an IEEE compare's),
-///   as Metal's own probe `depthkeep` on the same GPU answers. The M4 is unmeasured; its row is
-///   the identity's by construction (the fact's docs): through MoltenVK the M4's depth test is
-///   the M4's Metal test, where the stand-in would impose the M3 Max's rule. Its pass with depth
-///   writes over 16 such values (the runtime lane `depth_denormals`' merge, a draw at 0.5 under
-///   `Less`) stores each texel as Metal's own pass on the same GPU does (probe `depthstore`): the
-///   draw's depth where it passed, the others without their signs. A pass that sets such a state
-///   and draws under none (no draw, a draw of no instances or no vertices, or one under a state
-///   without depth writes set over it) keeps every bit there, where Metal's strips them; an
-///   indirect draw whose arguments draw no instances strips them as Metal's does.
-///
-/// Not listed: every other driver, unmeasured for it. Vulkan's depth comparison is of the stored
-/// value as it is, so such a driver's single-sample targets take the stand-in.
-///
-/// `FirstSparseResourceWaitsForQueues`, measured by
-/// `runtime_lane::first_use::neutrals_and_sparse_textures_wait_for_no_gpu_work` and a plain
-/// Vulkan program (2026-10-10): ANV, Mesa 26.2.4 on the Iris Xe (RPL-P) under `i915`, made a
-/// 256x256 sparse image in 567 ms behind 0.5 s of copies, and a second in 0.02 ms behind the same
-/// (an Iris Xe (RPL-P) host); gdb put the lane's wait in `vkCreateImage`, at `drmSyncobjWait`. Mesa
-/// 26.2.4's `anv_trtt_first_bind_init` submits to each queue and waits, the
-/// first time a sparse resource is made; under `xe`, ANV binds sparse memory through VM_BIND,
-/// whose creation path makes a synchronous ioctl and waits for no queue (read, not measured).
-/// Vulkan tells the two apart by nothing but `sparseAddressSpaceSize`, so the row is ANV's on
-/// Intel's GPUs at the release measured.
+/// The device checks `DepthTestKeepsDenormals` itself as it is made ([`CHECKED`]), testing a
+/// negative one by `NotEqual`, whose outcome Metal's order by magnitude and Vulkan's signed order
+/// share; these rows are its baseline where the check does not answer.
 ///
 /// `FragmentDepthStoresUnchanged`, measured by
 /// `runtime_lane::separate_samples::fragment_depth_stores_depth_values_unchanged` (signed zero,
@@ -1709,17 +1815,8 @@ const DYNAMIC_RESTART_WARNING: DriverDiagnostic = DriverDiagnostic {
 /// NVIDIA's 615.71.09 on the RTX 3090 and the RTX 5080 Laptop GPU, and RADV and ANV (Mesa
 /// 26.2.4; the 780M, the Iris Xe) flush denormals, ANV also storing -0 as +0.
 ///
-/// `DepthStencilImagesLieApart`, measured by
-/// `runtime_lane::heap_textures::heap_depth_textures_keep_their_bytes_with_their_twins` (two
-/// `Depth32Float` textures side by side in a placement heap, then a buffer over the first one's
-/// bytes filled): MoltenVK (`MOLTENVK`) from 1.4.1 (`driverVersion` 10401), on an Apple M4 mini
-/// (2026-10-06): the fill changed none of the first's texels in a `Private` heap. MoltenVK's source
-/// states it for every image with a depth or stencil aspect on any GPU
-/// (`MVKImagePlane::getMTLTexture` makes the texture from the device, not from the memory's
-/// `MTLHeap`: "Metal support for depth/stencil from heaps is flaky"). Measured not to have it, so
-/// not listed: RADV, Mesa 26.2.4 on the Radeon 780M; ANV, Mesa 26.2.4 on the Iris Xe (RPL-P);
-/// NVIDIA's 615.71.09 on the RTX 3090; lavapipe, x86, Mesa 26.0.8 (the fill
-/// changed every texel of the first).
+/// The device checks `FragmentDepthStoresUnchanged` itself as it is made ([`CHECKED`]), these rows
+/// its baseline where the check does not answer.
 ///
 /// `ColorResolveAverageIsMetals`, measured by
 /// `runtime_lane::resolve_rounding::color_resolves_against_metals_rules` (at
@@ -1735,35 +1832,9 @@ const DYNAMIC_RESTART_WARNING: DriverDiagnostic = DriverDiagnostic {
 /// Mesa 26.2.4 on LLVM 23.1.1, x86_64, and Mesa 26.0.8 on LLVM 21.1.8, arm64 (no format Metal's at
 /// 4 samples; no texture of 2 samples).
 ///
-/// `CompressedImagesHideAliasedWrites`, measured by
-/// `runtime_lane::heap_textures::a_buffer_write_shows_in_an_overlapping_texture` (a heap's
-/// buffer and `RGBA8Unorm` texture over the same bytes; the texture written by a blit, then the
-/// buffer by a copy): ANV (`INTEL_OPEN_SOURCE_MESA`) on Intel's GPUs from Mesa 26.2.4, on the
-/// Iris Xe (RPL-P) and Intel Graphics (RPL-S) (2026-10-06): the texture's write changed 234 of the
-/// buffer's 1024 bytes (compressed), and the buffer's write changed none of the 256 texels in a
-/// `Shared` heap. Measured not to have it, so not listed: RADV, Mesa 26.2.4 on the Radeon 780M;
-/// NVIDIA's 615.71.09 on the RTX 3090; lavapipe, x86, Mesa 26.0.8; MoltenVK 1.4.1 on an M4 (every
-/// texel changed).
-///
-/// `HostTransferImagesKeepTheirBytes`, measured by our standalone probe (2026-10-06;
-/// 8 colour formats, 4 usage sets, 16, 64 and 256 texels square, host-visible and device-local
-/// memory, the image at the start of its own allocation and at 64 KiB of a 1 MiB one,
-/// `hostImageCopy` enabled): ANV on Intel's GPUs from Mesa 26.2.4, on the same RPL-P and RPL-S: in
-/// all 90 cases of each memory kind and placement an optimal image of host-transfer usage read the
-/// buffer's fill at every texel, as a linear one did; the 6 more, `RGBA8Unorm_sRGB` with storage
-/// usage, are no image the format takes. Neither device lists `VK_EXT_image_compression_control`,
-/// the route the ruling ordered first.
-///
-/// `DepthStencilImagesStayGpuOptimized`, measured by
-/// `runtime_lane::heap_textures::heap_textures_answer_and_place_as_metal_s_do` (a 64x64
-/// `Depth32Float` render target's heap size with `allowGPUOptimizedContents` on and off; the
-/// image with the property off is one of `PixelFormatView` usage): MoltenVK from 1.4.1 on Apple's
-/// GPUs, an M4 mini (2026-10-07) and the M3 Max: 16512 bytes both ways, Metal's answer with the
-/// property on, where Metal answers 16384 with it off (every depth and stencil format and shape
-/// alike). MoltenVK's source gives a depth-only image no `PixelFormatView` usage, and sets its
-/// texture's `allowGPUOptimizedContents` only from create flags (a 2D view of a 3D image, block
-/// texel views) it reads after sizing the image. The row names Apple's GPUs, where Metal's sizes
-/// were measured; another driver's sizes are its own, not compared with Metal's.
+/// The device checks `ColorResolveAverageIsMetals` itself ([`CHECKED`]) over the formats of
+/// Metal's rules, these rows its baseline where the check does not answer and, for a format
+/// without such a rule, beside its answer.
 ///
 /// `FragmentDepthKeepsDepth16Codes`, measured by
 /// `runtime_lane::separate_samples::fragment_depth_keeps_every_16_bit_code` (every code of a
@@ -1778,6 +1849,9 @@ const DYNAMIC_RESTART_WARNING: DriverDiagnostic = DriverDiagnostic {
 /// the M4 kept every code too, each first read exactly the code over 65535. ANV, RADV and lavapipe
 /// make no `D16_UNORM_S8_UINT` attachment, so a separate pair's scratch image is refused there
 /// first.
+///
+/// The device checks `FragmentDepthKeepsDepth16Codes` itself as it is made ([`CHECKED`]), these
+/// rows its baseline where the check does not answer.
 ///
 /// `SampledFetchRecoversCodes`, measured by
 /// `runtime_lane::mipmaps_exact::a_first_level_read_in_place_recovers_every_code` at a scratch
@@ -1797,53 +1871,6 @@ const DYNAMIC_RESTART_WARNING: DriverDiagnostic = DriverDiagnostic {
 /// Not listed: every GPU and release not measured, among them the RTX 5080 desktop GPU. There
 /// `generate_mipmaps` copies the first level into its scratch buffer, as before.
 ///
-/// `InterlockedPassSplitNoSlower`, a cost fact: each GPU ran the same passes in both forms, each
-/// forced in turn by a scratch build whose runtime could still keep such a pass whole (2026-10-18;
-/// release builds without the validation layer; the GPU's own span, medians, whole against split):
-/// - `runtime_lane::tile_path_costs`, milliseconds a frame, two runs of two rounds: `wide
-///   composite` (nine 1920x1080 passes a frame, each 26 blended rectangles into a memoryless
-///   `RGBA16Float` color, then the fetch that resolves it into the `BGRA8Unorm` base), `base
-///   fetched every fourth draw` (the rectangles into the base, every fourth fetching it) and
-///   `window: tile dispatch, base fetched every fourth draw, resolve` (three 960x768 passes).
-/// - Four draws, microseconds a frame, the medians of 30 frames after the first in three rounds: a
-///   1920x1080 `RGBA16Float` target beside a memoryless one, three unblended plain draws then a
-///   fetching draw, the fullscreen triangle each. Whole's first frame compiles each plain
-///   pipeline's variant at the fetching call: 5 to 35 ms, against 0.1 ms split.
-///
-/// One row per GPU, as measured, which the window server's passes decide: split ran them faster on
-/// every GPU, where only ANV ran the four draws faster whole, by 0.6% and 2.4% in steady frames.
-/// - ANV, Mesa 26.2.4, on Intel Graphics (RPL-S), at 1650 MHz: 22.1 against 7.3, 25.5 against 8.9
-///   and 12.1 against 8.8 ms; four draws 1984 to 1987 against 1997 to 1999.
-/// - ANV, Mesa 26.2.4, on the Iris Xe (RPL-P), at 1200 to 1500 MHz: 6.6 to 7.6 against 3.4 to 3.7,
-///   7.9 to 9.4 against 4.3 to 4.9 and 4.6 to 5.2 against 3.4 to 4.1 ms; four draws, at 300 MHz,
-///   3759 against 3851.
-/// - RADV, Mesa 26.2.4, on the Radeon 780M: 7.1 to 9.1 against 3.3 to 4.0, 9.4 to 9.6 against 5.5
-///   to 5.9 and 4.7 against 3.9 ms; four draws 1216 to 1236 against 1134 to 1194.
-/// - NVIDIA's 615.71.09 on the RTX 3090: 2.33 against 0.86, 2.62 against 1.30 and 0.75 against
-///   0.44 ms; four draws 169 to 185 against 160.
-/// - NVIDIA's 615.71.09 on the RTX 5080 Laptop GPU: 1.75 to 1.91 against 0.44 to 0.46, 2.06 to
-///   2.25 against 0.89 to 0.90 and 0.57 to 0.61 against 0.33 to 0.35 ms; four draws 155 to 163
-///   against 105.
-/// - MoltenVK 1.4.1 on the M3 Max, not measured again: measured on the four draws alone by the
-///   scratch lane `reroute_costs` at 85f395e1 (2026-10-08), each frame from commit to the wait's
-///   return (wall) and the GPU's span, its split's plain draws blended and whole's not, which
-///   weighs against the split, so the split's lead stands: under macOS 26.7 wall 968 against 871,
-///   GPU 261 against 94; under macOS 27.0.1, the M4's identity (2026-10-14, the same pass at
-///   8b1f8606, two runs of three rounds) wall 974 to 1045 against 721 to 769, GPU 914 to 964
-///   against 671 to 719, whole's first frame 7.7 to 7.9 ms against 1.2 to 1.8 ms. The M4 itself
-///   ran it faster whole (wall 1383 against 1499, though the GPU's span 82 against 12), which its
-///   shared identity does not take.
-///
-/// Not listed: lavapipe, which fetches through input attachments and so never splits for the
-/// interlock, and every GPU and release not measured, which split such a pass and announce it.
-///
-/// `DontCareStoreIsMetals`, read in MoltenVK 1.4.1's source
-/// (`MVKAttachmentDescription::getMTLStoreAction`; the restarts of `MVKCommandEncoder`,
-/// `MVKCmdPipelineBarrier` and the draws' compute stages) against Metal's answer on the GPU, and
-/// measured by `runtime_lane::dont_care_stores` through MoltenVK 1.4.1 on the M4 ([`APPLE_M4`]) and
-/// the M3 Max ([`APPLE_M3_MAX`]), both at 8edef9600: every kept case kept its texels. One row per
-/// GPU, as measured: Apple's other GPUs are unmeasured, and announce.
-///
 /// `ColorBlockDecodeIsMetals` and `ChannelBlockDecodeIsMetals`: MoltenVK 1.4.1 on Apple's GPUs
 /// takes both, by construction: it hands each BC1 to BC5 format, unorm, sRGB and signed, to Metal
 /// as Metal's own pixel format of that name, with no substitute and no decode of its own
@@ -1858,103 +1885,22 @@ const DYNAMIC_RESTART_WARNING: DriverDiagnostic = DriverDiagnostic {
 /// a `float` ulp off). Each is checked by `runtime_lane::compressed_decode` against the decode
 /// fitted to Metal's. NVIDIA's 615.71.09 (the RTX 3090 and the RTX 5080 Laptop GPU), ANV, Mesa
 /// 26.2.4, on the Iris Xe and lavapipe, Mesa 26.0.8 decode both families otherwise. Every other
-/// driver and GPU is unmeasured, and announces.
+/// driver and GPU is unmeasured, and announces until the device's own check answers.
 ///
-/// `Bc6hBlockDecodeIsMetals` and `Bc7BlockDecodeIsMetals` (before, every driver was taken to decode
-/// both as Metal does, unmeasured): the format scouts' reads of random blocks of the fourteen BC
-/// formats, every view, read and sample cell byte for byte against plain Metal's on the M4. BC6H's
-/// reads were Metal's on NVIDIA's 615.71.09 on the RTX 3090 and the RTX 5080 Laptop GPU, RADV, Mesa
-/// 26.2.4, on the Radeon 780M, ANV, Mesa 26.2.4, on the Iris Xe of Raptor Lake-P and lavapipe, Mesa
-/// 26.0.8; BC7's on the same but lavapipe, whose values lie a `float` ulp off. MoltenVK 1.4.1 on
-/// Apple's GPUs takes both by construction, as it takes BC1 to BC5's (it hands each format to Metal
-/// as Metal's own). No lane re-measures them at the gates: `runtime_lane::compressed_decode` holds
-/// no model of either decode.
-///
-/// `PositionedDepthReadAtStandardPositions`, measured by `runtime_lane::sample_positions` and a
-/// probe of it (at f1accaf20 and our probe at 3cfc03dab, 2026-10-10): NVIDIA's
-/// (`NVIDIA_PROPRIETARY`) 615.71.09 on the GeForce RTX 3090: plane X drawn at four custom positions
-/// into a 4x `Depth32Float` read back each sample's depth at the standard positions, in the same
-/// command buffer and in a later one, under each layout transition pair after the pass; a pass at
-/// four other positions that loaded it drew no sample under `Less` (each stored depth taken at its
-/// own positions); the pass's own test under `Less` drew the samples the custom positions put below
-/// the clear; and a caller's image rendered through the stand-in, its depth copied back after the
-/// pass, read Metal's depths. The row names no GPU: the stand-in it selects is exact on every
-/// device, so NVIDIA's other GPUs at that release (the RTX 5080 Laptop GPU's lane is not yet run)
-/// take it too. Measured not to have it, so not listed: RADV, Mesa 26.2.4 on the Radeon 780M (every
-/// read and later pass kept the custom positions' depths); ANV, Mesa 26.2.4 on the Iris Xe (RPL-P);
-/// lavapipe, x86, LLVM 21.1.8; and MoltenVK 1.4.1 on the M4, whose `runtime_lane::sample_positions`
-/// passed rendering the texture's own image (at 53ae2b964). There the RTX 3090 passed through the
-/// stand-in.
-///
-/// `TimestampPoolsAreCounterSampleBuffers` (the probe): MoltenVK 1.4.1 on the M3 Max
-/// and the M4 made 32 timestamp query pools and failed the 33rd, and failed a pool of 8192
-/// timestamps, with `VK_ERROR_OUT_OF_DEVICE_MEMORY`; its source makes each pool one Metal counter
-/// sample buffer of the pool's count (`MVKGPUCounterQueryPool::initMTLCounterSampleBuffer`). A
-/// defect fact: MoltenVK takes it at every release and on every GPU.
-///
-/// `LinearTilingFeaturesUninitialized`, read in MoltenVK 1.4.1's source (`MVKDevice.h` declares
-/// `_pixelFormats` before `_metalFeatures`; `MVKPhysicalDevice`'s constructor initializes
-/// `_pixelFormats(this)`, whose constructor builds every format's properties through
-/// `MVKPixelFormats::setFormatProperties`, before its body calls `initMetalFeatures()`, which
-/// clears and then sets `renderLinearTextures`) and measured on the M3 Max (macOS 27.0.1,
-/// 2026-10-15): of 40 instances made one after another in one process, 38 reported
-/// `R8G8B8A8_UNORM`'s `linearTilingFeatures` as `0x8000dd83` (with `COLOR_ATTACHMENT`,
-/// `COLOR_ATTACHMENT_BLEND` and `BLIT_DST`) and 2 as `0x8000d403` (without them), and
-/// `vkGetPhysicalDeviceImageFormatProperties` of a linear `COLOR_ATTACHMENT` image succeeded in
-/// 38. MoltenVK's code on every GPU, so the row names no vendor; a defect fact, taken at every
-/// release.
-///
-/// `TileStoreIsMetals`, measured by
-/// `runtime_lane::snorm_tile_store::a_drawing_pass_keeps_a_snorm_minimum_code_and_says_so` (a
-/// 4x4 target of each of the six signed normalized colour formats holding a channel's minimum code
-/// in every channel, loaded and drawn over by a full-screen triangle that writes no channel):
-/// MoltenVK 1.4.1 on the M3 Max under macOS 27.0.1 ([`APPLE_M4`]'s identity) stored the code
-/// above it in every texel, as plain Metal's pass does on that GPU. Its `RGB9E5Float` twin
-/// (`a_drawing_pass_keeps_an_unnormalized_shared_exponent_word_and_says_so`: the word `1 | 2 << 9
-/// | 3 << 18 | 20 << 27` in every texel) is Metal's by the same construction: MoltenVK renders
-/// `E5B9G9R9_UFLOAT_PACK32` as a Metal `RGB9E5Float` attachment, whose pass plain Metal measured
-/// normalizing such a word on that GPU. One row for Apple's GPUs, by
-/// construction (the fact's docs). Measured not to have it, so not listed (every texel kept its
-/// code): RADV, Mesa 26.0.8, on the Radeon 780M and the RX 7900 XTX; ANV, Mesa 26.2.4, on the
-/// Iris Xe (RPL-P).
-///
-/// `DontCareStoreIsOneOfMetals`: measured by `runtime_lane::dont_care_stores`, every texel of each
-/// of its twelve kept cases the earlier one or the stored one, none other: at 66ffe6775, RADV, Mesa
-/// 26.2.4, on the Radeon 780M and ANV, Mesa 26.2.4, on the UHD 770 (RPL-S); at dd718a7905 with its
-/// row, ANV, Mesa 26.2.4, on the Iris Xe (RPL-P). Not listed: NVIDIA's 615.71.09, whose RTX 3080
-/// left a third answer; RADV, Mesa 26.0.8, on the RX 7900 XTX, clean at dd718a7905 but an
-/// unmeasured identity (`MEASURED_DEVICES`); and every GPU and release not measured, which store
-/// with `STORE`.
-///
-/// `PointerImportsFollowTheirAddress`: ANV, Mesa 26.2.4 on the Iris Xe of RPL-P under Linux 7.2.9's
-/// i915, measured with a probe outside the runtime (2026-10-17): a page of a `memfd` filled with
-/// `0xaa`, mapped shared at an address and imported by its pointer as a buffer's memory, read
-/// `0xaa` through a copy; another `memfd`'s page of `0xbb` mapped over the address with `MAP_FIXED`,
-/// the next copy read `0xbb`; a page of `0xa2` imported and replaced by one of `0xb2` before any
-/// submission, the first copy read `0xb2`. lavapipe (`MESA_LLVMPIPE`) from Mesa 26.0.8 through
-/// 26.2.4 by construction, read in both releases' `lvp_AllocateMemory`, which binds an import's
-/// buffers at the host pointer. RADV, Mesa 26.2.4 on the Radeon 780M under Linux 7.2.9's amdgpu,
-/// measured through the runtime (2026-10-17): a no-copy buffer over two fresh anonymous private
-/// pages, read by a blit; fresh anonymous pages mapped over the address with `MAP_FIXED` and
-/// `Device::host_range_remapped` told, the next blit read the new pages, and the newer ones after a
-/// second remap; remapped between the buffer's making and its first submission, the first blit
-/// read the new pages. Not listed: RADV, Mesa 26.0.8 on the RX 7900 XTX and the Radeon 780M under
-/// Linux 7.0.0, which answered the same, but are unmeasured identities (`MEASURED_DEVICES`).
-/// `tests::pointer_residency` in the runtime checks it on a device with it. Every other driver is
-/// unmeasured, and keeps its pointer imports.
-///
-/// `InterlockOrdersDraws`, measured with no barrier between such draws on any driver (a scratch
-/// build of the commit that adds it), by `runtime_lane::interlocked_draw_order` (passes of 84
-/// draws, fullscreen and held to bands, of two read-modify-writes of an `R32Uint` color that do
-/// not commute, at one sample over 1920x1080 and 64x36 and at four over 960x540 and 64x36, every
-/// texel read back) and by `runtime_lane::extended_range_blend_table`'s
-/// `a_memoryless_color_2_blends_as_a_stored_color_does` (99 banded blends into a memoryless
-/// extended-range color in the interlock, then a fetching copy of it): ANV, Mesa 26.2.4 on the
-/// Iris Xe (RPL-P), every texel of every pass right in three runs of the first, every band right
-/// in the second, and the `extended_range_blend_table` and `framebuffer_fetch` lanes passing.
-/// Measured not to have it: RADV, Mesa 26.2.4 on the Radeon 780M, which passes the first but
-/// leaves 19 of the second's 495 bands wrong. Every other driver is unmeasured, and takes the
-/// barrier.
+/// `Bc6hBlockDecodeIsMetals` and `Bc7BlockDecodeIsMetals`: the format scouts' reads of random
+/// blocks of the fourteen BC formats, every view, read and sample cell byte for byte against plain
+/// Metal's on the M4. BC6H's reads were Metal's on NVIDIA's 615.71.09 on the RTX 3090 and the RTX
+/// 5080 Laptop GPU, RADV, Mesa 26.2.4, on the Radeon 780M, ANV, Mesa 26.2.4, on the Iris Xe of
+/// Raptor Lake-P and lavapipe, Mesa 26.0.8; BC7's on the same but lavapipe, whose values lie a
+/// `float` ulp off. The scouts' random BC7 blocks held none of the reserved mode.
+/// `Bc7ReservedBlockIsMetals`: the device check's seven blocks of the reserved mode among its 64
+/// read `(0, 0, 0, 0)`, where Metal reads `(0, 0, 0, 1)`, on NVIDIA's 615.71.09 on the RTX 3090
+/// and the RTX 5080 Laptop GPU, RADV, Mesa 26.2.4, on the Radeon 780M and ANV, Mesa 26.2.4, on
+/// the Iris Xe of Raptor Lake-P, whose other 57 blocks each read Metal's; lavapipe is
+/// unmeasured. MoltenVK 1.4.1 on Apple's GPUs takes the three by construction, as it takes BC1 to BC5's (it hands each format to Metal as Metal's own). The
+/// device checks the five facts itself (`bind::block_decode_cases`: BC1 to BC5 against the fitted
+/// decode, BC6H and BC7 against Metal's reads of the same blocks on an M3 Max, BC7's reserved
+/// blocks apart from its others), these rows its baseline until its check answers.
 pub(crate) const MEASURED: &[Measured<DriverFact>] = &[
     Measured {
         fact: DriverFact::RobustIndexFetchReadsZero,
@@ -1981,60 +1927,12 @@ pub(crate) const MEASURED: &[Measured<DriverFact>] = &[
         last: nvidia(615, 71, 9),
     },
     Measured {
-        fact: DriverFact::DepthImageKeepsDenormals,
-        driver: DriverId::NVIDIA_PROPRIETARY,
-        vendor: None,
-        device: None,
-        first: nvidia(615, 71, 9),
-        last: nvidia(615, 71, 9),
-    },
-    Measured {
-        fact: DriverFact::DepthImageKeepsDenormals,
-        driver: DriverId::MESA_LLVMPIPE,
-        vendor: None,
-        device: None,
-        first: mesa(26, 0, 8),
-        last: mesa(26, 2, 4),
-    },
-    Measured {
-        fact: DriverFact::DepthImageKeepsDenormals,
-        driver: DriverId::MOLTENVK,
-        vendor: None,
-        device: None,
-        first: moltenvk(1, 4, 1),
-        last: moltenvk(1, 4, 1),
-    },
-    Measured {
-        fact: DriverFact::DepthImageKeepsValuesOutsideUnitRange,
-        driver: DriverId::MOLTENVK,
-        vendor: None,
-        device: None,
-        first: moltenvk(1, 4, 1),
-        last: moltenvk(1, 4, 1),
-    },
-    Measured {
         fact: DriverFact::DepthTestKeepsDenormals,
         driver: DriverId::MOLTENVK,
         vendor: Some(APPLE_VENDOR_ID),
         device: Some(APPLE_M4),
         first: moltenvk(1, 4, 1),
         last: moltenvk(1, 4, 1),
-    },
-    Measured {
-        fact: DriverFact::DepthTestComparesMagnitudes,
-        driver: DriverId::MOLTENVK,
-        vendor: Some(APPLE_VENDOR_ID),
-        device: Some(APPLE_M4),
-        first: moltenvk(1, 4, 1),
-        last: moltenvk(1, 4, 1),
-    },
-    Measured {
-        fact: DriverFact::FirstSparseResourceWaitsForQueues,
-        driver: DriverId::INTEL_OPEN_SOURCE_MESA,
-        vendor: Some(INTEL_VENDOR_ID),
-        device: None,
-        first: mesa(26, 2, 4),
-        last: mesa(26, 2, 4),
     },
     Measured {
         fact: DriverFact::FragmentDepthStoresUnchanged,
@@ -2045,39 +1943,7 @@ pub(crate) const MEASURED: &[Measured<DriverFact>] = &[
         last: mesa(26, 2, 4),
     },
     Measured {
-        fact: DriverFact::DepthStencilImagesLieApart,
-        driver: DriverId::MOLTENVK,
-        vendor: None,
-        device: None,
-        first: moltenvk(1, 4, 1),
-        last: moltenvk(1, 4, 1),
-    },
-    Measured {
         fact: DriverFact::ColorResolveAverageIsMetals,
-        driver: DriverId::MOLTENVK,
-        vendor: Some(APPLE_VENDOR_ID),
-        device: None,
-        first: moltenvk(1, 4, 1),
-        last: moltenvk(1, 4, 1),
-    },
-    Measured {
-        fact: DriverFact::CompressedImagesHideAliasedWrites,
-        driver: DriverId::INTEL_OPEN_SOURCE_MESA,
-        vendor: Some(INTEL_VENDOR_ID),
-        device: None,
-        first: mesa(26, 2, 4),
-        last: mesa(26, 2, 4),
-    },
-    Measured {
-        fact: DriverFact::HostTransferImagesKeepTheirBytes,
-        driver: DriverId::INTEL_OPEN_SOURCE_MESA,
-        vendor: Some(INTEL_VENDOR_ID),
-        device: None,
-        first: mesa(26, 2, 4),
-        last: mesa(26, 2, 4),
-    },
-    Measured {
-        fact: DriverFact::DepthStencilImagesStayGpuOptimized,
         driver: DriverId::MOLTENVK,
         vendor: Some(APPLE_VENDOR_ID),
         device: None,
@@ -2149,158 +2015,6 @@ pub(crate) const MEASURED: &[Measured<DriverFact>] = &[
         last: mesa(26, 2, 4),
     },
     Measured {
-        fact: DriverFact::InterlockedPassSplitNoSlower,
-        driver: DriverId::MOLTENVK,
-        vendor: Some(APPLE_VENDOR_ID),
-        device: Some(APPLE_M3_MAX),
-        first: moltenvk(1, 4, 1),
-        last: moltenvk(1, 4, 1),
-    },
-    Measured {
-        fact: DriverFact::InterlockedPassSplitNoSlower,
-        driver: DriverId::MOLTENVK,
-        vendor: Some(APPLE_VENDOR_ID),
-        device: Some(APPLE_M4),
-        first: moltenvk(1, 4, 1),
-        last: moltenvk(1, 4, 1),
-    },
-    Measured {
-        fact: DriverFact::InterlockedPassSplitNoSlower,
-        driver: DriverId::MESA_RADV,
-        vendor: Some(AMD_VENDOR_ID),
-        device: Some(AMD_RADEON_780M),
-        first: mesa(26, 2, 4),
-        last: mesa(26, 2, 4),
-    },
-    Measured {
-        fact: DriverFact::InterlockedPassSplitNoSlower,
-        driver: DriverId::NVIDIA_PROPRIETARY,
-        vendor: Some(NVIDIA_VENDOR_ID),
-        device: Some(NVIDIA_RTX_5080_LAPTOP),
-        first: nvidia(615, 71, 9),
-        last: nvidia(615, 71, 9),
-    },
-    Measured {
-        fact: DriverFact::InterlockedPassSplitNoSlower,
-        driver: DriverId::NVIDIA_PROPRIETARY,
-        vendor: Some(NVIDIA_VENDOR_ID),
-        device: Some(NVIDIA_RTX_3090),
-        first: nvidia(615, 71, 9),
-        last: nvidia(615, 71, 9),
-    },
-    Measured {
-        fact: DriverFact::InterlockedPassSplitNoSlower,
-        driver: DriverId::INTEL_OPEN_SOURCE_MESA,
-        vendor: Some(INTEL_VENDOR_ID),
-        device: Some(INTEL_IRIS_XE_RPL_P),
-        first: mesa(26, 2, 4),
-        last: mesa(26, 2, 4),
-    },
-    Measured {
-        fact: DriverFact::InterlockedPassSplitNoSlower,
-        driver: DriverId::INTEL_OPEN_SOURCE_MESA,
-        vendor: Some(INTEL_VENDOR_ID),
-        device: Some(INTEL_UHD_770_RPL_S),
-        first: mesa(26, 2, 4),
-        last: mesa(26, 2, 4),
-    },
-    Measured {
-        fact: DriverFact::DynamicRestartWarns,
-        driver: DriverId::MOLTENVK,
-        vendor: None,
-        device: None,
-        first: moltenvk(1, 4, 1),
-        last: moltenvk(1, 4, 1),
-    },
-    Measured {
-        fact: DriverFact::FillCompiledPerCommandPool,
-        driver: DriverId::MOLTENVK,
-        vendor: None,
-        device: None,
-        first: moltenvk(1, 4, 1),
-        last: moltenvk(1, 4, 1),
-    },
-    Measured {
-        fact: DriverFact::DontCareStoreIsMetals,
-        driver: DriverId::MOLTENVK,
-        vendor: Some(APPLE_VENDOR_ID),
-        device: Some(APPLE_M4),
-        first: moltenvk(1, 4, 1),
-        last: moltenvk(1, 4, 1),
-    },
-    Measured {
-        fact: DriverFact::DontCareStoreIsMetals,
-        driver: DriverId::MOLTENVK,
-        vendor: Some(APPLE_VENDOR_ID),
-        device: Some(APPLE_M3_MAX),
-        first: moltenvk(1, 4, 1),
-        last: moltenvk(1, 4, 1),
-    },
-    Measured {
-        fact: DriverFact::SemaphoreOperationsStallSubmits,
-        driver: DriverId::NVIDIA_PROPRIETARY,
-        vendor: Some(NVIDIA_VENDOR_ID),
-        device: Some(NVIDIA_RTX_5080_LAPTOP),
-        first: nvidia(615, 71, 9),
-        last: nvidia(615, 71, 9),
-    },
-    Measured {
-        fact: DriverFact::SemaphoreOperationsStallSubmits,
-        driver: DriverId::NVIDIA_PROPRIETARY,
-        vendor: Some(NVIDIA_VENDOR_ID),
-        device: Some(NVIDIA_RTX_3090),
-        first: nvidia(615, 71, 9),
-        last: nvidia(615, 71, 9),
-    },
-    Measured {
-        fact: DriverFact::TimestampsWaitForEveryQueue,
-        driver: DriverId::MOLTENVK,
-        vendor: Some(APPLE_VENDOR_ID),
-        device: None,
-        first: moltenvk(1, 4, 1),
-        last: moltenvk(1, 4, 1),
-    },
-    Measured {
-        fact: DriverFact::TimestampPoolsAreCounterSampleBuffers,
-        driver: DriverId::MOLTENVK,
-        vendor: Some(APPLE_VENDOR_ID),
-        device: None,
-        first: moltenvk(1, 4, 1),
-        last: moltenvk(1, 4, 1),
-    },
-    Measured {
-        fact: DriverFact::LinearTilingFeaturesUninitialized,
-        driver: DriverId::MOLTENVK,
-        vendor: None,
-        device: None,
-        first: moltenvk(1, 4, 1),
-        last: moltenvk(1, 4, 1),
-    },
-    Measured {
-        fact: DriverFact::DontCareStoreIsOneOfMetals,
-        driver: DriverId::MESA_RADV,
-        vendor: Some(AMD_VENDOR_ID),
-        device: Some(AMD_RADEON_780M),
-        first: mesa(26, 2, 4),
-        last: mesa(26, 2, 4),
-    },
-    Measured {
-        fact: DriverFact::DontCareStoreIsOneOfMetals,
-        driver: DriverId::INTEL_OPEN_SOURCE_MESA,
-        vendor: Some(INTEL_VENDOR_ID),
-        device: Some(INTEL_UHD_770_RPL_S),
-        first: mesa(26, 2, 4),
-        last: mesa(26, 2, 4),
-    },
-    Measured {
-        fact: DriverFact::DontCareStoreIsOneOfMetals,
-        driver: DriverId::INTEL_OPEN_SOURCE_MESA,
-        vendor: Some(INTEL_VENDOR_ID),
-        device: Some(INTEL_IRIS_XE_RPL_P),
-        first: mesa(26, 2, 4),
-        last: mesa(26, 2, 4),
-    },
-    Measured {
         fact: DriverFact::ColorBlockDecodeIsMetals,
         driver: DriverId::MESA_RADV,
         vendor: Some(AMD_VENDOR_ID),
@@ -2323,14 +2037,6 @@ pub(crate) const MEASURED: &[Measured<DriverFact>] = &[
         device: None,
         first: moltenvk(1, 4, 1),
         last: moltenvk(1, 4, 1),
-    },
-    Measured {
-        fact: DriverFact::PositionedDepthReadAtStandardPositions,
-        driver: DriverId::NVIDIA_PROPRIETARY,
-        vendor: Some(NVIDIA_VENDOR_ID),
-        device: None,
-        first: nvidia(615, 71, 9),
-        last: nvidia(615, 71, 9),
     },
     Measured {
         fact: DriverFact::Bc6hBlockDecodeIsMetals,
@@ -2421,97 +2127,17 @@ pub(crate) const MEASURED: &[Measured<DriverFact>] = &[
         last: moltenvk(1, 4, 1),
     },
     Measured {
-        fact: DriverFact::ShadowCopyBackDispatchFaster,
-        driver: DriverId::INTEL_OPEN_SOURCE_MESA,
-        vendor: Some(INTEL_VENDOR_ID),
-        device: None,
-        first: mesa(26, 2, 4),
-        last: mesa(26, 2, 4),
-    },
-    Measured {
-        fact: DriverFact::ShadowCopyInDispatchFaster,
-        driver: DriverId::INTEL_OPEN_SOURCE_MESA,
-        vendor: Some(INTEL_VENDOR_ID),
-        device: Some(INTEL_UHD_770_RPL_S),
-        first: mesa(26, 2, 4),
-        last: mesa(26, 2, 4),
-    },
-    Measured {
-        fact: DriverFact::RowCopiesDispatchFaster,
-        driver: DriverId::INTEL_OPEN_SOURCE_MESA,
-        vendor: Some(INTEL_VENDOR_ID),
-        device: None,
-        first: mesa(26, 2, 4),
-        last: mesa(26, 2, 4),
-    },
-    Measured {
-        fact: DriverFact::RowCopiesDispatchFaster,
-        driver: DriverId::NVIDIA_PROPRIETARY,
-        vendor: Some(NVIDIA_VENDOR_ID),
-        device: Some(NVIDIA_RTX_5080_LAPTOP),
-        first: nvidia(615, 71, 9),
-        last: nvidia(615, 71, 9),
-    },
-    Measured {
-        fact: DriverFact::SampledDepthKeepsHiZ,
-        driver: DriverId::INTEL_OPEN_SOURCE_MESA,
-        vendor: Some(INTEL_VENDOR_ID),
-        device: Some(INTEL_IRIS_XE_RPL_P),
-        first: mesa(26, 2, 4),
-        last: mesa(26, 2, 4),
-    },
-    Measured {
-        fact: DriverFact::MultisampledDepthFasterOutOfGeneral,
-        driver: DriverId::INTEL_OPEN_SOURCE_MESA,
-        vendor: Some(INTEL_VENDOR_ID),
-        device: Some(INTEL_IRIS_XE_RPL_P),
-        first: mesa(26, 2, 4),
-        last: mesa(26, 2, 4),
-    },
-    Measured {
-        fact: DriverFact::TileStoreIsMetals,
+        fact: DriverFact::Bc7ReservedBlockIsMetals,
         driver: DriverId::MOLTENVK,
         vendor: Some(APPLE_VENDOR_ID),
         device: None,
         first: moltenvk(1, 4, 1),
         last: moltenvk(1, 4, 1),
     },
-    Measured {
-        fact: DriverFact::PointerImportsFollowTheirAddress,
-        driver: DriverId::INTEL_OPEN_SOURCE_MESA,
-        vendor: Some(INTEL_VENDOR_ID),
-        device: Some(INTEL_IRIS_XE_RPL_P),
-        first: mesa(26, 2, 4),
-        last: mesa(26, 2, 4),
-    },
-    Measured {
-        fact: DriverFact::PointerImportsFollowTheirAddress,
-        driver: DriverId::MESA_RADV,
-        vendor: Some(AMD_VENDOR_ID),
-        device: Some(AMD_RADEON_780M),
-        first: mesa(26, 2, 4),
-        last: mesa(26, 2, 4),
-    },
-    Measured {
-        fact: DriverFact::PointerImportsFollowTheirAddress,
-        driver: DriverId::MESA_LLVMPIPE,
-        vendor: None,
-        device: None,
-        first: mesa(26, 0, 8),
-        last: mesa(26, 2, 4),
-    },
-    Measured {
-        fact: DriverFact::InterlockOrdersDraws,
-        driver: DriverId::INTEL_OPEN_SOURCE_MESA,
-        vendor: Some(INTEL_VENDOR_ID),
-        device: Some(INTEL_IRIS_XE_RPL_P),
-        first: mesa(26, 2, 4),
-        last: mesa(26, 2, 4),
-    },
 ];
 
 /// Intel's `vendorID`.
-const INTEL_VENDOR_ID: u32 = 0x8086;
+pub(crate) const INTEL_VENDOR_ID: u32 = 0x8086;
 
 /// Mesa's `vendorID` (`VK_VENDOR_ID_MESA`), which lavapipe reports, with `deviceID` 0.
 const MESA_VENDOR_ID: u32 = 0x10005;
@@ -2598,35 +2224,53 @@ pub(crate) const MEASURED_DEVICES: &[MeasuredDevice] = &[
 impl DeviceDescription {
     /// The runtime's driver facts ([`DriverFact`]) of the device this description names (the
     /// module docs' rule): on a measured identity ([`DeviceDescription::measured_identity`]) those
-    /// its driver's rows name at its release, on its vendor and GPU; on any other identity only the
-    /// defects its driver is measured with on any release or GPU
-    /// ([`DriverFact::assumed_where_unmeasured`]). The runtime relies on an answer fact only where
-    /// the driver has it, and elsewhere takes the exact path that needs none.
+    /// its driver's rows of `MEASURED` name at its release, on its vendor and GPU, and on every
+    /// identity those the known-driver list names for its driver, release and GPU
+    /// (`device::listed`). The runtime relies on an answer fact only where the driver has it, and
+    /// elsewhere takes the exact path that needs none.
+    ///
+    /// A fact the device checks takes its check's answer from [`DeviceDescription::checks`]
+    /// where one is found, and this rule until then (`device::checks`).
     pub fn driver_facts(&self) -> BTreeSet<DriverFact> {
-        let measured = self.measured_identity();
-        let gpu = self.canonical_device_id();
-        MEASURED
-            .iter()
-            .filter(|row| Some(row.driver) == self.driver_id)
-            .filter(|row| match measured {
-                true => {
-                    (row.first..=row.last).contains(&self.driver_version)
-                        && row.vendor.is_none_or(|v| v == self.vendor_id)
-                        && row.device.is_none_or(|d| d == gpu)
-                }
-                false => row.fact.assumed_where_unmeasured(),
-            })
-            .map(|row| row.fact)
-            .collect()
+        let mut facts: BTreeSet<DriverFact> = self.table_driver_facts().into_keys().collect();
+        for entry in CHECKED {
+            let DeviceFact::Fact(fact) = entry.fact else {
+                continue;
+            };
+            match held(entry.fact, facts.contains(&fact), Some(&self.checks)).0 {
+                true => facts.insert(fact),
+                false => facts.remove(&fact),
+            };
+        }
+        facts
+    }
+
+    /// The runtime's driver facts the tables give the device (the module docs' rule), each with
+    /// the row or entry that gives it, as a feature status names it: `MEASURED`'s on a measured
+    /// identity, and the known-driver list's.
+    fn table_driver_facts(&self) -> BTreeMap<DriverFact, String> {
+        let mut facts = listed(LISTED_FACTS, self);
+        if self.measured_identity() {
+            let gpu = self.canonical_device_id();
+            let measured = (MEASURED.iter())
+                .filter(|row| Some(row.driver) == self.driver_id)
+                .filter(|row| (row.first..=row.last).contains(&self.driver_version))
+                .filter(|row| row.vendor.is_none_or(|v| v == self.vendor_id))
+                .filter(|row| row.device.is_none_or(|d| d == gpu));
+            for row in measured {
+                facts.entry(row.fact).or_insert_with(|| entry(row));
+            }
+        }
+        facts
     }
 
     /// Whether the device's identity (`driverID`, `vendorID`, `deviceID` and `driverVersion`) is
     /// one the runtime's driver facts were measured on (`MEASURED_DEVICES`, the module docs), its
     /// `deviceID` read as the GPU's measured one
     /// ([`canonical_device_id`](DeviceDescription::canonical_device_id)). Another release of a
-    /// measured driver, another GPU of it, or another driver is not: the runtime takes no answer
-    /// fact there, assumes its driver's measured defects, and says so once in the informational
-    /// message `metal2vulkan-unmeasured-driver`.
+    /// measured driver, another GPU of it, or another driver is not: the runtime takes none of
+    /// `MEASURED`'s facts there, only the known-driver list's (`device::listed`), and says so once
+    /// in its feature status (the runtime's informational message `metal2vulkan-feature-status`).
     pub fn measured_identity(&self) -> bool {
         let gpu = self.canonical_device_id();
         MEASURED_DEVICES.iter().any(|m| {
@@ -2650,10 +2294,14 @@ impl DeviceDescription {
             })
     }
 
-    /// The answer facts the device's driver is measured to give on another release or GPU, which
-    /// the device does not take because its identity is not measured
-    /// ([`DeviceDescription::measured_identity`]): the runtime takes the exact path each needs
-    /// none of instead. Empty on a measured identity, and for a driver with no answer measured.
+    /// The facts the device's driver is measured to give on another release or GPU, which the
+    /// device does not take because its identity is not measured
+    /// ([`DeviceDescription::measured_identity`]): `MEASURED`'s, which a check on the device may
+    /// settle. The runtime takes the exact path each needs none of instead. Empty on a measured
+    /// identity, and for a driver with none measured.
+    ///
+    /// A fact the device checks is withheld only until its check answers
+    /// ([`DeviceDescription::checks`]).
     pub fn driver_facts_withheld(&self) -> BTreeSet<DriverFact> {
         if self.measured_identity() {
             return BTreeSet::new();
@@ -2661,9 +2309,115 @@ impl DeviceDescription {
         MEASURED
             .iter()
             .filter(|row| Some(row.driver) == self.driver_id)
-            .filter(|row| !row.fact.assumed_where_unmeasured())
             .map(|row| row.fact)
+            .filter(|&fact| {
+                let status = decide(
+                    DeviceFact::Fact(fact),
+                    Baseline::withheld(String::new()),
+                    Some(&self.checks),
+                );
+                status.decided == Decided::Exact(String::new())
+            })
             .collect()
+    }
+
+    /// How the device takes each fact the curated tables or its checks decide (the module docs,
+    /// `device::checks`): every deviation a row gives the setup, every translation defect the
+    /// tables give it (a row, its driver's identity or its rasterizer), every
+    /// runtime driver fact a row gives it or its unmeasured identity withholds, and every fact the
+    /// device checks, its checks taken where `trusted` (else every fact as the tables have it,
+    /// `DeviceChecksPolicy::Distrusted`), and every other fact it learned off. The runtime's own
+    /// defects are the runtime's to add.
+    /// In the facts' order.
+    pub fn fact_status(&self, trusted: bool) -> Vec<FactStatus> {
+        let checks = checks_of(self, trusted);
+        let identity = (self.vendor_id, self.canonical_device_id());
+        let mut rows: BTreeMap<DeviceFact, FactStatus> = BTreeMap::new();
+        let mut add = |fact: DeviceFact, baseline: Baseline| {
+            rows.insert(fact, decide(fact, baseline, checks));
+        };
+        let listed = |entry: Option<String>| match entry {
+            Some(entry) => Baseline::listed(entry),
+            None => Baseline::unlisted(),
+        };
+        let deviations = among(DEVIATIONS, self.driver_id, identity, self.driver_version);
+        let checked_deviations = CHECKED.iter().filter_map(|entry| match entry.fact {
+            DeviceFact::Deviation(deviation) => Some(deviation),
+            _ => None,
+        });
+        for deviation in deviations.keys().copied().chain(checked_deviations) {
+            let row = row_of(
+                DEVIATIONS,
+                deviation,
+                self.driver_id,
+                identity,
+                self.driver_version,
+            );
+            let row = row.filter(|_| deviations.contains_key(&deviation));
+            add(DeviceFact::Deviation(deviation), listed(row.map(entry)));
+        }
+        let workarounds = super::derive::baseline_workarounds(self);
+        let checked_workarounds = CHECKED.iter().filter_map(|entry| match entry.fact {
+            DeviceFact::Workaround(workaround) => Some(workaround),
+            _ => None,
+        });
+        for workaround in workarounds.keys().copied().chain(checked_workarounds) {
+            let baseline = workarounds.get(&workaround).cloned();
+            add(
+                DeviceFact::Workaround(workaround),
+                baseline.unwrap_or_else(Baseline::unlisted),
+            );
+        }
+        let facts = self.table_driver_facts();
+        let withheld = match self.measured_identity() {
+            true => BTreeSet::new(),
+            false => MEASURED
+                .iter()
+                .filter(|row| Some(row.driver) == self.driver_id)
+                .map(|row| row.fact)
+                .collect(),
+        };
+        let checked_facts = CHECKED.iter().filter_map(|entry| match entry.fact {
+            DeviceFact::Fact(fact) => Some(fact),
+            _ => None,
+        });
+        let unmeasured = format!(
+            "the identity is not measured ({:?} at {} on {:04x}:{:04x})",
+            self.driver_id,
+            release_name(self.driver_id, self.driver_version),
+            self.vendor_id,
+            self.device_id
+        );
+        for fact in (facts.keys().copied())
+            .chain(withheld.iter().copied())
+            .chain(checked_facts)
+        {
+            let baseline = match (facts.get(&fact), withheld.contains(&fact)) {
+                (Some(named), _) => Baseline::listed(named.clone()),
+                (None, true) => Baseline::withheld(unmeasured.clone()),
+                (None, false) => Baseline::unlisted(),
+            };
+            add(DeviceFact::Fact(fact), baseline);
+        }
+        // A fact learned off that no row names takes its row too where it applies (the floor of
+        // Function storage, on a device whose storage is not measured); the runtime adds its
+        // defects'.
+        if let Some(checks) = checks {
+            for fact in checks.learned_facts() {
+                let applies = match fact {
+                    DeviceFact::Defect(_) => false,
+                    DeviceFact::FunctionStorageFloor => matches!(
+                        super::function_storage::of(self, true),
+                        super::profile::FunctionStorage::Floor(_)
+                    ),
+                    _ => true,
+                };
+                if applies && !rows.contains_key(&fact) {
+                    rows.insert(fact, decide(fact, Baseline::unlisted(), Some(checks)));
+                }
+            }
+        }
+        rows.into_values().collect()
     }
 }
 

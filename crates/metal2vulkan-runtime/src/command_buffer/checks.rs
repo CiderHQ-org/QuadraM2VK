@@ -1,6 +1,6 @@
 //! A command buffer's submission checks (a runtime extension): a check the program sets runs for
-//! each submission of the command buffer as Metal splits it, once its event waits are met, just
-//! before the runtime submits it, and may fail it with a code.
+//! each submission of the command buffer as Metal splits it, as Metal schedules it (**When**),
+//! just before the runtime submits it, and may fail it with a code.
 //!
 //! - **Metal's submissions** ([`metal_submissions`]). Metal splits a command buffer into
 //!   submissions (measured by a consumer on an M3 Max, macOS 26.7): each render pass is its own;
@@ -12,11 +12,18 @@
 //! - **When.** The scheduler holds a batch of a command buffer with a check, as it holds one for
 //!   its host step, once it is otherwise ready: its binary semaphores' signals submitted, every
 //!   event value it waits for reached by the host or by a submitted signal, and its host step
-//!   recorded. It holds it further while a value it waits for is reached only by a GPU signal
-//!   submitted but not yet landed (an `Event`'s, or a `SharedEvent`'s the GPU signals): Metal
-//!   submits the submission, and checks it, once the signal happened, so a resource detached
-//!   meanwhile fails it. A value the host set (or the device reached) needs no wait. On its
-//!   thread, without its own lock or the command buffer's, it then runs the check of each
+//!   recorded. It holds it further while a `SharedEvent`'s value it waits for is reached only by
+//!   a GPU signal submitted but not yet landed: Metal holds a command buffer waiting for a shared
+//!   event on the CPU until the value is reached, and submits the submission, and checks it, only
+//!   then, so a resource detached meanwhile fails it. An `Event`'s value needs no landing: Metal
+//!   schedules a command buffer waiting for `Event`s, checks it and counts it in flight, at the
+//!   first commit after which each event it waits for has a committed signaller of a value at
+//!   least the wait's (a higher one counts) or holds such a value, the GPU waiting for the signal
+//!   (measured by a consumer on an M3 Max, macOS 27.0.1); until then a detach fails it. The
+//!   runtime checks it once such a signal is submitted, and the batch goes with a Vulkan wait for
+//!   it: later than Metal only where the scheduler still holds a committed signaller
+//!   (`docs/FAST-PATHS.md`, known gaps). A value the host set (or the device reached) needs no
+//!   wait. On its thread, without its own lock or the command buffer's, it then runs the check of each
 //!   submission that begins in the batch, and again of each that a host step of the batch
 //!   recorded commands for (what they reach is known only then), then submits the batch in its
 //!   order. Where the scheduler groups batches (`CompletionPolicy::Grouped` on a driver that
@@ -270,7 +277,7 @@ impl CommandBuffer {
     /// `Problem::AlreadyCommitted`).
     pub fn set_submission_check(&self, check: SubmissionCheck) -> Result<(), Error> {
         let mut state = self.state();
-        if state.status != crate::values::CommandBufferStatus::NotEnqueued || state.committing {
+        if state.enqueued() || state.committing {
             return Err(invalid("set_submission_check", Problem::AlreadyCommitted));
         }
         state.check = Some(check);

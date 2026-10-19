@@ -80,7 +80,7 @@ impl CommandBuffer {
             return false;
         };
         state.end_encoder(
-            self,
+            (self, false),
             Recorded {
                 encoder,
                 raws: recorded.raws,

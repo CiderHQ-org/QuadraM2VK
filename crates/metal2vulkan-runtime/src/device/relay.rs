@@ -23,7 +23,8 @@
 //! keeps its submissions in flight in submission order ([`Flights`]), each with a fence its
 //! submission signals: a batch of a command buffer's, which there always takes one
 //! (`command_buffer/submit.rs`), and, after any other use of the queue (the program's through
-//! `CommandQueue::with_vk_queue`, or the runtime's own outside a batch), a submission of no work
+//! `CommandQueue::with_vk_queue`, the runtime's own outside a batch, or a submission of the
+//! device's checks of its driver, `device_checks/kit.rs`), a submission of no work
 //! with one, which ends where that use's submissions end. Metal runs one queue's completed
 //! handlers in order, on one thread (the probe's `handlers` and `handlers_fault`: 600
 //! handlers, failures among them, none out of order), so when MoltenVK reports a failure every
@@ -34,7 +35,8 @@
 //! once its fences are signaled (`CommandBufferShared::complete`: `PageFault` for 3, `DeviceLost`
 //! for 11, else `CommandBufferError::Execution`), its description kept
 //! (`CommandBuffer::error_description`); a failure of the program's own submission is the program's
-//! to read (its own messenger hears it); and one of the runtime's own, or one no submission in
+//! to read (its own messenger hears it); one of a check's fails that check alone, which then
+//! answers unanswered; and one of the runtime's own, or one no submission in
 //! flight explains (a Metal command buffer MoltenVK made for itself), loses the device: every
 //! command buffer in flight then finishes `DeviceLost`, and no later one is submitted.
 //!
@@ -50,6 +52,7 @@
 
 use super::functions::Functions;
 use super::lock;
+use crate::device_checks::learned::Risks;
 use crate::exit_guard::{self, Call};
 use crate::loader_word::LoaderWord;
 use ash::vk::{self, Handle};
@@ -160,7 +163,7 @@ impl Relay {
             return;
         };
         match flights.first_pending() {
-            Some(By::Batch(failed)) => failed.fail(code, Some(description)),
+            Some(By::Batch(failed) | By::Check(failed)) => failed.fail(code, Some(description)),
             Some(By::Program) => {}
             Some(By::Runtime) | None => {
                 flights.lost.store(true, Ordering::Release);
@@ -215,6 +218,10 @@ pub(crate) enum By {
     Program,
     /// The runtime's own use outside a batch.
     Runtime,
+    /// A submission of the device's checks of its driver (`device_checks/kit.rs`): its failure
+    /// goes to the cell and fails that check alone; no work of the program's, so its mark counts
+    /// in no counter of the queue's (`WorkCounts`).
+    Check(Arc<Relayed>),
 }
 
 /// A submission in flight: the fence it signals, and whose it is.
@@ -352,10 +359,10 @@ impl Flights {
         status.is_ok()
     }
 
-    /// Every batch in flight fails with `code`, unless it failed already.
+    /// Every batch and check in flight fails with `code`, unless it failed already.
     fn fail_all(&self, code: u64) {
         for flight in lock(&self.log).iter() {
-            if let By::Batch(failed) = &flight.by {
+            if let By::Batch(failed) | By::Check(failed) = &flight.by {
                 failed.fail(code, None);
             }
         }
@@ -381,12 +388,13 @@ impl super::DeviceShared {
     /// failure for `failed` ([`By::Batch`]), and dropped from the log again when `f` fails. A
     /// batch that signals the queue's timeline to `value` notes it once submitted (the exit
     /// hook's value, and where freed memory waits for the batches in flight, theirs, under the
-    /// gate's read lock: `freed_memory.rs`). The time `f` takes, the driver's, is counted
-    /// (`WorkCounts::batch_submit_nanos`).
+    /// gate's read lock: `freed_memory.rs`), and the risky paths its command buffers took,
+    /// `risks`, on the device's watch of its loss (`device_checks/learned.rs`). The time `f`
+    /// takes, the driver's, is counted (`WorkCounts::batch_submit_nanos`).
     pub(crate) fn submit_logged(
         &self,
         (queue, value): (usize, Option<u64>),
-        fence: Option<vk::Fence>,
+        (fence, risks): (Option<vk::Fence>, Risks),
         failed: &Arc<Relayed>,
         f: impl FnOnce(vk::Queue) -> Result<(), vk::Result>,
     ) -> Result<(), vk::Result> {
@@ -405,6 +413,7 @@ impl super::DeviceShared {
                 (Err(_), Some((fence, flights)), _) => flights.unpush(fence),
                 (Ok(()), _, Some(value)) => {
                     slot.submitted(value);
+                    self.learning.submitted(queue, value, risks);
                     if let Some(parking) = parking {
                         parking.submitted(queue, value);
                     }
@@ -464,6 +473,7 @@ impl super::DeviceShared {
             };
             let raw = self.vk();
             let logged = fence.zip(flights);
+            let counted = !matches!(by, By::Check(_));
             if let Some((fence, flights)) = logged {
                 flights.push(fence, by);
             }
@@ -480,7 +490,9 @@ impl super::DeviceShared {
                     true => std::slice::from_ref(&submit),
                     false => &[],
                 };
-                self.counts.queue_submitted(0);
+                if counted {
+                    self.counts.queue_submitted(0);
+                }
                 // SAFETY: a submission of no work, with an unsignaled fence in no pending
                 // submission where it has one, signalling the timeline of marks above every
                 // value signalled there before where it has one; the queue is used under its

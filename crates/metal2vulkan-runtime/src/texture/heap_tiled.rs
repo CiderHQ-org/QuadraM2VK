@@ -110,33 +110,40 @@
 //!
 //! **Held** as the texture's image in memory of its own, a shadow of the heap's bytes
 //! (`shadow.rs`, `ShadowTarget::Tiled`): into the image, the texture's bytes copied into a
-//! staging buffer, one dispatch of `bind::tiled_texels_module` moving each level's elements into
-//! a tight buffer of the image's elements (`heap_plane_layout`), and that buffer copied into
-//! the image; back, the heap's bytes copied into the staging buffer again, the image into the
-//! tight buffer, the kernel into the staging buffer (each element's bytes; every other byte as
-//! the heap held it), and each level's bytes of each chain on into the heap. Each step is
-//! ordered after the one before by a full barrier, and the buffers are the texture's for its
-//! life. The texture's CPU copies move each element between the heap's bytes and the caller's
-//! as laid out (`TiledLayout::element`); a command that writes the bytes two ways merges as
-//! any shadow's (`shadow_merge.rs`), the shadow's texels laid out tiled for it
-//! (`HeapTiledCopies::record_out`).
+//! staging part, one dispatch of `bind::tiled_texels_module` moving each level's elements into
+//! a tight part of the image's elements (`heap_plane_layout`), and that part copied into the
+//! image; back, the heap's bytes copied into the staging part again, the image into the tight
+//! part, the kernel into the staging part (each element's bytes; every other byte as the heap
+//! held it), and each level's bytes of each chain on into the heap. Each step is ordered after
+//! the one before by a full barrier. The parts are its command queue's scratch, which every
+//! staged move of the queue's encoders goes through (`heap_tiled_scratch.rs`), not the
+//! texture's: a texture holds no buffer of its own. The texture's CPU copies move each element between the heap's
+//! bytes and the caller's as laid out (`TiledLayout::element`). A merge (`shadow_merge.rs`)
+//! keeps the shadow's texels laid out tiled: the bytes its copy in moved, where the keep follows
+//! the copy in and the image holds every element's bytes as copied in
+//! (`HeapTiledCopies::record_into_kept`, `HeapTiledCopies::restores`), else the image's elements
+//! moved over zeros
+//! (`HeapTiledCopies::record_out`); its changed texels are the image's elements moved over a
+//! copy of the kept part, in the staging part (`HeapTiledCopies::record_changed`), so a byte no
+//! element lies in is the same in both. Where the image takes a storing unsigned-integer view of
+//! its element's width at no cost, its elements move by a dispatch a level through that view
+//! over the heap's bytes instead, with no staging (`heap_tiled_words.rs`,
+//! `ShadowTarget::TiledWords`).
 
-use super::super::buffer::Buffer;
 use super::super::copy_plan::{block_bytes, block_extent, depth_bytes};
 use super::super::degradation::Degradation;
 use super::super::error::{internal, Error};
 use super::super::heap::SizeAndAlign;
 use super::super::image_plan::block_family;
 use super::super::metal_level::MetalLevel;
-use super::super::owned_kernel::{OwnedKernel, OwnedModule, OwnedSets};
+use super::super::owned_kernel::{OwnedKernel, OwnedModule};
 use super::super::row_copies::RowCopies;
-use super::super::shadow::{self, ShadowStaging};
 use super::super::texture_descriptor::TextureLayout;
 use super::super::tracker::Barrier;
-use super::super::values::{CpuCacheMode, HazardTrackingMode, ResourceOptions, StorageMode};
 use super::super::Device;
 use super::copy_units;
 use super::heap::HeapPlane;
+use super::heap_tiled_scratch::{ScratchNeed, TiledScratch};
 use crate::device::functions::Vk;
 use ash::vk;
 use metal2vulkan::bind::{TiledLevelMove, TiledTexelsModule};
@@ -151,9 +158,6 @@ const TILE_BYTES: u64 = 16 << 10;
 const PAGE: u64 = 16 << 10;
 /// The multiple a narrow level's bytes are rounded up to, and any other texture's alignment.
 const LINE: u64 = 128;
-/// Where a shape lies in the shape buffer, per direction: past its bytes, and a multiple of
-/// every `minStorageBufferOffsetAlignment`.
-const SHAPE_SLOT: u64 = 1024;
 /// The side of the square tile of texels whose compression metadata takes `METADATA_BYTES`.
 const METADATA_TILE: u64 = 16;
 /// The bytes of compression metadata a `METADATA_TILE` square takes.
@@ -1126,34 +1130,97 @@ fn multisample_heap_layout(
     refused(answer)
 }
 
-/// One direction of the kernel's moves: its shape, where it lies in the shape buffer, and the
-/// dispatch's workgroups.
+/// One direction of the kernel's moves: its shape, the shape slot of a scratch it is written
+/// into (`TiledScratch::shape_at`), and the dispatch's workgroups.
 struct Move {
     shape: Vec<u8>,
-    at: u64,
+    slot: usize,
     groups: [u32; 2],
 }
 
+/// Where a tiled texture's bytes lie for its staged moves (the module docs): `size` bytes from
+/// `at` of their `VkBuffer` (the heap's, or a surface plane's), copied into a scratch's staging
+/// part from its start; and the copies of each run of them back, from offsets in that part
+/// (`src_offset`) to the `VkBuffer` (`dst_offset`).
+pub(crate) struct TiledStaging {
+    pub(crate) at: u64,
+    pub(crate) size: u64,
+    pub(crate) back: Vec<vk::BufferCopy>,
+}
+
+impl TiledStaging {
+    /// The staging of a texture of `layout` whose first byte lies at `at` of its bytes'
+    /// `VkBuffer`: its bytes from its first to its last; each level's bytes of each chain back.
+    pub(crate) fn of(layout: &TiledLayout, at: u64) -> TiledStaging {
+        let back = (0..layout.chains)
+            .flat_map(|chain| {
+                layout.levels.iter().filter_map(move |level| {
+                    // A 3D level lies in the chains of its depth slices alone.
+                    let used = !layout.volume || chain < level.depth;
+                    let first = chain * layout.stride + level.base;
+                    used.then_some(vk::BufferCopy {
+                        src_offset: first,
+                        dst_offset: at + first,
+                        size: level.bytes,
+                    })
+                })
+            })
+            .collect();
+        TiledStaging {
+            at,
+            size: layout.size,
+            back,
+        }
+    }
+
+    /// The copy of the bytes into a staging part at `staging` of its `VkBuffer`.
+    fn into(&self, staging: u64) -> vk::BufferCopy {
+        vk::BufferCopy {
+            src_offset: self.at,
+            dst_offset: staging,
+            size: self.size,
+        }
+    }
+
+    /// The bytes a merge's kept and changed texels take: `size` rounded up to whole words, which
+    /// its kernel reads.
+    pub(crate) fn kept_bytes(&self) -> u64 {
+        self.size.next_multiple_of(4)
+    }
+
+    /// The copies of the runs back out of a staging part at `staging` of its `VkBuffer`.
+    pub(crate) fn back(&self, staging: u64) -> Vec<vk::BufferCopy> {
+        (self.back.iter())
+            .map(|copy| vk::BufferCopy {
+                src_offset: staging + copy.src_offset,
+                ..*copy
+            })
+            .collect()
+    }
+}
+
 /// A heap texture's moves between its image and its elements tiled in the heap's bytes (the
-/// module docs): the tight buffer of the image's elements, the shapes, and the kernel's two sets
-/// (into the image, then back).
+/// module docs): the image's regions in a tight part, the two directions' shapes and the kernel.
+/// Each move goes through its command queue's scratch (`heap_tiled_scratch.rs`), whose staging
+/// and tight parts no command's uses name: every move writes the image or the bytes, so the
+/// tracker orders it after every other move of the texture, and each records a full barrier
+/// first, which orders it after every earlier move in the scratch too.
 pub(crate) struct HeapTiledCopies {
     /// Metal's layout of the texture's elements.
     pub(crate) layout: TiledLayout,
-    /// The image's elements, each level's from its plane's offset; held for the texture's life.
-    /// No command's uses name it: every copy writes the image or the heap's bytes, so the
-    /// tracker orders it after every other copy of the texture, and each records a full barrier
-    /// first.
-    _tight: Buffer,
-    tight_raw: vk::Buffer,
-    /// The tight buffer's copies to and from the image, one a level.
+    /// The tight part's copies to and from the image, one a level, from the part's start.
     regions: Vec<vk::BufferImageCopy>,
-    /// The two shapes; held for the texture's life.
-    _shapes: Buffer,
-    shapes_raw: vk::Buffer,
+    /// The bytes of the image's elements in the tight part, each level's from its plane's
+    /// offset.
+    tight_bytes: u64,
     moves: [Move; 2],
     kernel: OwnedKernel,
-    sets: OwnedSets,
+    /// Whether the image holds each element's bytes as a move into it copied them, so a move
+    /// back writes them again: no region is a depth aspect's, whose copy Vulkan leaves undefined
+    /// for a value outside [0, 1] ("When copying to a depth aspect, and the
+    /// `VK_EXT_depth_range_unrestricted` extension is not enabled, the data in buffer memory must
+    /// be in the range [0,1], or the resulting values are undefined").
+    restores: bool,
 }
 
 impl HeapTiledCopies {
@@ -1235,67 +1302,17 @@ impl HeapTiledCopies {
             && moves
     }
 
-    /// The staging buffer of a texture of `layout` whose first byte lies at `at` of the heap's
-    /// `VkBuffer`: the texture's bytes, from its first to its last, at its start, of the
-    /// texture's `hazard` tracking; each level's bytes of each chain copied back.
-    pub(crate) fn staging(
-        device: &Device,
-        layout: &TiledLayout,
-        at: u64,
-        hazard: HazardTrackingMode,
-    ) -> Result<ShadowStaging, Error> {
-        let options =
-            ResourceOptions::new(StorageMode::Private, CpuCacheMode::DefaultCache, hazard);
-        let buffer = device.own_buffer(layout.size, options)?;
-        let (_, start) = buffer.at(0);
-        let back = (0..layout.chains)
-            .flat_map(|chain| {
-                layout.levels.iter().filter_map(move |level| {
-                    // A 3D level lies in the chains of its depth slices alone.
-                    let used = !layout.volume || chain < level.depth;
-                    let first = chain * layout.stride + level.base;
-                    used.then_some(vk::BufferCopy {
-                        src_offset: start + first,
-                        dst_offset: at + first,
-                        size: level.bytes,
-                    })
-                })
-            })
-            .collect();
-        Ok(ShadowStaging {
-            into: vk::BufferCopy {
-                src_offset: at,
-                dst_offset: start,
-                size: layout.size,
-            },
-            back,
-            buffer,
-        })
-    }
-
-    /// The moves of a texture of `layout` through `staging` (its `staging`),
-    /// whose image's elements lie in its tight buffer as `planes` say, `tight_len` bytes, copied
-    /// to and from the image by `regions` (offsets in that buffer), of the texture's `hazard`
-    /// tracking. Refused as `new_buffer` refuses the tight and shape buffers; the caller checked
-    /// that they `fit`.
+    /// The moves of a texture of `layout` whose image's elements lie in a tight part as `planes`
+    /// say, `tight_len` bytes, copied to and from the image by `regions` (offsets from the
+    /// part's start). The caller checked that they `fit`.
     pub(crate) fn new(
         device: &Device,
-        staging: &ShadowStaging,
         layout: TiledLayout,
         (planes, tight_len): (&[HeapPlane], u64),
         regions: &[vk::BufferImageCopy],
-        hazard: HazardTrackingMode,
     ) -> Result<HeapTiledCopies, Error> {
         let levels = Self::levels(&layout, planes)
             .ok_or_else(|| internal("a tiled heap texture's moves past u32"))?;
-        let options =
-            ResourceOptions::new(StorageMode::Private, CpuCacheMode::DefaultCache, hazard);
-        let tight_bytes = tight_len.next_multiple_of(4);
-        let tight = device.own_buffer(tight_bytes, options)?;
-        let shapes = device.own_buffer(2 * SHAPE_SLOT, options)?;
-        let (tight_raw, tight_at) = tight.at(0);
-        let (shapes_raw, shapes_at) = shapes.at(0);
-        let (staging_raw, staging_at) = (staging.raw(), staging.into.dst_offset);
         let local = TiledTexelsModule::LOCAL_SIZE;
         let mut moves = Vec::new();
         for into in [true, false] {
@@ -1304,63 +1321,80 @@ impl HeapTiledCopies {
                 .ok_or_else(|| internal("a tiled heap texture's moves past the device's grid"))?;
             let shape = TiledTexelsModule::shape(&levels, into, groups[0] * local)
                 .ok_or_else(|| internal("a tiled heap texture of more levels than a shape"))?;
-            let at = shapes_at + if into { 0 } else { SHAPE_SLOT };
-            moves.push(Move { shape, at, groups });
+            let slot = usize::from(!into);
+            moves.push(Move {
+                shape,
+                slot,
+                groups,
+            });
         }
         let [into, back] = <[Move; 2]>::try_from(moves)
             .map_err(|_| internal("a tiled heap texture's moves are two"))?;
-        let shape_bytes = 4 * u64::from(TiledTexelsModule::SHAPE_WORDS);
         let kernel = device.owned_kernel(OwnedModule::TiledTexels)?;
-        // Each set binds the tight elements, the tiled bytes and the shape, in binding order.
-        let sets = OwnedSets::write(
-            device,
-            &kernel,
-            &[&into, &back]
-                .iter()
-                .map(|step| {
-                    vec![
-                        (tight_raw, tight_at, tight_bytes),
-                        (staging_raw, staging_at, layout.size),
-                        (shapes_raw, step.at, shape_bytes),
-                    ]
-                })
-                .collect::<Vec<_>>(),
-        )?;
-        let regions = regions
-            .iter()
-            .map(|region| vk::BufferImageCopy {
-                buffer_offset: tight_at + region.buffer_offset,
-                ..*region
-            })
-            .collect();
+        let restores = (regions.iter()).all(|region| {
+            !(region.image_subresource.aspect_mask).contains(vk::ImageAspectFlags::DEPTH)
+        });
         Ok(HeapTiledCopies {
             layout,
-            _tight: tight,
-            tight_raw,
-            regions,
-            _shapes: shapes,
-            shapes_raw,
+            regions: regions.to_vec(),
+            tight_bytes: tight_len.next_multiple_of(4),
             moves: [into, back],
             kernel,
-            sets,
+            restores,
         })
     }
 
-    /// Record the dispatch of the move `into` the image, or back, after writing its shape.
+    /// Whether the image holds each element's bytes as a move into it copied them, so the bytes
+    /// a move into it moved are the image's elements laid out tiled (no depth aspect's).
+    pub(crate) fn restores(&self) -> bool {
+        self.restores
+    }
+
+    /// The parts a scratch its moves go through holds: the texture's bytes (rounded up to a
+    /// merge's windows, `shadow_merge.rs`), and its image's elements.
+    pub(crate) fn needs(&self) -> ScratchNeed {
+        ScratchNeed {
+            staging: self.layout.size.next_multiple_of(256),
+            tight: self.tight_bytes,
+        }
+    }
+
+    /// The tight part's copies to and from the image in `scratch`.
+    fn regions(&self, scratch: &TiledScratch) -> Vec<vk::BufferImageCopy> {
+        let at = scratch.tight_at();
+        (self.regions.iter())
+            .map(|region| vk::BufferImageCopy {
+                buffer_offset: at + region.buffer_offset,
+                ..*region
+            })
+            .collect()
+    }
+
+    /// Record the dispatch of the move `into` the image, or back, in `scratch`, after writing its
+    /// shape.
     ///
     /// # Safety
     ///
     /// `command_buffer` is recording, outside a render pass, with every write the dispatch
-    /// reads made visible to it; the buffers and the sets are live until it completes.
-    unsafe fn dispatch(&self, device: &Vk, command_buffer: vk::CommandBuffer, into: bool) {
-        let (step, set) = match into {
-            true => (&self.moves[0], self.sets.sets[0]),
-            false => (&self.moves[1], self.sets.sets[1]),
-        };
-        // SAFETY: the caller's contract; the shape fits its slot, and the sets bind the
-        // texture's own buffers.
+    /// reads made visible to it; the scratch holds the moves' parts (`needs`) and is live until
+    /// it completes.
+    unsafe fn dispatch(
+        &self,
+        device: &Vk,
+        command_buffer: vk::CommandBuffer,
+        scratch: &TiledScratch,
+        into: bool,
+    ) {
+        let step = &self.moves[usize::from(!into)];
+        // SAFETY: the caller's contract; the shape fits its slot, and the set binds the
+        // scratch's parts.
         unsafe {
-            device.cmd_update_buffer(command_buffer, self.shapes_raw, step.at, &step.shape);
+            device.cmd_update_buffer(
+                command_buffer,
+                scratch.raw(),
+                scratch.shape_at(step.slot),
+                &step.shape,
+            );
             Barrier::everything().record(device, command_buffer);
             device.cmd_bind_pipeline(
                 command_buffer,
@@ -1372,7 +1406,7 @@ impl HeapTiledCopies {
                 vk::PipelineBindPoint::COMPUTE,
                 self.kernel.layout,
                 0,
-                &[set],
+                &[scratch.set(step.slot)],
                 &[],
             );
             device.cmd_dispatch(command_buffer, step.groups[0], step.groups[1], 1);
@@ -1380,88 +1414,182 @@ impl HeapTiledCopies {
         }
     }
 
-    /// Record the move of the texture's `image` from `bytes` (the heap's `VkBuffer`) through
-    /// `staging` (`into`), or back, its rows back by `back` (`shadow::record_back`).
+    /// Record the move of the texture's `image` from `bytes` (laid out as `staging` says)
+    /// through `scratch`, or back, its rows back by `back` (`shadow::ShadowCopy::staged_back`)
+    /// where given, else by copies; where `kept` is given, the texture's bytes copied in are
+    /// copied on into it too (a merge's kept part, `kept.1` bytes into it, the keep that follows
+    /// a copy in).
     ///
     /// # Safety
     ///
     /// `command_buffer` is recording, outside a render pass; the image, the buffers and the
-    /// sets are live until it completes, and the image rests in `GENERAL`; `back` is the copy's
-    /// `ShadowCopy::staged_back`, over `bytes`.
+    /// scratch are live until it completes, the scratch holds the moves' parts (`needs`), and
+    /// the image rests in `GENERAL`; `back` copies out of the scratch's staging part into
+    /// `bytes`.
     pub(crate) unsafe fn record(
         &self,
         device: &Vk,
         command_buffer: vk::CommandBuffer,
         image: vk::Image,
-        (bytes, staging): (vk::Buffer, &ShadowStaging),
+        (bytes, staging, scratch): (vk::Buffer, &TiledStaging, &TiledScratch),
         into: bool,
         back: Option<&RowCopies>,
     ) {
         let general = vk::ImageLayout::GENERAL;
-        // SAFETY: the caller's contract; the copies lie in the buffers and the image (planned
-        // when the texture was made).
+        let at = scratch.staging_at();
+        // SAFETY: the caller's contract; the copies lie in the bytes, the scratch's parts and
+        // the image (planned when the texture was made).
         unsafe {
             Barrier::everything().record(device, command_buffer);
-            // Both ways the staging buffer starts as the heap's bytes: back, so the bytes
-            // between the elements are the heap's when they are copied back.
-            device.cmd_copy_buffer(command_buffer, bytes, staging.raw(), &[staging.into]);
+            // Both ways the staging part starts as the texture's bytes: back, so the bytes
+            // between the elements are the bytes' own when they are copied back.
+            device.cmd_copy_buffer(command_buffer, bytes, scratch.raw(), &[staging.into(at)]);
             if !into {
+                let regions = self.regions(scratch);
                 device.cmd_copy_image_to_buffer(
                     command_buffer,
                     image,
                     general,
-                    self.tight_raw,
-                    &self.regions,
+                    scratch.raw(),
+                    &regions,
                 );
             }
-            self.dispatch(device, command_buffer, into);
+            self.dispatch(device, command_buffer, scratch, into);
             if into {
+                let regions = self.regions(scratch);
                 device.cmd_copy_buffer_to_image(
                     command_buffer,
-                    self.tight_raw,
+                    scratch.raw(),
                     image,
                     general,
-                    &self.regions,
+                    &regions,
                 );
             } else {
-                shadow::record_back(device, command_buffer, (staging, bytes), back);
+                match back {
+                    Some(rows) => rows.record(device, command_buffer),
+                    None => device.cmd_copy_buffer(
+                        command_buffer,
+                        scratch.raw(),
+                        bytes,
+                        &staging.back(at),
+                    ),
+                }
             }
         }
     }
 
-    /// Record a copy of the texture's `image` into `to` from `at`, laid out as in the heap's
-    /// bytes from the texture's first (a merge's kept or changed part, `shadow_merge.rs`): the
-    /// move back into `staging`, then its bytes on. A byte no element lies in is the staging
-    /// buffer's, the heap's as the last move left it, alike in each copy of one merge.
+    /// Record the move of the texture's `image` from `bytes` into it through `scratch`, as
+    /// [`record`](Self::record) does, and the staging part on into `kept` from `kept_at` (a
+    /// merge's kept part, [`TiledStaging::kept_bytes`]): the keep that follows a copy in, whose
+    /// kept texels are those the copy in moved (`shadow_merge.rs`).
     ///
     /// # Safety
     ///
-    /// As `record`; `to` holds the texture's bytes from `at`, a multiple of 4.
+    /// As `record`; `kept` holds `staging.kept_bytes()` bytes from `kept_at`.
+    pub(crate) unsafe fn record_into_kept(
+        &self,
+        device: &Vk,
+        command_buffer: vk::CommandBuffer,
+        image: vk::Image,
+        (bytes, staging, scratch): (vk::Buffer, &TiledStaging, &TiledScratch),
+        (kept, kept_at): (vk::Buffer, u64),
+    ) {
+        // SAFETY: the caller's contract, which `record`'s takes; the dispatch's barriers order
+        // the copy into the kept part after the copy into the staging part.
+        unsafe {
+            self.record(
+                device,
+                command_buffer,
+                image,
+                (bytes, staging, scratch),
+                true,
+                None,
+            );
+            let region = vk::BufferCopy {
+                src_offset: scratch.staging_at(),
+                dst_offset: kept_at,
+                size: staging.kept_bytes(),
+            };
+            device.cmd_copy_buffer(command_buffer, scratch.raw(), kept, &[region]);
+        }
+    }
+
+    /// Record a copy of the texture's `image` into `to` from `at` (a merge's kept part), laid
+    /// out as in the heap's bytes from the texture's first, through `scratch`: the staging part
+    /// filled with zeros, the image's elements moved back into it, and its
+    /// [`TiledStaging::kept_bytes`] on. A byte no element lies in is 0, alike in the kept and the
+    /// changed texels ([`record_changed`](Self::record_changed)).
+    ///
+    /// # Safety
+    ///
+    /// As `record`; `to` holds `staging.kept_bytes()` bytes from `at`, a multiple of 4.
     pub(crate) unsafe fn record_out(
         &self,
         device: &Vk,
         command_buffer: vk::CommandBuffer,
         image: vk::Image,
-        staging: &ShadowStaging,
+        (staging, scratch): (&TiledStaging, &TiledScratch),
         (to, at): (vk::Buffer, u64),
     ) {
-        // SAFETY: the caller's contract, as `record`'s.
+        let from = scratch.staging_at();
+        // SAFETY: the caller's contract; the dispatch's barriers order the fill before it and
+        // the copy on after it.
         unsafe {
             Barrier::everything().record(device, command_buffer);
+            device.cmd_fill_buffer(command_buffer, scratch.raw(), from, staging.kept_bytes(), 0);
+            let regions = self.regions(scratch);
             device.cmd_copy_image_to_buffer(
                 command_buffer,
                 image,
                 vk::ImageLayout::GENERAL,
-                self.tight_raw,
-                &self.regions,
+                scratch.raw(),
+                &regions,
             );
-            self.dispatch(device, command_buffer, false);
+            self.dispatch(device, command_buffer, scratch, false);
             let region = vk::BufferCopy {
-                src_offset: staging.into.dst_offset,
+                src_offset: from,
                 dst_offset: at,
-                size: staging.into.size,
+                size: staging.kept_bytes(),
             };
-            device.cmd_copy_buffer(command_buffer, staging.raw(), to, &[region]);
+            device.cmd_copy_buffer(command_buffer, scratch.raw(), to, &[region]);
+        }
+    }
+
+    /// Record the texture's `image` laid out as in the heap's bytes into `scratch`'s staging
+    /// part, over a copy of the kept part `kept` from `kept_at` ([`TiledStaging::kept_bytes`]): a
+    /// merge's changed texels, each byte no element lies in the kept part's, which the merge's
+    /// kernel reads from the staging part (`shadow_merge.rs`).
+    ///
+    /// # Safety
+    ///
+    /// As `record`; `kept` holds `staging.kept_bytes()` bytes from `kept_at`.
+    pub(crate) unsafe fn record_changed(
+        &self,
+        device: &Vk,
+        command_buffer: vk::CommandBuffer,
+        image: vk::Image,
+        (staging, scratch): (&TiledStaging, &TiledScratch),
+        (kept, kept_at): (vk::Buffer, u64),
+    ) {
+        // SAFETY: the caller's contract; the dispatch's barriers order the copies before it and
+        // the merge after it.
+        unsafe {
+            Barrier::everything().record(device, command_buffer);
+            let region = vk::BufferCopy {
+                src_offset: kept_at,
+                dst_offset: scratch.staging_at(),
+                size: staging.kept_bytes(),
+            };
+            device.cmd_copy_buffer(command_buffer, kept, scratch.raw(), &[region]);
+            let regions = self.regions(scratch);
+            device.cmd_copy_image_to_buffer(
+                command_buffer,
+                image,
+                vk::ImageLayout::GENERAL,
+                scratch.raw(),
+                &regions,
+            );
+            self.dispatch(device, command_buffer, scratch, false);
         }
     }
 }

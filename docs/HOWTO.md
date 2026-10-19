@@ -43,9 +43,9 @@ driver's subgroup width instead.
 
 A `half` computed in `float` rounds through the device's conversion to 16 bits and back, Metal's
 `half(float)` under the float controls the entry declares, where the driver keeps that pair (ANV,
-RADV). NVIDIA's driver (615.71.09) folds it (`DriverWorkaround::HalfConversionPairFolded`), so
-there a `half` rounds natively by default and in integer arithmetic under
-`HalfRoundingPolicy::Exact`.
+RADV). NVIDIA's driver (615.71.09) folds it on the RTX 3090, and a NaN keeps its payload through
+it on the RTX 5080 Laptop GPU (`DriverWorkaround::HalfConversionPairFolded`), so there a `half`
+rounds natively by default and in integer arithmetic under `HalfRoundingPolicy::Exact`.
 
 To read AIR without translating it (list a metallib's functions, decode a module into typed IR,
 read its entry points' bindings, canonicalize an entry under function-constant values), depend on
@@ -73,18 +73,25 @@ second process does not translate it again. It cannot be turned off.
 - **Where.** By default `~/Library/Caches/metal2vulkan` on macOS, `$XDG_CACHE_HOME/metal2vulkan`
   elsewhere, or `~/.cache/metal2vulkan` when `XDG_CACHE_HOME` is unset. `ShaderCacheOptions`
   (in `DeviceOptions`, or `RawDevice` for an adopted device) names another directory. Several
-  processes and builds may share it; each build reads only its own translations.
+  processes and builds may share it; each build reads only what it wrote itself, translations and
+  records alike, so the first process of a new build makes every pipeline again once.
 - **How much.** At most `capacity` bytes on disk (25 GiB by default), least recently used first;
   another build's entries go after 30 days unused. In memory, at most `memory_capacity` bytes
   (256 MiB by default): a pipeline state made again takes its translation from there without
   reading the disk.
 - **The driver's pipeline cache.** Each pipeline is made with a `VkPipelineCache` of its own,
-  seeded from a record named by what the making reads (its SPIR-V, layout and state, and the
-  driver's identity) and written back only when the making added to it. After an update of
-  metal2vulkan, a pipeline whose SPIR-V and state did not change is made from its record; a driver
-  update starts empty. On drivers that report `pipelineBinaryInternalCacheControl` (NVIDIA's), a
-  device the runtime makes turns the driver's own internal cache off; an adopted device keeps what
-  its creator chose.
+  seeded from a record named by the build and what the making reads (its SPIR-V, layout and
+  state, the driver's identity, and the features and extensions the device enabled) and written
+  back only when the making added to it; a driver update starts empty. The record is not named
+  by the device's compile profile, so within one build a process whose device checks answered
+  after an earlier process's making (or whose policy differs where a pipeline does not read it)
+  finds the records of every pipeline its translation leaves as it was. On drivers that report
+  `pipelineBinaryInternalCacheControl` (NVIDIA's), a device the runtime makes turns the driver's
+  own internal cache off; an adopted device keeps what its creator chose.
+- **The threadgroup sizes a kernel ran at.** For each compute variant, the keys of the pipelines
+  its dispatches made (one per threadgroup size and edge region, at most 16, the most recent
+  first), named as the driver's pipeline cache records are: a later process's state
+  creation makes them, as Metal compiles at creation, so its first dispatches wait for no making.
 - **When it fills or a write fails.** Each device says so once, through its `MessageSink` (or on
   stderr) as a `Warning` whose `id_name` is `metal2vulkan-shader-cache-evicted` or
   `metal2vulkan-shader-cache-write-failed`. Match on `id_name`, never on the text. Later events are
@@ -95,6 +102,78 @@ second process does not translate it again. It cannot be turned off.
   driver's own shader cache off (`__GL_SHADER_DISK_CACHE=0` for NVIDIA,
   `MESA_SHADER_CACHE_DISABLE=true` for Mesa). Give each test its own directory.
 - **It is a cache.** Deleting the directory, or any file in it, is always safe.
+
+### The device's checks of its driver
+
+Some driver facts are checked on the device itself (`metal2vulkan::device::CHECKED`): a short
+dispatch or draw per fact compares the driver's answer with Metal's, and the device takes the fact
+only where the answer is Metal's (docs/API.md, "Measured driver behavior").
+
+- **Where.** The answers are kept per setup (driver, GPU, release, `pipelineCacheUUID`, OS build,
+  check-suite and runtime version, the translator's and the runtime's source digests, so a build
+  of other sources checks again, what the device enables and its policy) by default in
+  `~/Library/Caches/metal2vulkan-device-checks` on macOS, `$XDG_CACHE_HOME/metal2vulkan-device-checks`
+  elsewhere, or `~/.cache/metal2vulkan-device-checks`; `DeviceChecksOptions` (`device_checks` in
+  `DeviceOptions` or `RawDevice`) names another directory. It lies beside the shader cache's, not
+  in it, so the shader cache's sweeps never touch it. A device of a kept setup reads one file and
+  runs no check; any change of the setup checks again. Each answer is kept as its check settles,
+  so a device dropped before its checks thread finished keeps what the thread answered, and the
+  setup's next device runs only the checks left. Writes merge into the setup's entry and go to a
+  new file renamed into place, so several processes may share the directory and keep each other's
+  answers. Deleting it is always safe.
+- **When.** A check whose fact decides a refusal or shapes a layout (`Settle::AtCreation`) runs as
+  the device is made, on the creating thread (an adopted device's on its queue, which the consumer
+  must not use meanwhile). The rest (`Settle::Background`) run after the making on the device's
+  checks thread, one runtime thread that ends with its last check; the making does not wait for
+  them. It submits on the device's first queue under the queue's lock, counted in none of the
+  device's `WorkCounts`, and a GPU failure the driver reports for one of its submissions fails that
+  check alone (unanswered). Until a fact's answer
+  is in, the device takes the fact as the curated tables have it. A fact the runtime reads as it
+  records then switches to its answer on the running device; a fact translation reads (a deviation
+  or a converter's defect) stays as made for the device's life, and its answer is taken from the
+  setup's next device on. The drop of a device's last handle waits for the checks thread's call
+  in progress (one Vulkan call, or one answer's write to the cache, at most), lets no other begin, and tears the device down before it
+  returns, the thread joined and what its checks made released: the consumer of an adopted
+  device may destroy its `VkDevice` right after. What the thread had not answered is not kept,
+  and runs again at the next making.
+- **Waiting.** `DeviceChecksOptions::wait` runs every check as the device is made: every fact is as
+  its check found it from the device's first object, the same in every run, and no checks thread
+  runs beside the program's work. For tests and for a consumer that needs determinism from the
+  start; a cold making then takes the checks' whole time. A warm making reads one file either way.
+- **The status.** Each device says once as it is made, as an `Info` message whose `id_name` is
+  `metal2vulkan-feature-status`, how it decided each fact: checked (Metal's answer or not, the
+  difference named), listed in the curated tables, or the exact path, and whether its checks ran
+  (in how long), came from the directory or still run on its checks thread. The same table is
+  `DeviceProperties::feature_status`, as made. `Device::feature_status` is the status as it stands,
+  and once the checks thread answers its last check the device says the settled status once, as
+  `metal2vulkan-feature-status-settled`; a translation fact's row there says "checked <answer>,
+  taken from the next device". Nothing a guest sees (the device's Metal properties, families or
+  limits) depends on it.
+- **Triage.** `DeviceChecksPolicy::Distrusted` (set by `DevicePolicy::exact_answers()`) runs and
+  reads no check and no learned record: every fact is as the curated tables have it.
+- **Learned from a lost device.** Each device watches the runtime's own Vulkan calls (not the
+  program's, nor an adopted device's other users'). A call that returns `VK_ERROR_DEVICE_LOST`
+  writes a record, before it returns, for each risky path a submission still in flight took: a
+  known-bug entry's direct path, used on a setup the list leaves clean or does not name
+  (`MultisampledStencilColourCopies`, `ImplicitPreprocessAfterExecutionSet`,
+  `FreedAddressMemoryFailsPendingWork`, and a vertex or fragment function past the Function
+  storage floor of a device whose storage is not measured). The record is
+  `v1/<learned key>.learned/<kind>-<name>` in the same directory, one file per path, its name the
+  record. The learned key is SHA-256 over the driver ID, vendor ID, device ID, driver version and,
+  on macOS, the OS build. A line `metal2vulkan-learned-off` goes to stderr as it is written. From
+  the next device of the setup on, the path's workaround is taken, and the feature status says
+  `learned off` with the record's call and time. A loss with no tagged submission in flight blames
+  nothing. Deleting the directory, or one record, turns the path back on. A process can watch 8
+  devices at once; a device made past them runs unwatched (never refused), and its status says
+  so (`FeatureStatus::learning`, `WorkCounts::loss_watched`). A driver crash that ends the process
+  (`SIGSEGV`) loses no device and leaves no record: those bugs are list entries only.
+- **GPU report.** `metal2vulkan-gpu-report` (the runtime's feature `gpu-report`; README.md,
+  "GPU report") makes the system default device
+  (`--device N` the Nth, `--all` each) with its checks, waiting for every one
+  (`DeviceChecksOptions::wait`), and prints its setup's keys, each fact's
+  decision and why, and each check's cost (`--json` for JSON). It uses a scratch checks directory,
+  removed at exit, so every check runs cold and no record is read, unless `--checks-dir DIR` names
+  one (the default directory above, to see what a program's devices take).
 
 ## 4. Handle failures
 
@@ -250,7 +329,11 @@ them.
 A blit that names a texture over a buffer runs on the buffers' bytes, a region per row where its
 rows lie apart, and a buffer-texture copy in a layout Vulkan cannot state moves its rows through a
 staging buffer, as does a shadow's copy back where its texels start off their alignment (and a
-rotated texture's, and a heap's two-plane or tiled texture's), whether an encoder records it or a
+rotated texture's, a heap's two-plane texture's, and a heap's tiled texture's where its image takes
+no storing unsigned-integer view of its element's width or the device has no unified memory; one
+that takes it moves its elements by a dispatch through the view, with no staging,
+`WorkCounts::heap_tiled_view_moves`), whether an
+encoder records it or a
 render pass between two of its instances. A driver may record each region as an operation of its
 own: on ANV the 1080 rows of a 1920-texel `BGRA8Unorm` texture took 3.1-3.3 ms of CPU and 5.3-7.8 ms
 of GPU on the Iris Xe of RPL-P. Where the device is measured to run it faster

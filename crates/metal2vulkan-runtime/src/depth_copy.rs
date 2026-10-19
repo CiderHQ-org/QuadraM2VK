@@ -11,12 +11,13 @@
 //! - **Where it is exact** ([`copies_exactly`]): a 32-bit float depth, on a driver whose fragment
 //!   depth stores every depth value unchanged: each value in `[0, 1]` it is given, and, for the
 //!   rest, the value it stored when given it again.
-//!   `runtime_lane::separate_samples::fragment_depth_stores_depth_values_unchanged` probes that
-//!   with signed zero, denormals, 1, values outside `[0, 1]`, infinities and NaN payloads, and the
-//!   driver fact [`DriverFact::FragmentDepthStoresUnchanged`] lists each driver where it held,
-//!   from the release measured (`device/driver_facts.rs`). And a 16-bit unsigned normalized depth,
-//!   on a driver whose fragment depth stores each code's fetched `float` as that code
-//!   (`fragment_depth_keeps_every_16_bit_code` probes every code; the fact
+//!   The device checks that as it is made, with signed zero, denormals, 1, values outside
+//!   `[0, 1]`, infinities and NaN payloads (`device_checks/fragment_depth.rs`, the driver fact
+//!   [`DriverFact::FragmentDepthStoresUnchanged`], whose rows in `device/driver_facts.rs` are its
+//!   baseline), as `runtime_lane::separate_samples::fragment_depth_stores_depth_values_unchanged`
+//!   probes it. And a 16-bit unsigned normalized depth, on a driver whose fragment depth stores
+//!   each code's fetched `float` as that code (the same check of every code, and the lane's
+//!   `fragment_depth_keeps_every_16_bit_code`; the fact
 //!   [`DriverFact::FragmentDepthKeepsDepth16Codes`]). Elsewhere a 32-bit float depth has no exact
 //!   form on a device whose copies go by draws (Vulkan writes a multisampled depth image's
 //!   samples by no other means there), so the draw runs as an announced near-equivalent
@@ -143,13 +144,14 @@ pub(super) fn drawn_by(
         .then(|| Drawn::Changes(fragment_depth_changes(driver).unwrap_or(UNMEASURED_FLOAT_DEPTH)))
 }
 
-/// What the `FragDepth` draw may change of a 32-bit float depth on a driver whose fragment depth
-/// is not measured: what Vulkan leaves to the driver. A fragment depth outside the depth range
-/// `[0, 1]` is undefined (the fragment operations chapter: "If zf is not in the range
-/// [zmin, zmax], then zf is undefined"), a denormal may be flushed to zero, and the probe found
-/// -0 stored as +0 on a driver (MoltenVK); every other value is stored as the shader wrote it.
-pub(super) const UNMEASURED_FLOAT_DEPTH: &str = "its driver's fragment depth is not measured: \
-     Vulkan leaves undefined a value outside [0, 1] (past 1, below 0, an infinity or a NaN), \
+/// What the `FragDepth` draw may change of a 32-bit float depth on a driver no row of
+/// [`FRAGMENT_DEPTH_CHANGES`] names: what Vulkan leaves to the driver. A fragment depth outside the
+/// depth range `[0, 1]` is undefined (the fragment operations chapter: "If zf is not in the range
+/// [zmin, zmax], then zf is undefined"), a denormal may be flushed to zero, and the probe found -0
+/// stored as +0 on a driver (MoltenVK); every other value is stored as the shader wrote it.
+pub(super) const UNMEASURED_FLOAT_DEPTH: &str = "no row names the values its driver's fragment \
+     depth changes: Vulkan leaves undefined a value outside [0, 1] (past 1, below 0, an infinity \
+     or a NaN), \
      which it may store clamped, as a value of its own or not at all, and it may flush a \
      denormal to zero or store -0 as +0; every other value lands as Metal's copy leaves it";
 

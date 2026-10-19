@@ -22,7 +22,8 @@
 //! rewrite pass writes (`index_rewrite.rs`), with the class's list topology.
 
 use super::RenderCall;
-use super::{Assembly, RenderCommandEncoder};
+use super::RenderCommandEncoder;
+use super::{Assembly, RenderEncoding};
 use metal2vulkan::bind::{DrawCall, RewriteProgram};
 use metal2vulkan::metal::PrimitiveType;
 
@@ -55,6 +56,13 @@ impl RenderCommandEncoder {
     /// strip restarting elsewhere than at the all-ones index is drawn as a list a GPU pass writes
     /// before the pass; a draw it cannot draw so is refused (`NotImplemented(RestartedStrip)`).
     pub fn set_primitive_restart_enabled(&mut self, _enabled: bool, index: u64) {
+        self.on(|encoding| encoding.set_primitive_restart_enabled(_enabled, index))
+    }
+}
+
+impl RenderEncoding {
+    /// [`RenderCommandEncoder::set_primitive_restart_enabled`]'s encoding.
+    pub(crate) fn set_primitive_restart_enabled(&mut self, _enabled: bool, index: u64) {
         self.log(|_| RenderCall::PrimitiveRestartEnabled(_enabled, index));
         self.restart = Some(index);
     }

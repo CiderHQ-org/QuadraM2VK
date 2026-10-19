@@ -253,7 +253,7 @@ impl Texture {
     }
 
     /// Whether a write switched the texture's depth on (the module docs). One atomic read.
-    fn switched_on(&self) -> bool {
+    pub(crate) fn switched_on(&self) -> bool {
         self.image()
             .is_ok_and(|image| image.signed_depth.load(Ordering::Acquire))
     }

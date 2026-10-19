@@ -768,14 +768,20 @@ fn public_tile_cases_plan_their_attachments() {
                     plan.specialization.data[at..at + 4].try_into().ok()?,
                 ))
             };
+            // The render area is pushed (read as data), the tile specialized.
+            let pushed = |key: SpecKey| plan.specialized_value(key).map(|v| v as u32);
             assert_eq!(
                 (
                     specialized(SpecKey::RenderAreaWidth),
                     specialized(SpecKey::RenderAreaHeight),
+                    pushed(SpecKey::RenderAreaWidth),
+                    pushed(SpecKey::RenderAreaHeight),
                     specialized(SpecKey::ImageblockWidth),
                     specialized(SpecKey::ImageblockHeight),
                 ),
                 (
+                    None,
+                    None,
                     Some(pass.tiles[0]),
                     Some(pass.tiles[1]),
                     Some(tile_width),

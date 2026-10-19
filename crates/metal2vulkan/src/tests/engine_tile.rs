@@ -26,9 +26,10 @@
 //!   and a read after the function's own write, against the probes's model; and through `half`
 //!   members, against probe 12's.
 //! - The refusals are typed: no tile inputs, a converting format, an attachment without a format,
-//!   a multisampled pass, a threadgroup variable in a tile function; the binder specializes the
-//!   render area, refuses an empty one, and binds the attachments in their staging formats, and
-//!   places a tile function's threadgroup arguments where the encoder set them.
+//!   a multisampled pass, a threadgroup variable in a tile function; the binder pushes the render
+//!   area (a value the function reads as data, no specialization constant: one module stages
+//!   every pass size), refuses an empty one, and binds the attachments in their staging formats,
+//!   and places a tile function's threadgroup arguments where the encoder set them.
 //!
 //! `llvm-as` assembles the fixtures; without it the tests skip visibly.
 
@@ -58,7 +59,7 @@ use crate::pipeline::{
     TileRenderPipelineDescriptor,
 };
 use crate::spirv::interp::{run_with_images, Buffer, Config, Image, Order, Resources};
-use crate::spirv::ir::TypedModule;
+use crate::spirv::ir::{ConstKind, Decl, TypedModule};
 use crate::spirv::testing::committed_profiles;
 use crate::vk;
 
@@ -204,6 +205,8 @@ fn run_images(
     );
     spec.insert(SpecKey::ImageblockWidth, u64::from(d.tile[0]));
     spec.insert(SpecKey::ImageblockHeight, u64::from(d.tile[1]));
+    // The render area, which the function reads as data: the interpreter writes each pushed key's
+    // value from `spec` (`interp::specialized_push`), as the binder writes it.
     spec.insert(SpecKey::RenderAreaWidth, u64::from(d.area[0]));
     spec.insert(SpecKey::RenderAreaHeight, u64::from(d.area[1]));
     let groups = [
@@ -228,6 +231,11 @@ fn run_images(
                     spec.insert(SpecKey::MultiRegion, 1);
                 }
             }
+            // The render area, written from `spec` (above).
+            (
+                PushField::Specialized(SpecKey::RenderAreaWidth | SpecKey::RenderAreaHeight),
+                PushLoc::Push { .. },
+            ) => {}
             other => panic!("unexpected push field {other:?}"),
         }
     }
@@ -260,6 +268,17 @@ fn run_images(
     outs.swap_remove(0)
 }
 
+/// Whether `m` declares a specialization constant of `key`.
+fn declares_spec(m: &TypedModule, key: SpecKey) -> bool {
+    m.decls().iter().any(|d| match d {
+        Decl::Const(c) => m
+            .consts()
+            .get(*c)
+            .is_ok_and(|def| matches!(def.kind, ConstKind::Spec { key: k, .. } if k == key)),
+        _ => false,
+    })
+}
+
 fn words(bytes: &[u8]) -> Vec<u32> {
     bytes
         .as_chunks::<4>()
@@ -278,7 +297,18 @@ fn cell_tag(tg: [u32; 2], c: [u32; 2]) -> u32 {
 /// cell (past the render area for the partial tiles) across the imageblock barrier.
 #[test]
 fn every_tile_stages_its_pixels() {
-    stage_every_pixel(false);
+    stage_every_pixel(false, &[[40, 24]]);
+}
+
+/// One module stages every render area: the function reads the area as data (no specialization
+/// constant of it, so one `VkPipeline` serves every pass size) and stages each area's pixels as
+/// [`every_tile_stages_its_pixels`] does its own: whole tiles, partial last tiles on either axis,
+/// a single pixel past a tile, and areas whose width is no multiple of the tile's.
+#[test]
+fn one_module_stages_every_render_area() {
+    let areas = [[64, 16], [33, 17], [49, 31], [17, 1], [1, 32]];
+    stage_every_pixel(false, &areas);
+    stage_every_pixel(true, &areas);
 }
 
 /// [`every_tile_stages_its_pixels`] under `threadgroupSizeMatchesTileSize`: the 8x8 threads
@@ -288,23 +318,16 @@ fn every_tile_stages_its_pixels() {
 /// grid the 3x2 tiles times the tile, 48x32.
 #[test]
 fn a_tile_sized_threadgroup_stages_every_pixel_and_answers_the_tile() {
-    stage_every_pixel(true);
+    stage_every_pixel(true, &[[40, 24]]);
 }
 
-/// The 40x24 pass of 16x16 tiles of 8x8 threads over `k10ts_tile_grid`, whose pipeline's
-/// threadgroup is the tile where `tile_sized`.
-fn stage_every_pixel(tile_sized: bool) {
+/// The passes of `areas`, each of at most 4x2 tiles of 16x16 (the fixture's records), in tiles of
+/// 8x8 threads over `k10ts_tile_grid`, whose pipeline's threadgroup is the tile where
+/// `tile_sized`: one module on each profile runs every area.
+fn stage_every_pixel(tile_sized: bool, areas: &[[u32; 2]]) {
     let Some(bc) = assemble("k10ts_tile_grid") else {
         return;
     };
-    let (w, h) = (40u32, 24u32);
-    let f0: Vec<u32> = (0..h)
-        .flat_map(|y| (0..w).map(move |x| ((y * 64 + x) as f32).to_bits()))
-        .collect();
-    let v0: Vec<u32> = (0..h)
-        .flat_map(|y| (0..w).map(move |x| y * 1000 + x + 7))
-        .collect();
-    let t0 = vec![0x5555_5555u32; (w * h) as usize];
     let mut inputs = tile_inputs(&[
         PixelFormat::R32Float,
         PixelFormat::R32Uint,
@@ -321,62 +344,107 @@ fn stage_every_pixel(tile_sized: bool) {
         assert!(plan
             .facts
             .contains(&RuntimeFact::TileThreadgroup { tile_sized }));
-        let d = Tiles {
-            area: [w, h],
-            tile: [16, 16],
-            threads: [8, 8],
-            buffer: vec![0xAB; 512 * 48],
-            attachments: &[f0.clone(), v0.clone(), t0.clone()],
-            nominal: tile_sized.then_some([16, 16]),
-        };
-        let (buf, planes) = run(&plan, &m, &d);
-        for y in 0..h {
-            for x in 0..w {
-                let i = (y * w + x) as usize;
-                let (tg, c) = ([x / 16, y / 16], [x % 16, y % 16]);
-                let k = 1 + (c[0] % 2) + 2 * (c[1] % 2);
-                let f = f32::from_bits(f0[i]) * 2.0 + 1.0;
-                assert_eq!(planes[0][i], f.to_bits(), "{stem} f ({x}, {y})");
-                assert_eq!(planes[1][i], v0[i] * 3 + k, "{stem} v ({x}, {y})");
-                assert_eq!(planes[2][i], cell_tag(tg, c), "{stem} tag ({x}, {y})");
-            }
+        // The render area is data: pushed, and no specialization constant of it, so one module
+        // runs every area below.
+        for key in [SpecKey::RenderAreaWidth, SpecKey::RenderAreaHeight] {
+            assert!(
+                plan.push
+                    .fields
+                    .iter()
+                    .any(|f| f.field == PushField::Specialized(key)),
+                "{stem}: {key:?} is not pushed"
+            );
+            assert!(!declares_spec(&m, key), "{stem}: {key:?} is specialized");
         }
-        let out = words(&buf);
-        let mut records = 0;
-        for slot in 0..512u32 {
-            let r = &out[(slot * 12) as usize..(slot * 12 + 12) as usize];
-            let (tile, tidx) = (slot / 64, slot % 64);
-            let tg = [tile % 4, tile / 4];
-            if tg[0] >= 3 || tg[1] >= 2 {
-                assert!(r.iter().all(|x| *x == 0xABAB_ABAB), "{stem} slot {slot}");
-                continue;
-            }
-            // Metal's tile dispatch numbers a threadgroup's 2x2 quads in row-major order, each
-            // quad's threads in row-major order (measured).
-            let (quad, within) = (tidx / 4, tidx % 4);
-            let tid = [(quad % 4) * 2 + within % 2, (quad / 4) * 2 + within / 2];
-            let mirrored = [15 - 2 * tid[0], 15 - 2 * tid[1]];
-            let want = [
-                tid[0] | (tid[1] << 16),
-                tg[0] | (tg[1] << 16),
-                tg[0] * group + tid[0],
-                tg[1] * group + tid[1],
-                group | (group << 16),
-                3 * group,
-                2 * group,
-                tidx,
-                0,
-                16 | (16 << 16),
-                cell_tag(tg, mirrored),
-                0xC0DE_0000 | slot,
-            ];
-            assert_eq!(r, want, "{stem} slot {slot}");
-            records += 1;
+        for &[w, h] in areas {
+            stage_area(&plan, &m, (&stem, [w, h]), group, tile_sized);
         }
-        assert_eq!(records, 6 * 64);
         ran += 1;
     }
     assert!(ran > 0);
+}
+
+/// [`stage_every_pixel`]'s pass of `area` on `m`, `stem`'s module, every pixel and record checked.
+fn stage_area(
+    plan: &Plan,
+    m: &TypedModule,
+    (stem, area): (&str, [u32; 2]),
+    group: u32,
+    tile_sized: bool,
+) {
+    let [w, h] = area;
+    let tiles = [w.div_ceil(16), h.div_ceil(16)];
+    assert!(
+        tiles[0] <= 4 && tiles[0] * tiles[1] <= 8,
+        "the fixture's records hold {area:?}"
+    );
+    let f0: Vec<u32> = (0..h)
+        .flat_map(|y| (0..w).map(move |x| ((y * 64 + x) as f32).to_bits()))
+        .collect();
+    let v0: Vec<u32> = (0..h)
+        .flat_map(|y| (0..w).map(move |x| y * 1000 + x + 7))
+        .collect();
+    let t0 = vec![0x5555_5555u32; (w * h) as usize];
+    let d = Tiles {
+        area: [w, h],
+        tile: [16, 16],
+        threads: [8, 8],
+        buffer: vec![0xAB; 512 * 48],
+        attachments: &[f0.clone(), v0.clone(), t0],
+        nominal: tile_sized.then_some([16, 16]),
+    };
+    let (buf, planes) = run(plan, m, &d);
+    for y in 0..h {
+        for x in 0..w {
+            let i = (y * w + x) as usize;
+            let (tg, c) = ([x / 16, y / 16], [x % 16, y % 16]);
+            let k = 1 + (c[0] % 2) + 2 * (c[1] % 2);
+            let f = f32::from_bits(f0[i]) * 2.0 + 1.0;
+            assert_eq!(planes[0][i], f.to_bits(), "{stem} {area:?} f ({x}, {y})");
+            assert_eq!(planes[1][i], v0[i] * 3 + k, "{stem} {area:?} v ({x}, {y})");
+            assert_eq!(
+                planes[2][i],
+                cell_tag(tg, c),
+                "{stem} {area:?} tag ({x}, {y})"
+            );
+        }
+    }
+    let out = words(&buf);
+    let mut records = 0;
+    for slot in 0..512u32 {
+        let r = &out[(slot * 12) as usize..(slot * 12 + 12) as usize];
+        let (tile, tidx) = (slot / 64, slot % 64);
+        let tg = [tile % 4, tile / 4];
+        if tg[0] >= tiles[0] || tg[1] >= tiles[1] {
+            assert!(
+                r.iter().all(|x| *x == 0xABAB_ABAB),
+                "{stem} {area:?} slot {slot}"
+            );
+            continue;
+        }
+        // Metal's tile dispatch numbers a threadgroup's 2x2 quads in row-major order, each
+        // quad's threads in row-major order (measured).
+        let (quad, within) = (tidx / 4, tidx % 4);
+        let tid = [(quad % 4) * 2 + within % 2, (quad / 4) * 2 + within / 2];
+        let mirrored = [15 - 2 * tid[0], 15 - 2 * tid[1]];
+        let want = [
+            tid[0] | (tid[1] << 16),
+            tg[0] | (tg[1] << 16),
+            tg[0] * group + tid[0],
+            tg[1] * group + tid[1],
+            group | (group << 16),
+            tiles[0] * group,
+            tiles[1] * group,
+            tidx,
+            0,
+            16 | (16 << 16),
+            cell_tag(tg, mirrored),
+            0xC0DE_0000 | slot,
+        ];
+        assert_eq!(r, want, "{stem} {area:?} slot {slot}");
+        records += 1;
+    }
+    assert_eq!(records, tiles[0] * tiles[1] * 64);
 }
 
 /// IEEE binary16 bits `h` as the `f32` bits of the same value, for every half: a denormal is
@@ -662,15 +730,19 @@ fn run_memory(
         u64::from(d.threads[0] * d.threads[1]),
     );
     spec.insert(SpecKey::TileThreadgroupLength, u64::from(d.tile_length));
-    spec.insert(SpecKey::TileGridWidth, u64::from(d.grid[0]));
     for (index, &offset) in d.offsets.iter().enumerate() {
         spec.insert(SpecKey::TgOffset(index as u32), u64::from(offset));
     }
+    // The tiles across the render area, which the function reads as data: the interpreter writes
+    // the value from `spec` (`interp::specialized_push`), as the binder writes it.
+    spec.insert(SpecKey::TileGridWidth, u64::from(d.grid[0]));
     let push = vec![0u8; plan.push.push_range.map_or(0, |(_, end)| end as usize)];
     for f in &plan.push.fields {
         match (f.field, f.loc) {
             // One region, every buffer bound at its start.
             (PushField::SlotBindOffset(_) | PushField::DispatchRegion, PushLoc::Push { .. }) => {}
+            // The tiles across the render area, written from `spec` (above).
+            (PushField::Specialized(SpecKey::TileGridWidth), PushLoc::Push { .. }) => {}
             other => panic!("unexpected push field {other:?}"),
         }
     }
@@ -819,7 +891,8 @@ fn a_tile_pipeline_places_its_threadgroup_arguments() {
             specialized(&pipe, &plan, SpecKey::TileThreadgroupLength),
             Some(80)
         );
-        assert_eq!(specialized(&pipe, &plan, SpecKey::TileGridWidth), Some(3));
+        assert_eq!(specialized(&pipe, &plan, SpecKey::TileGridWidth), None);
+        assert_eq!(plan.specialized_value(SpecKey::TileGridWidth), Some(3));
         assert!(
             plan.descriptors
                 .iter()
@@ -965,13 +1038,23 @@ fn a_tile_pipeline_binds_its_attachments() {
             specialized(&pipe, &plan, SpecKey::ImageblockWidth),
             Some(16)
         );
+        // The render area is pushed, no specialization: one pipeline for every pass size.
+        for (key, value) in [
+            (SpecKey::RenderAreaWidth, 40),
+            (SpecKey::RenderAreaHeight, 24),
+        ] {
+            assert_eq!(specialized(&pipe, &plan, key), None, "{stem} {key:?}");
+            assert_eq!(plan.specialized_value(key), Some(value), "{stem} {key:?}");
+        }
+        let other = {
+            let mut s = state(0);
+            s.render_area = [1984, 64];
+            pipe.plan(&dev, &s.shape()).expect("plan")
+        };
+        assert_eq!(other.specialization, plan.specialization, "{stem}");
         assert_eq!(
-            specialized(&pipe, &plan, SpecKey::RenderAreaWidth),
-            Some(40)
-        );
-        assert_eq!(
-            specialized(&pipe, &plan, SpecKey::RenderAreaHeight),
-            Some(24)
+            other.specialized_value(SpecKey::RenderAreaWidth),
+            Some(1984)
         );
         // The float attachment's bits move through its `uint` view; the others are `uint`.
         for c in 0..3 {

@@ -389,14 +389,20 @@ impl<C> CallLog<C> {
     }
 }
 
-/// How many cleared logs of each kind of encoder the device keeps ([`SpareLogs`]).
+/// How many cleared logs of compute and blit encoders the device keeps ([`SpareLogs`]).
 const SPARE_LOGS: usize = 16;
+
+/// How many cleared render logs the device keeps ([`SpareLogs`]): also the pieces of captured
+/// render encoders (`render/captured.rs`), of which a frame's may wait for the resolver a few at
+/// each of its passes.
+const SPARE_RENDER_LOGS: usize = 128;
 
 /// The most room a cleared log keeps for a next encoder, in bytes; a log with more goes.
 pub(super) const SPARE_LOG_BYTES: usize = 64 * 1024;
 
 /// Cleared logs the device keeps for its next encoders (the module docs): at most [`SPARE_LOGS`]
-/// of each kind, each with at most [`SPARE_LOG_BYTES`] of room, and no call or handle. An
+/// of compute and of blit encoders and [`SPARE_RENDER_LOGS`] of render encoders, each with at
+/// most [`SPARE_LOG_BYTES`] of room, and no call or handle. An
 /// encoder that logs takes one, or a new log where none is kept; its log comes back as its
 /// encoder ends where its command buffer does not keep it, and else in the command buffer's
 /// release, on its queue's handler thread.
@@ -421,10 +427,10 @@ impl<T> Spares<T> {
         lock(&self.0).pop()
     }
 
-    /// Keep `spare` where fewer than [`SPARE_LOGS`] are kept; else it goes, after the lock.
-    fn give(&self, spare: T) {
+    /// Keep `spare` where fewer than `keep` are kept; else it goes, after the lock.
+    fn give(&self, spare: T, keep: usize) {
         let mut spares = lock(&self.0);
-        if spares.len() < SPARE_LOGS {
+        if spares.len() < keep {
             spares.push(spare);
         }
     }
@@ -446,23 +452,37 @@ impl SpareLogs {
         RenderLog::new(descriptor, self.render.take())
     }
 
+    /// The lists of a captured render encoder's piece (`render/captured.rs`): kept ones, or new
+    /// ones.
+    pub(crate) fn room(&self) -> RenderRoom {
+        self.render.take().unwrap_or_else(RenderRoom::new)
+    }
+
+    /// Clear `room`, a piece the resolver encoded, and keep it for another piece, where its room
+    /// is small enough ([`RenderRoom::cleared`]): its calls and handles go now.
+    pub(crate) fn give_room(&self, room: RenderRoom) {
+        if let Some(room) = room.cleared() {
+            self.render.give(room, SPARE_RENDER_LOGS);
+        }
+    }
+
     /// Clear `replay` and keep it for a next encoder, where its room is small enough
     /// ([`CallLog::cleared`]): its calls and handles go now.
     pub(super) fn give(&self, replay: Replay) {
         match replay {
             Replay::Compute { log, .. } => {
                 if let Some(log) = log.cleared() {
-                    self.compute.give(log);
+                    self.compute.give(log, SPARE_LOGS);
                 }
             }
             Replay::Blit(log) => {
                 if let Some(log) = log.cleared() {
-                    self.blit.give(log);
+                    self.blit.give(log, SPARE_LOGS);
                 }
             }
             Replay::Render(log) => {
                 if let Some(room) = log.cleared() {
-                    self.render.give(room);
+                    self.render.give(room, SPARE_RENDER_LOGS);
                 }
             }
         }

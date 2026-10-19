@@ -10,15 +10,17 @@
 //! waiter), and the work counts per frame (the merges' kept images live at the end too).
 
 use super::host_memory::Mapping;
-use super::no_copy_textures::{blending, floats, staged};
+use super::no_copy_textures::{blending, floats, rects_descriptor, staged};
 use super::pitched_surfaces::{reading, sampler};
 use super::{validated_device_with, Messages, ScratchCache, WAIT};
 use crate::gpu::TEST_DEVICE;
-use metal2vulkan::metal::{PixelFormat, PrimitiveType, SamplerMinMagFilter, TextureUsage};
+use metal2vulkan::metal::{
+    ColorWriteMask, PixelFormat, PrimitiveType, SamplerMinMagFilter, TextureUsage,
+};
 use metal2vulkan_runtime::{
     Buffer, CommandBuffer, CpuCacheMode, Device, HazardTrackingMode, HostMemory, IoSurfacePlane,
-    LoadAction, Origin, RenderPassDescriptor, ResourceOptions, Size, StorageMode, StoreAction,
-    Texture, TextureDescriptor, WorkCounts,
+    LoadAction, Origin, PipelineOptions, RenderPassDescriptor, ResourceOptions, Size, StorageMode,
+    StoreAction, Texture, TextureDescriptor, WorkCounts,
 };
 use std::time::Instant;
 
@@ -421,6 +423,113 @@ fn guest_frame_costs() {
                 per_frame(&before, &after),
             );
             drop((surface, kept, private, scratches));
+        }
+    }
+}
+
+/// What each frame of [`merge_costs`] writes over the whole surface, by one pass that loads and
+/// stores it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Change {
+    /// The same color every frame: after the first, no word changes.
+    Unchanged,
+    /// Two colors that differ in every channel, alternating: every byte of every word changes.
+    WholeWords,
+    /// The same, written through a mask that leaves alpha alone: three bytes of each word change
+    /// and one stays, as a redraw of opaque content does.
+    PartialWords,
+}
+
+/// What a shadowed surface's merge back costs, by how much of each word the frame's pass changes
+/// ([`Change`]): one pass a frame that writes a color over the whole 1920x1080 surface of
+/// [`guest_frame_costs`], a device of its own for each. Printed (`MERGE-COST`): the texture's
+/// form, the medians and 90th percentiles of the frame's GPU time and commit to completion, and
+/// the work counts per frame.
+#[test]
+#[ignore = "a release-mode measurement: run by name"]
+fn merge_costs() {
+    let len = ((ROW * HEIGHT) as usize).next_multiple_of(16384);
+    let mapping = Mapping::anonymous(len);
+    for round in 0..2 {
+        for change in [Change::Unchanged, Change::WholeWords, Change::PartialWords] {
+            let cache = ScratchCache::new().unwrap();
+            let messages = Messages::default();
+            let device = validated_device_with(TEST_DEVICE, &messages, cache.path(), |o| {
+                o.layers.clear();
+            })
+            .unwrap();
+            let queue = device.new_command_queue().unwrap();
+            let mut d = rects_descriptor(&device, PixelFormat::BGRA8Unorm, false);
+            if change == Change::PartialWords {
+                let color = d.color_attachments[0].as_mut().unwrap();
+                color.write_mask =
+                    ColorWriteMask::RED | ColorWriteMask::GREEN | ColorWriteMask::BLUE;
+            }
+            let writing = device
+                .new_render_pipeline_state(&d, &PipelineOptions::default())
+                .unwrap();
+            let colors = [
+                staged(&device, &floats([0.25, 0.5, 0.75, 0.5])),
+                staged(&device, &floats([0.75, 0.25, 0.5, 0.25])),
+            ];
+            let whole = staged(&device, &floats([-1.0, -1.0, 1.0, 1.0]));
+            let kept = surface_buffer(&device, &mapping, len);
+            let surface = plane_texture(
+                &kept,
+                TextureUsage::RENDER_TARGET | TextureUsage::SHADER_READ,
+            );
+            let (mut waits, mut gpus) = (Vec::new(), Vec::new());
+            let mut before = device.work_counts();
+            for k in 0..WARM + FRAMES {
+                if k == WARM {
+                    before = device.work_counts();
+                }
+                let command_buffer = queue.command_buffer().unwrap();
+                let mut pass = RenderPassDescriptor::new();
+                let attachment = &mut pass.color_attachments[0];
+                attachment.texture = Some(surface.clone());
+                attachment.load_action = LoadAction::Load;
+                attachment.store_action = StoreAction::Store;
+                let mut encoder = command_buffer.render_command_encoder(&pass).unwrap();
+                encoder.set_render_pipeline_state(&writing).unwrap();
+                let color = match change {
+                    Change::Unchanged => &colors[0],
+                    _ => &colors[k % 2],
+                };
+                encoder.set_fragment_buffer(Some(color), 0, 0).unwrap();
+                encoder.set_vertex_buffer(Some(&whole), 0, 0).unwrap();
+                encoder
+                    .draw_primitives(PrimitiveType::Triangle, 0, 6, 1, 0)
+                    .unwrap();
+                encoder.end_encoding().unwrap();
+                let committed = Instant::now();
+                command_buffer.commit().unwrap();
+                command_buffer.wait_until_completed_for(WAIT).unwrap();
+                assert_eq!(command_buffer.error(), None);
+                if k >= WARM {
+                    waits.push(committed.elapsed().as_secs_f64() * 1e6);
+                    gpus.push(
+                        (command_buffer.gpu_end_time().unwrap()
+                            - command_buffer.gpu_start_time().unwrap())
+                            * 1e6,
+                    );
+                }
+            }
+            let after = device.work_counts();
+            let (wait, wait90) = median_p90(waits);
+            let (gpu, gpu90) = median_p90(gpus);
+            println!(
+                "MERGE-COST on {}: round {round}, {change:?}: the texture {}; GPU {gpu:.0} us \
+                 (p90 {gpu90:.0}), commit to completion {wait:.0} us (p90 {wait90:.0}); per \
+                 frame: merges fetched {:.2}, kept in images {:.2}; {}",
+                device.name(),
+                form_of(&surface),
+                (after.shadow_merges_fetched - before.shadow_merges_fetched) as f64 / FRAMES as f64,
+                (after.shadow_merges_kept_in_images - before.shadow_merges_kept_in_images) as f64
+                    / FRAMES as f64,
+                per_frame(&before, &after),
+            );
+            drop((surface, kept));
         }
     }
 }

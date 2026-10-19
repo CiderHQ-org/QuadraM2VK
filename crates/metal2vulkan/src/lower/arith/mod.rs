@@ -1224,10 +1224,7 @@ pub fn finish(cx: &mut SelectCx<'_>) -> Result<(), Error> {
     }
     let metal = arith.metal_functions;
     // The same fact decides the multiply's form.
-    arith.product = match metal {
-        Some(_) => ProductForm::NegativeZeroFma,
-        None => ProductForm::Multiply,
-    };
+    arith.product = product_form(cx.profile.fields().float_functions);
     arith.libm = arith
         .libm_uses
         .iter()
@@ -1415,6 +1412,18 @@ pub fn declare(
             .insert(*r, libm::define(mb, *r, arith.libm_fma, helpers)?);
     }
     Ok(decl)
+}
+
+/// How a module emits a multiply the device must round on its own on a device whose `float`
+/// functions are `functions` ([`ArithPlan::product`]): `Fma(a, b, -0.0)` where they are Metal's
+/// (the device's SPIR-V reaches Metal through SPIRV-Cross), else the `OpFMul`. Translation's
+/// modules take it, and so do the device's sweeps (`bind::Sweep`), which hold the form translation
+/// writes.
+pub(crate) fn product_form(functions: FloatFunctions) -> ProductForm {
+    match functions {
+        FloatFunctions::Metal => ProductForm::NegativeZeroFma,
+        FloatFunctions::Device | FloatFunctions::Native => ProductForm::Multiply,
+    }
 }
 
 /// Record that a float operation on form `f` with fast-math flags `fmf` needs signed zeros,

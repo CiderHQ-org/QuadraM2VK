@@ -302,31 +302,10 @@ const SLOPE_ALONE: [(u32, f32, u16); 28] = [
     (0x3ebc19cf, 1000.0, 24078),
 ];
 
-/// The depth `z` of a flat triangle biased by the constant `c` and the slope factor `s` (`z`
-/// where both are 0, or `c` is not finite): Metal's bias, `c + 1` units of 1/65535 as `float` for
-/// `c` of 0 or more and `c - 1` below, added to `z` rounded toward zero, clamped to `[0, 1]`, and
-/// scaled by 65535 exactly.
-fn scaled(z: f32, c: f32, s: f32) -> f64 {
-    let biased = if c.is_finite() && (c != 0.0 || s != 0.0) {
-        let unit = if c >= 0.0 { 1.0 } else { -1.0 };
-        let bias = ((f64::from(c) + unit) / 65535.0) as f32;
-        // Two `float`s sum exactly in `f64` here (their exponents lie within 29 of each other).
-        let exact = f64::from(z) + f64::from(bias);
-        let nearest = exact as f32;
-        if f64::from(nearest).abs() > exact.abs() {
-            f32::from_bits(nearest.to_bits() - 1)
-        } else {
-            nearest
-        }
-    } else {
-        z
-    };
-    f64::from(biased.clamp(0.0, 1.0)) * 65535.0
-}
-
-/// Metal's stored code: the scaled sum ([`scaled`]) rounded to nearest, a tie up (Metal stored 0x8000 for 0.5).
+/// Metal's stored code for a flat triangle at depth `z` biased by the constant `c` and the slope
+/// factor `s` (`metal::state::depth16_code`, the rule the device's own check compares with).
 fn metal_code(z: f32, c: f32, s: f32) -> u16 {
-    (scaled(z, c, s) + 0.5).floor() as u16
+    metal2vulkan::metal::state::depth16_code(z, c, s)
 }
 
 /// The codes `cases` store on the device: each case `(depth, constant, slope factor)` drawn into

@@ -122,6 +122,7 @@ pub mod half;
 pub(crate) mod heap_raw;
 pub mod norm_write;
 mod slice;
+pub(crate) use slice::{cooperate as cooperate_slices, is_cooperative as cooperative_slice};
 mod slot;
 mod status;
 
@@ -879,8 +880,12 @@ impl TextureStrategy {
             TextureStrategy::Sampling(s) => s.name(),
             TextureStrategy::NullHandle => "texture.null_handle",
             TextureStrategy::Switch(s) => return s.name(),
-            TextureStrategy::ImageblockSlice(s) if s.guard => "texture.imageblock_slice_guarded",
-            TextureStrategy::ImageblockSlice(_) => "texture.imageblock_slice",
+            TextureStrategy::ImageblockSlice(s) => match (s.cooperative.is_some(), s.guard) {
+                (true, true) => "texture.imageblock_slice_cooperative_guarded",
+                (true, false) => "texture.imageblock_slice_cooperative",
+                (false, true) => "texture.imageblock_slice_guarded",
+                (false, false) => "texture.imageblock_slice",
+            },
             TextureStrategy::ExtendedSample(e) => e.name(),
             TextureStrategy::AbsentArgument(_) => AbsentArgument::NAME,
         })
@@ -1002,6 +1007,9 @@ pub struct TexturePlan {
     /// `0x7fc00000` because the device stores that as Metal's (`MetalFloatStorageNans`). The
     /// module requires them.
     pub storage_properties: BTreeSet<crate::device::requirements::VkProperty>,
+    /// Some imageblock slice write is copied by the whole threadgroup
+    /// ([`slice::Cooperative`]): the kernel derives each invocation's linear index for it.
+    pub cooperative_slices: bool,
 }
 
 impl TexturePlan {
@@ -3728,7 +3736,10 @@ fn select_write(
         Some(_) => IntRange::Full,
         None => int_range(cx, image, texel)?,
     };
-    mark(cx, image, |u| u.write = true);
+    mark(cx, image, |u| {
+        u.write = true;
+        u.texel_write = true;
+    });
     Ok(TextureStrategy::Write(Write {
         image,
         at,

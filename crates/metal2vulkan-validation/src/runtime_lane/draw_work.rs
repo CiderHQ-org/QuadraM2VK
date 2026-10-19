@@ -54,9 +54,15 @@
 //!
 //! The pipeline is the owned fixture `tob_renders`'s `tob_rect` (a rectangle of the corners at
 //! vertex buffer 0) and `tob_sample` (texture 0 through sampler 0, where its pixel lies).
+//!
+//! Each test's device encodes every encoder at the call (`DeviceOptions::encode_at_the_call`), so
+//! each draw's work lands in the counts read around it: a device's resolver encodes the draws it
+//! captured later, on its own thread (`render/captured.rs`), by the same code. One test holds an
+//! encoder's whole work to the same on a device with its resolver
+//! (`draws_alternating_states_of_one_layout_push_only_what_changed`).
 
-use super::degrade_notices::{on_device, on_device_with};
-use super::{buffer_with, pipelines_settled, WAIT};
+use super::degrade_notices;
+use super::{buffer_with, pipelines_settled, Messages, WAIT};
 use crate::air_library::AirLibrary;
 use metal2vulkan::bind::{BindState, SamplerDescriptor};
 use metal2vulkan::device::VkExtension;
@@ -68,9 +74,9 @@ use metal2vulkan::metal::{
 use metal2vulkan::pipeline::{ColorAttachmentDescriptor, RenderPipelineDescriptor, StageSource};
 use metal2vulkan_devtools::{engine_dir, llvm_assemble};
 use metal2vulkan_runtime::{
-    Buffer, ClearColor, CommandBuffer, CommandBufferStatus, Device, LoadAction, PipelineOptions,
-    Region, RenderCommandEncoder, RenderPassDescriptor, RenderPipelineState, ResourceOptions,
-    SamplerState, StoreAction, Texture, TextureDescriptor, WorkCounts,
+    Buffer, ClearColor, CommandBuffer, CommandBufferStatus, Device, DeviceOptions, LoadAction,
+    PipelineOptions, Region, RenderCommandEncoder, RenderPassDescriptor, RenderPipelineState,
+    ResourceOptions, SamplerState, StoreAction, Texture, TextureDescriptor, WorkCounts,
 };
 
 /// The target's side, in pixels: one column a draw.
@@ -1062,9 +1068,26 @@ pub(super) fn pushes(device: &Device) -> bool {
     profile.descriptors().push_descriptor && !device.properties().driver_defects.contains(&unset)
 }
 
+/// Run `test` on a device of the lane's ([`degrade_notices::on_device`]) that encodes every
+/// encoder at the call (the module docs).
+fn on_device(test: impl FnOnce(&Device, &Messages)) {
+    on_device_with(|_| {}, test);
+}
+
+/// [`on_device`] with the options `adjust` changes.
+fn on_device_with(adjust: impl FnOnce(&mut DeviceOptions), test: impl FnOnce(&Device, &Messages)) {
+    degrade_notices::on_device_with(
+        |options| {
+            options.encode_at_the_call = true;
+            adjust(options);
+        },
+        test,
+    );
+}
+
 /// Run `test` on the device twice: as it is, and with `VK_KHR_push_descriptor` withheld, so a
 /// device of the instance's Vulkan 1.2 has no push command and binds set 0 as a device without
-/// one does.
+/// one does. Each device encodes every encoder at the call ([`on_device`]).
 pub(super) fn on_device_both_ways(test: impl Fn(&Device)) {
     on_device(|device, _| test(device));
     on_device_with(
@@ -1217,66 +1240,14 @@ fn draws_switching_pipelines_keep_the_dynamic_states_set() {
 /// past the first where the driver's pushed descriptors go stale across a pipeline bind
 /// (`RuntimeDriverDefect::PushedDescriptorsStaleAfterPipelineBinds`). No push counts as a switch
 /// between equal shapes (`WorkCounts::set_zero_equal_shape_switches` and kin), either way. The
-/// target is the second texture's; both ways ([`on_device_both_ways`]).
+/// target is the second texture's; both ways ([`on_device_both_ways`]). On a device with its
+/// resolver, whose memo the draws teach and which captures the encoders until a call it does not
+/// answer takes them back (`render/captured.rs`), each encoder pushes the writes in all that it
+/// pushes at the call.
 #[test]
 fn draws_alternating_states_of_one_layout_push_only_what_changed() {
-    const DRAWS: usize = 8;
     on_device_both_ways(|device| {
-        let scene = Scene::new(device);
-        let textures = [
-            solid(device, PixelFormat::RGBA8Unorm, RED),
-            solid(device, PixelFormat::RGBA8Unorm, GREEN),
-        ];
-        make(
-            device,
-            &scene,
-            std::slice::from_ref(&scene.pipeline),
-            &textures[0],
-        );
-        let before = device.work_counts();
-        let pipelines = [scene.pipeline.clone(), pipeline(device, true)];
-        make(device, &scene, &pipelines, &textures[0]);
-        let shared = grew(&before, &device.work_counts(), |c| {
-            c.pipeline_layouts_shared
-        });
-        assert!(shared >= 1, "the second state's layout shared: {shared}");
-        let corners = [-1.0f32, -1.0, 1.0, 1.0].map(f32::to_le_bytes).concat();
-        // Each draw's pushed writes, and the three counts' growth, through the first state alone
-        // or both in turn.
-        let run = |alternate: bool| {
-            let (command_buffer, mut encoder) = scene.encoder(device);
-            encoder.set_vertex_bytes(&corners, 0).unwrap();
-            let before = device.work_counts();
-            let pushed: Vec<u64> = (0..DRAWS)
-                .map(|d| {
-                    let state = if alternate { d % 2 } else { 0 };
-                    encoder
-                        .set_render_pipeline_state(&pipelines[state])
-                        .unwrap();
-                    if d % (DRAWS / 2) == 0 {
-                        let texture = &textures[d / (DRAWS / 2)];
-                        encoder.set_fragment_texture(Some(texture), 0).unwrap();
-                    }
-                    let before = device.work_counts();
-                    draw(&mut encoder);
-                    grew(&before, &device.work_counts(), |c| c.set_zero_writes_pushed)
-                })
-                .collect();
-            let after = device.work_counts();
-            encoder.end_encoding().unwrap();
-            let counts = [
-                grew(&before, &after, |c| c.set_zero_equal_shape_switches),
-                grew(&before, &after, |c| {
-                    c.set_zero_writes_on_equal_shape_switches
-                }),
-                grew(&before, &after, |c| c.set_zero_writes_if_shapes_shared),
-            ];
-            let pixels = scene.pixels(&command_buffer);
-            assert!(pixels.iter().all(|&p| p == GREEN), "{pixels:?}");
-            (pushed, counts)
-        };
-        let (alone, alone_counts) = run(false);
-        let (alternating, counts) = run(true);
+        let [(alone, alone_counts, _), (alternating, counts, _)] = alternating_pushes(device);
         println!(
             "runtime_lane: set 0 pushed alone {alone:?}, alternating {alternating:?}; equal-shape \
              switches, writes carried and writes if shared {counts:?}"
@@ -1295,6 +1266,78 @@ fn draws_alternating_states_of_one_layout_push_only_what_changed() {
             .collect();
         assert_eq!(alternating, expected, "alone {alone:?}");
     });
+    degrade_notices::on_device(|resolving, _| {
+        on_device(|at_the_call, _| {
+            let totals = |device: &Device| alternating_pushes(device).map(|(_, _, total)| total);
+            assert_eq!(
+                totals(resolving),
+                totals(at_the_call),
+                "an encoder's set 0 writes pushed with the resolver and at the call"
+            );
+        });
+    });
+}
+
+/// [`draws_alternating_states_of_one_layout_push_only_what_changed`]'s draws on `device`, through
+/// the first state alone and then both in turn: each draw's pushed writes, the three switch
+/// counts' growth over the draws, and the writes pushed from the encoder's open through its
+/// command buffer's completion.
+fn alternating_pushes(device: &Device) -> [(Vec<u64>, [u64; 3], u64); 2] {
+    const DRAWS: usize = 8;
+    let scene = Scene::new(device);
+    let textures = [
+        solid(device, PixelFormat::RGBA8Unorm, RED),
+        solid(device, PixelFormat::RGBA8Unorm, GREEN),
+    ];
+    make(
+        device,
+        &scene,
+        std::slice::from_ref(&scene.pipeline),
+        &textures[0],
+    );
+    let before = device.work_counts();
+    let pipelines = [scene.pipeline.clone(), pipeline(device, true)];
+    make(device, &scene, &pipelines, &textures[0]);
+    let shared = grew(&before, &device.work_counts(), |c| {
+        c.pipeline_layouts_shared
+    });
+    assert!(shared >= 1, "the second state's layout shared: {shared}");
+    let corners = [-1.0f32, -1.0, 1.0, 1.0].map(f32::to_le_bytes).concat();
+    let run = |alternate: bool| {
+        let opened = device.work_counts();
+        let (command_buffer, mut encoder) = scene.encoder(device);
+        encoder.set_vertex_bytes(&corners, 0).unwrap();
+        let before = device.work_counts();
+        let pushed: Vec<u64> = (0..DRAWS)
+            .map(|d| {
+                let state = if alternate { d % 2 } else { 0 };
+                encoder
+                    .set_render_pipeline_state(&pipelines[state])
+                    .unwrap();
+                if d % (DRAWS / 2) == 0 {
+                    let texture = &textures[d / (DRAWS / 2)];
+                    encoder.set_fragment_texture(Some(texture), 0).unwrap();
+                }
+                let before = device.work_counts();
+                draw(&mut encoder);
+                grew(&before, &device.work_counts(), |c| c.set_zero_writes_pushed)
+            })
+            .collect();
+        let after = device.work_counts();
+        encoder.end_encoding().unwrap();
+        let counts = [
+            grew(&before, &after, |c| c.set_zero_equal_shape_switches),
+            grew(&before, &after, |c| {
+                c.set_zero_writes_on_equal_shape_switches
+            }),
+            grew(&before, &after, |c| c.set_zero_writes_if_shapes_shared),
+        ];
+        let pixels = scene.pixels(&command_buffer);
+        assert!(pixels.iter().all(|&p| p == GREEN), "{pixels:?}");
+        let total = grew(&opened, &device.work_counts(), |c| c.set_zero_writes_pushed);
+        (pushed, counts, total)
+    };
+    [run(false), run(true)]
 }
 
 /// A pipeline state of the owned fixture `zwd_shapes`' `zwd_quad` (a shape's box, from its bytes

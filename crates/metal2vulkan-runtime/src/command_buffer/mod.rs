@@ -53,6 +53,7 @@ use super::degradation::Degradation;
 use super::descriptor_arena::DescriptorArena;
 use super::device::lock;
 use super::device::relay::Relayed;
+use super::device_checks::learned::{Risks, TakenRisks};
 use super::encoder::{Recorded, Segment};
 use super::error::{
     internal, invalid, vulkan, CommandBufferError, DeadlockCause, Error, FailedPipeline,
@@ -76,6 +77,7 @@ use super::rebind::{Holds, SubmittedHolds, Taken};
 use super::recorder::{self, Replays};
 use super::replay::Replay;
 use super::residency::Residency;
+use super::resolver::Work;
 use super::resource::ResourceKey;
 use super::sampler_listing::SamplerListing;
 use super::scheduler::{BatchSync, StepWaits};
@@ -108,7 +110,7 @@ use own::{
 use std::any::Any;
 use std::collections::{BTreeSet, HashSet, VecDeque};
 use std::ops::Range;
-use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -135,6 +137,61 @@ pub type Handler = Box<dyn FnOnce(&CommandBuffer) + Send + 'static>;
 #[derive(Clone)]
 pub struct CommandBuffer(Arc<CommandBufferShared>);
 
+/// A hold of a command buffer by work handed to the device's resolver (`resolver.rs`), counted
+/// apart from the program's: the program's last hold of a command buffer it never committed,
+/// let go of while the resolver still holds it, waits for the resolver first, so the command
+/// buffer goes, and what it alone held with it, at the program's call, on the program's thread,
+/// as without a resolver (`Drop for CommandBuffer`).
+pub(crate) struct ResolverHold {
+    command_buffer: CommandBuffer,
+    /// Let go of after the command buffer (fields drop in order): the count never reads lower
+    /// than the resolver's holds.
+    _counted: HoldCount,
+}
+
+/// One count of [`CommandBufferShared::resolver_holds`].
+struct HoldCount(Arc<AtomicUsize>);
+
+impl Drop for HoldCount {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+impl std::ops::Deref for ResolverHold {
+    type Target = CommandBuffer;
+    fn deref(&self) -> &CommandBuffer {
+        &self.command_buffer
+    }
+}
+
+impl CommandBuffer {
+    /// A hold of it for work handed to the device's resolver ([`ResolverHold`]).
+    pub(crate) fn resolver_hold(&self) -> ResolverHold {
+        let count = Arc::clone(&self.0.resolver_holds);
+        count.fetch_add(1, Ordering::AcqRel);
+        ResolverHold {
+            command_buffer: self.clone(),
+            _counted: HoldCount(count),
+        }
+    }
+}
+
+impl Drop for CommandBuffer {
+    /// The program's last hold of a command buffer the device's resolver still holds waits for
+    /// the resolver (`ResolverHold`): read the resolver's holds first, so one it lets go of
+    /// meanwhile is not missed.
+    fn drop(&mut self) {
+        let held = self.0.resolver_holds.load(Ordering::Acquire);
+        if held > 0 && Arc::strong_count(&self.0) <= held + 1 && !crate::resolver::resolving() {
+            self.0
+                .device
+                .shared()
+                .drain_resolver(crate::resolver::Drain::Drop);
+        }
+    }
+}
+
 impl std::fmt::Debug for CommandBuffer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CommandBuffer")
@@ -149,6 +206,8 @@ pub(super) struct CommandBufferShared {
     state: Mutex<State>,
     /// Signaled when the command buffer's status changes (`wait_until_scheduled` waits on it).
     changed: Condvar,
+    /// The holds of it the device's resolver's work keeps ([`ResolverHold`]).
+    resolver_holds: Arc<AtomicUsize>,
     /// What `wait_until_completed` waits for: the command buffer finished, and the runtime's
     /// threads let go of it.
     gate: Arc<Gate>,
@@ -193,6 +252,9 @@ pub(super) struct CommandBufferShared {
     /// Whether a batch of it is held in the scheduler's group, and whether a thread waits for its
     /// completion: a group kept past a pass goes at once once one does (`group.rs`).
     group_hold: AtomicU8,
+    /// The risky paths its encoders took (`device_checks/learned.rs`): each of its batches'
+    /// submissions notes them on its queue once the driver accepted it.
+    risks: TakenRisks,
 }
 
 /// The word [`CommandBufferShared::status`] holds for `status`: its raw value.
@@ -210,6 +272,27 @@ fn status_of(word: u8) -> CommandBufferStatus {
         3 => CommandBufferStatus::Scheduled,
         4 => CommandBufferStatus::Completed,
         _ => CommandBufferStatus::Error,
+    }
+}
+
+/// An event or binary semaphore wait or signal a command buffer adds to its batches
+/// ([`CommandBuffer::batch_command`]).
+pub(crate) enum BatchCommand {
+    Signal(Arc<EventShared>, u64),
+    Wait(Arc<EventShared>, u64),
+    BinaryWait(vk::Semaphore),
+    BinarySignal(vk::Semaphore),
+}
+
+impl BatchCommand {
+    /// Add it to `batches`.
+    fn add(self, batches: &mut Batches<Arc<EventShared>, vk::Semaphore>) {
+        match self {
+            BatchCommand::Signal(event, value) => batches.signal(event, value),
+            BatchCommand::Wait(event, value) => batches.wait(event, value),
+            BatchCommand::BinaryWait(semaphore) => batches.binary_wait(semaphore),
+            BatchCommand::BinarySignal(semaphore) => batches.binary_signal(semaphore),
+        }
     }
 }
 
@@ -436,6 +519,9 @@ pub(super) struct State {
     /// The encoders split at the event and binary semaphore waits and signals.
     batches: Batches<Arc<EventShared>, vk::Semaphore>,
     scheduled: VecDeque<Handler>,
+    /// The shared events' values it sets as it is scheduled
+    /// ([`CommandBuffer::encode_signal_event_scheduled`]), in the order encoded.
+    scheduled_signals: Vec<(Arc<EventShared>, u64)>,
     /// Its submission handlers ([`CommandBuffer::add_submission_handler`]): run on the thread
     /// that takes its last batch for its queue (submits it, or holds it in a group), before its
     /// transition to `Scheduled`.
@@ -520,8 +606,18 @@ pub(super) struct State {
     /// Why a host step failed: the batch it recorded for is not submitted, and the command buffer
     /// finishes with it.
     step_failure: Option<CommandBufferError>,
-    /// The refusal of a host step that failed so (`CommandBufferError::Refused`).
+    /// The refusal of a host step, or of the device's resolver, that failed it so
+    /// (`CommandBufferError::Refused`).
     refusal: Option<Error>,
+    /// Its render encoders the device's resolver encodes (`render/captured.rs`), opened so far:
+    /// its event and semaphore commands go to the resolver after them.
+    pub(super) captured_encoders: u32,
+    /// Work of it was encoded at the program's call (an encoder, or a captured encoder taken back
+    /// to the call): its commit runs at the call, after the resolver (`resolver.rs`).
+    pub(super) at_call_work: bool,
+    /// The program committed it and its commit was handed to the device's resolver: it reads as
+    /// committed, and takes no more work, from the program's call on (`resolver.rs`).
+    program_committed: bool,
     /// The first draw's pipeline whose making failed, which a host step met
     /// (`CommandBufferError::PipelineCreation`).
     failed_pipeline: Option<FailedPipeline>,
@@ -624,7 +720,15 @@ struct Resident {
 impl State {
     /// Whether it was committed: a handler added now would not run (`Problem::HandlerAfterCommit`).
     pub(crate) fn enqueued(&self) -> bool {
-        self.status != CommandBufferStatus::NotEnqueued
+        self.status != CommandBufferStatus::NotEnqueued || self.program_committed
+    }
+
+    /// Whether an encoder it ended made a shadowed texture resident, which its next render
+    /// encoder starts with (`Residency::shadows`): the device's memo keys no such encoder
+    /// (`render/captured.rs`).
+    pub(crate) fn inherits_shadows(&self) -> bool {
+        (self.residency.as_ref())
+            .is_some_and(|residency| residency.textures().any(|t| t.shadow().is_some()))
     }
 
     /// An encoder of `kind` ended, its commands' uses and bindings having named `keys`, having
@@ -822,6 +926,34 @@ impl State {
         write_fields(&upload, table, address, count)
     }
 
+    /// Whether its commit refuses nothing past what the call checks ([`State::refusal`]) and
+    /// announces nothing, so the device's resolver may make it after the encoders it encodes
+    /// (`CommandBuffer::commit`): its encoders' work holds none but pipelines being made (no
+    /// execution of indirect commands, indirect dispatch or sparse update for its commit to
+    /// record or its host steps to read), no command predication, no function-table snapshot,
+    /// argument samplers to list or root table, no heap set bound, and no texture over the
+    /// caller's image among what they used (whose layout moves its commit announces).
+    pub(super) fn commit_predicted(&self, device: &Device) -> bool {
+        let plain = self.recorded.iter().all(|recorded| {
+            recorded.sparse.is_empty()
+                && (recorded.segments.iter())
+                    .all(|segment| matches!(segment.work, Deferred::Pending(_)))
+        });
+        plain
+            && self.predication.untouched()
+            && self.table_snapshots.is_empty()
+            && self.sampler_listings.is_empty()
+            && self.root_tables.is_empty()
+            && !self.heaps.bound()
+            && (device.shared().interop.wrapped)
+                .among(
+                    self.recorded
+                        .iter()
+                        .flat_map(|recorded| recorded.summary.keys()),
+                )
+                .is_empty()
+    }
+
     /// Point every root table noted before the commit at the command buffer's resident set.
     fn point_root_tables(&mut self, device: &Device) -> Result<(), Error> {
         if self.root_tables.is_empty() {
@@ -914,7 +1046,10 @@ impl State {
     /// Why nothing more can be encoded or committed now: the command buffer was committed, an
     /// encoder is open, or one was abandoned.
     pub(super) fn refusal(&self) -> Option<Problem> {
-        if self.status != CommandBufferStatus::NotEnqueued || self.committing {
+        if self.status != CommandBufferStatus::NotEnqueued
+            || self.committing
+            || self.program_committed
+        {
             Some(Problem::AlreadyCommitted)
         } else if self.encoder_open {
             Some(Problem::EncoderOpen)
@@ -1034,16 +1169,24 @@ impl State {
         recorded: Recorded,
     ) {
         self.batches.sparse();
-        self.end_encoder(command_buffer, recorded);
+        self.end_encoder((command_buffer, false), recorded);
     }
 
     /// An encoder of `command_buffer` ended with `recorded`: it joins the current batch, or a
     /// new one after the batch's signals. The tail before it ends: with its batch's end where
     /// that batch ended before this encoder ([`CommandBufferShared::close_tail`]).
-    pub(super) fn end_encoder(&mut self, command_buffer: &CommandBuffer, recorded: Recorded) {
+    /// A captured render encoder's (`captured`, `EncoderCore::open_captured`) leaves the open
+    /// encoder to the program's encoder.
+    pub(super) fn end_encoder(
+        &mut self,
+        (command_buffer, captured): (&CommandBuffer, bool),
+        recorded: Recorded,
+    ) {
         self.recorded.push(recorded);
         self.batches.encoder();
-        self.encoder_open = false;
+        if !captured {
+            self.encoder_open = false;
+        }
         let joined = self.recorded.len() - 1;
         command_buffer.0.close_tail(self, Some(joined));
     }
@@ -1382,6 +1525,7 @@ impl CommandBuffer {
                 prefix: None,
                 batches: Batches::default(),
                 scheduled: VecDeque::new(),
+                scheduled_signals: Vec::new(),
                 submission: VecDeque::new(),
                 submitting: false,
                 scheduled_ran: false,
@@ -1411,6 +1555,9 @@ impl CommandBuffer {
                 placed: 0,
                 step_failure: None,
                 refusal: None,
+                captured_encoders: 0,
+                at_call_work: false,
+                program_committed: false,
                 failed_pipeline: None,
                 relayed_description: None,
                 report: None,
@@ -1438,6 +1585,7 @@ impl CommandBuffer {
                 trail_mark: 0,
             }),
             changed: Condvar::new(),
+            resolver_holds: Arc::new(AtomicUsize::new(0)),
             gate: Arc::default(),
             relayed: Arc::default(),
             step_numbers: OnceLock::new(),
@@ -1449,7 +1597,15 @@ impl CommandBuffer {
             status: AtomicU8::new(status_word(CommandBufferStatus::NotEnqueued)),
             error: OnceLock::new(),
             group_hold: AtomicU8::new(0),
+            risks: TakenRisks::default(),
         }))
+    }
+
+    /// It took `risks`, paths that can lose the device where their workaround is not applied
+    /// (`device_checks/learned.rs`): a loss while a batch of it is in flight turns them off on the
+    /// setup from the next device on.
+    pub(crate) fn took(&self, risks: Risks) {
+        self.0.risks.took(risks);
     }
 
     /// `device`.
@@ -1566,7 +1722,7 @@ impl CommandBuffer {
     /// utilization floor on Linux ([`Handler`]). Refused once the command buffer is committed.
     pub fn add_scheduled_handler(&self, handler: Handler) -> Result<(), Error> {
         let mut state = self.state();
-        if state.status != CommandBufferStatus::NotEnqueued {
+        if state.enqueued() {
             return Err(invalid(
                 "add_scheduled_handler",
                 Problem::HandlerAfterCommit,
@@ -1609,7 +1765,7 @@ impl CommandBuffer {
     /// as [`add_scheduled_handler`](Self::add_scheduled_handler) is.
     pub fn add_submission_handler(&self, handler: Handler) -> Result<(), Error> {
         let mut state = self.state();
-        if state.status != CommandBufferStatus::NotEnqueued {
+        if state.enqueued() {
             return Err(invalid(
                 "add_submission_handler",
                 Problem::HandlerAfterCommit,
@@ -1623,16 +1779,54 @@ impl CommandBuffer {
     /// becomes at least `value`. Refused while an encoder is open (Metal asserts), after commit,
     /// after an abandoned encoder, and for another device's event.
     pub fn encode_signal_event(&self, event: EventRef<'_>, value: u64) -> Result<(), Error> {
-        self.event_command("encode_signal_event", event, |batches, event| {
-            batches.signal(event, value);
+        self.event_command("encode_signal_event", event, |event| {
+            BatchCommand::Signal(event, value)
         })
+    }
+
+    /// `encodeSignalEventScheduled:value:` (Apple's SPI): the shared event's value becomes at
+    /// least `value` as the command buffer is scheduled, whatever its work and the work ahead of
+    /// it. Metal sets it before the status reads `Scheduled` and before the first scheduled
+    /// handler runs, and a command buffer of another queue that waits for it starts its work then,
+    /// while the signaller's own work still waits behind earlier work on its queue; where it is
+    /// encoded among the encoders makes no difference (measured on an M3 Max, macOS 27.0.1). The
+    /// device's scheduler sets it as it takes the command buffer's last batch (submitted, or held
+    /// for one kernel submission), under its lock, and takes the batches waiting for it in the
+    /// same pass: they go with no handler thread or scheduler woken for them, where a scheduled
+    /// handler that sets the value wakes both first (`WorkCounts::event_holds_signal_scheduled`,
+    /// `WorkCounts::event_holds_set_scheduled`). Never for a command buffer that fails before it is
+    /// scheduled.
+    ///
+    /// Refused while an encoder is open (Metal asserts), after an abandoned encoder, and for
+    /// another device's event. Metal takes a shared event alone (it raises an exception for an
+    /// `MTLEvent`), so this takes a [`SharedEvent`](super::SharedEvent). After the commit it
+    /// changes nothing, as Metal's sets no value then.
+    pub fn encode_signal_event_scheduled(
+        &self,
+        event: &super::SharedEvent,
+        value: u64,
+    ) -> Result<(), Error> {
+        let call = "encode_signal_event_scheduled";
+        let event = Arc::clone(EventRef::from(event).shared());
+        if !event.device().same(&self.0.device) {
+            return Err(invalid(call, Problem::ForeignObject));
+        }
+        let mut state = self.state();
+        match state.refusal() {
+            Some(Problem::AlreadyCommitted) => Ok(()),
+            Some(problem) => Err(invalid(call, problem)),
+            None => {
+                state.scheduled_signals.push((event, value));
+                Ok(())
+            }
+        }
     }
 
     /// `encodeWaitForEvent:value:`: the work encoded after it starts once the event's value
     /// reached `value`. Refused as [`CommandBuffer::encode_signal_event`] is.
     pub fn encode_wait_for_event(&self, event: EventRef<'_>, value: u64) -> Result<(), Error> {
-        self.event_command("encode_wait_for_event", event, |batches, event| {
-            batches.wait(event, value);
+        self.event_command("encode_wait_for_event", event, |event| {
+            BatchCommand::Wait(event, value)
         })
     }
 
@@ -1660,9 +1854,11 @@ impl CommandBuffer {
         &self,
         semaphore: vk::Semaphore,
     ) -> Result<(), Error> {
-        self.binary_command("encode_wait_for_vk_semaphore", semaphore, |batches| {
-            batches.binary_wait(semaphore);
-        })
+        self.binary_command(
+            "encode_wait_for_vk_semaphore",
+            semaphore,
+            BatchCommand::BinaryWait(semaphore),
+        )
     }
 
     /// Signal the caller's binary semaphore `semaphore` once the work encoded before it
@@ -1684,46 +1880,98 @@ impl CommandBuffer {
     /// the batch runs (every earlier signal of it waited for), and lives until the command buffer
     /// completed.
     pub unsafe fn encode_signal_vk_semaphore(&self, semaphore: vk::Semaphore) -> Result<(), Error> {
-        self.binary_command("encode_signal_vk_semaphore", semaphore, |batches| {
-            batches.binary_signal(semaphore);
-        })
+        self.binary_command(
+            "encode_signal_vk_semaphore",
+            semaphore,
+            BatchCommand::BinarySignal(semaphore),
+        )
     }
 
-    /// Add a binary semaphore wait or signal to the batches, after the runtime's checks.
+    /// Add a binary semaphore wait or signal, `command`, to the batches, after the runtime's
+    /// checks ([`batch_command`](Self::batch_command)).
     fn binary_command(
         &self,
         call: &'static str,
         semaphore: vk::Semaphore,
-        add: impl FnOnce(&mut Batches<Arc<EventShared>, vk::Semaphore>),
+        command: BatchCommand,
     ) -> Result<(), Error> {
         if let Some(problem) = self.0.device.binary_semaphore_problem(semaphore) {
             return Err(invalid(call, Problem::Semaphore(problem)));
         }
-        let mut state = self.state();
-        if let Some(problem) = state.refusal() {
-            return Err(invalid(call, problem));
-        }
-        add(&mut state.batches);
-        Ok(())
+        self.batch_command(call, command)
     }
 
-    /// Add an event wait or signal to the batches, after the checks Metal makes.
+    /// Add an event wait or signal, the command `command` makes of the event, to the batches,
+    /// after the checks Metal makes ([`batch_command`](Self::batch_command)).
     fn event_command(
         &self,
         call: &'static str,
         event: EventRef<'_>,
-        add: impl FnOnce(&mut Batches<Arc<EventShared>, vk::Semaphore>, Arc<EventShared>),
+        command: impl FnOnce(Arc<EventShared>) -> BatchCommand,
     ) -> Result<(), Error> {
         let event = event.shared();
         if !event.device().same(&self.0.device) {
             return Err(invalid(call, Problem::ForeignObject));
         }
+        self.batch_command(call, command(Arc::clone(event)))
+    }
+
+    /// Add `command` to the batches, refused as Metal's `call` is while an encoder is open, after
+    /// one was abandoned, after commit: at the call, or, after a render encoder the device's
+    /// resolver encodes, by the resolver after it (`resolver.rs`), so the command falls between
+    /// the same encoders.
+    fn batch_command(&self, call: &'static str, command: BatchCommand) -> Result<(), Error> {
         let mut state = self.state();
         if let Some(problem) = state.refusal() {
             return Err(invalid(call, problem));
         }
-        add(&mut state.batches, Arc::clone(event));
+        match self.0.device.shared().resolver() {
+            Some(resolver) if state.captured_encoders > 0 => {
+                drop(state);
+                resolver.hand(Work::Batch(self.resolver_hold(), command), false);
+            }
+            _ => command.add(&mut state.batches),
+        }
         Ok(())
+    }
+
+    /// Add `command`, which [`batch_command`](Self::batch_command) handed to the device's
+    /// resolver, to the batches.
+    pub(crate) fn resolve_batch_command(&self, command: BatchCommand) {
+        command.add(&mut self.state().batches);
+    }
+
+    /// Fail the command buffer as its first batch is submitted for `error`, a failure of the
+    /// device's resolver to encode a call of one of its render encoders, or its commit
+    /// (`resolver.rs`): out of memory, a lost device or a runtime defect, as a host step's
+    /// failure fails it; a refusal is the defect of an answer given at the call, failing it
+    /// `Refused`. The first failure decides; each is counted and announced.
+    pub(crate) fn resolver_failed(&self, error: Error) {
+        let device = &self.0.device;
+        let text = format!("metal2vulkan: the resolver failed a command buffer: {error}");
+        let mut state = self.state();
+        if state.step_failure.is_none() {
+            // A refusal here of a call answered `Ok` at the call is the runtime's defect, not a
+            // refusal the program could meet: an internal failure, the refusal kept beside it.
+            let refused = refusal_class(&error);
+            let failure = match refused {
+                true => {
+                    if state.refusal.is_none() {
+                        state.refusal = Some(error);
+                    }
+                    CommandBufferError::Internal(super::error::VkResultCode(
+                        vk::Result::ERROR_UNKNOWN.as_raw(),
+                    ))
+                }
+                false => recording_error(device, error),
+            };
+            device.shared().counts.resolver_failure(refused);
+            state.step_failure = Some(failure);
+        } else {
+            device.shared().counts.resolver_failure(false);
+        }
+        drop(state);
+        device.inform("metal2vulkan-resolver", text);
     }
 
     /// `addCompletedHandler:`: call `handler` once the command buffer completed or failed, on one
@@ -1732,7 +1980,7 @@ impl CommandBuffer {
     /// committed.
     pub fn add_completed_handler(&self, handler: Handler) -> Result<(), Error> {
         let mut state = self.state();
-        if state.status != CommandBufferStatus::NotEnqueued {
+        if state.enqueued() {
             return Err(invalid(
                 "add_completed_handler",
                 Problem::HandlerAfterCommit,
@@ -1762,8 +2010,70 @@ impl CommandBuffer {
     /// signals encoded before it fire, and nothing from the pass on runs or signals. One with an
     /// encoder Metal's GPU faults fails as Metal's does ([`CommandBufferError::PageFault`]): that
     /// encoder runs nothing, and the others run and every signal fires.
+    ///
+    /// On a device whose resolver encodes render encoders (`resolver.rs`), a command buffer whose
+    /// commit refuses only what the call checks is refused at the call as here, reads as committed
+    /// from the call on, and commits on the resolver after its encoders, in the order the program
+    /// committed: one whose every encoder the resolver encodes, or one with encoders at the call
+    /// whose work its commit neither refuses nor announces, while the resolver has work
+    /// (`State::commit_predicted`). Any other commits at the call once the resolver encoded what
+    /// was handed to it. A resource or internal failure of the commit there (out of memory, a
+    /// lost device, a runtime defect) fails the command buffer as it completes, and nothing of it
+    /// runs.
     pub fn commit(&self) -> Result<(), Error> {
-        self.commit_as("commit", None)
+        let device = &self.0.device;
+        let Some(resolver) = device.shared().resolver() else {
+            return self.commit_as(("commit", false), None);
+        };
+        let mut state = self.state();
+        // Work at the call: committed at the call where the resolver has nothing to encode
+        // first, or where the commit could refuse or announce what the call does not check;
+        // else handed to the resolver, behind what it encodes, with no wait here.
+        if state.at_call_work && (resolver.waits() || !state.commit_predicted(device)) {
+            drop(state);
+            resolver.drain(crate::resolver::Drain::Commit);
+            return self.commit_as(("commit", false), None);
+        }
+        if let Some(problem) = state.refusal() {
+            return Err(invalid("commit", problem));
+        }
+        state.program_committed = true;
+        self.0.answer(&state);
+        drop(state);
+        device.shared().counts.commit_answered();
+        resolver.hand(Work::Commit(self.clone()), true);
+        Ok(())
+    }
+
+    /// The commit the program made that [`commit`](Self::commit) handed to the device's resolver,
+    /// on the resolver: one that fails is committed again with every encoder failed
+    /// ([`resolver_failed`](Self::resolver_failed)), so its waiters, signals and handlers see it
+    /// fail as it completes.
+    pub(crate) fn resolve_commit(&self) {
+        let Err(error) = self.commit_resolved(None) else {
+            return;
+        };
+        self.resolver_failed(error);
+        if let Err(error) = self.commit_resolved(Some(CommitFailure::new(0))) {
+            // Nothing is left to run it: its waiters see it fail now.
+            let mut state = self.state();
+            state.status = CommandBufferStatus::Error;
+            state.error = Some(CommandBufferError::Internal(super::error::VkResultCode(
+                vk::Result::ERROR_UNKNOWN.as_raw(),
+            )));
+            if state.refusal.is_none() {
+                state.refusal = Some(error);
+            }
+            self.0.answer(&state);
+            drop(state);
+            self.0.changed.notify_all();
+        }
+    }
+
+    /// [`commit_as`](Self::commit_as) on the resolver, with `failure`: the program's call refused
+    /// what it refuses, and nothing changed its state since.
+    fn commit_resolved(&self, failure: Option<CommitFailure>) -> Result<(), Error> {
+        self.commit_as(("commit", true), failure)
     }
 
     /// Commit the command buffer as failed with `failure`: a runtime extension, no Metal call
@@ -1791,19 +2101,30 @@ impl CommandBuffer {
     /// encoder past the ended ones (`Invalid`, `Problem::IndexOutOfRange`, its `limit` the
     /// number ended). (A code of 0 was refused, `Problem::UndefinedValue`.)
     pub fn commit_failed(&self, failure: CommitFailure) -> Result<(), Error> {
-        self.commit_as("commit_failed", Some(failure))
+        // Its places among the ended encoders are the resolver's to settle first (`resolver.rs`).
+        self.0
+            .device
+            .shared()
+            .drain_resolver(crate::resolver::Drain::Commit);
+        self.state().at_call_work = true;
+        self.commit_as(("commit_failed", false), Some(failure))
     }
 
     /// [`commit`](Self::commit) for `call`, or, with `failure`,
-    /// [`commit_failed`](Self::commit_failed).
-    fn commit_as(&self, call: &'static str, failure: Option<CommitFailure>) -> Result<(), Error> {
+    /// [`commit_failed`](Self::commit_failed); `resolving` on the device's resolver, the
+    /// program's call having refused what it refuses ([`resolve_commit`](Self::resolve_commit)).
+    fn commit_as(
+        &self,
+        (call, resolving): (&'static str, bool),
+        failure: Option<CommitFailure>,
+    ) -> Result<(), Error> {
         // The waiting fetched render targets take their storage form at this commit where it
         // allows (`storage_form.rs`): one atomic read where none waits. The scheduler's thread
         // ends the switch once it submitted the command buffer.
         if !self.take_storage_forms(failure.is_some()) {
-            return self.commit_now(call, failure);
+            return self.commit_now((call, resolving), failure);
         }
-        let committed = self.commit_now(call, failure);
+        let committed = self.commit_now((call, resolving), failure);
         if committed.is_err() {
             self.give_up_storage_forms();
         }
@@ -1811,11 +2132,15 @@ impl CommandBuffer {
     }
 
     /// [`commit_as`](Self::commit_as) itself.
-    fn commit_now(&self, call: &'static str, failure: Option<CommitFailure>) -> Result<(), Error> {
+    fn commit_now(
+        &self,
+        (call, resolving): (&'static str, bool),
+        failure: Option<CommitFailure>,
+    ) -> Result<(), Error> {
         let device = &self.0.device;
         let (segments, failure, reached): (Vec<(Deferred, bool)>, _, _) = {
             let mut state = self.state();
-            if let Some(problem) = state.refusal() {
+            if let (Some(problem), false) = (state.refusal(), resolving) {
                 return Err(invalid(call, problem));
             }
             let ended = state.ended.len();
@@ -3020,8 +3345,12 @@ impl CommandBufferShared {
             // Set at most once: a second set would be of the same completion's error.
             let _ = self.error.set(error);
         }
-        self.status
-            .store(status_word(state.status), Ordering::Release);
+        // Committed from the program's commit on, while the resolver has its commit to make.
+        let status = match (state.status, state.program_committed) {
+            (CommandBufferStatus::NotEnqueued, true) => CommandBufferStatus::Committed,
+            (status, _) => status,
+        };
+        self.status.store(status_word(status), Ordering::Release);
     }
 
     /// Place its GPU times among its queue's, now that it completed: in the completion turn,
@@ -3190,7 +3519,7 @@ impl CommandBufferShared {
         shared.counts.queue_submitted(0);
         let submitted = shared.submit_logged(
             (queue, None),
-            Some(fence),
+            (Some(fence), Risks::NONE),
             &self.relayed,
             |vk_queue| unsafe { raw.queue_submit(vk_queue, &[], fence) },
         );
@@ -3207,7 +3536,9 @@ impl CommandBufferShared {
     }
 
     /// The command buffer's last batch is submitted, or held in a group (`group.rs`), on the
-    /// scheduler's thread under its lock: its transition to `Scheduled` runs here where it is [`plain`](Transition::plain) (it has no
+    /// scheduler's thread under its lock: the values it signals at its scheduling
+    /// ([`CommandBuffer::encode_signal_event_scheduled`]) are set first, then its transition to
+    /// `Scheduled` runs here where it is [`plain`](Transition::plain) (it has no
     /// scheduled handler, none is added after the commit, and it waits for no submission handler)
     /// and its queue's context runs on no thread and holds nothing (`Contexts::run_alone`): its
     /// status reads `Scheduled`, and `wait_until_scheduled` returns, as its last batch goes, with
@@ -3216,7 +3547,12 @@ impl CommandBufferShared {
     /// here. Counted: `WorkCounts::scheduled_where_submitted`.
     pub(crate) fn schedule(self: &Arc<Self>) {
         let plain = {
-            let state = lock(&self.state);
+            let mut state = lock(&self.state);
+            // Its signals at scheduling, before its status reads `Scheduled`: the scheduler's
+            // pass that took its last batch takes the batches waiting for them.
+            for (event, value) in state.scheduled_signals.drain(..) {
+                event.signal_scheduled(value);
+            }
             state.scheduled.is_empty() && !state.submitting
         };
         let shared = self.device.shared();
@@ -3679,7 +4015,17 @@ fn step_error(device: &Device, error: Error, refusal: &mut Option<Error>) -> Com
     if let Error::HostStepObject(object) = error {
         return CommandBufferError::HostStepObject(object);
     }
-    let refused = match &error {
+    if !refusal_class(&error) {
+        return recording_error(device, error);
+    }
+    *refusal = Some(error);
+    CommandBufferError::Refused
+}
+
+/// Whether `error` is a refusal, which a call or a commit gives the program, not a failure of the
+/// device or the runtime.
+fn refusal_class(error: &Error) -> bool {
+    match error {
         Error::Compile(metal2vulkan::error::Error::Internal(_)) => false,
         Error::Invalid(_)
         | Error::Unsupported(_)
@@ -3689,12 +4035,7 @@ fn step_error(device: &Device, error: Error, refusal: &mut Option<Error>) -> Com
         | Error::AppleOnly(_)
         | Error::SamplerLimit(_) => true,
         _ => false,
-    };
-    if !refused {
-        return recording_error(device, error);
     }
-    *refusal = Some(error);
-    CommandBufferError::Refused
 }
 
 /// The command-buffer error of a failed submission, recording a lost device.

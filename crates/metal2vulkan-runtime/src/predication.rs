@@ -273,6 +273,16 @@ impl Predication {
     /// The command buffer commits: its last unit ends, and each run's table is written into its
     /// record. Refused where a unit ended with a live block open
     /// ([`RuntimeGap::PredicationOpenAtUnitEnd`]), or as the arena refuses a table.
+    /// Whether no encoder used command predication: the commit has nothing of it to end, refuse
+    /// or write.
+    pub(super) fn untouched(&self) -> bool {
+        self.unit.is_none()
+            && self.runs.is_empty()
+            && !self.open_at_end
+            && !self.across_encoders
+            && self.overflow.is_none()
+    }
+
     pub(super) fn commit(&mut self, uploads: &mut Uploads, device: &Device) -> Result<(), Error> {
         self.end_unit();
         if self.open_at_end {

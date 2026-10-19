@@ -229,8 +229,8 @@ pub(crate) enum Notices<'a> {
     Now(Option<BoundFormats<'a>>),
     /// Already, by the draw or dispatch that handed the making to the pool, naming what it binds.
     Announced,
-    /// At the first draw that takes it (`RenderVariant::first_use`): made at its state's
-    /// creation.
+    /// At the first draw or dispatch that takes it (`RenderVariant::first_use`,
+    /// `Variant::first_use`): made at its state's creation.
     FirstDraw,
 }
 

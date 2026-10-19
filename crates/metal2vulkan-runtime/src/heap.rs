@@ -856,6 +856,11 @@ impl Heap {
     ///
     /// Fails only when zeroing the bytes fails.
     pub fn set_purgeable_state(&self, state: PurgeableState) -> Result<PurgeableState, Error> {
+        // What a captured encoder's calls handed the device's resolver is encoded first, so this
+        // reads and changes what the commands encoded before it see (`resolver.rs`).
+        self.device()
+            .shared()
+            .drain_resolver(crate::resolver::Drain::Object);
         // A heap over the caller's memory answers as a no-copy buffer: the bytes stay.
         if self
             .bytes()

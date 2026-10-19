@@ -44,8 +44,9 @@
 //!   treatment under Metal's bicubic filter), `TexelFormat` (the bound format's conversion to
 //!   `half`), `SampleCount` (the pipeline's rasterization samples), `AmplificationCount` (the
 //!   shape's vertex amplification count), and a fragment function's tile threadgroup memory's
-//!   (`TgOffset`, `TileThreadgroupLength`, `TileGridWidth`, and the pass's tile as
-//!   `ImageblockWidth` and `ImageblockHeight`).
+//!   (`TgOffset`, `TileThreadgroupLength`, and the pass's tile as `ImageblockWidth` and
+//!   `ImageblockHeight`). The tiles across the render area (`TileGridWidth`) are pushed, a value
+//!   the function reads as data (`SpecKey::read_as_data`).
 //! - **Views**. A count of 0, above 1 for a pipeline whose `maxVertexAmplificationCount` is 1, or
 //!   with fewer view mappings than the count is `InvalidVertexAmplification`. A count above a
 //!   larger maximum draws that many amplifications, as plain Metal draws them where its validation
@@ -2235,10 +2236,10 @@ fn plan(p: &RenderPipeline, device: &Device, shape: &BindShape) -> Result<Bindin
                 len
             }
             SpecKey::TgLength(_) if mesh => return Err(not_implemented(Feature::MeshShading)),
-            // A fragment function's tile threadgroup memory and the pass's tile.
+            // A fragment function's tile threadgroup memory and the pass's tile (the tiles across
+            // the render area it reads as data).
             SpecKey::TgOffset(_)
             | SpecKey::TileThreadgroupLength
-            | SpecKey::TileGridWidth
             | SpecKey::ImageblockWidth
             | SpecKey::ImageblockHeight => tile_memory
                 .as_ref()

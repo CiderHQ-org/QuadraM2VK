@@ -24,6 +24,7 @@ use crate::degradation::{
 };
 use crate::descriptor_arena::{DescriptorArena, SetNeeds};
 use crate::device::{lock, DeviceShared};
+use crate::device_checks::learned::{self, Risks};
 use crate::error::{internal, vulkan, Error};
 use crate::exit_guard;
 use crate::generated_commands::INDIRECT_BINDABLE;
@@ -35,9 +36,9 @@ use ash::vk;
 use metal2vulkan::bind::DispatchRegion;
 use metal2vulkan::cache::{Hash256, SpecializationKey};
 use metal2vulkan::pipeline::{
-    DescriptorSetLayout, PipelineLayout, RenderPipeline, SlotRef, StageModule,
+    DescriptorSetLayout, PipelineLayout, RenderPipeline, SlotRef, SpecializationLayout, StageModule,
 };
-use std::ffi::CString;
+use std::ffi::{CStr, CString};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -218,25 +219,77 @@ pub(crate) fn words_digest(words: &[u32]) -> Hash256 {
     Making::new("words").words(words).finish()
 }
 
+/// What a variant's content covers of one stage ([`variant_content`]): its stage, entry point,
+/// stage flags, required subgroup size and specialization layout, and the digest of its SPIR-V
+/// words.
+pub(crate) struct StagePart<'a> {
+    pub(crate) stage: metal2vulkan::vk::ShaderStage,
+    pub(crate) entry_point: &'a str,
+    pub(crate) stage_flags: metal2vulkan::vk::PipelineShaderStageCreateFlags,
+    pub(crate) required_subgroup_size: Option<u32>,
+    pub(crate) specialization: &'a SpecializationLayout,
+    pub(crate) words: &'a Hash256,
+}
+
+impl<'a> StagePart<'a> {
+    /// What the content covers of `stage`, whose words' digest is `words`.
+    fn of(stage: &'a StageModule, words: &'a Hash256) -> StagePart<'a> {
+        StagePart {
+            stage: stage.stage,
+            entry_point: &stage.entry_point,
+            stage_flags: stage.stage_flags,
+            required_subgroup_size: stage.required_subgroup_size,
+            specialization: &stage.specialization,
+            words,
+        }
+    }
+}
+
 /// The digest of what every `VkPipeline` of a variant of `layout` and `stages` reads besides its
 /// making's own state, which its makings' records are named by (`shader_cache/driver.rs`): each
-/// stage's stage, entry point, stage flags, required subgroup size, specialization layout and
-/// SPIR-V words (By their digest, `words`, in stage order), and the layout, its immutable samplers
-/// among it.
-fn variant_content(layout: &PipelineLayout, stages: &[StageModule], words: &[Hash256]) -> Hash256 {
+/// stage's [`StagePart`], in stage order, and the layout, its immutable samplers among it.
+pub(crate) fn variant_content<'a>(
+    layout: &PipelineLayout,
+    stages: impl IntoIterator<Item = StagePart<'a>>,
+) -> Hash256 {
     let mut making = Making::new("variant").text(layout);
-    for (stage, words) in stages.iter().zip(words) {
+    for stage in stages {
         making = making
             .text(&(
                 stage.stage,
-                &stage.entry_point,
+                stage.entry_point,
                 stage.stage_flags,
                 stage.required_subgroup_size,
-                &stage.specialization,
+                stage.specialization,
             ))
-            .digest(words);
+            .digest(stage.words);
     }
     making.finish()
+}
+
+/// The description of a compute making of a variant of `content` ([`variant_content`]), which
+/// names its record: what its `VkComputePipelineCreateInfo` takes besides that content, the
+/// stage and entry point of the variant's module, the specialization (its map and its data),
+/// stage flags and required subgroup size it is created under, and whether it is
+/// indirect-bindable.
+pub(crate) fn compute_making(
+    content: &Hash256,
+    (stage, entry): (vk::ShaderStageFlags, &CStr),
+    (specialization, stage_flags, required_subgroup_size): (
+        &SpecializationKey,
+        vk::PipelineShaderStageCreateFlags,
+        Option<u32>,
+    ),
+    bindable: bool,
+) -> Making {
+    Making::new("compute").digest(content).text(&(
+        stage.as_raw(),
+        entry,
+        specialization,
+        stage_flags.as_raw(),
+        required_subgroup_size,
+        bindable,
+    ))
 }
 
 impl VariantObjects {
@@ -362,6 +415,9 @@ pub(crate) struct VariantObjects {
     pub(super) specialized: Vec<StageModule>,
     /// The kinds its making may announce, which a bind tests (`announce_bound`).
     kinds: Kinds,
+    /// The risky paths a draw or dispatch that binds it takes (`device_checks/learned.rs`): a
+    /// stage past the Function storage an unmeasured device is taken to hold.
+    risks: Risks,
     /// The texture slots its specialized notes test (`degradation::tested_slots_of`): those
     /// whose bound formats a bind's notices may name.
     tested: Vec<SlotRef>,
@@ -461,7 +517,8 @@ pub(crate) struct RawPipeline {
     /// keeps it for that instance (`kept.rs`); `None` destroys it.
     pub(super) keep: Option<(Instance, Place)>,
     /// Made at its state's creation, its specialized notices not announced yet: the first draw
-    /// that takes it announces them, with what it binds (`RenderVariant::first_use`).
+    /// or dispatch that takes it announces them, with what it binds (`RenderVariant::first_use`,
+    /// `Variant::first_use`).
     pub(super) unannounced: AtomicBool,
     /// The libraries it was linked from, held while it lives (`libraries.rs`); `None` for a
     /// pipeline made whole.
@@ -507,9 +564,12 @@ impl RawPipeline {
         }
     }
 
-    /// Whether its specialized notices wait for this, its first draw: once true, then false.
+    /// Whether its specialized notices wait for this, its first draw or dispatch: once true, then
+    /// false.
     pub(crate) fn first_drawn(&self) -> bool {
-        self.unannounced.swap(false, Ordering::AcqRel)
+        // A load first: every draw and dispatch of the pipeline asks, and only the first of a
+        // pipeline made at a creation finds it set, so the others write nothing to its line.
+        self.unannounced.load(Ordering::Acquire) && self.unannounced.swap(false, Ordering::AcqRel)
     }
 
     /// The pipeline, kept at `place` of `objects`' instance once released, where `objects` are
@@ -572,10 +632,17 @@ impl VariantObjects {
             heap_layout: layout.sets.get(1).cloned(),
             heap: Mutex::new(None),
             kinds: Kinds::of(stages, pipeline),
+            risks: learned::stage_risks(stages),
             tested: tested_slots_of(stages),
             bound: Mutex::new(None),
             keep: None,
-            content: variant_content(layout, stages, &words),
+            content: variant_content(
+                layout,
+                stages
+                    .iter()
+                    .zip(words.iter())
+                    .map(|(stage, words)| StagePart::of(stage, words)),
+            ),
             words: Arc::clone(&words),
             parts_content: OnceLock::new(),
         };
@@ -648,6 +715,7 @@ impl VariantObjects {
             heap_layout: layout.sets.get(1).cloned(),
             heap: Mutex::new(None),
             kinds: Kinds::of(stages, pipeline),
+            risks: learned::stage_risks(stages),
             tested: tested_slots_of(stages),
             bound: Mutex::new(None),
             keep: Some(instance),
@@ -670,6 +738,11 @@ impl VariantObjects {
     /// The kinds its making may announce (`Kinds::of`), which a bind tests.
     pub(crate) fn kinds(&self) -> &Kinds {
         &self.kinds
+    }
+
+    /// The risky paths a draw or dispatch that binds it takes (`device_checks/learned.rs`).
+    pub(crate) fn risks(&self) -> Risks {
+        self.risks
     }
 
     /// The format `formats` gives at each texture slot a specialized note of its stages tests:
@@ -898,14 +971,12 @@ impl VariantObjects {
             info = info.push_next(&mut feedback);
         }
         // Its record is named by the variant's content and what this making adds to it.
-        let making = self.making("compute").text(&(
-            c.object.stage.as_raw(),
-            &c.object.entry,
-            c.specialization,
-            c.stage_flags.as_raw(),
-            c.required_subgroup_size,
+        let making = compute_making(
+            &self.content,
+            (c.object.stage, &c.object.entry),
+            (c.specialization, c.stage_flags, c.required_subgroup_size),
             bindable,
-        ));
+        );
         // The turn first (none where a piece's thread holds one), once no twin's making is in the
         // air (`flight.rs`): the driver's time alone is timed, not the wait for a turn or a twin.
         let flight = self.flight(&(
@@ -943,7 +1014,7 @@ impl VariantObjects {
             raw,
             created_in,
             keep: None,
-            unannounced: AtomicBool::new(false),
+            unannounced: AtomicBool::new(matches!(c.notices, Notices::FirstDraw)),
             linked: None,
         };
         if let Notices::Now(formats) = c.notices {

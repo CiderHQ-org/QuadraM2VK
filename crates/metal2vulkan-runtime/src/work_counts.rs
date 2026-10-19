@@ -9,7 +9,10 @@ use super::buffer::{KeptBecause, ReadApart};
 use super::command_buffer::GroupEnd;
 use super::degradation::Degradation;
 use super::device::lock;
+use super::event::Released;
 use super::recorder::{CommandsReplayed, ReplayCounts};
+use super::render::{OpenedAtTheCall, TakenBack};
+use super::resolver::{Drain, ResolverCounts};
 use super::shadow::{Backing, CopyCause, Lost, ShadowCopy, ShadowSource};
 use super::Device;
 use ash::vk;
@@ -57,6 +60,8 @@ pub(crate) struct Counters {
     host_step_sampler_sets_made: AtomicU64,
     creation_pipelines_made: AtomicU64,
     creation_pipelines_drawn: AtomicU64,
+    creation_dispatch_pipelines_made: AtomicU64,
+    creation_dispatch_pipelines_dispatched: AtomicU64,
     sampler_sets_made: AtomicU64,
     sampler_sets_shared: AtomicU64,
     sampler_sets_destroyed: AtomicU64,
@@ -86,6 +91,9 @@ pub(crate) struct Counters {
     heap_slots_rewritten: AtomicU64,
     heap_slot_writes_deferred: AtomicU64,
     heap_textures_tiled: AtomicU64,
+    heap_tiled_view_moves: AtomicU64,
+    tiled_scratches_made: AtomicU64,
+    tiled_scratches_reused: AtomicU64,
     heap_texture_lossless_layouts: AtomicU64,
     heap_texture_block_compressed_layouts: AtomicU64,
     heap_texture_untiled_layouts: AtomicU64,
@@ -105,6 +113,14 @@ pub(crate) struct Counters {
     command_buffers_begun_by: [AtomicU64; Begun::COUNT],
     encoder_primaries_begun_ahead: AtomicU64,
     primaries_begun_ahead: AtomicU64,
+    render_encoders_captured: AtomicU64,
+    render_encoders_demoted: AtomicU64,
+    render_encoders_taken_back_by: [AtomicU64; TakenBack::COUNT],
+    render_opens_at_the_call_by: [AtomicU64; OpenedAtTheCall::COUNT],
+    calls_answered: AtomicU64,
+    commits_answered: AtomicU64,
+    resolver_failures: AtomicU64,
+    answered_calls_refused: AtomicU64,
     barrier_buffers_kept: AtomicU64,
     stamped_buffers_kept: AtomicU64,
     stamped_buffers_reused: AtomicU64,
@@ -129,6 +145,11 @@ pub(crate) struct Counters {
     slot_wait_nanos: AtomicU64,
     completed_waits: AtomicU64,
     event_waits_met: AtomicU64,
+    /// By `Released`, in its order: the batches the scheduler held for an event value, and the
+    /// nanoseconds from the value's reach to their `vkQueueSubmit`'s return.
+    event_holds: [AtomicU64; Released::COUNT],
+    event_hold_nanos: [AtomicU64; Released::COUNT],
+    submissions_after_scheduled_sets: AtomicU64,
     bare_starts: AtomicU64,
     prefixed_starts: AtomicU64,
     unrun_instances_ended: AtomicU64,
@@ -695,6 +716,20 @@ impl Counters {
             .fetch_add(1, Ordering::Relaxed);
     }
 
+    /// A compute state's creation made a region's `VkPipeline` its record held
+    /// (`pipeline/dispatch_making.rs`).
+    pub(crate) fn creation_dispatch_pipeline_made(&self) {
+        self.creation_dispatch_pipelines_made
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A dispatch took a region's `VkPipeline` a compute state's creation made, its first
+    /// dispatch.
+    pub(crate) fn creation_dispatch_pipeline_dispatched(&self) {
+        self.creation_dispatch_pipelines_dispatched
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
     /// A variant made an immutable sampler set: the device's map's, or a host step's or a pool
     /// piece's own (`pipeline/objects.rs`).
     pub(crate) fn sampler_set_made(&self) {
@@ -842,6 +877,44 @@ impl Counters {
         self.primaries_begun_ahead.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// A render encoder's open was answered at the call and handed to the device's resolver
+    /// (`render/captured.rs`).
+    pub(crate) fn render_encoder_captured(&self) {
+        (self.render_encoders_captured).fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A captured render encoder was taken back to the call for `why` (`render/captured.rs`).
+    pub(crate) fn render_encoder_demoted(&self, why: TakenBack) {
+        (self.render_encoders_demoted).fetch_add(1, Ordering::Relaxed);
+        self.render_encoders_taken_back_by[why as usize].fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A render encoder of a device with a resolver opened at the call for `why`
+    /// (`render/captured.rs`).
+    pub(crate) fn render_opened_at_the_call(&self, why: OpenedAtTheCall) {
+        self.render_opens_at_the_call_by[why as usize].fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// `calls` calls of a captured render encoder were answered at the call and handed to the
+    /// device's resolver (`render/captured.rs`).
+    pub(crate) fn calls_answered(&self, calls: u64) {
+        self.calls_answered.fetch_add(calls, Ordering::Relaxed);
+    }
+
+    /// A commit was answered at the call and handed to the device's resolver (`resolver.rs`).
+    pub(crate) fn commit_answered(&self) {
+        self.commits_answered.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// The device's resolver failed a command buffer (`resolver.rs`): `refused` where the failure
+    /// was a refusal of a call answered `Ok` at the call.
+    pub(crate) fn resolver_failure(&self, refused: bool) {
+        self.resolver_failures.fetch_add(1, Ordering::Relaxed);
+        if refused {
+            (self.answered_calls_refused).fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
     /// A batch's barrier command buffer was recorded to be kept and submitted again
     /// (`command_buffer/kept_barriers.rs`).
     pub(crate) fn barrier_buffer_kept(&self) {
@@ -952,6 +1025,23 @@ impl Counters {
     pub(crate) fn event_waits_met(&self, waits: usize) {
         self.event_waits_met
             .fetch_add(waits as u64, Ordering::Relaxed);
+    }
+
+    /// A batch the scheduler held for an event value went, `released` by what reached that value,
+    /// `nanos` nanoseconds after the host saw it reached (`scheduler/mod.rs`).
+    pub(crate) fn event_hold(&self, released: Released, nanos: u64) {
+        self.event_holds[released as usize].fetch_add(1, Ordering::Relaxed);
+        self.event_hold_nanos[released as usize].fetch_add(nanos, Ordering::Relaxed);
+    }
+
+    /// A `vkQueueSubmit` carried a batch a scheduled handler's set released.
+    pub(crate) fn submission_after_scheduled_set(&self) {
+        (self.submissions_after_scheduled_sets).fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// The `vkQueueSubmit` calls made so far.
+    pub(crate) fn queue_submissions(&self) -> u64 {
+        self.queue_submissions.load(Ordering::Relaxed)
     }
 
     /// A batch with work was submitted with no command buffer of barriers before its first
@@ -1866,6 +1956,24 @@ impl Counters {
         self.heap_textures_tiled.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// `n` copies in or back, keeps or merges of tiled heap textures were planned as dispatches
+    /// through their images' views (`texture/heap_tiled_words.rs`).
+    pub(crate) fn heap_tiled_view_moves(&self, n: usize) {
+        (self.heap_tiled_view_moves).fetch_add(n as u64, Ordering::Relaxed);
+    }
+
+    /// A queue made a scratch for its encoders' staged tiled moves, its first or a larger one
+    /// (`texture/heap_tiled_scratch.rs`).
+    pub(crate) fn tiled_scratch_made(&self) {
+        self.tiled_scratches_made.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// An encoder took its queue's scratch for its staged tiled moves as it was
+    /// (`texture/heap_tiled_scratch.rs`).
+    pub(crate) fn tiled_scratch_reused(&self) {
+        self.tiled_scratches_reused.fetch_add(1, Ordering::Relaxed);
+    }
+
     /// A texture in a heap over host pages was met as laid out otherwise than Metal tiles it, as
     /// `kind` (`heap-texture-lossless-layout`, `heap-texture-block-compressed-layout` or
     /// `heap-texture-untiled-layout`; announced where it is the first of its kind).
@@ -2122,6 +2230,12 @@ pub struct WorkCounts {
     /// Of those, the ones a draw took so far: the rest are makings no draw has used yet, the
     /// speculative part of making at creation.
     pub creation_pipelines_drawn: u64,
+    /// Regions' `VkPipeline`s compute states' creations made: the keys their variants'
+    /// dispatches made in earlier processes (`pipeline/region_record.rs`).
+    pub creation_dispatch_pipelines_made: u64,
+    /// Of those, the ones a dispatch took so far: the rest are recorded keys no dispatch of this
+    /// process used yet.
+    pub creation_dispatch_pipelines_dispatched: u64,
     /// Immutable sampler sets variants made (the device's map's, and a host step's or a pool
     /// piece's own): none for a variant without immutable samplers.
     pub sampler_sets_made: u64,
@@ -2265,6 +2379,17 @@ pub struct WorkCounts {
     /// Textures made in heaps over host pages laid out as Metal tiles them, each a shadow of its
     /// elements in the heap's bytes (`texture/heap_tiled.rs`).
     pub heap_textures_tiled: u64,
+    /// Copies in and back, keeps and merges of textures laid out as Metal tiles them in heaps
+    /// over host pages, planned as dispatches through their images' unsigned-integer views over
+    /// the heap's bytes, with no staging (`texture/heap_tiled_words.rs`).
+    pub heap_tiled_view_moves: u64,
+    /// Scratches made for the staged moves of textures laid out as Metal tiles them in heaps over
+    /// host pages (`texture/heap_tiled_scratch.rs`): the staging and tight buffers the moves go
+    /// through, one a command queue, made at its encoders' first such move and again each time
+    /// one moves a texture larger than it holds.
+    pub tiled_scratches_made: u64,
+    /// Encoders that took their queue's scratch for staged tiled moves as it was: no buffer made.
+    pub tiled_scratches_reused: u64,
     /// Textures made in heaps over host pages that Metal keeps losslessly compressed
     /// (`Degradation::HeapTextureLosslessLayout`).
     pub heap_texture_lossless_layouts: u64,
@@ -2358,6 +2483,156 @@ pub struct WorkCounts {
     /// counted once its pool is among the spares again, so a command buffer made after the count
     /// moved can take it.
     pub primaries_begun_ahead: u64,
+    /// Render encoders whose open the device's memo answered at the call, their calls encoded
+    /// by the device's resolver thread (`render/captured.rs`).
+    pub render_encoders_captured: u64,
+    /// Of `render_encoders_captured`, those a call the memo does not answer took back to the
+    /// call: the call and those after it were encoded at the call, after a drain. Each counts
+    /// once, by what took it back (`taken_back_plural_buffers` and kin); a draw by its key's first
+    /// difference, in their order, from what the memo's keys bind.
+    pub render_encoders_demoted: u64,
+    /// Of `render_encoders_demoted`, those taken back by a `set_*_buffers` call.
+    pub taken_back_plural_buffers: u64,
+    /// Of `render_encoders_demoted`, those taken back by a `set_*_textures` call.
+    pub taken_back_plural_textures: u64,
+    /// Of `render_encoders_demoted`, those taken back by a `set_*_sampler_states` call.
+    pub taken_back_plural_samplers: u64,
+    /// Of `render_encoders_demoted`, those taken back by a `set_*_buffer_offset` call.
+    pub taken_back_buffer_offsets: u64,
+    /// Of `render_encoders_demoted`, those taken back by a deferred store action or its options (`set_*_store_action*`).
+    pub taken_back_store_actions: u64,
+    /// Of `render_encoders_demoted`, those taken back by render state the memo does not key: depth bias, depth clip mode, triangle
+    /// fill mode, visibility result mode, vertex amplification, tessellation factors.
+    pub taken_back_render_state: u64,
+    /// Of `render_encoders_demoted`, those taken back by any other call the memo does not key: an indirect draw, patches, mesh or
+    /// tile work, resource uses, fences, executions of indirect commands.
+    pub taken_back_other_calls: u64,
+    /// Of `render_encoders_demoted`, those taken back by `set_render_pipeline_state` of a state whose draws the memo does not
+    /// key.
+    pub taken_back_unkeyed_pipelines: u64,
+    /// Of `render_encoders_demoted`, those taken back by `set_render_pipeline_state` of a state the memo keys but has not
+    /// answered in the pass.
+    pub taken_back_unseen_pipelines: u64,
+    /// Of `render_encoders_demoted`, those taken back by a draw the memo keys none of: no keyed pipeline set, or a vertex buffer
+    /// bound with more than 4 GiB past its offset.
+    pub taken_back_unkeyed_draws: u64,
+    /// Of `render_encoders_demoted`, those taken back by an indexed draw that reads its indices through a copy.
+    pub taken_back_index_copies: u64,
+    /// Of `render_encoders_demoted`, those taken back by a draw the memo saw at the call not settled, not learned: its own
+    /// pipeline being made, a residual form, or a notice heard.
+    pub taken_back_unsettled_draws: u64,
+    /// Of `render_encoders_demoted`, those taken back by a draw whose key names an object (a buffer, texture, sampler or
+    /// depth/stencil state) no key of the memo names.
+    pub taken_back_new_objects: u64,
+    /// Of `render_encoders_demoted`, those taken back by a draw that binds an object, or bytes, at a slot of a stage where no
+    /// key of the memo binds it.
+    pub taken_back_new_bindings: u64,
+    /// Of `render_encoders_demoted`, those taken back by a draw that binds a buffer where keys bind it, but at an offset
+    /// class (or at its end, or far) no key binds it at there.
+    pub taken_back_new_offset_classes: u64,
+    /// Of `render_encoders_demoted`, those taken back by a draw that binds bytes where keys bind bytes, but of a length no
+    /// key binds there.
+    pub taken_back_new_bytes_lengths: u64,
+    /// Of `render_encoders_demoted`, those taken back by a draw whose bindings keys bind, in render state, a pipeline, a pass
+    /// or a kind of draw no key draws them in.
+    pub taken_back_new_draw_states: u64,
+    /// Of `render_encoders_demoted`, those taken back by `end_encoding` of draws the memo has not seen end.
+    pub taken_back_unseen_ends: u64,
+    /// Render encoders of a device with a resolver opened at the call, not captured, by why
+    /// (`render/captured.rs`): a descriptor the memo keys no pass of (a rate map, custom sample
+    /// positions or layers).
+    pub render_opens_unkeyed_descriptors: u64,
+    /// Opened at the call: the command buffer's earlier encoders made a shadowed texture
+    /// resident.
+    pub render_opens_inheriting_shadows: u64,
+    /// Opened at the call: the open announced.
+    pub render_opens_announced: u64,
+    /// Opened at the call: a pass the memo keys none of (color groups, extended-range colors, an
+    /// attachment in a buffer's or a heap's bytes, or one over the caller's image).
+    pub render_opens_unkeyed_passes: u64,
+    /// Opened at the call: a pass the memo keys but had not seen, whose encoder teaches it.
+    pub render_opens_unseen_passes: u64,
+    /// Calls of captured render encoders answered at the call and encoded by the resolver: the
+    /// opens, the calls and the ends.
+    pub calls_answered: u64,
+    /// Commits answered at the call and made by the resolver after the command buffer's captured
+    /// encoders (`CommandBuffer::commit`).
+    pub commits_answered: u64,
+    /// Waits of a call at the program's thread for the resolver to encode what was handed to it
+    /// (`resolver.rs`): an encoder or a commit at the call, a captured encoder taken back, a
+    /// rebind, a detach, the CPU's access to a texture. Those that found nothing to wait for are
+    /// `resolver_drains_idle`.
+    pub resolver_drains: u64,
+    /// The time `resolver_drains` waited, in nanoseconds.
+    pub resolver_drain_nanos: u64,
+    /// Drains that found everything handed to the resolver encoded.
+    pub resolver_drains_idle: u64,
+    /// Of `resolver_drains`, those of a commit at the call (of a command buffer with an encoder
+    /// or a command at the call).
+    pub resolver_drains_commits: u64,
+    /// The time `resolver_drains_commits` waited, in nanoseconds.
+    pub resolver_drain_commits_nanos: u64,
+    /// Of `resolver_drains`, those of an encoder other than a render encoder opened at the call
+    /// (a blit, compute or resource state encoder).
+    pub resolver_drains_encoders: u64,
+    /// The time `resolver_drains_encoders` waited, in nanoseconds.
+    pub resolver_drain_encoders_nanos: u64,
+    /// Of `resolver_drains`, those of a render encoder opened at the call (its pass, or its
+    /// command buffer, not one the memo keys).
+    pub resolver_drains_render_opens: u64,
+    /// The time `resolver_drains_render_opens` waited, in nanoseconds.
+    pub resolver_drain_render_opens_nanos: u64,
+    /// Of `resolver_drains`, those of a captured encoder taken back to the call
+    /// (`render_encoders_demoted`).
+    pub resolver_drains_taken_back: u64,
+    /// The time `resolver_drains_taken_back` waited, in nanoseconds.
+    pub resolver_drain_taken_back_nanos: u64,
+    /// Of `resolver_drains`, those of the program's last hold of an uncommitted command buffer
+    /// the resolver held.
+    pub resolver_drains_drops: u64,
+    /// The time `resolver_drains_drops` waited, in nanoseconds.
+    pub resolver_drain_drops_nanos: u64,
+    /// Of `resolver_drains`, those of a call on an object whose state an encoding reads (its
+    /// bytes on the CPU, its pages, its purgeability or aliasing, a command buffer's used
+    /// resources).
+    pub resolver_drains_objects: u64,
+    /// The time `resolver_drains_objects` waited, in nanoseconds.
+    pub resolver_drain_objects_nanos: u64,
+    /// The pieces of work the drains that waited waited for, summed: an encoder's pieces, a
+    /// commit, a command between encoders.
+    pub resolver_drain_pieces: u64,
+    /// Of `resolver_drains`, those that encoded pieces on the calling thread in the resolver's
+    /// place, the resolver's thread not part-way through one (`resolver.rs`): a drain wakes no
+    /// sleeping resolver and waits for no wake.
+    pub resolver_drains_encoding: u64,
+    /// The pieces drains encoded in the resolver's place.
+    pub resolver_drain_encoded_pieces: u64,
+    /// The time drains spent encoding pieces in the resolver's place, in nanoseconds (within
+    /// `resolver_drain_nanos`).
+    pub resolver_drain_encoding_nanos: u64,
+    /// Wakes of the sleeping resolver that a drain waited for: only a drain on a thread command
+    /// buffers' completion depends on, which encodes nothing itself, wakes it.
+    pub resolver_drain_wakes: u64,
+    /// Hand-overs that woke the resolver's thread from its sleep: one per burst of work, at an
+    /// encoder's end or a commit, and at a drain on a thread command buffers' completion depends
+    /// on (`resolver_drain_wakes`).
+    pub resolver_wakes: u64,
+    /// The time from each of `resolver_wakes` to the resolver's thread running, in nanoseconds.
+    pub resolver_wake_nanos: u64,
+    /// The time the resolver's thread spent encoding, in nanoseconds.
+    pub resolver_busy_nanos: u64,
+    /// Command buffers the resolver failed: a failure of a captured call's encoding or of a
+    /// commit there (out of memory, a lost device, a runtime defect), which fails the command
+    /// buffer as it completes.
+    pub resolver_failures: u64,
+    /// Of `resolver_failures`, refusals of a call answered `Ok` at the call: a defect of the
+    /// answer, which fails the command buffer as `CommandBufferError::Internal` (the refusal its
+    /// `refusal`), 0 where the answers hold.
+    pub answered_calls_refused: u64,
+    /// Messages delivered on the resolver's thread as it encoded: one for each of its failures,
+    /// and any notice of a captured call's encoding, which the memo keeps from being captured
+    /// (`render/captured.rs`): 0 where nothing failed and the answers hold.
+    pub resolver_notices: u64,
     /// Barrier command buffers of batches recorded once, kept, and submitted again by later
     /// batches once the batch that last took one completed (`command_buffer/kept_barriers.rs`):
     /// each is among `command_buffers_begun` once.
@@ -2497,6 +2772,51 @@ pub struct WorkCounts {
     /// (`CompletionPolicy::Grouped`) as a batch with no wait does; the others' waits make it lead
     /// one or go alone (`group_ends_wait`).
     pub event_waits_met: u64,
+    /// Batches the scheduler held for an event value (no submitted signal or host set reached it
+    /// yet, or, for a command buffer with a submission check, only a submitted GPU signal of a
+    /// `SharedEvent` did, which the check waits for to land: `command_buffer/checks.rs`) that went
+    /// once an `Event`'s GPU signal reached it, seen landed by the host, where nothing else
+    /// released it: a batch waiting for an `Event` goes at its signal's submission, so this counts
+    /// only one the scheduler did not look at between that submission and the landing. With the
+    /// six fields of `event_holds_` after it, every such batch, each counted once as it went, by
+    /// what reached the value it waited for last (`event.rs`, `scheduler/mod.rs`).
+    pub event_holds_landed_event: u64,
+    /// The nanoseconds from the host seeing those values land (a completion turn, the
+    /// scheduler's own wait on the GPU, or a read of the value) to the return of their batches'
+    /// `vkQueueSubmit` (for a batch held in a group, the group's): the host's part of each hop,
+    /// its checks and the kernel submission included, not the driver's wake.
+    pub event_holds_landed_event_nanos: u64,
+    /// Batches so held that went once a `SharedEvent`'s GPU signal reached the value, seen landed.
+    pub event_holds_landed_shared_event: u64,
+    /// The nanoseconds from those landings to the return of their batches' `vkQueueSubmit`.
+    pub event_holds_landed_shared_event_nanos: u64,
+    /// Batches so held that went once the host set the value from a scheduled handler
+    /// (`CommandBuffer::add_scheduled_handler`), on a handler thread.
+    pub event_holds_set_scheduled: u64,
+    /// The nanoseconds from those sets to the return of their batches' `vkQueueSubmit`.
+    pub event_holds_set_scheduled_nanos: u64,
+    /// Batches so held that went once the host set the value from a submission handler
+    /// (`CommandBuffer::add_submission_handler`).
+    pub event_holds_set_submission: u64,
+    /// The nanoseconds from those sets to the return of their batches' `vkQueueSubmit`.
+    pub event_holds_set_submission_nanos: u64,
+    /// Batches so held that went once the host set the value anywhere else.
+    pub event_holds_set_host: u64,
+    /// The nanoseconds from those sets to the return of their batches' `vkQueueSubmit`.
+    pub event_holds_set_host_nanos: u64,
+    /// Batches so held that went once a GPU signal of the value was submitted, with a Vulkan wait
+    /// for it: no landing waited for.
+    pub event_holds_signal_submitted: u64,
+    /// Batches so held that went once the command buffer signalling the value at its scheduling
+    /// was scheduled (`CommandBuffer::encode_signal_event_scheduled`): taken in the scheduler's
+    /// pass that set it, or the next.
+    pub event_holds_signal_scheduled: u64,
+    /// The nanoseconds from those values' sets to the return of their batches' `vkQueueSubmit`.
+    pub event_holds_signal_scheduled_nanos: u64,
+    /// `vkQueueSubmit` calls that carried a batch a scheduled handler's set released
+    /// (`event_holds_set_scheduled`): each one a submission of its own after its signaller's,
+    /// which a wake of the scheduler's thread by the set began.
+    pub submissions_after_scheduled_sets: u64,
     /// Batches with work submitted with no command buffer of barriers before their first
     /// encoder: nothing planned before it, and no start timestamp to write there (none, or one
     /// its first encoder wrote, `WorkCounts::prefixed_starts`).
@@ -2774,8 +3094,8 @@ pub struct WorkCounts {
     /// samplers'), their pipelines made, recorded in a `VkCommandBuffer` of their own, as a
     /// dispatch whose pipeline is still being made is (`pending_dispatch.rs`): on a device whose
     /// driver loses baked samplers after a copy in the same `VkCommandBuffer`
-    /// (`RuntimeDriverDefect::ImmutableSamplersLostAfterCopies`, every lavapipe release). Zero
-    /// elsewhere.
+    /// (`RuntimeDriverDefect::ImmutableSamplersLostAfterCopies`, as the device takes it when the
+    /// dispatch is encoded). Zero elsewhere.
     pub baked_sampler_dispatches_apart: u64,
     /// No-copy buffers and heaps released with a deallocator whose deallocator waited past the
     /// release (`host-deallocator-delayed`), counted at each wait: given no keep-alive, for the
@@ -3244,6 +3564,15 @@ pub struct WorkCounts {
     /// each one the compute dispatch of the tile function over the pass's tiles, between the
     /// pass's instances, with its attachments' scratch copies.
     pub tile_dispatches_recorded: u64,
+    /// 1 where the device holds a slot of the loss watch's (`device_checks/learned.rs`), 0 where
+    /// every slot was taken as it was made: unwatched, it learns nothing from a lost device.
+    pub loss_watched: u64,
+    /// The device's calls that returned `VK_ERROR_DEVICE_LOST`, as the watch saw them.
+    pub device_losses_seen: u64,
+    /// The records of a risky path learned off that the watch made at the device's loss.
+    pub learned_off_recorded: u64,
+    /// The device's batch submissions the driver accepted that took a risky path.
+    pub risky_submissions: u64,
 }
 
 impl Device {
@@ -3267,6 +3596,15 @@ impl Device {
         };
         let begun =
             |what: Begun| counters.command_buffers_begun_by[what as usize].load(Ordering::Relaxed);
+        let holds = |by: Released| counters.event_holds[by as usize].load(Ordering::Relaxed);
+        let hold_nanos =
+            |by: Released| counters.event_hold_nanos[by as usize].load(Ordering::Relaxed);
+        let taken_back = |why: TakenBack| {
+            counters.render_encoders_taken_back_by[why as usize].load(Ordering::Relaxed)
+        };
+        let opened = |why: OpenedAtTheCall| {
+            counters.render_opens_at_the_call_by[why as usize].load(Ordering::Relaxed)
+        };
         let (sleeps, [by_commit, by_completion, by_host, by_slice], scheduler_spared, gpu_waits) =
             self.shared().scheduler.sleeps_and_wakings();
         let (completion_wakes, completion_spared) = self.shared().completion.wakes();
@@ -3287,6 +3625,9 @@ impl Device {
         };
         let replays = (self.shared().recorder())
             .map_or_else(ReplayCounts::default, |recorder| recorder.counts());
+        let watch = self.shared().learning.counts();
+        let resolver = (self.shared().resolver())
+            .map_or_else(ResolverCounts::default, |resolver| resolver.counts());
         WorkCounts {
             command_pools_made: counters.command_pools_made.load(Ordering::Relaxed)
                 + replays.pools_made,
@@ -3335,6 +3676,12 @@ impl Device {
                 .load(Ordering::Relaxed),
             creation_pipelines_made: counters.creation_pipelines_made.load(Ordering::Relaxed),
             creation_pipelines_drawn: counters.creation_pipelines_drawn.load(Ordering::Relaxed),
+            creation_dispatch_pipelines_made: counters
+                .creation_dispatch_pipelines_made
+                .load(Ordering::Relaxed),
+            creation_dispatch_pipelines_dispatched: counters
+                .creation_dispatch_pipelines_dispatched
+                .load(Ordering::Relaxed),
             sampler_sets_made: counters.sampler_sets_made.load(Ordering::Relaxed),
             sampler_sets_shared: counters.sampler_sets_shared.load(Ordering::Relaxed),
             sampler_sets_destroyed: counters.sampler_sets_destroyed.load(Ordering::Relaxed),
@@ -3380,6 +3727,9 @@ impl Device {
             heap_slot_writes_deferred: counters.heap_slot_writes_deferred.load(Ordering::Relaxed),
             host_range_lookups: self.shared().aliases.range_lookups(),
             heap_textures_tiled: counters.heap_textures_tiled.load(Ordering::Relaxed),
+            heap_tiled_view_moves: counters.heap_tiled_view_moves.load(Ordering::Relaxed),
+            tiled_scratches_made: counters.tiled_scratches_made.load(Ordering::Relaxed),
+            tiled_scratches_reused: counters.tiled_scratches_reused.load(Ordering::Relaxed),
             heap_texture_lossless_layouts: counters
                 .heap_texture_lossless_layouts
                 .load(Ordering::Relaxed),
@@ -3417,6 +3767,59 @@ impl Device {
                 .load(Ordering::Relaxed)
                 + replays.begun_ahead_taken,
             primaries_begun_ahead: counters.primaries_begun_ahead.load(Ordering::Relaxed),
+            render_encoders_captured: counters.render_encoders_captured.load(Ordering::Relaxed),
+            render_encoders_demoted: counters.render_encoders_demoted.load(Ordering::Relaxed),
+            taken_back_plural_buffers: taken_back(TakenBack::PluralBuffers),
+            taken_back_plural_textures: taken_back(TakenBack::PluralTextures),
+            taken_back_plural_samplers: taken_back(TakenBack::PluralSamplers),
+            taken_back_buffer_offsets: taken_back(TakenBack::BufferOffset),
+            taken_back_store_actions: taken_back(TakenBack::StoreAction),
+            taken_back_render_state: taken_back(TakenBack::RenderState),
+            taken_back_other_calls: taken_back(TakenBack::OtherCall),
+            taken_back_unkeyed_pipelines: taken_back(TakenBack::PipelineUnkeyed),
+            taken_back_unseen_pipelines: taken_back(TakenBack::PipelineUnseen),
+            taken_back_unkeyed_draws: taken_back(TakenBack::DrawUnkeyed),
+            taken_back_index_copies: taken_back(TakenBack::IndexCopy),
+            taken_back_unsettled_draws: taken_back(TakenBack::DrawUnsettled),
+            taken_back_new_objects: taken_back(TakenBack::DrawNewObject),
+            taken_back_new_bindings: taken_back(TakenBack::DrawNewBinding),
+            taken_back_new_offset_classes: taken_back(TakenBack::DrawNewOffsetClass),
+            taken_back_new_bytes_lengths: taken_back(TakenBack::DrawNewBytesLength),
+            taken_back_new_draw_states: taken_back(TakenBack::DrawNewState),
+            taken_back_unseen_ends: taken_back(TakenBack::EndUnseen),
+            render_opens_unkeyed_descriptors: opened(OpenedAtTheCall::UnkeyedDescriptor),
+            render_opens_inheriting_shadows: opened(OpenedAtTheCall::InheritedShadows),
+            render_opens_announced: opened(OpenedAtTheCall::Announced),
+            render_opens_unkeyed_passes: opened(OpenedAtTheCall::UnkeyedPass),
+            render_opens_unseen_passes: opened(OpenedAtTheCall::UnseenPass),
+            calls_answered: counters.calls_answered.load(Ordering::Relaxed),
+            commits_answered: counters.commits_answered.load(Ordering::Relaxed),
+            resolver_drains: resolver.drains,
+            resolver_drain_nanos: resolver.drain_wait_ns,
+            resolver_drains_idle: resolver.drains_idle,
+            resolver_drains_commits: resolver.drains_by[Drain::Commit as usize],
+            resolver_drain_commits_nanos: resolver.drain_ns_by[Drain::Commit as usize],
+            resolver_drains_encoders: resolver.drains_by[Drain::Encoder as usize],
+            resolver_drain_encoders_nanos: resolver.drain_ns_by[Drain::Encoder as usize],
+            resolver_drains_render_opens: resolver.drains_by[Drain::RenderOpen as usize],
+            resolver_drain_render_opens_nanos: resolver.drain_ns_by[Drain::RenderOpen as usize],
+            resolver_drains_taken_back: resolver.drains_by[Drain::TakeBack as usize],
+            resolver_drain_taken_back_nanos: resolver.drain_ns_by[Drain::TakeBack as usize],
+            resolver_drains_drops: resolver.drains_by[Drain::Drop as usize],
+            resolver_drain_drops_nanos: resolver.drain_ns_by[Drain::Drop as usize],
+            resolver_drains_objects: resolver.drains_by[Drain::Object as usize],
+            resolver_drain_objects_nanos: resolver.drain_ns_by[Drain::Object as usize],
+            resolver_drain_pieces: resolver.drain_pieces,
+            resolver_drains_encoding: resolver.drains_encoding,
+            resolver_drain_encoded_pieces: resolver.drain_encoded_pieces,
+            resolver_drain_encoding_nanos: resolver.drain_encoding_ns,
+            resolver_drain_wakes: resolver.drain_wakes,
+            resolver_wakes: resolver.wakes,
+            resolver_wake_nanos: resolver.wake_ns,
+            resolver_busy_nanos: resolver.busy_ns,
+            resolver_failures: counters.resolver_failures.load(Ordering::Relaxed),
+            answered_calls_refused: counters.answered_calls_refused.load(Ordering::Relaxed),
+            resolver_notices: resolver.notices,
             barrier_buffers_kept: counters.barrier_buffers_kept.load(Ordering::Relaxed),
             stamped_buffers_kept: counters.stamped_buffers_kept.load(Ordering::Relaxed),
             stamped_buffers_reused: counters.stamped_buffers_reused.load(Ordering::Relaxed),
@@ -3459,6 +3862,21 @@ impl Device {
             slot_wait_nanos: counters.slot_wait_nanos.load(Ordering::Relaxed),
             completed_waits: counters.completed_waits.load(Ordering::Relaxed),
             event_waits_met: counters.event_waits_met.load(Ordering::Relaxed),
+            event_holds_landed_event: holds(Released::LandedEvent),
+            event_holds_landed_event_nanos: hold_nanos(Released::LandedEvent),
+            event_holds_landed_shared_event: holds(Released::LandedSharedEvent),
+            event_holds_landed_shared_event_nanos: hold_nanos(Released::LandedSharedEvent),
+            event_holds_set_scheduled: holds(Released::SetScheduled),
+            event_holds_set_scheduled_nanos: hold_nanos(Released::SetScheduled),
+            event_holds_set_submission: holds(Released::SetSubmission),
+            event_holds_set_submission_nanos: hold_nanos(Released::SetSubmission),
+            event_holds_set_host: holds(Released::SetHost),
+            event_holds_set_host_nanos: hold_nanos(Released::SetHost),
+            event_holds_signal_submitted: holds(Released::SignalSubmitted),
+            event_holds_signal_scheduled: holds(Released::SignalScheduled),
+            event_holds_signal_scheduled_nanos: hold_nanos(Released::SignalScheduled),
+            submissions_after_scheduled_sets: (counters.submissions_after_scheduled_sets)
+                .load(Ordering::Relaxed),
             bare_starts: counters.bare_starts.load(Ordering::Relaxed),
             prefixed_starts: counters.prefixed_starts.load(Ordering::Relaxed),
             unrun_instances_ended: counters.unrun_instances_ended.load(Ordering::Relaxed),
@@ -3754,6 +4172,10 @@ impl Device {
             upload_chunks_in_device_memory: (counters.upload_chunks_in_device_memory)
                 .load(Ordering::Relaxed),
             tile_dispatches_recorded: counters.tile_dispatches_recorded.load(Ordering::Relaxed),
+            loss_watched: u64::from(watch.watched),
+            device_losses_seen: watch.losses,
+            learned_off_recorded: watch.recorded,
+            risky_submissions: watch.risky_submissions,
         }
     }
 }

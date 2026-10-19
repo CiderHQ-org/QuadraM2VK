@@ -5,7 +5,7 @@
 //! it (Linux). Each test uses a guard of its own; only the fork tests use the process's, which
 //! nothing here closes.
 
-use crate::exit_guard::{self, hook, Busy, Call, Guard, InProcess, InProcessDevices};
+use crate::exit_guard::{self, hook, Busy, Call, Calls, Guard, InProcess, InProcessDevices};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Barrier, Mutex, Weak};
 use std::time::{Duration, Instant};
@@ -618,13 +618,15 @@ fn a_forked_child_s_exit_does_not_wait_for_its_parent_s_sections() {
 /// Each entry point has a bit of its own.
 #[test]
 fn every_entry_point_has_a_bit_of_its_own() {
-    let mut bits = 0_u128;
+    let mut bits = Calls::NONE;
     for &call in Call::ALL {
         let bit = call.bit();
-        assert_eq!(bit.count_ones(), 1, "{call:?} has no bit of the word");
-        assert_eq!(bits & bit, 0, "{call:?} shares a bit");
+        assert_eq!(bit.count(), 1, "{call:?} has no bit of the words");
+        assert_eq!(bits & bit, Calls::NONE, "{call:?} shares a bit");
+        assert!(bit.contains(call), "{call:?}");
         bits |= bit;
     }
+    assert_eq!(bits.count() as usize, Call::ALL.len());
 }
 
 /// The exit status of a child that registers its hook (its first device), then a destructor (a
@@ -1622,7 +1624,7 @@ fn the_device_s_functions_are_reached_through_checked_accessors() {
 /// tuple field, a type argument or a by-value parameter) fails
 /// `only_the_listed_modules_keep_the_device_s_functions`; so does a listed module that keeps none
 /// any more.
-const KEEPERS: [(&str, &str); 24] = [
+const KEEPERS: [(&str, &str); 26] = [
     (
         "binding.rs",
         "the push command (vkCmdPushDescriptorSet), a call's parameter (`push_set`) and the \
@@ -1650,6 +1652,17 @@ const KEEPERS: [(&str, &str); 24] = [
     (
         "device/relay.rs",
         "the queues' flights, taken back from the instance's relay first in the teardown",
+    ),
+    (
+        "device_checks/kit.rs",
+        "a check's extension commands (the sized index bind and the depth bias command), \
+         resolved as the device is made or copied from the running device, handed to a check \
+         inside a kit call that holds the device",
+    ),
+    (
+        "device_checks/learned/thunks.rs",
+        "a slot's driver entry points, which every call the loss watch routes goes through, \
+         called by its thunks and cleared at the slot's release, after vkDestroyDevice",
     ),
     (
         "draw_source.rs",
@@ -2077,15 +2090,17 @@ fn the_priming_check_names_what_was_not_made() {
         depth_bias: true,
         sized_index_bind: true,
     };
-    let all = Call::ALL.iter().fold(0, |bits, call| bits | call.bit());
+    let all = Call::ALL
+        .iter()
+        .fold(Calls::NONE, |bits, call| bits | call.bit());
     assert!(missing(all, has(true, true)).is_empty());
     let made = Call::ALL
         .iter()
         .filter(|call| !UNPRIMED.contains(call))
-        .fold(0, |bits, call| bits | call.bit());
+        .fold(Calls::NONE, |bits, call| bits | call.bit());
     assert!(missing(made, has(true, true)).is_empty());
     assert_eq!(
-        missing(0, has(true, true)).len(),
+        missing(Calls::NONE, has(true, true)).len(),
         Call::ALL.len() - UNPRIMED.len()
     );
     for &call in Call::ALL {

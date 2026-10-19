@@ -397,7 +397,6 @@ fn mechanism_is_total_over_every_fact_and_profile() {
                 | RuntimeFact::SamplerCoordinates { .. }
                 | RuntimeFact::AmplificationCount
                 | RuntimeFact::ImageblockSize { .. }
-                | RuntimeFact::TileFunction
                 | RuntimeFact::OutOfBoundsAlpha { .. }
                 | RuntimeFact::BicubicTexels { .. }
                 | RuntimeFact::SparseTexture {
@@ -513,7 +512,9 @@ fn mechanism_is_total_over_every_fact_and_profile() {
                 | RuntimeFact::ViewportCount
                 | RuntimeFact::Depth16Codes { biased: true }
                 // The bound texture's format class, which the binder pushes.
-                | RuntimeFact::TexelFormat { .. } => Mechanism::PushConstant,
+                | RuntimeFact::TexelFormat { .. }
+                // The render area, which the binder pushes.
+                | RuntimeFact::TileFunction => Mechanism::PushConstant,
                 RuntimeFact::AliasedImageblock { .. } => Mechanism::None,
                 RuntimeFact::CallStackDepth { .. }
                 | RuntimeFact::AbsentArgumentRead { .. }

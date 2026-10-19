@@ -31,7 +31,7 @@ use crate::shader_cache::driver::Making;
 use ash::vk;
 use metal2vulkan::bind::{
     CompressedBlit, MipmapFilterKernel, RewritePhase, RewriteProgram, ShadowTexelView,
-    TessellationScanKernel, TexelWords, YCbCrOutput,
+    TessellationScanKernel, TexelWords, TiledTexelView, YCbCrCodes, YCbCrRange,
 };
 use metal2vulkan::metal::format::ExtendedRange;
 use metal2vulkan::metal::PixelFormat;
@@ -106,10 +106,10 @@ pub(super) enum OwnedModule {
     /// `bind::rotate_texels_module`: a rotated texture's texels moved between its pass's frame
     /// and its bytes (`rotated.rs`).
     RotateTexels,
-    /// `bind::ycbcr_convert_module`: a YCbCr texture's texels converted from its surface's two
-    /// planes into its image (`ycbcr.rs`), which it binds as a storage image: converted values,
-    /// or (`YCbCrOutput::Codes`) the packed codes.
-    YCbCrConvert(YCbCrOutput),
+    /// `bind::ycbcr_convert_module` of one code layout and range: a YCbCr texture's texels
+    /// converted from its surface's two planes into its image (`ycbcr.rs`), which it binds as a
+    /// storage image: converted values, or (`YCbCrOutput::Codes`) the packed codes.
+    YCbCrConvert(YCbCrCodes, YCbCrRange),
     /// `bind::two_plane_texels_module`: a heap's two-plane extended-range texture's texels moved
     /// between its image and its two planes in the heap's bytes (`texture/heap_two_planes.rs`).
     TwoPlaneTexels,
@@ -127,6 +127,11 @@ pub(super) enum OwnedModule {
     /// `bind::tiled_texels_module`: a heap texture's elements moved between its image's tight
     /// copy and Metal's tiles in the heap's bytes (`texture/heap_tiled.rs`).
     TiledTexels,
+    /// `bind::tiled_words_module` of one view of an element (`TiledTexelView`): a heap
+    /// texture's elements moved between its image and Metal's tiles in the heap's bytes, and its
+    /// keeps and merges, by a dispatch a level (`texture/heap_tiled_words.rs`). Its image's
+    /// unsigned-integer view of one level is its storage image.
+    TiledWords(TiledTexelView),
     /// `bind::compressed_blit_module` of one rule: the texels a blit wrote rewritten as Metal's
     /// blit through a losslessly compressed texture writes them (`compressed_blit.rs`).
     CompressedBlit(CompressedBlit),
@@ -173,7 +178,8 @@ impl OwnedModule {
     /// Whether the module's set 0 is pushed on `device` ([`OwnedKernel::pushed`]): the rows
     /// copy's and a shadowed texture's copies' and merges', on a device with
     /// `VK_KHR_push_descriptor`, so their commands make no pool on the encoding thread
-    /// (`row_copies.rs`, `shadow_copy_back.rs`, `shadow_copy_in.rs`, `shadow_merge.rs`).
+    /// (`row_copies.rs`, `shadow_copy_back.rs`, `shadow_copy_in.rs`, `shadow_merge.rs`,
+    /// `texture/heap_tiled_words.rs`).
     fn pushed(self, device: &Device) -> bool {
         matches!(
             self,
@@ -183,15 +189,17 @@ impl OwnedModule {
                 | OwnedModule::ShadowMerge
                 | OwnedModule::ShadowMergeImage(_)
                 | OwnedModule::ShadowMergeKeptImage(_)
+                | OwnedModule::TiledWords(_)
         ) && device.shared().vk().push_descriptor().is_some()
     }
 
     /// The module's storage-image bindings, which come after its sampled images.
     fn storage_images(self) -> u32 {
         match self {
-            OwnedModule::YCbCrConvert(_)
+            OwnedModule::YCbCrConvert(..)
             | OwnedModule::YCbCrWrite
-            | OwnedModule::ShadowCopyIn(_) => 1,
+            | OwnedModule::ShadowCopyIn(_)
+            | OwnedModule::TiledWords(_) => 1,
             OwnedModule::ExtendedShadowLoad(_) => 2,
             _ => 0,
         }
@@ -311,9 +319,9 @@ impl OwnedModule {
                     .map_err(Error::Compile)?;
                 Ok((module.spirv.to_vec(), 5, 0))
             }
-            OwnedModule::YCbCrConvert(output) => {
+            OwnedModule::YCbCrConvert(codes, range) => {
                 let module =
-                    metal2vulkan::bind::ycbcr_convert_module(device.compile_device(), output)
+                    metal2vulkan::bind::ycbcr_convert_module(device.compile_device(), codes, range)
                         .map_err(Error::Compile)?;
                 Ok((module.spirv.to_vec(), 2, 0))
             }
@@ -341,6 +349,12 @@ impl OwnedModule {
                 let module = metal2vulkan::bind::tiled_texels_module(device.compile_device())
                     .map_err(Error::Compile)?;
                 Ok((module.spirv.to_vec(), 3, 0))
+            }
+            OwnedModule::TiledWords(view) => {
+                let module = metal2vulkan::bind::tiled_words_module(device.compile_device(), view)
+                    .map_err(Error::Compile)?;
+                let push_bytes = metal2vulkan::bind::TiledWordsModule::PUSH_BYTES;
+                Ok((module.spirv.to_vec(), 2, push_bytes))
             }
             OwnedModule::UnusedBits(format, words) => {
                 let device = device.compile_device();
@@ -451,12 +465,13 @@ pub(super) struct OwnedKernels {
     index_rewrites: HashMap<(RewriteProgram, RewritePhase), OwnedKernel>,
     rotate_texels: Option<OwnedKernel>,
     rows_copy: Option<OwnedKernel>,
-    ycbcr_converts: HashMap<YCbCrOutput, OwnedKernel>,
+    ycbcr_converts: HashMap<(YCbCrCodes, YCbCrRange), OwnedKernel>,
     two_plane_texels: Option<OwnedKernel>,
     plane_bytes_copy: Option<OwnedKernel>,
     ycbcr_write: Option<OwnedKernel>,
     unused_bits: HashMap<(PixelFormat, TexelWords), OwnedKernel>,
     tiled_texels: Option<OwnedKernel>,
+    tiled_words: HashMap<TiledTexelView, OwnedKernel>,
     compressed_blits: HashMap<CompressedBlit, OwnedKernel>,
     capture_assembly: Option<OwnedKernel>,
     tile_reach: Option<OwnedKernel>,
@@ -499,6 +514,7 @@ impl OwnedKernels {
         .chain(self.shadow_merge_images.values().copied())
         .chain(self.shadow_merge_kept_images.values().copied())
         .chain(self.shadow_copy_ins.values().copied())
+        .chain(self.tiled_words.values().copied())
         .chain(self.mipmap_filters.values().copied())
         .chain(self.index_rewrites.values().copied())
         .chain(self.ycbcr_converts.values().copied())
@@ -521,11 +537,14 @@ impl OwnedKernels {
                 self.shadow_merge_kept_images.get(&view).copied()
             }
             OwnedModule::ShadowCopyIn(view) => self.shadow_copy_ins.get(&view).copied(),
+            OwnedModule::TiledWords(view) => self.tiled_words.get(&view).copied(),
             OwnedModule::MipmapFilter(kernel) => self.mipmap_filters.get(&kernel).copied(),
             OwnedModule::IndexRewrite(program, phase) => {
                 self.index_rewrites.get(&(program, phase)).copied()
             }
-            OwnedModule::YCbCrConvert(output) => self.ycbcr_converts.get(&output).copied(),
+            OwnedModule::YCbCrConvert(codes, range) => {
+                self.ycbcr_converts.get(&(codes, range)).copied()
+            }
             OwnedModule::UnusedBits(format, words) => {
                 self.unused_bits.get(&(format, words)).copied()
             }
@@ -552,14 +571,17 @@ impl OwnedKernels {
             OwnedModule::ShadowCopyIn(view) => {
                 self.shadow_copy_ins.insert(view, kernel);
             }
+            OwnedModule::TiledWords(view) => {
+                self.tiled_words.insert(view, kernel);
+            }
             OwnedModule::MipmapFilter(key) => {
                 self.mipmap_filters.insert(key, kernel);
             }
             OwnedModule::IndexRewrite(program, phase) => {
                 self.index_rewrites.insert((program, phase), kernel);
             }
-            OwnedModule::YCbCrConvert(output) => {
-                self.ycbcr_converts.insert(output, kernel);
+            OwnedModule::YCbCrConvert(codes, range) => {
+                self.ycbcr_converts.insert((codes, range), kernel);
             }
             OwnedModule::UnusedBits(format, words) => {
                 self.unused_bits.insert((format, words), kernel);
@@ -585,9 +607,9 @@ impl OwnedKernels {
     }
 
     /// The slot of a kernel the device makes once (none for the shadow copy back's, the image
-    /// merge's, the shadow copy in's, the mipmap filter's, the index rewrite's, the YCbCr conversion's, the unused bits', the compressed
-    /// blit's, the extended shadow load's, the twin decode's or the tessellation scan's, one
-    /// per key).
+    /// merge's, the shadow copy in's, the tiled words', the mipmap filter's, the index
+    /// rewrite's, the YCbCr conversion's, the unused bits', the compressed blit's, the extended
+    /// shadow load's, the twin decode's or the tessellation scan's, one per key).
     fn slot(&mut self, which: OwnedModule) -> Option<&mut Option<OwnedKernel>> {
         Some(match which {
             OwnedModule::VisibilityResolve => &mut self.visibility_resolve,
@@ -602,9 +624,10 @@ impl OwnedKernels {
             | OwnedModule::ShadowMergeImage(_)
             | OwnedModule::ShadowMergeKeptImage(_)
             | OwnedModule::ShadowCopyIn(_)
+            | OwnedModule::TiledWords(_)
             | OwnedModule::MipmapFilter(_)
             | OwnedModule::IndexRewrite(..)
-            | OwnedModule::YCbCrConvert(_)
+            | OwnedModule::YCbCrConvert(..)
             | OwnedModule::UnusedBits(..)
             | OwnedModule::CompressedBlit(_)
             | OwnedModule::ExtendedShadowLoad(_)

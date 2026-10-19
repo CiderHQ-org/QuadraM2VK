@@ -13,9 +13,16 @@
 //!   alike, its pass recorded later (`render/pending_tile.rs`). Its specialized notices are announced
 //!   at the dispatch that hands the making over, on the program's thread, naming what it binds: the
 //!   pool decides nothing the program sees.
-//! - **Nothing at the creation.** A compute state's creation starts no making: one that ran
-//!   past the state's release, which never waits, would hold the variant and the device past
-//!   the program's last drop, which Metal's never does.
+//! - **The recorded keys at the creation.** A compute state's creation makes the keys its base
+//!   variant's dispatches made in earlier processes (its record, `region_record.rs`), at once:
+//!   the first on its thread, the others on the device's pool, joined before the creation returns
+//!   (`Pool::join_all`), so a first dispatch of such a key takes its `VkPipeline` made, as Metal's
+//!   takes the compile its creation did. Nothing is begun that outlives the creation: one that
+//!   ran past the state's release, which never waits, would hold the variant and the device past
+//!   the program's last drop, which Metal's never does. A key no record holds (a first run, a
+//!   threadgroup size not dispatched before) is made at its first dispatch, as above, and joins
+//!   the record. Their specialized notices wait for the first dispatch that takes each, which
+//!   announces them naming what it binds.
 //! - **Kept by the state** (`piece_holds.rs`). What a piece needs (its variant and its making's
 //!   ticket) is kept by the state, never by the pool's thread; the state's release stops a piece
 //!   not started, its making failing, and a dispatch that took it (of another state of the variant)
@@ -26,7 +33,7 @@ use super::kept;
 use super::making::{Begun, Pending, Ticket};
 use super::objects::RawPipeline;
 use super::piece_holds::PieceHolds;
-use super::pool::Place;
+use super::pool::{Joined, Place};
 use super::{ComputePipelineState, RegionKey, Variant};
 use crate::degradation::{BoundFormats, Occurrence};
 use crate::error::Error;
@@ -84,7 +91,10 @@ impl Variant {
     ) -> RegionPipeline {
         let key = RegionKey::of(region);
         match self.pipelines.begin(&key) {
-            Begun::Made(made) => RegionPipeline::Made(made),
+            Begun::Made(made) => {
+                self.first_use(&made, &key, formats);
+                RegionPipeline::Made(made)
+            }
             // The command that began it announces its kinds.
             Begun::Pending(pending) => RegionPipeline::Making(pending),
             Begun::Yours(ticket) => {
@@ -107,8 +117,70 @@ impl Variant {
     pub(crate) fn make_region(&self, key: &RegionKey) -> Result<Arc<RawPipeline>, Error> {
         self.pipelines.get_or_make(key, || {
             let made = self.objects.pipeline(key, Notices::Announced)?;
+            self.note_region(key);
             Ok(made.kept_at(&self.objects, kept::Place::Region(key.clone())))
         })
+    }
+
+    /// A dispatch that binds `formats` takes `made`, its `VkPipeline` of `key`: where `made` was
+    /// made at its state's creation and this is its first dispatch, the notices its making would
+    /// have announced are announced now, naming what the dispatch binds.
+    pub(super) fn first_use(&self, made: &RawPipeline, key: &RegionKey, formats: BoundFormats<'_>) {
+        if made.first_drawn() {
+            let counts = &self.objects.device.shared().counts;
+            counts.creation_dispatch_pipeline_dispatched();
+            self.announce(key, formats);
+        }
+    }
+
+    /// The `VkPipeline`s of the keys its record holds (`region_record.rs`), made at its state's
+    /// creation (the module docs): each key's memo entry begun on this thread, in the record's
+    /// order (a key made already, or being made by another caller, is not this creation's); the
+    /// first made on this thread, the others on the device's pool, joined before this returns.
+    /// Each piece settles its own key's entry as its pipeline is made, a failed one not kept: the
+    /// dispatch of the key meets it as it would have. Their notices wait for their first
+    /// dispatches ([`first_use`](Self::first_use)).
+    pub(super) fn make_recorded(self: &Arc<Self>) {
+        let mut pending = Vec::new();
+        let mut pieces: Vec<Joined<()>> = Vec::new();
+        for key in self.recorded_regions() {
+            let Begun::Yours(ticket) = self.pipelines.begin(&key) else {
+                continue;
+            };
+            pending.push(ticket.pending());
+            // The piece owns the variant (its modules and layout, and the device), the key and
+            // its making's ticket: each lives until the making returned, wherever the piece runs
+            // and whether or not it runs.
+            let variant = Arc::clone(self);
+            pieces.push(Box::new(move || {
+                let made = variant
+                    .objects
+                    .pipeline(&key, Notices::FirstDraw)
+                    .map(|made| made.kept_at(&variant.objects, kept::Place::Region(key.clone())));
+                if made.is_ok() {
+                    let counts = &variant.objects.device.shared().counts;
+                    counts.creation_dispatch_pipeline_made();
+                }
+                // Dropped unrun (the process exiting), the ticket fails the making, as a pool's
+                // does.
+                drop(ticket.settle(made));
+            }));
+        }
+        if pieces.is_empty() {
+            return;
+        }
+        // The full join: every key begun here is settled before the creation returns.
+        drop(self.objects.device.shared().pipeline_pool.join_all(
+            pieces,
+            true,
+            // Each key handed to the pool waits there: a dispatch that finds it in flight, its
+            // commit, or a host step hastens it through its place.
+            |index, place| {
+                if let Some(pending) = pending.get(index) {
+                    pending.queued_at(place.clone());
+                }
+            },
+        ));
     }
 
     /// Hand the making of `key`, `ticket`'s, to the device's pool, kept by `holds`: a
@@ -135,6 +207,7 @@ impl Variant {
                 .objects
                 .pipeline(&key, Notices::Announced)
                 .map(|made| made.kept_at(&variant.objects, kept::Place::Region(key.clone())));
+            let made_now = made.is_ok();
             // Its callers take it from the making: from the settle, the batches that wait for it
             // may run and complete while this piece still holds the variant, and the device with
             // it, until it gave it back. A trail spans that (`trails.rs`).
@@ -142,6 +215,11 @@ impl Variant {
             drop(ticket.settle(made));
             #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
             super::pool::held::settled();
+            // The record after the settle, so its write delays no batch that waits for the
+            // making.
+            if made_now {
+                variant.note_region(&key);
+            }
             lease.give_back(RegionHeld::Made { _variant: variant }, Some(trail));
         }))
     }

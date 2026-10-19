@@ -322,13 +322,15 @@ fn returns(cx: &SelectCx<'_>) -> u64 {
 /// the input attachments, the predicated returns, and the interlocked entry add to the stage
 /// interface's size estimate.
 pub fn finish(cx: &mut SelectCx<'_>, m: &mut Meter) -> Result<(), Error> {
-    // On a device that shades a triangle it clips as several, a quad a seam crosses runs once
-    // per piece: an operation over the active lanes sees each piece's.
-    if cx
-        .profile
-        .fields()
-        .workarounds
-        .contains(&DriverWorkaround::ClippedTrianglesSplitPixelFragments)
+    // On a device that shades a triangle it clips as several, a fragment function's quad a seam
+    // crosses runs once per piece: an operation over the active lanes sees each piece's. A
+    // kernel's or a vertex function's lanes are no primitive's pixels, which no clipping splits.
+    if cx.stage == Stage::Fragment
+        && cx
+            .profile
+            .fields()
+            .workarounds
+            .contains(&DriverWorkaround::ClippedTrianglesSplitPixelFragments)
         && counts_active_lanes(cx)
     {
         cx.precision.insert(PrecisionNote::QuadsSplitByClipping);

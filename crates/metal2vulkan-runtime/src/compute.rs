@@ -1656,10 +1656,7 @@ fn record(
             // `VkCommandBuffer` (`RuntimeDriverDefect::ImmutableSamplersLostAfterCopies`), a
             // variant that bakes them records in one of its own, as one being made does.
             let apart = objects.bakes_samplers()
-                && device
-                    .properties()
-                    .driver_defects
-                    .contains(&RuntimeDriverDefect::ImmutableSamplersLostAfterCopies);
+                && device.driver_defect(RuntimeDriverDefect::ImmutableSamplersLostAfterCopies);
             match made {
                 Some(made) if !apart => (made, None),
                 Some(_) => {

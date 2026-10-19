@@ -208,7 +208,9 @@ fn checked_event_round_trips() {
 
 /// Where the one head waits for an event value another queue's submitted command buffer signals,
 /// the scheduler's thread waits for it on the GPU itself (`scheduler/mod.rs`; not on MoltenVK,
-/// which keeps the condition variable), and the head's check, run as the signal landed, reads it.
+/// which keeps the condition variable), and the head's check, run as the signal landed, reads it;
+/// the head's hold is counted as released by a shared event's landed signal
+/// (`WorkCounts::event_holds_landed_shared_event`).
 #[test]
 fn a_checked_head_waits_for_another_queue_s_signal_on_the_gpu() {
     /// The signalling command buffer's fill: long enough that its signal lands after the pass
@@ -277,7 +279,12 @@ fn a_checked_head_waits_for_another_queue_s_signal_on_the_gpu() {
                 "{completion:?} round {round}: the check ran before the signal landed"
             );
         }
-        let waits = device.work_counts().scheduler_gpu_waits - before.scheduler_gpu_waits;
+        let after = device.work_counts();
+        assert!(
+            after.event_holds_landed_shared_event > before.event_holds_landed_shared_event,
+            "{completion:?}: no checked head was counted as held for a landing"
+        );
+        let waits = after.scheduler_gpu_waits - before.scheduler_gpu_waits;
         if moltenvk {
             assert_eq!(
                 waits, 0,

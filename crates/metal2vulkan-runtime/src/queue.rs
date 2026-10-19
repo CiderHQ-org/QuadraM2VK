@@ -34,6 +34,7 @@ use super::contexts;
 use super::degradation::Degradation;
 use super::device::{lock, Device};
 use super::error::{Error, Invalid, Problem};
+use super::texture::heap_tiled_scratch::TiledScratches;
 use super::texture::kept_image::KeptImages;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
@@ -74,6 +75,9 @@ struct QueueShared {
     /// The kept images its merges' keeps made, kept for its later keeps
     /// (`texture/kept_image.rs`).
     kept_images: KeptImages,
+    /// The scratch its encoders' staged tiled moves go through, from its first such move
+    /// (`texture/heap_tiled_scratch.rs`).
+    tiled_scratches: TiledScratches,
 }
 
 /// A queue's slots: one per uncompleted command buffer, at most `max`.
@@ -247,6 +251,7 @@ impl Device {
             latest_gpu_end: Mutex::new(0),
             memoryless_backings: Mutex::new(BackingPool::default()),
             kept_images: KeptImages::default(),
+            tiled_scratches: TiledScratches::default(),
         }))
     }
 }
@@ -348,6 +353,12 @@ impl CommandQueue {
     /// The kept images the queue keeps for its merges' keeps (`texture/kept_image.rs`).
     pub(super) fn kept_images(&self) -> &KeptImages {
         &self.0.kept_images
+    }
+
+    /// The scratches the queue keeps for its encoders' staged tiled moves
+    /// (`texture/heap_tiled_scratch.rs`).
+    pub(super) fn tiled_scratches(&self) -> &TiledScratches {
+        &self.0.tiled_scratches
     }
 
     /// Place a command buffer of the queue that completed after every one placed before: `place`

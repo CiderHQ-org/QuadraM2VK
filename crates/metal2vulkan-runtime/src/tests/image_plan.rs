@@ -1075,20 +1075,18 @@ fn depth_twins_hold_the_texels_in_colour_where_a_depth_image_may_not() {
             }
         }
     }
-    // Lavapipe 26.2.3 (`lavapipe`) is no measured identity, so it takes the twin too.
-    for stem in [
-        "intel-irisxe-rplp-anv",
-        "amd-780m-radv",
-        "amd-rdna3-radv",
-        "lavapipe",
-    ] {
+    // Drivers no list entry names as keeping every `float` in a depth image.
+    for stem in ["intel-irisxe-rplp-anv", "amd-780m-radv", "amd-rdna3-radv"] {
         assert!(twinned.iter().any(|n| n == stem), "{stem}: {twinned:?}");
     }
-    // Drivers measured to keep every `float` in a depth image: NVIDIA's and lavapipe with the
-    // extension, MoltenVK without it.
+    // Drivers the known-driver list names as keeping every `float` in a depth image
+    // (`device::listed`): NVIDIA's on the GPUs measured and lavapipe from Mesa 26.0.8 with the
+    // extension (the `lavapipe` capture's 26.2.3 lies between the releases measured, 26.0.8 and
+    // 26.2.4), MoltenVK without it.
     for stem in [
         "nvidia-rtx5080-laptop",
         "gate-lavapipe",
+        "lavapipe",
         "moltenvk-m3",
         "moltenvk-m4",
     ] {

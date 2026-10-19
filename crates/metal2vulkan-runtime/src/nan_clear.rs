@@ -488,12 +488,10 @@ pub(super) fn degrade_converting_copy(
 }
 
 /// Whether `device`'s driver copies into a multisampled float image through its format,
-/// converting its NaNs (`RuntimeDriverDefect::MultisampledCopiesConvertFloatNans`).
+/// converting its NaNs (`RuntimeDriverDefect::MultisampledCopiesConvertFloatNans`), as the device
+/// takes it now (`Device::driver_defect`): an image made keeps the view it was made with.
 fn converts_nans(device: &Device) -> bool {
-    device
-        .properties()
-        .driver_defects
-        .contains(&RuntimeDriverDefect::MultisampledCopiesConvertFloatNans)
+    device.driver_defect(RuntimeDriverDefect::MultisampledCopiesConvertFloatNans)
 }
 
 /// `plan` mutable with a view in the unsigned-integer format of its texel size, through which a

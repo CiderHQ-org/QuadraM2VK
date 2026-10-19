@@ -494,7 +494,7 @@ fn scaled_axis_gradients(
 /// broken as Metal breaks them (`face::metal_ties`) is Metal's, there being none left. A footprint
 /// its sampler's word chooses (`CubeFootprint::Word`) is [`word_footprint`]'s; it has no form of
 /// its own here.
-pub(super) fn cube_footprint(
+pub(crate) fn cube_footprint(
     fb: &mut FunctionBuilder<'_>,
     p: SValue,
     grads: (SValue, SValue),

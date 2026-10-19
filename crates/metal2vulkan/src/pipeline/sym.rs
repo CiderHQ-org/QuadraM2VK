@@ -737,10 +737,10 @@ pub enum SpecKey {
     /// height.
     ImageblockHeight,
     /// The width of the render area a tile dispatch covers (`renderTargetWidth`,
-    /// `BindState::render_area`, default 0).
+    /// `BindState::render_area`): read as data ([`SpecKey::read_as_data`]).
     RenderAreaWidth,
     /// The height of the render area a tile dispatch covers (`renderTargetHeight`,
-    /// `BindState::render_area`, default 0).
+    /// `BindState::render_area`): read as data ([`SpecKey::read_as_data`]).
     RenderAreaHeight,
     /// Boolean: an out-of-bounds read of the texture bound to the slot reads alpha 1, because its
     /// pixel format has no alpha component (or is a depth or stencil format, whose missing
@@ -768,8 +768,8 @@ pub enum SpecKey {
     /// The bytes of each tile's threadgroup memory: the render pass's `threadgroupMemoryLength`
     /// rounded up to 16 (default 0).
     TileThreadgroupLength,
-    /// The tiles across the render pass's render area, `ceil(width / tile width)` (default 0):
-    /// the stride of a tile row in `SyntheticBinding::TileMemory`.
+    /// The tiles across the render pass's render area, `ceil(width / tile width)`: the stride of
+    /// a tile row in `SyntheticBinding::TileMemory`. Read as data ([`SpecKey::read_as_data`]).
     TileGridWidth,
     /// The swizzle of the texture buffer bound to the slot (`u32`, default the identity's word):
     /// its `MTLTextureSwizzleChannels`, each channel's `MTLTextureSwizzle` raw value in three
@@ -865,10 +865,20 @@ impl SpecKey {
     /// Whether a function reads this key's value from its push field (`PushField::Specialized`)
     /// rather than from a specialization constant: the format class of the texture bound at a
     /// slot (`TexelFormat`), which a guest's draws vary most and whose data form costs a making
-    /// least. Every other key stays a specialization; read as data, the bound sampler's word, say,
-    /// made one NVIDIA making cost about four times a specialized one.
+    /// least; and the render pass's extent a tile function stages its tile within
+    /// (`RenderAreaWidth`, `RenderAreaHeight`) and a tile or fragment function places its tile's
+    /// threadgroup memory by (`TileGridWidth`), which change with every pass size while the
+    /// function only compares and multiplies them, so one `VkPipeline` serves every pass. Every
+    /// other key stays a specialization; read as data, the bound sampler's word, say, made one
+    /// NVIDIA making cost about four times a specialized one.
     pub fn read_as_data(self) -> bool {
-        matches!(self, SpecKey::TexelFormat(_))
+        matches!(
+            self,
+            SpecKey::TexelFormat(_)
+                | SpecKey::RenderAreaWidth
+                | SpecKey::RenderAreaHeight
+                | SpecKey::TileGridWidth
+        )
     }
 }
 

@@ -60,12 +60,11 @@
 //! them naming what it binds (`RenderVariant::first_use`): a pipeline made here and never drawn
 //! announces nothing.
 //!
-//! **Nothing kept from earlier processes** (the owner's ruling of 2026-10-10). A creation makes the
-//! predicted key alone, from the request in hand. The keys its pipeline's earlier draws took, kept
-//! on disk, the variants they needed, a record's completeness and a first boot's alternative
-//! samplers are removed: each chose what to make from what earlier sessions did, not from the
-//! state. A draw whose key the creation did not make makes its own, as before's records of the
-//! driver's data still serve that making where the same pipeline was made before.
+//! **The predicted key alone.** A render state's creation makes the predicted key, from the
+//! request in hand; the keys its earlier draws took are not kept (a compute state's creation makes
+//! the keys its dispatches made in earlier processes, `region_record.rs`). A draw whose key the
+//! creation did not make makes its own, as before; the records of the driver's data still serve
+//! that making where the same pipeline was made before.
 //!
 //! The predicted key's making runs on the creating thread, joined before the creation returns
 //! (`RenderVariant::make_at_creation`), at the rank of a making the program waits for. A key

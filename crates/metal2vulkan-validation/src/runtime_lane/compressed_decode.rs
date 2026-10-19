@@ -21,7 +21,9 @@
 //! texture's decoded twin, announced `decoded-block-twin` once ([`BLOCK_DECODES`]);
 //! `compressed-texel-decode` is announced by no BC1 to BC5 texture of the lane. A BC6H or BC7
 //! texture, which keeps no twin, announces it where the driver lacks the format's fact
-//! ([`bc6h_and_bc7_announce_where_their_decode_is_unmeasured`]). The twins lane
+//! ([`bc6h_and_bc7_announce_where_their_decode_is_unmeasured`]), and a BC7 texture's host write of
+//! a block of the reserved mode where the driver lacks that block's
+//! ([`a_reserved_bc7_block_reads_opaque_black_or_announces`]). The twins lane
 //! ([`decoded_twins_follow_every_write`]) reads Metal's texels after every kind of write: a blit
 //! into a level, a CPU copy of a region inside an array's slice, a copy into a cube's face, an sRGB
 //! view, and a heap's textures, fresh and over the bytes a released one left. A texture in a heap
@@ -455,6 +457,68 @@ fn bc6h_and_bc7_announce_where_their_decode_is_unmeasured() {
             "on {name}"
         );
         drop(made);
+    });
+}
+
+/// A BC7 texture's `replace_region` of a block of the reserved mode (its first byte 0) among
+/// blocks of mode 6 announces `compressed-texel-decode` once where the device's driver lacks
+/// `DriverFact::Bc7ReservedBlockIsMetals` (taken on a measured identity alone) and takes its other
+/// blocks' decode (`DriverFact::Bc7BlockDecodeIsMetals`; a texture of a driver without that
+/// announced as it was made), and nothing elsewhere; where the driver has it, the block reads as
+/// Metal's, opaque black at each texel.
+#[test]
+fn a_reserved_bc7_block_reads_opaque_black_or_announces() {
+    on_device(|device, messages| {
+        let name = device.name().to_owned();
+        let facts = &device.properties().driver_facts;
+        let defined = facts.contains(&DriverFact::Bc7BlockDecodeIsMetals);
+        let reserved = facts.contains(&DriverFact::Bc7ReservedBlockIsMetals);
+        let state = reader(device);
+        drop(messages.take_notices());
+        let mut descriptor =
+            TextureDescriptor::texture_2d(PixelFormat::BC7RGBAUnorm, 16, 16, false);
+        descriptor.usage = TextureUsage::SHADER_READ;
+        descriptor.resource_options = ResourceOptions::shared();
+        let texture = device.new_texture(&descriptor).unwrap();
+        let announced = || {
+            let counts = counts(&messages.take_notices());
+            counts
+                .get(&Degradation::CompressedTexelDecode)
+                .copied()
+                .unwrap_or(0)
+        };
+        let made = announced();
+        // 16 blocks, four across: block 5 of the reserved mode, every other of mode 6.
+        const RESERVED: usize = 5;
+        let mut blocks: Vec<u8> = (0..256u32).map(|i| (i * 37 + 11) as u8).collect();
+        for (b, block) in blocks.chunks_mut(16).enumerate() {
+            block[0] = match b {
+                RESERVED => 0,
+                _ => (block[0] & 0x80) | 0x40,
+            };
+        }
+        let whole = Region::new_2d(0, 0, 16, 16);
+        (texture.replace_region(whole, 0, 0, &blocks, 64, 0)).unwrap();
+        let written = announced();
+        let texels = texels_of(device, &state, &texture);
+        let (bx, by) = (RESERVED % 4 * 4, RESERVED / 4 * 4);
+        let read: Vec<[f32; 4]> = (0..16)
+            .map(|j| texels[(by + j / 4) * 16 + bx + j % 4])
+            .collect();
+        eprintln!(
+            "BC7 reserved {name}: facts defined {defined} reserved {reserved}, announced at the \
+             making {made} and the write {written}, the block's first texel read {:?}",
+            read[0]
+        );
+        assert_eq!(made, usize::from(!defined), "on {name}");
+        assert_eq!(written, usize::from(defined && !reserved), "on {name}");
+        if reserved {
+            assert!(
+                read.iter().all(|texel| *texel == [0.0, 0.0, 0.0, 1.0]),
+                "on {name}: {read:?}"
+            );
+        }
+        drop(texture);
     });
 }
 

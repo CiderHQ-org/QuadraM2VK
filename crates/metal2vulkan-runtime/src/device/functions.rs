@@ -30,6 +30,7 @@
 //! 615.71.09 on the RTX 3090 likewise: within 3 us of the GPU time, and 8,294,411 bytes 1.52 ms
 //! split against 6.05-6.06 ms whole.
 
+use crate::device_checks::learned;
 use crate::exit_guard::{self, Call};
 use crate::image_barrier::MemoryReads;
 use crate::recorder::Slot;
@@ -267,21 +268,23 @@ pub(crate) struct Functions {
 impl Functions {
     /// The functions of `all`'s device, made from `instance`, whose global memory barriers name
     /// `reads`, with `push_descriptor`, its push command where it has one, and `object_name`, its
-    /// naming of an object where its instance reports messages, whose commands go through
-    /// `recording`, its slot where it has one (`recorder`).
+    /// naming of an object where its instance reports messages, whose calls that return a
+    /// `VkResult` go through `watching` and whose commands through `recording`, its slots where it
+    /// has them (`device_checks/learned.rs`, `recorder`).
     ///
     /// # Safety
     ///
-    /// `all` is a live device of `instance`, routed (`compiles::route`, and through `recording`
-    /// where it is set, `recorder::route`), and the loader serves `vkGetDeviceProcAddr` for it
-    /// (its loader word is in place).
+    /// `all` is a live device of `instance`, routed (`compiles::route`, then through `watching`
+    /// where it is set, `learned::route`, then through `recording` where it is set,
+    /// `recorder::route`), and the loader serves `vkGetDeviceProcAddr` for it (its loader word is
+    /// in place).
     pub(super) unsafe fn new(
         instance: &ash::Instance,
         all: ash::Device,
         reads: MemoryReads,
         push_descriptor: Option<vk::PFN_vkCmdPushDescriptorSetKHR>,
         object_name: Option<vk::PFN_vkSetDebugUtilsObjectNameEXT>,
-        recording: Option<&Slot>,
+        (watching, recording): (Option<&learned::Slot>, Option<&Slot>),
     ) -> Functions {
         let handle = all.handle();
         let get = instance.fp_v1_0().get_device_proc_addr;
@@ -298,9 +301,11 @@ impl Functions {
                 Some(at) => {
                     let pointer = address(name);
                     entry_points[at] = pointer as usize as u64;
-                    // The pipeline makings come through `compiles.rs`, and the commands through
-                    // the device's slot, as `all`'s do.
-                    super::compiles::entry(name)
+                    // The calls that return a `VkResult` come through the watch's slot (the
+                    // pipeline makings through it and then `compiles.rs`), and the commands
+                    // through the recorder's, as `all`'s do.
+                    (watching.and_then(|slot| slot.entry(name)))
+                        .or_else(|| super::compiles::entry(name))
                         .or_else(|| recording.and_then(|slot| slot.entry(name)))
                         .unwrap_or(pointer)
                 }

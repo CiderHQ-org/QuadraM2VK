@@ -4,12 +4,14 @@
 use crate::device::profile::{GuestIsolation, HandleDomain, PointerDomain};
 
 /// Policy inputs of `Device::new`. Every field but `decoded_texels`, `heap_compression`,
-/// `completion`, `tile_store`, `resolve` and `batch_order` can change emitted code, so the profile
-/// carries it (containment as the encoding it selects) and its fingerprint covers it; those six
-/// are the runtime's alone (the texels of a carried texture's decoded twin, a heap's compressed
-/// texture's image, when the host sees a command buffer complete, what a render pass's load leaves
-/// in the texels its draws do not write, how a multisampled color attachment resolves, and how a
-/// batch begins after the earlier ones of its queue), and no profile carries them.
+/// `completion`, `tile_store`, `resolve`, `batch_order` and `device_checks` can change emitted
+/// code, so the profile carries it (containment as the encoding it selects) and its fingerprint
+/// covers it; the first six are the runtime's alone (the texels of a carried texture's decoded
+/// twin, a heap's compressed texture's image, when the host sees a command buffer complete, what a
+/// render pass's load leaves in the texels its draws do not write, how a multisampled color
+/// attachment resolves, and how a batch begins after the earlier ones of its queue), and no
+/// profile carries them. `device_checks` decides which deviations the profile takes, and the
+/// profile carries those.
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -89,6 +91,9 @@ pub struct DevicePolicy {
     /// one queue side by side), or by a barrier for each access that depends on theirs. The
     /// runtime's choice alone: no emitted code changes.
     pub batch_order: BatchOrderPolicy,
+    /// Whether the device's own checks of its driver's answers decide the facts they check (the
+    /// default), or the curated tables alone do, as for every unchecked fact (`device::checks`).
+    pub device_checks: DeviceChecksPolicy,
 }
 
 impl DevicePolicy {
@@ -100,8 +105,9 @@ impl DevicePolicy {
     /// compact codes in a carried texture's decoded twin, the driver's compressed image of a
     /// heap's texture Metal keeps compressed, command buffers ready together in one kernel
     /// submission, the device's load and store of a signed normalized or `RGB9E5Float` color
-    /// attachment, the device's resolve of a multisampled color attachment, and batches of one
-    /// queue ordered by their ends where the driver runs them one after another.
+    /// attachment, the device's resolve of a multisampled color attachment, batches of one
+    /// queue ordered by their ends where the driver runs them one after another, and the facts
+    /// the device checks decided by its checks.
     pub const UNTRUSTED: DevicePolicy = DevicePolicy {
         pointer_domain: PointerDomain::ResidentTable,
         handle_domain: HandleDomain::Table,
@@ -122,6 +128,7 @@ impl DevicePolicy {
         tile_store: TileStorePolicy::Device,
         resolve: ResolvePolicy::Device,
         batch_order: BatchOrderPolicy::Ends,
+        device_checks: DeviceChecksPolicy::Trusted,
     };
 
     /// This policy with Metal's answer wherever the choices offer it: its maths functions,
@@ -135,9 +142,10 @@ impl DevicePolicy {
     /// as written ([`HeapCompressionPolicy::Uncompressed`]), each command buffer seen complete
     /// at its own end ([`CompletionPolicy::Exact`]), a loaded attachment's texels as its tile
     /// store leaves them ([`TileStorePolicy::Exact`]), its multisample color resolve
-    /// ([`ResolvePolicy::Exact`]), and each batch ordered after the earlier ones of its queue by
-    /// the accesses it depends on alone ([`BatchOrderPolicy::Exact`]). Sampling and every other
-    /// field are kept.
+    /// ([`ResolvePolicy::Exact`]), each batch ordered after the earlier ones of its queue by
+    /// the accesses it depends on alone ([`BatchOrderPolicy::Exact`]), and the facts the device
+    /// checks taken from the curated tables alone ([`DeviceChecksPolicy::Distrusted`]). Sampling
+    /// and every other field are kept.
     pub const fn exact_answers(self) -> DevicePolicy {
         DevicePolicy {
             ycbcr_filter: YCbCrFilterPolicy::Exact,
@@ -153,6 +161,7 @@ impl DevicePolicy {
             tile_store: TileStorePolicy::Exact,
             resolve: ResolvePolicy::Exact,
             batch_order: BatchOrderPolicy::Exact,
+            device_checks: DeviceChecksPolicy::Distrusted,
             ..self
         }
     }
@@ -592,4 +601,23 @@ pub enum BatchOrderPolicy {
     /// the accesses within a batch, and its first encoder's GPU start time written as it begins,
     /// at the top of the pipe, where the driver may run it beside the batch before it.
     Exact,
+}
+
+/// Whether the device's own checks decide the facts they check (`device::checks`): a fact whose
+/// fast form a check found Metal's on the device takes that form, and one a check found otherwise
+/// leaves it, where the curated tables decide every unchecked fact by the setups measured.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum DeviceChecksPolicy {
+    /// The checks decide (the default): the runtime checks each fact of `device::CHECKED` on the
+    /// device, or reads the answers it checked on the same setup before, and a fact whose check
+    /// answered takes that answer. A check covers its own bounded inputs, where a curated row may
+    /// rest on an exhaustive probe of one setup.
+    #[default]
+    Trusted,
+    /// The curated tables decide every fact, as they do with no check: the runtime runs no check,
+    /// reads none it stored, and `Device::new` takes no answer a description holds. The switch to
+    /// tell a wrong check from a wrong table.
+    Distrusted,
 }

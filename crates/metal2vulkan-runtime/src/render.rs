@@ -374,6 +374,7 @@ use tile_dispatch::{ScratchEdges, TileDispatch};
 mod arguments;
 mod bound;
 mod capture;
+mod captured;
 mod color_groups;
 mod executions;
 mod extended_shadow;
@@ -399,6 +400,9 @@ mod vertex_reach;
 mod vertex_strides;
 
 use bound::{Bound, EqualShapes, Now, Recorded};
+#[cfg(test)]
+pub(crate) use captured::offset_class;
+pub(crate) use captured::{AnswerMemo, OpenedAtTheCall, RenderWork, TakenBack};
 pub(crate) use inline_splits::SpareKept;
 use replay::{
     DrawIndexed, DrawIndexedIndirect, DrawIndexedPatches, DrawIndexedPatchesIndirect, DrawPatches,
@@ -622,7 +626,7 @@ fn primitive_id_indices(pipeline: &DrawingState, draw: &DrawCall) -> Option<Inde
 }
 
 /// What a draw settles from the encoder's state before its bind state
-/// (`RenderCommandEncoder::draw_settings`).
+/// (`RenderEncoding::draw_settings`).
 struct DrawSettings {
     /// Points that rasterize nothing: the draw runs its vertex function alone, through empty
     /// scissors.
@@ -651,7 +655,7 @@ struct DrawSettings {
     routing: Arc<Routing>,
     /// The pass's colors it zeroes and its own it drops, where the encoder keeps no such colors
     /// for its pipeline state in its pass (`Routed`): found for the draw alone. `None` where the
-    /// encoder keeps them, which the draw reads in place ([`RenderCommandEncoder::draw_colors`]).
+    /// encoder keeps them, which the draw reads in place ([`RenderEncoding::draw_colors`]).
     routed_colors: Option<RoutedColors>,
     /// Whether the depth it renders against is `Depth16Unorm` (`BindState::depth16_pass`).
     depth16_pass: Option<bool>,
@@ -796,8 +800,8 @@ impl InterlockedStorage {
 struct Instance {
     /// The secondary command buffer its draws record into, against `compatible`. Null for a
     /// pass's first instance that may record inline until a command records into it or a split
-    /// keeps it (`RenderCommandEncoder::begin_current_draws`), for a new instance until the
-    /// caller that installs it begins it (`RenderCommandEncoder::begin_new_draws`), and for one
+    /// keeps it (`RenderEncoding::begin_current_draws`), for a new instance until the
+    /// caller that installs it begins it (`RenderEncoding::begin_new_draws`), and for one
     /// recorded inline after a split, which takes none (`render/inline_splits.rs`): an instance
     /// whose secondary never began recorded nothing, and its pass executes none for it.
     draws: vk::CommandBuffer,
@@ -873,7 +877,7 @@ struct Instance {
     /// whose pipeline is being made, or an execution of render commands, that the instance
     /// before would have taken (`render/inline_first.rs`). The shadowed textures' copies take
     /// the two as one: its draws' shadowed textures and uses are gathered into the first of
-    /// them ([`RenderCommandEncoder::gathering`]), copied in before it, and nothing is copied
+    /// them ([`RenderEncoding::gathering`]), copied in before it, and nothing is copied
     /// between them.
     continues: bool,
     /// It records inline after a split (`render/inline_splits.rs`): its commands, kept until its
@@ -888,7 +892,7 @@ struct Instance {
     /// instance records in a secondary, never inline, and runs as one render pass instance.
     feedback: Feedback,
     /// The colors whose images a draw recorded into it binds as a storage image
-    /// (`RenderCommandEncoder::storage_colors`): a draw that reads one of them through a
+    /// (`RenderEncoding::storage_colors`): a draw that reads one of them through a
     /// snapshot records into another instance, as the feedback loop layout serves no storage
     /// access (`render/snapshot.rs`).
     storage_colors: u32,
@@ -1064,7 +1068,24 @@ enum Standing {
 /// Each object a call binds to a stage is held until its command buffer completes (or, never
 /// committed, is released), as Metal holds what an encoder was handed: one a later call replaced
 /// or unbound before any draw used it, and one bound after the last draw, too.
+///
+/// Its calls are encoded at the call, or, where the device's memo answers them, on the device's
+/// resolver thread while the program goes on (`render/captured.rs`, `resolver.rs`): each call
+/// returns at the call the answer its encoding there would return. A resource or internal
+/// failure of such a call's encoding (out of memory, a lost device, a runtime defect) fails the
+/// command buffer as it completes (`CommandBufferError`), as Metal reports such failures, and its
+/// notices come from the resolver's thread before the command buffer's submission.
 pub struct RenderCommandEncoder {
+    form: captured::Form,
+}
+
+/// A render encoder's encoding ([`RenderCommandEncoder`]): its calls, at the call or on the
+/// device's resolver.
+pub(crate) struct RenderEncoding {
+    /// Whether its indexed indirect draws stay one draw each, their fetch bounded by the bound
+    /// range ([`robust_index_fetch`](Self::robust_index_fetch)), as the device took it when the
+    /// encoder was assembled.
+    robust_index_fetch: bool,
     core: EncoderCore,
     /// The pass's instances before the current one, which the draws record into.
     earlier: Vec<Instance>,
@@ -1400,9 +1421,9 @@ impl QuietBoundValues {
     }
 }
 
-/// A drawing state's routing into a pass's colors ([`RenderCommandEncoder::routing`]), with the
+/// A drawing state's routing into a pass's colors ([`RenderEncoding::routing`]), with the
 /// state and the pass's color formats it was found for, and the colors a draw of it zeroes and
-/// drops by that routing ([`RenderCommandEncoder::routed_colors`]): each a function of those
+/// drops by that routing ([`RenderEncoding::routed_colors`]): each a function of those
 /// alone.
 struct Routed {
     state: DrawingState,
@@ -1413,14 +1434,14 @@ struct Routed {
 }
 
 /// The pass colors a draw of a drawing state zeroes, and the state's colors it drops, by its
-/// routing ([`RenderCommandEncoder::zeroed_colors`], [`RenderCommandEncoder::dropped_colors`]).
+/// routing ([`RenderEncoding::zeroed_colors`], [`RenderEncoding::dropped_colors`]).
 #[derive(Clone)]
 struct RoutedColors {
     zeroed: BTreeMap<u32, PixelFormat>,
     dropped: BTreeSet<u32>,
 }
 
-impl std::fmt::Debug for RenderCommandEncoder {
+impl std::fmt::Debug for RenderEncoding {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RenderCommandEncoder")
             .field("extent", &self.layout.extent)
@@ -1438,20 +1459,36 @@ impl CommandBuffer {
         &self,
         descriptor: &RenderPassDescriptor,
     ) -> Result<RenderCommandEncoder, Error> {
-        self.open_render(descriptor, None)
+        if self.device().shared().resolver().is_some() {
+            return self.captured_render(descriptor);
+        }
+        let encoding = self.open_render(descriptor, OpenAs::Program)?;
+        Ok(RenderCommandEncoder::of(captured::Form::AtTheCall(
+            Box::new(encoding),
+        )))
     }
 
-    /// [`render_command_encoder`](Self::render_command_encoder)'s encoder, or with `again` the
-    /// residency an ended encoder of the committed command buffer started with, that encoder
-    /// opened again (`render/replay.rs`): over a new `VkCommandBuffer` with no refusal of a
-    /// committed command buffer, starting with that residency, logging nothing but where its pass
-    /// takes several color groups (`render/color_groups.rs`). Its layout is the first color
-    /// group's where the device draws the pass's colors in groups.
+    /// The encoding of a captured encoder's pass, on the device's resolver (`render/captured.rs`):
+    /// the program's call refused what it refuses and marked the command buffer's encoder open.
+    pub(crate) fn open_captured(
+        &self,
+        descriptor: &RenderPassDescriptor,
+    ) -> Result<RenderEncoding, Error> {
+        self.open_render(descriptor, OpenAs::Captured)
+    }
+
+    /// [`render_command_encoder`](Self::render_command_encoder)'s encoding, as `open` says
+    /// ([`OpenAs`]). Its layout is the first color group's where the device draws the pass's
+    /// colors in groups.
     fn open_render(
         &self,
         given: &RenderPassDescriptor,
-        again: Option<Residency>,
-    ) -> Result<RenderCommandEncoder, Error> {
+        open: OpenAs,
+    ) -> Result<RenderEncoding, Error> {
+        let again = match &open {
+            OpenAs::Again(_) => true,
+            OpenAs::Program | OpenAs::Captured => false,
+        };
         const CALL: &str = "render_command_encoder";
         let device = self.device();
         rate_mapped_pass::check_descriptor(CALL, device, given)?;
@@ -1467,14 +1504,14 @@ impl CommandBuffer {
         }
         // Each later group runs the encoder's calls again from its log, which such a pass keeps
         // whatever the device's rebinds.
-        let log = match (&again, groups > 1) {
+        let log = match (again, groups > 1) {
             (_, true) => Some(device.shared().scheduler.spare_logs().render(given)),
-            (None, false) => device
+            (false, false) => device
                 .shared()
                 .rebinds
                 .any()
                 .then(|| device.shared().scheduler.spare_logs().render(given)),
-            (Some(_), false) => None,
+            (true, false) => None,
         };
         let projected;
         let (mut layout, mut full, descriptor) = match &grouping {
@@ -1487,7 +1524,7 @@ impl CommandBuffer {
         let rate_map = RateMappedPass::of(CALL, descriptor, &layout)?;
         let shape = PassShape::of(&layout)?;
         let compatible = render_target::shared_compatible_pass(device, &shape)?;
-        if again.is_none() {
+        if let OpenAs::Program = open {
             if let Some(problem) = self.state().refusal() {
                 return Err(invalid(CALL, problem));
             }
@@ -1495,9 +1532,9 @@ impl CommandBuffer {
         // Its first instance may record inline (`render/inline_first.rs`), not where it encodes
         // an ended encoder's calls again, nor in a pass of several color groups, whose later
         // groups record after the first group's pass: its draws' secondary begins only where a
-        // command records into it (`RenderCommandEncoder::begin_current_draws`).
+        // command records into it (`RenderEncoding::begin_current_draws`).
         let extended = ExtendedShadows::of(descriptor, &layout, rate_map.is_some());
-        let opens = match again.is_none() && groups == 1 {
+        let opens = match !again && groups == 1 {
             true => inline_first::opens_inline(device, &layout, rate_map.is_some(), &extended),
             false => Err(NotInline::Encoders),
         };
@@ -1513,9 +1550,10 @@ impl CommandBuffer {
             false => self.begin_draws(&compatible)?,
         };
         // A refusal past here leaves the secondary command buffer unused, freed with the pool.
-        let mut core = match again {
-            None => EncoderCore::open(self, CALL, false)?,
-            Some(_) => EncoderCore::replaying(self, false)?,
+        let mut core = match &open {
+            OpenAs::Program => EncoderCore::open(self, CALL, false)?,
+            OpenAs::Captured => EncoderCore::open_captured(self, false)?,
+            OpenAs::Again(_) => EncoderCore::replaying(self, false)?,
         };
         // The whole pass, every group's colors.
         let whole = full.as_ref().unwrap_or(&layout);
@@ -1538,9 +1576,9 @@ impl CommandBuffer {
                 color_groups::settle_depth_stencil(full);
             }
         }
-        let residency = match again {
-            Some(residency) => residency,
-            None => self.inherited_residency(true),
+        let residency = match open {
+            OpenAs::Again(residency) => residency,
+            OpenAs::Program | OpenAs::Captured => self.inherited_residency(true),
         };
         let grouped = match (grouping, full) {
             (Some(group), Some(full)) => Some(Box::new(color_groups::Grouped::first(
@@ -1558,12 +1596,27 @@ impl CommandBuffer {
             log,
             grouped,
         );
-        Ok(RenderCommandEncoder::assemble(core, draws, opening))
+        Ok(RenderEncoding::assemble(core, draws, opening))
     }
 }
 
+/// How `CommandBuffer::open_render` opens an encoding.
+enum OpenAs {
+    /// At the program's call.
+    Program,
+    /// On the device's resolver, for a captured encoder (`render/captured.rs`): the program's
+    /// call refused what it refuses and keeps the command buffer's open state
+    /// (`EncoderCore::open_captured`).
+    Captured,
+    /// An ended encoder of the committed command buffer, opened again (`render/replay.rs`) with
+    /// the residency it started with: over a new `VkCommandBuffer` with no refusal of a committed
+    /// command buffer, logging nothing but where its pass takes several color groups
+    /// (`render/color_groups.rs`).
+    Again(Residency),
+}
+
 /// What a render encoder opens with but its core and the secondary command buffer of its first
-/// instance ([`RenderCommandEncoder::assemble`]): its pass's layout (a color group's, where the
+/// instance ([`RenderEncoding::assemble`]): its pass's layout (a color group's, where the
 /// device draws the pass's colors in groups), that layout's shape and compatible pass, its
 /// rasterization-rate map, its extended-range shadows and the extended-range colors whose clear
 /// Metal's tile memory holds off its codes, whether its first instance records inline (and its
@@ -1618,7 +1671,17 @@ impl Opening {
     }
 }
 
-impl RenderCommandEncoder {
+/// Whether `device`'s indexed indirect draws stay one draw each now
+/// (`RenderEncoding::robust_index_fetch`).
+fn robust_index_fetch_of(device: &Device) -> bool {
+    device
+        .enabled()
+        .features
+        .contains(&VkFeature::RobustBufferAccess2)
+        && device.driver_fact(DriverFact::RobustIndexFetchReadsZero)
+}
+
+impl RenderEncoding {
     /// An encoder over `core` of the pass `opening` describes, its first instance's draws
     /// recording into `draws` (null where it records inline).
     fn assemble(core: EncoderCore, draws: vk::CommandBuffer, opening: Opening) -> Self {
@@ -1637,11 +1700,13 @@ impl RenderCommandEncoder {
         } = opening;
         let keeping = capture::Keeping::of(&layout);
         let rerecord = extended.keeps_draws();
+        let robust_index_fetch = robust_index_fetch_of(core.device());
         // The bind state the device's last ended render encoder left (`live_bind.rs`).
         let live = core.device().shared().live_binds.take();
         // The views and sampler descriptions its binds made or found (`binding::BindMemo`).
         let bind_memo = core.device().shared().bind_memos.take();
-        RenderCommandEncoder {
+        RenderEncoding {
+            robust_index_fetch,
             core,
             earlier: Vec::new(),
             current: Instance {
@@ -1802,6 +1867,19 @@ fn indices_inside(buffer: &Buffer, offset: u64, size: u64) -> (u64, u64) {
     (offset, end.saturating_sub(offset) / size)
 }
 
+/// Whether a direct indexed draw of `index_count` indices of `index_type` at `offset` of
+/// `buffer` reads them through a copy (`draw_source.rs`), which it announces: positions past
+/// where Metal's fetch stops (a padded copy, and where the offset lies past the buffer, zeroed
+/// fetches), or indices in a buffer whose byte 0 lies at no multiple of 4 of its `VkBuffer`. As
+/// `draw_indexed_primitives` decides it, read at the call (`render/captured.rs`).
+fn indices_copied(buffer: &Buffer, offset: u64, index_count: u32, index_type: IndexType) -> bool {
+    let size = index_size(index_type);
+    let offset = u64::from(offset as u32);
+    let (_, inside) = indices_inside(buffer, offset - offset % size, size);
+    u64::from(index_count) > inside
+        || (index_count > 0 && !buffer.zero_in_vk_buffer().is_multiple_of(4))
+}
+
 /// Whether `state` belongs to the fragment shader or fragment output state, which a pipeline
 /// with rasterization disabled does not include: it is none of such a pipeline's dynamic states,
 /// so setting it after binding one is `VUID-vkCmdDraw-None-08608`, and binding one leaves what an
@@ -1869,7 +1947,7 @@ impl DrawDynamic {
 }
 
 /// No colors or slots: what a draw's set of them is compared with where it names none
-/// ([`RenderCommandEncoder::settle_draw`]).
+/// ([`RenderEncoding::settle_draw`]).
 static NO_INDICES: BTreeSet<u32> = BTreeSet::new();
 
 /// The dynamic states a draw records, beside `VERTEX_INPUT_BINDING_STRIDE` (recorded with the
@@ -1894,6 +1972,16 @@ const RECORDED: [vk::DynamicState; 16] = [
 ];
 
 impl RenderCommandEncoder {
+    /// `endEncoding`: begin the pass with its load and store operations, run the draws, and end it.
+    /// A store action still `Unknown` is `DontCare`, as plain Metal stores it where its validation
+    /// stops it: a color attachment's (measured on an M4), and a depth or stencil attachment's,
+    /// resolving or not; a resolve texture is left untouched, as plain Metal leaves it. The encoder
+    /// is consumed either way, so a refusal leaves its command buffer abandoned, as Metal stops
+    /// there.
+    pub fn end_encoding(self) -> Result<(), Error> {
+        self.follow_end()
+    }
+
     /// `setRenderPipelineState:`. Refused (`Invalid`, measured: Metal's validation stops the
     /// call): a color pixel format other than the pass's, as `DrawProblem::AttachmentFormat`
     /// says (plain Metal stores each place of the state's per-sample record into the pass's
@@ -1922,6 +2010,771 @@ impl RenderCommandEncoder {
     /// as zeroes), which the groups' variants do not state. A refused call keeps the state set
     /// before.
     pub fn set_render_pipeline_state(&mut self, state: &RenderPipelineState) -> Result<(), Error> {
+        self.follow_pipeline(state)
+    }
+
+    /// `setVertexBuffer:offset:atIndex:` (`None` unbinds the index). Refused: an index past the
+    /// table, an offset past the buffer's length, a buffer of another device.
+    pub fn set_vertex_buffer(
+        &mut self,
+        buffer: Option<&Buffer>,
+        offset: u64,
+        index: u32,
+    ) -> Result<(), Error> {
+        self.follow_buffer(
+            ("set_vertex_buffer", Table::Vertex),
+            (buffer, offset, index),
+            |encoding| encoding.set_vertex_buffer(buffer, offset, index),
+        )
+    }
+
+    /// `setVertexBuffers:offsets:withRange:`. Refused as
+    /// [`RenderCommandEncoder::set_vertex_buffer`] is, and when the slices' lengths differ; a
+    /// refusal binds none of them.
+    pub fn set_vertex_buffers(
+        &mut self,
+        buffers: &[Option<&Buffer>],
+        offsets: &[u64],
+        first: u32,
+    ) -> Result<(), Error> {
+        self.on_as(TakenBack::PluralBuffers, |encoding| {
+            encoding.set_vertex_buffers(buffers, offsets, first)
+        })
+    }
+
+    /// `setVertexBufferOffset:atIndex:`, which clears the index's attribute stride
+    /// (`render/vertex_strides.rs`). At an index holding a visible-function table, the stage then
+    /// reads the null table there (size 0, every entry null) until a table or buffer is bound at
+    /// the index again, as plain Metal reads it. At an index holding inline bytes
+    /// ([`set_vertex_bytes`](Self::set_vertex_bytes)), they then read as zeros at any offset until
+    /// the index is bound again, as plain Metal reads them (an M4; its debug layer asserts there is
+    /// no buffer). Refused: nothing bound at the index, an offset past the buffer's length.
+    pub fn set_vertex_buffer_offset(&mut self, offset: u64, index: u32) -> Result<(), Error> {
+        self.on_as(TakenBack::BufferOffset, |encoding| {
+            encoding.set_vertex_buffer_offset(offset, index)
+        })
+    }
+
+    /// `setVertexBytes:length:atIndex:`: `bytes`, copied now, at vertex buffer index `index` in
+    /// place of anything bound there, so a later write of the caller's memory reaches no draw, as
+    /// Metal copies them at the call. Every later draw reads the copy until the index is bound
+    /// again, as a buffer argument or as a vertex descriptor's buffer; a layout of
+    /// `MTLBufferLayoutStrideDynamic` reads it at stride 0, as a buffer bound without a stride
+    /// (`render/vertex_strides.rs`). A slot the stage reaches through a pointer loaded from
+    /// memory (one of a device-address form) cannot read inline bytes:
+    /// `Bind(MissingDeviceAddress)`, at the draw. Refused: an index past the table, and more than
+    /// 4096 bytes, Metal's limit for inline bytes (`Invalid(InlineBytesLength)`).
+    pub fn set_vertex_bytes(&mut self, bytes: &[u8], index: u32) -> Result<(), Error> {
+        self.follow_bytes(
+            ("set_vertex_bytes", Table::Vertex),
+            (bytes, index),
+            |encoding| encoding.set_vertex_bytes(bytes, index),
+        )
+    }
+
+    /// `setVertexTexture:atIndex:` (`None` unbinds the index). Refused: an index past the table,
+    /// a texture of another device.
+    pub fn set_vertex_texture(
+        &mut self,
+        texture: Option<&Texture>,
+        index: u32,
+    ) -> Result<(), Error> {
+        self.follow_texture(
+            ("set_vertex_texture", Table::Vertex),
+            (texture, index),
+            |encoding| encoding.set_vertex_texture(texture, index),
+        )
+    }
+
+    /// `setVertexTextures:withRange:`. Refused as [`RenderCommandEncoder::set_vertex_texture`]
+    /// is; a refusal binds none of them.
+    pub fn set_vertex_textures(
+        &mut self,
+        textures: &[Option<&Texture>],
+        first: u32,
+    ) -> Result<(), Error> {
+        self.on_as(TakenBack::PluralTextures, |encoding| {
+            encoding.set_vertex_textures(textures, first)
+        })
+    }
+
+    /// `setVertexSamplerState:atIndex:` (`None` unbinds the index). Refused: an index past the
+    /// table, a state of another device.
+    pub fn set_vertex_sampler_state(
+        &mut self,
+        sampler: Option<&SamplerState>,
+        index: u32,
+    ) -> Result<(), Error> {
+        self.follow_sampler(
+            ("set_vertex_sampler_state", Table::Vertex),
+            (sampler, index),
+            |encoding| encoding.set_vertex_sampler_state(sampler, index),
+        )
+    }
+
+    /// `setVertexSamplerStates:withRange:`, or with `clamps` (minimums and maximums)
+    /// `setVertexSamplerStates:lodMinClamps:lodMaxClamps:withRange:`. Refused as
+    /// [`RenderCommandEncoder::set_vertex_sampler_state`] is, and when the slices' lengths differ;
+    /// a refusal binds none of them.
+    pub fn set_vertex_sampler_states(
+        &mut self,
+        samplers: &[Option<&SamplerState>],
+        clamps: Option<(&[f32], &[f32])>,
+        first: u32,
+    ) -> Result<(), Error> {
+        self.on_as(TakenBack::PluralSamplers, |encoding| {
+            encoding.set_vertex_sampler_states(samplers, clamps, first)
+        })
+    }
+
+    /// `setFragmentBuffer:offset:atIndex:` (`None` unbinds the index). Refused as
+    /// [`RenderCommandEncoder::set_vertex_buffer`] is.
+    pub fn set_fragment_buffer(
+        &mut self,
+        buffer: Option<&Buffer>,
+        offset: u64,
+        index: u32,
+    ) -> Result<(), Error> {
+        self.follow_buffer(
+            ("set_fragment_buffer", Table::Fragment),
+            (buffer, offset, index),
+            |encoding| encoding.set_fragment_buffer(buffer, offset, index),
+        )
+    }
+
+    /// `setFragmentBuffers:offsets:withRange:`. Refused as
+    /// [`RenderCommandEncoder::set_vertex_buffers`] is.
+    pub fn set_fragment_buffers(
+        &mut self,
+        buffers: &[Option<&Buffer>],
+        offsets: &[u64],
+        first: u32,
+    ) -> Result<(), Error> {
+        self.on_as(TakenBack::PluralBuffers, |encoding| {
+            encoding.set_fragment_buffers(buffers, offsets, first)
+        })
+    }
+
+    /// `setFragmentBufferOffset:atIndex:`. Refused as
+    /// [`RenderCommandEncoder::set_vertex_buffer_offset`] is.
+    pub fn set_fragment_buffer_offset(&mut self, offset: u64, index: u32) -> Result<(), Error> {
+        self.on_as(TakenBack::BufferOffset, |encoding| {
+            encoding.set_fragment_buffer_offset(offset, index)
+        })
+    }
+
+    /// `setFragmentBytes:length:atIndex:`: as
+    /// [`set_vertex_bytes`](Self::set_vertex_bytes), in the fragment stage's table. Refused as
+    /// that is.
+    pub fn set_fragment_bytes(&mut self, bytes: &[u8], index: u32) -> Result<(), Error> {
+        self.follow_bytes(
+            ("set_fragment_bytes", Table::Fragment),
+            (bytes, index),
+            |encoding| encoding.set_fragment_bytes(bytes, index),
+        )
+    }
+
+    /// `setFragmentTexture:atIndex:` (`None` unbinds the index). Refused as
+    /// [`RenderCommandEncoder::set_vertex_texture`] is.
+    pub fn set_fragment_texture(
+        &mut self,
+        texture: Option<&Texture>,
+        index: u32,
+    ) -> Result<(), Error> {
+        self.follow_texture(
+            ("set_fragment_texture", Table::Fragment),
+            (texture, index),
+            |encoding| encoding.set_fragment_texture(texture, index),
+        )
+    }
+
+    /// `setFragmentTextures:withRange:`. Refused as
+    /// [`RenderCommandEncoder::set_vertex_textures`] is.
+    pub fn set_fragment_textures(
+        &mut self,
+        textures: &[Option<&Texture>],
+        first: u32,
+    ) -> Result<(), Error> {
+        self.on_as(TakenBack::PluralTextures, |encoding| {
+            encoding.set_fragment_textures(textures, first)
+        })
+    }
+
+    /// `setFragmentSamplerState:atIndex:` (`None` unbinds the index). Refused as
+    /// [`RenderCommandEncoder::set_vertex_sampler_state`] is.
+    pub fn set_fragment_sampler_state(
+        &mut self,
+        sampler: Option<&SamplerState>,
+        index: u32,
+    ) -> Result<(), Error> {
+        self.follow_sampler(
+            ("set_fragment_sampler_state", Table::Fragment),
+            (sampler, index),
+            |encoding| encoding.set_fragment_sampler_state(sampler, index),
+        )
+    }
+
+    /// `setFragmentSamplerStates:withRange:`, or with `clamps`
+    /// `setFragmentSamplerStates:lodMinClamps:lodMaxClamps:withRange:`. Refused as
+    /// [`RenderCommandEncoder::set_vertex_sampler_states`] is.
+    pub fn set_fragment_sampler_states(
+        &mut self,
+        samplers: &[Option<&SamplerState>],
+        clamps: Option<(&[f32], &[f32])>,
+        first: u32,
+    ) -> Result<(), Error> {
+        self.on_as(TakenBack::PluralSamplers, |encoding| {
+            encoding.set_fragment_sampler_states(samplers, clamps, first)
+        })
+    }
+
+    /// `setColorStoreAction:atIndex:`: the store action of color attachment `index`, which the
+    /// descriptor left `Unknown`. As plain Metal does where its validation stops the call (measured
+    /// on an M4): for an attachment without a texture, or over an action the descriptor knew,
+    /// nothing changes; a resolving action where nothing resolves resolves nothing
+    /// (`MultisampleResolve` keeps no sample, `StoreAndMultisampleResolve` stores them); and one
+    /// that does not resolve where a resolve texture is named leaves that texture untouched.
+    /// Refused (`Invalid`, measured): an index past the attachments, `Unknown` itself, and `Store`
+    /// or `StoreAndMultisampleResolve` for a memoryless attachment.
+    pub fn set_color_store_action(&mut self, action: StoreAction, index: u32) -> Result<(), Error> {
+        self.on_as(TakenBack::StoreAction, |encoding| {
+            encoding.set_color_store_action(action, index)
+        })
+    }
+
+    /// `setDepthStoreAction:`: the depth attachment's store action, which the descriptor left
+    /// `Unknown`; without a depth attachment nothing changes, as plain Metal does where its
+    /// validation stops the call (measured on an M4); one that does not resolve where a resolve
+    /// texture is named leaves that texture untouched and stores the depth by the action, as plain
+    /// Metal does where its validation stops it. Refused (`Invalid`, measured):
+    /// an action over one the descriptor knew, `Unknown` itself, a resolving action without a
+    /// resolve texture, `Store` for a memoryless attachment, and `Store` where the stencil
+    /// attachment is the same texture resolved by `MultisampleResolve`.
+    pub fn set_depth_store_action(&mut self, action: StoreAction) -> Result<(), Error> {
+        self.on_as(TakenBack::StoreAction, |encoding| {
+            encoding.set_depth_store_action(action)
+        })
+    }
+
+    /// `setStencilStoreAction:`: the stencil attachment's store action, which the descriptor
+    /// left `Unknown`. Refused as [`RenderCommandEncoder::set_depth_store_action`] is, but for
+    /// the last: here `MultisampleResolve` where the depth attachment is the same texture,
+    /// stored; and without a stencil attachment (unmeasured).
+    pub fn set_stencil_store_action(&mut self, action: StoreAction) -> Result<(), Error> {
+        self.on_as(TakenBack::StoreAction, |encoding| {
+            encoding.set_stencil_store_action(action)
+        })
+    }
+
+    /// `setColorStoreActionOptions:atIndex:`: the color attachment's store action options, which
+    /// change nothing, as plain Metal's: Apple's GPUs ignore them, and plain Metal takes them over
+    /// a store action the descriptor knew and under one that keeps no samples, where its validation
+    /// stops them (measured on an M4, `sample_positions.rs`). Refused (`Invalid`): an index past
+    /// the attachments and an attachment without a texture (unmeasured).
+    pub fn set_color_store_action_options(
+        &mut self,
+        _options: StoreActionOptions,
+        index: u32,
+    ) -> Result<(), Error> {
+        self.on_as(TakenBack::StoreAction, |encoding| {
+            encoding.set_color_store_action_options(_options, index)
+        })
+    }
+
+    /// `setDepthStoreActionOptions:`: the depth attachment's store action options, where the
+    /// descriptor left its store action `Unknown`; they change nothing, as plain Metal's (Metal
+    /// probe case `opt_depth_late` on an M4). Refused (`Invalid`, measured): an attachment without
+    /// a texture, and one whose descriptor knew its store action.
+    pub fn set_depth_store_action_options(
+        &mut self,
+        options: StoreActionOptions,
+    ) -> Result<(), Error> {
+        self.on_as(TakenBack::StoreAction, |encoding| {
+            encoding.set_depth_store_action_options(options)
+        })
+    }
+
+    /// `setStencilStoreActionOptions:`: the stencil attachment's store action options. Refused
+    /// as [`RenderCommandEncoder::set_depth_store_action_options`] is; `end_encoding` refuses
+    /// `CustomSamplePositions` under a store action that keeps no samples (unmeasured for a
+    /// stencil attachment, `sample_positions.rs`).
+    pub fn set_stencil_store_action_options(
+        &mut self,
+        options: StoreActionOptions,
+    ) -> Result<(), Error> {
+        self.on_as(TakenBack::StoreAction, |encoding| {
+            encoding.set_stencil_store_action_options(options)
+        })
+    }
+
+    /// `setViewport:`. A NaN origin x draws nothing, as plain Metal's where its validation stops it
+    /// (measured on an M4). Refused (`Invalid`, measured): any other NaN or infinite field. A depth
+    /// range past `[0, 1]` is refused on a device that takes it neither natively nor by the vertex
+    /// stage's compensation: `NotImplemented` without the features, `Unsupported` on a driver that
+    /// draws the compensated depths inexactly (`render_state.rs`). A refused call keeps the
+    /// viewports set before.
+    pub fn set_viewport(&mut self, viewport: Viewport) -> Result<(), Error> {
+        self.follow_viewports("set_viewport", &[viewport], |encoding| {
+            encoding.set_viewport(viewport)
+        })
+    }
+
+    /// `setViewports:count:`. Refused as [`RenderCommandEncoder::set_viewport`] is, and for a
+    /// count outside 1 to 16 (measured). On a device without `multiViewport`, a draw that selects
+    /// among more than one viewport (its vertex function writes `[[viewport_array_index]]`, or an
+    /// amplification's mapping offsets the viewport) is refused at the draw,
+    /// `Unsupported(LayeredRendering)` needing the feature; with one it draws through it.
+    pub fn set_viewports(&mut self, viewports: &[Viewport]) -> Result<(), Error> {
+        self.follow_viewports("set_viewports", viewports, |encoding| {
+            encoding.set_viewports(viewports)
+        })
+    }
+
+    /// `setScissorRect:`. A rectangle past the render area is clipped to it, as plain Metal clips
+    /// it where its validation stops the call (measured on an M4).
+    pub fn set_scissor_rect(&mut self, rect: ScissorRect) -> Result<(), Error> {
+        self.follow_scissors("set_scissor_rect", &[rect], |encoding| {
+            encoding.set_scissor_rect(rect)
+        })
+    }
+
+    /// `setScissorRects:count:`. Each rectangle is clipped to the render area as
+    /// [`RenderCommandEncoder::set_scissor_rect`] clips it, and more than 16 are taken, as plain
+    /// Metal takes them where its validation stops them (Metal probe case `scissors_17` on an M4).
+    /// Refused (`Invalid`): no rectangle (unmeasured). A draw whose pipeline selects no viewport
+    /// draws through the first; one that selects draws each viewport through the rectangle of its
+    /// index, one rectangle serving every viewport and a viewport past two or more drawing nothing,
+    /// as plain Metal draws them where its validation stops a count other than 1 and the viewport
+    /// count (probes).
+    pub fn set_scissor_rects(&mut self, rects: &[ScissorRect]) -> Result<(), Error> {
+        self.follow_scissors("set_scissor_rects", rects, |encoding| {
+            encoding.set_scissor_rects(rects)
+        })
+    }
+
+    /// `setCullMode:`.
+    pub fn set_cull_mode(&mut self, mode: CullMode) {
+        self.follow_cull_mode(mode)
+    }
+
+    /// `setFrontFacingWinding:`.
+    pub fn set_front_facing_winding(&mut self, winding: Winding) {
+        self.follow_winding(winding)
+    }
+
+    /// `setDepthStencilState:`: `state` is a `&DepthStencilState`, or `None` for nil, which
+    /// makes the encoder's state Metal's default again (a depth compare of `Always` without
+    /// writes, and no stencil test), as plain Metal draws after nil where its validation stops
+    /// it. Refused: a state of another device. A draw refuses a state that
+    /// writes depth in a pass without a depth attachment, or uses the stencil in one without a
+    /// stencil attachment (measured).
+    pub fn set_depth_stencil_state<'a>(
+        &mut self,
+        state: impl Into<Option<&'a DepthStencilState>>,
+    ) -> Result<(), Error> {
+        self.follow_depth_stencil(state.into())
+    }
+
+    /// `setStencilReferenceValue:`: both faces' reference, saturated at 255 as Metal's is
+    /// (measured).
+    pub fn set_stencil_reference_value(&mut self, value: u32) {
+        self.follow_references([value, value], true)
+    }
+
+    /// `setStencilFrontReferenceValue:backReferenceValue:`, saturated at 255 as Metal's are.
+    pub fn set_stencil_reference_values(&mut self, front: u32, back: u32) {
+        self.follow_references([front, back], false)
+    }
+
+    /// `setDepthBias:slopeScale:clamp:`. NaN and infinite factors give Metal's measured depths: a
+    /// NaN constant biases as +inf; an unbounded infinite or NaN bias saturates the depth (at 1 or
+    /// 0, in depth clamp mode at the viewport's larger or smaller depth); a NaN or infinite clamp
+    /// clamps nothing; a clamp that bounds an infinite or NaN bias adds itself to the depth.
+    /// Refused `NotImplemented(NonFiniteDepthBias)`: factors whose effect differs between flat and
+    /// sloped triangles (an infinite slope factor against an unbounded or opposite clamp, or
+    /// against the opposite infinite constant); and at a draw of triangles, a clamp's addition that
+    /// moves a viewport's depth range past `[0, 1]` or that depth clamp mode bounds. A draw refuses
+    /// a clamp other than 0 on a device without `depthBiasClamp` (`Unsupported`).
+    pub fn set_depth_bias(
+        &mut self,
+        depth_bias: f32,
+        slope_scale: f32,
+        clamp: f32,
+    ) -> Result<(), Error> {
+        self.on_as(TakenBack::RenderState, |encoding| {
+            encoding.set_depth_bias(depth_bias, slope_scale, clamp)
+        })
+    }
+
+    /// `setDepthClipMode:`. `Clamp` needs `depthClamp` (`Unsupported`).
+    pub fn set_depth_clip_mode(&mut self, mode: DepthClipMode) -> Result<(), Error> {
+        self.on_as(TakenBack::RenderState, |encoding| {
+            encoding.set_depth_clip_mode(mode)
+        })
+    }
+
+    /// `setTriangleFillMode:`. `Lines` needs `fillModeNonSolid` (`Unsupported`).
+    pub fn set_triangle_fill_mode(&mut self, mode: TriangleFillMode) -> Result<(), Error> {
+        self.on_as(TakenBack::RenderState, |encoding| {
+            encoding.set_triangle_fill_mode(mode)
+        })
+    }
+
+    /// `setBlendColorRed:green:blue:alpha:`.
+    pub fn set_blend_color(&mut self, red: f32, green: f32, blue: f32, alpha: f32) {
+        self.follow_blend_color([red, green, blue, alpha])
+    }
+
+    /// `setTessellationFactorBuffer:offset:instanceStride:` (`tessellation.rs`): the factors a
+    /// patch draw reads, `None` for `nil`, from the offset rounded down to a multiple of 2, each
+    /// instance's at the instance stride rounded down to a multiple of 4: Metal's validation stops
+    /// an offset or a stride that is not a multiple of 4, but plain Metal reads an offset of 2 at
+    /// that byte (Metal probe case `factor_offset_2` on an M4), an odd one from the byte below (1
+    /// read from 0, 3 from 2, 7 from 6), and steps the instances by a stride rounded down to a
+    /// multiple of 4 (Metal probes: strides 2 and 14 drew what 0 and 12 draw, 6 and 10 what 4 and 8
+    /// draw: 13 and 15 what 12 draws, 17 and 19 what 16 draws). Refused (`Invalid`) for a buffer of
+    /// another device, keeping the buffer set before.
+    pub fn set_tessellation_factor_buffer(
+        &mut self,
+        buffer: Option<&Buffer>,
+        offset: u64,
+        instance_stride: u64,
+    ) -> Result<(), Error> {
+        self.on_as(TakenBack::RenderState, |encoding| {
+            encoding.set_tessellation_factor_buffer(buffer, offset, instance_stride)
+        })
+    }
+
+    /// `setTessellationFactorScale:` (`tessellation.rs`), which a pipeline that enables
+    /// `tessellationFactorScaleEnabled` multiplies its factors by, rounded to `half` as Metal
+    /// rounds it (one infinite as a `half` takes the factors to the maximum, and one that is 0,
+    /// negative or NaN as a `half` culls every patch; and a Metal probe
+    /// on an M4). Every scale is taken, as plain Metal takes those its validation stops (0, a
+    /// negative one, NaN, an infinity and a subnormal `float`; Metal probes on an M4): each culls
+    /// or draws as its `half` does under a pipeline that enables the scale, and a pipeline that
+    /// does not draws as before.
+    pub fn set_tessellation_factor_scale(&mut self, scale: f32) {
+        self.on_as(TakenBack::RenderState, |encoding| {
+            encoding.set_tessellation_factor_scale(scale)
+        })
+    }
+
+    /// `setVertexAmplificationCount:viewMappings:` (`amplification.rs`): each later draw
+    /// processes its vertices `count` times, amplification `a` offset by `view_mappings[a]`
+    /// (`None` for `nil`, offsets of 0). Refused (`Invalid`): fewer mappings than `count`. A
+    /// draw draws a count above its pipeline's `maxVertexAmplificationCount` as plain Metal does
+    /// where its validation stops it, and refuses one above a maximum of 1 or above 8
+    /// (`DrawProblem::AmplificationCount`); a refused call keeps the amplification set before.
+    pub fn set_vertex_amplification_count(
+        &mut self,
+        count: u64,
+        view_mappings: Option<&[VertexAmplificationViewMapping]>,
+    ) -> Result<(), Error> {
+        self.on_as(TakenBack::RenderState, |encoding| {
+            encoding.set_vertex_amplification_count(count, view_mappings)
+        })
+    }
+
+    /// `drawPrimitives:vertexStart:vertexCount:instanceCount:baseInstance:` (Metal's shorter
+    /// forms take one instance and a base instance of 0). A draw of no vertices or no instances
+    /// records nothing (the module docs). Refused as the module docs say.
+    pub fn draw_primitives(
+        &mut self,
+        primitive_type: PrimitiveType,
+        vertex_start: u32,
+        vertex_count: u32,
+        instance_count: u32,
+        base_instance: u32,
+    ) -> Result<(), Error> {
+        let empty = vertex_count == 0 || instance_count == 0;
+        self.follow_draw(
+            (captured::DrawKind::Primitives(primitive_type), empty),
+            None,
+            |calls| {
+                calls.push(|_| {
+                    RenderCall::DrawPrimitives(
+                        primitive_type,
+                        vertex_start,
+                        vertex_count,
+                        instance_count,
+                        base_instance,
+                    )
+                });
+            },
+            |encoding| {
+                encoding.draw_primitives(
+                    primitive_type,
+                    vertex_start,
+                    vertex_count,
+                    instance_count,
+                    base_instance,
+                )
+            },
+        )
+    }
+
+    /// `drawIndexedPrimitives:indexCount:indexType:indexBuffer:indexBufferOffset:instanceCount:
+    /// baseVertex:baseInstance:` (Metal's shorter forms take one instance and a base vertex and
+    /// instance of 0). Index positions past the buffer's length draw as the module docs say, and
+    /// the indices are read from the offset's low 32 bits rounded down to a multiple of the index
+    /// size, as plain Metal reads them (an M4 read an offset of 2^32 + 16 into a buffer past 4 GiB
+    /// at 16). A draw of no indices or no instances records nothing. Refused as the
+    /// module docs say, and for an index buffer of another device.
+    pub fn draw_indexed_primitives(
+        &mut self,
+        primitive_type: PrimitiveType,
+        index_count: u32,
+        index_type: IndexType,
+        index_buffer: &Buffer,
+        index_buffer_offset: u64,
+        instance_count: u32,
+        base_vertex: i32,
+        base_instance: u32,
+    ) -> Result<(), Error> {
+        let empty = index_count == 0 || instance_count == 0;
+        self.follow_draw(
+            (
+                captured::DrawKind::Indexed(primitive_type, index_type),
+                empty,
+            ),
+            Some(("draw_indexed_primitives", index_buffer, &|| {
+                indices_copied(index_buffer, index_buffer_offset, index_count, index_type)
+            })),
+            |calls| {
+                calls.push_indexed(|log| DrawIndexed {
+                    primitive_type,
+                    index_count,
+                    index_type,
+                    index_buffer: log.hold_buffer(index_buffer),
+                    index_buffer_offset,
+                    instance_count,
+                    base_vertex,
+                    base_instance,
+                });
+            },
+            |encoding| {
+                encoding.draw_indexed_primitives(
+                    primitive_type,
+                    index_count,
+                    index_type,
+                    index_buffer,
+                    index_buffer_offset,
+                    instance_count,
+                    base_vertex,
+                    base_instance,
+                )
+            },
+        )
+    }
+
+    /// `drawPrimitives:indirectBuffer:indirectBufferOffset:`: Metal's
+    /// `MTLDrawPrimitivesIndirectArguments` at `indirect_buffer_offset`. Refused as the module
+    /// docs say, and for an indirect buffer of another device.
+    pub fn draw_primitives_indirect(
+        &mut self,
+        primitive_type: PrimitiveType,
+        indirect_buffer: &Buffer,
+        indirect_buffer_offset: u64,
+    ) -> Result<(), Error> {
+        self.on(|encoding| {
+            encoding.draw_primitives_indirect(
+                primitive_type,
+                indirect_buffer,
+                indirect_buffer_offset,
+            )
+        })
+    }
+
+    /// `drawIndexedPrimitives:indexType:indexBuffer:indexBufferOffset:indirectBuffer:
+    /// indirectBufferOffset:`: Metal's `MTLDrawIndexedPrimitivesIndirectArguments` at
+    /// `indirect_buffer_offset`, drawing `index_type` indices of `index_buffer` from
+    /// `index_buffer_offset`, those past the buffer's length as the module docs say, each offset
+    /// rounded down as the direct draws' are. Refused as the module docs say, and for buffers of
+    /// another device.
+    pub fn draw_indexed_primitives_indirect(
+        &mut self,
+        primitive_type: PrimitiveType,
+        index_type: IndexType,
+        index_buffer: &Buffer,
+        index_buffer_offset: u64,
+        indirect_buffer: &Buffer,
+        indirect_buffer_offset: u64,
+    ) -> Result<(), Error> {
+        self.on(|encoding| {
+            encoding.draw_indexed_primitives_indirect(
+                primitive_type,
+                index_type,
+                index_buffer,
+                index_buffer_offset,
+                indirect_buffer,
+                indirect_buffer_offset,
+            )
+        })
+    }
+
+    /// `drawPatches:patchStart:patchCount:patchIndexBuffer:patchIndexBufferOffset:instanceCount:
+    /// baseInstance:` of a tessellation pipeline (`tessellation.rs`): `patch_count` patches of
+    /// `number_of_patch_control_points` control points from `patch_start`, `instance_count`
+    /// instances from `base_instance`, patch `i` the one the patch index buffer's `uint` at
+    /// `patch_start + i` names where one is given (its factors stay at `patch_start + i`), read
+    /// from its offset rounded down to a multiple of 4 as plain Metal reads it. A draw of no
+    /// patches or no instances records nothing; the draw's control points are its pipeline's where
+    /// its function states them, and a pipeline with a control-point index type reads every control
+    /// point's index as 0, as plain Metal draws them. Refused as the module docs say, for a patch
+    /// index buffer of another device, and as Metal's validation refuses it (`Invalid`, measured):
+    /// indices `patch_start + patch_count` past the buffer from the offset.
+    pub fn draw_patches(
+        &mut self,
+        number_of_patch_control_points: u32,
+        patch_start: u32,
+        patch_count: u32,
+        patch_index_buffer: Option<&Buffer>,
+        patch_index_buffer_offset: u64,
+        instance_count: u32,
+        base_instance: u32,
+    ) -> Result<(), Error> {
+        self.on(|encoding| {
+            encoding.draw_patches(
+                number_of_patch_control_points,
+                patch_start,
+                patch_count,
+                patch_index_buffer,
+                patch_index_buffer_offset,
+                instance_count,
+                base_instance,
+            )
+        })
+    }
+
+    /// `drawPatches:patchIndexBuffer:patchIndexBufferOffset:indirectBuffer:
+    /// indirectBufferOffset:` of a tessellation pipeline: Metal's `MTLDrawPatchIndirectArguments`
+    /// at `indirect_buffer_offset` (a `VkDrawIndirectCommand`'s layout). Refused as
+    /// [`RenderCommandEncoder::draw_patches`] and [`RenderCommandEncoder::draw_primitives_indirect`]
+    /// are, but for the patch indices past the buffer, whose count the arguments hold: a patch
+    /// whose index lies past the buffer's length reads patch index 0 (Metal reads memory past the
+    /// buffer there, which its validation does not check). A pipeline with a control-point index
+    /// type, which Metal's validation stops, reads every index as 0, as the direct draw does (a
+    /// Metal probe `cpi_plain_typed_indirect`).
+    pub fn draw_patches_indirect(
+        &mut self,
+        number_of_patch_control_points: u32,
+        patch_index_buffer: Option<&Buffer>,
+        patch_index_buffer_offset: u64,
+        indirect_buffer: &Buffer,
+        indirect_buffer_offset: u64,
+    ) -> Result<(), Error> {
+        self.on(|encoding| {
+            encoding.draw_patches_indirect(
+                number_of_patch_control_points,
+                patch_index_buffer,
+                patch_index_buffer_offset,
+                indirect_buffer,
+                indirect_buffer_offset,
+            )
+        })
+    }
+
+    /// `drawIndexedPatches:patchStart:patchCount:patchIndexBuffer:patchIndexBufferOffset:
+    /// controlPointIndexBuffer:controlPointIndexBufferOffset:instanceCount:baseInstance:` of a
+    /// tessellation pipeline whose `tessellationControlPointIndexType` is not `None`: as
+    /// [`RenderCommandEncoder::draw_patches`], but control point `k` of the patch whose index is
+    /// `p` is the index (of the pipeline's type) at position `p · N + k` of the control-point index
+    /// buffer from its offset (measured), `N` the pipeline's control points where its function
+    /// states them, an offset that is not a multiple of the index size rounded down to one, as
+    /// plain Metal reads it, where its validation stops the draw. A pipeline whose type is `None`,
+    /// which Metal's validation stops, draws the patches' own control points, the buffer unread, as
+    /// plain Metal draws them (Metal probe case `indexed_without_type` on an M4). Refused as
+    /// `draw_patches` is, for a control-point index buffer of another device, and as Metal's
+    /// validation refuses it (`Invalid`, measured): `(patch_start + patch_count) · N` indices past
+    /// the buffer from the offset.
+    pub fn draw_indexed_patches(
+        &mut self,
+        number_of_patch_control_points: u32,
+        patch_start: u32,
+        patch_count: u32,
+        patch_index_buffer: Option<&Buffer>,
+        patch_index_buffer_offset: u64,
+        control_point_index_buffer: &Buffer,
+        control_point_index_buffer_offset: u64,
+        instance_count: u32,
+        base_instance: u32,
+    ) -> Result<(), Error> {
+        self.on(|encoding| {
+            encoding.draw_indexed_patches(
+                number_of_patch_control_points,
+                patch_start,
+                patch_count,
+                patch_index_buffer,
+                patch_index_buffer_offset,
+                control_point_index_buffer,
+                control_point_index_buffer_offset,
+                instance_count,
+                base_instance,
+            )
+        })
+    }
+
+    /// `drawIndexedPatches:patchIndexBuffer:patchIndexBufferOffset:controlPointIndexBuffer:
+    /// controlPointIndexBufferOffset:indirectBuffer:indirectBufferOffset:` of a tessellation
+    /// pipeline whose `tessellationControlPointIndexType` is not `None`: the arguments of
+    /// [`RenderCommandEncoder::draw_patches_indirect`], the control points of
+    /// [`RenderCommandEncoder::draw_indexed_patches`]. Refused as both are, but for the indices
+    /// past the buffers, whose counts the arguments hold: an index that lies past the buffer's
+    /// length reads 0 (Metal reads memory past the buffer there, which its validation does not
+    /// check). A pipeline without a control-point index type, which Metal's validation stops, draws
+    /// the patches' own control points, the buffer unread, as the direct draw does (a Metal probe
+    /// `cpi_indexed_untyped_indirect`).
+    pub fn draw_indexed_patches_indirect(
+        &mut self,
+        number_of_patch_control_points: u32,
+        patch_index_buffer: Option<&Buffer>,
+        patch_index_buffer_offset: u64,
+        control_point_index_buffer: &Buffer,
+        control_point_index_buffer_offset: u64,
+        indirect_buffer: &Buffer,
+        indirect_buffer_offset: u64,
+    ) -> Result<(), Error> {
+        self.on(|encoding| {
+            encoding.draw_indexed_patches_indirect(
+                number_of_patch_control_points,
+                patch_index_buffer,
+                patch_index_buffer_offset,
+                control_point_index_buffer,
+                control_point_index_buffer_offset,
+                indirect_buffer,
+                indirect_buffer_offset,
+            )
+        })
+    }
+
+    /// `setVisibilityResultMode:offset:` (`visibility.rs`). An offset that is not a multiple of 8
+    /// is rounded down to one, where plain Metal writes the result (measured on an M4). Refused
+    /// (`Invalid`, measured) for `Boolean` and `Counting`: a pass without a visibility result
+    /// buffer, an offset whose 8 bytes run past the buffer, an offset the encoder took before.
+    /// `Counting` is `Unsupported` where the device lacks `occlusionQueryPrecise`. A refused call
+    /// keeps the mode set before. While a mode other than `Disabled` is set, amplified draws draw
+    /// one amplification at a time, whose samples the one query counts as Metal's does
+    /// (`VertexAmplification::one_at_a_time`); a mode set after a draw amplified as views begins
+    /// its query in a new instance of the pass's layers, since a query in a multiview instance
+    /// takes one query per view. Where the device draws the pass's colors in groups, the first
+    /// group's pass counts the results (`render/color_groups.rs`).
+    pub fn set_visibility_result_mode(
+        &mut self,
+        mode: VisibilityResultMode,
+        offset: u64,
+    ) -> Result<(), Error> {
+        self.on_as(TakenBack::RenderState, |encoding| {
+            encoding.set_visibility_result_mode(mode, offset)
+        })
+    }
+}
+
+impl RenderEncoding {
+    /// [`RenderCommandEncoder::set_render_pipeline_state`]'s encoding.
+    pub(crate) fn set_render_pipeline_state(
+        &mut self,
+        state: &RenderPipelineState,
+    ) -> Result<(), Error> {
         self.log(|log| RenderCall::PipelineState(log.hold_render_state(state)));
         let turn = self.group_turn();
         if let color_groups::Turn::Later(false) = turn {
@@ -1994,9 +2847,8 @@ impl RenderCommandEncoder {
         Ok(twin)
     }
 
-    /// `setVertexBuffer:offset:atIndex:` (`None` unbinds the index). Refused: an index past the
-    /// table, an offset past the buffer's length, a buffer of another device.
-    pub fn set_vertex_buffer(
+    /// [`RenderCommandEncoder::set_vertex_buffer`]'s encoding.
+    pub(crate) fn set_vertex_buffer(
         &mut self,
         buffer: Option<&Buffer>,
         offset: u64,
@@ -2010,10 +2862,8 @@ impl RenderCommandEncoder {
             .set_buffer(&mut self.core, "set_vertex_buffer", buffer, offset, index)
     }
 
-    /// `setVertexBuffers:offsets:withRange:`. Refused as
-    /// [`RenderCommandEncoder::set_vertex_buffer`] is, and when the slices' lengths differ; a
-    /// refusal binds none of them.
-    pub fn set_vertex_buffers(
+    /// [`RenderCommandEncoder::set_vertex_buffers`]'s encoding.
+    pub(crate) fn set_vertex_buffers(
         &mut self,
         buffers: &[Option<&Buffer>],
         offsets: &[u64],
@@ -2036,37 +2886,26 @@ impl RenderCommandEncoder {
         )
     }
 
-    /// `setVertexBufferOffset:atIndex:`, which clears the index's attribute stride
-    /// (`render/vertex_strides.rs`). At an index holding a visible-function table, the stage then
-    /// reads the null table there (size 0, every entry null) until a table or buffer is bound at
-    /// the index again, as plain Metal reads it. At an index holding inline bytes
-    /// ([`set_vertex_bytes`](Self::set_vertex_bytes)), they then read as zeros at any offset until
-    /// the index is bound again, as plain Metal reads them (an M4; its debug layer asserts there is
-    /// no buffer). Refused: nothing bound at the index, an offset past the buffer's length.
-    pub fn set_vertex_buffer_offset(&mut self, offset: u64, index: u32) -> Result<(), Error> {
+    /// [`RenderCommandEncoder::set_vertex_buffer_offset`]'s encoding.
+    pub(crate) fn set_vertex_buffer_offset(
+        &mut self,
+        offset: u64,
+        index: u32,
+    ) -> Result<(), Error> {
         self.log(|_| RenderCall::BufferOffset(Table::Vertex, offset, index));
         self.vertex
             .set_buffer_offset(&mut self.core, "set_vertex_buffer_offset", offset, index)
     }
 
-    /// `setVertexBytes:length:atIndex:`: `bytes`, copied now, at vertex buffer index `index` in
-    /// place of anything bound there, so a later write of the caller's memory reaches no draw, as
-    /// Metal copies them at the call. Every later draw reads the copy until the index is bound
-    /// again, as a buffer argument or as a vertex descriptor's buffer; a layout of
-    /// `MTLBufferLayoutStrideDynamic` reads it at stride 0, as a buffer bound without a stride
-    /// (`render/vertex_strides.rs`). A slot the stage reaches through a pointer loaded from
-    /// memory (one of a device-address form) cannot read inline bytes:
-    /// `Bind(MissingDeviceAddress)`, at the draw. Refused: an index past the table, and more than
-    /// 4096 bytes, Metal's limit for inline bytes (`Invalid(InlineBytesLength)`).
-    pub fn set_vertex_bytes(&mut self, bytes: &[u8], index: u32) -> Result<(), Error> {
+    /// [`RenderCommandEncoder::set_vertex_bytes`]'s encoding.
+    pub(crate) fn set_vertex_bytes(&mut self, bytes: &[u8], index: u32) -> Result<(), Error> {
         self.log(|log| RenderCall::Bytes(Table::Vertex, log.byte_span(bytes), index));
         self.vertex
             .set_bytes(&mut self.core, "set_vertex_bytes", bytes, None, index)
     }
 
-    /// `setVertexTexture:atIndex:` (`None` unbinds the index). Refused: an index past the table,
-    /// a texture of another device.
-    pub fn set_vertex_texture(
+    /// [`RenderCommandEncoder::set_vertex_texture`]'s encoding.
+    pub(crate) fn set_vertex_texture(
         &mut self,
         texture: Option<&Texture>,
         index: u32,
@@ -2079,9 +2918,8 @@ impl RenderCommandEncoder {
             .set_textures(&mut self.core, "set_vertex_texture", &[texture], index)
     }
 
-    /// `setVertexTextures:withRange:`. Refused as [`RenderCommandEncoder::set_vertex_texture`]
-    /// is; a refusal binds none of them.
-    pub fn set_vertex_textures(
+    /// [`RenderCommandEncoder::set_vertex_textures`]'s encoding.
+    pub(crate) fn set_vertex_textures(
         &mut self,
         textures: &[Option<&Texture>],
         first: u32,
@@ -2091,9 +2929,8 @@ impl RenderCommandEncoder {
             .set_textures(&mut self.core, "set_vertex_textures", textures, first)
     }
 
-    /// `setVertexSamplerState:atIndex:` (`None` unbinds the index). Refused: an index past the
-    /// table, a state of another device.
-    pub fn set_vertex_sampler_state(
+    /// [`RenderCommandEncoder::set_vertex_sampler_state`]'s encoding.
+    pub(crate) fn set_vertex_sampler_state(
         &mut self,
         sampler: Option<&SamplerState>,
         index: u32,
@@ -2111,11 +2948,8 @@ impl RenderCommandEncoder {
         )
     }
 
-    /// `setVertexSamplerStates:withRange:`, or with `clamps` (minimums and maximums)
-    /// `setVertexSamplerStates:lodMinClamps:lodMaxClamps:withRange:`. Refused as
-    /// [`RenderCommandEncoder::set_vertex_sampler_state`] is, and when the slices' lengths differ;
-    /// a refusal binds none of them.
-    pub fn set_vertex_sampler_states(
+    /// [`RenderCommandEncoder::set_vertex_sampler_states`]'s encoding.
+    pub(crate) fn set_vertex_sampler_states(
         &mut self,
         samplers: &[Option<&SamplerState>],
         clamps: Option<(&[f32], &[f32])>,
@@ -2131,9 +2965,8 @@ impl RenderCommandEncoder {
         )
     }
 
-    /// `setFragmentBuffer:offset:atIndex:` (`None` unbinds the index). Refused as
-    /// [`RenderCommandEncoder::set_vertex_buffer`] is.
-    pub fn set_fragment_buffer(
+    /// [`RenderCommandEncoder::set_fragment_buffer`]'s encoding.
+    pub(crate) fn set_fragment_buffer(
         &mut self,
         buffer: Option<&Buffer>,
         offset: u64,
@@ -2147,9 +2980,8 @@ impl RenderCommandEncoder {
             .set_buffer(&mut self.core, "set_fragment_buffer", buffer, offset, index)
     }
 
-    /// `setFragmentBuffers:offsets:withRange:`. Refused as
-    /// [`RenderCommandEncoder::set_vertex_buffers`] is.
-    pub fn set_fragment_buffers(
+    /// [`RenderCommandEncoder::set_fragment_buffers`]'s encoding.
+    pub(crate) fn set_fragment_buffers(
         &mut self,
         buffers: &[Option<&Buffer>],
         offsets: &[u64],
@@ -2172,26 +3004,26 @@ impl RenderCommandEncoder {
         )
     }
 
-    /// `setFragmentBufferOffset:atIndex:`. Refused as
-    /// [`RenderCommandEncoder::set_vertex_buffer_offset`] is.
-    pub fn set_fragment_buffer_offset(&mut self, offset: u64, index: u32) -> Result<(), Error> {
+    /// [`RenderCommandEncoder::set_fragment_buffer_offset`]'s encoding.
+    pub(crate) fn set_fragment_buffer_offset(
+        &mut self,
+        offset: u64,
+        index: u32,
+    ) -> Result<(), Error> {
         self.log(|_| RenderCall::BufferOffset(Table::Fragment, offset, index));
         self.fragment
             .set_buffer_offset(&mut self.core, "set_fragment_buffer_offset", offset, index)
     }
 
-    /// `setFragmentBytes:length:atIndex:`: as
-    /// [`set_vertex_bytes`](Self::set_vertex_bytes), in the fragment stage's table. Refused as
-    /// that is.
-    pub fn set_fragment_bytes(&mut self, bytes: &[u8], index: u32) -> Result<(), Error> {
+    /// [`RenderCommandEncoder::set_fragment_bytes`]'s encoding.
+    pub(crate) fn set_fragment_bytes(&mut self, bytes: &[u8], index: u32) -> Result<(), Error> {
         self.log(|log| RenderCall::Bytes(Table::Fragment, log.byte_span(bytes), index));
         self.fragment
             .set_bytes(&mut self.core, "set_fragment_bytes", bytes, None, index)
     }
 
-    /// `setFragmentTexture:atIndex:` (`None` unbinds the index). Refused as
-    /// [`RenderCommandEncoder::set_vertex_texture`] is.
-    pub fn set_fragment_texture(
+    /// [`RenderCommandEncoder::set_fragment_texture`]'s encoding.
+    pub(crate) fn set_fragment_texture(
         &mut self,
         texture: Option<&Texture>,
         index: u32,
@@ -2204,9 +3036,8 @@ impl RenderCommandEncoder {
             .set_textures(&mut self.core, "set_fragment_texture", &[texture], index)
     }
 
-    /// `setFragmentTextures:withRange:`. Refused as
-    /// [`RenderCommandEncoder::set_vertex_textures`] is.
-    pub fn set_fragment_textures(
+    /// [`RenderCommandEncoder::set_fragment_textures`]'s encoding.
+    pub(crate) fn set_fragment_textures(
         &mut self,
         textures: &[Option<&Texture>],
         first: u32,
@@ -2216,9 +3047,8 @@ impl RenderCommandEncoder {
             .set_textures(&mut self.core, "set_fragment_textures", textures, first)
     }
 
-    /// `setFragmentSamplerState:atIndex:` (`None` unbinds the index). Refused as
-    /// [`RenderCommandEncoder::set_vertex_sampler_state`] is.
-    pub fn set_fragment_sampler_state(
+    /// [`RenderCommandEncoder::set_fragment_sampler_state`]'s encoding.
+    pub(crate) fn set_fragment_sampler_state(
         &mut self,
         sampler: Option<&SamplerState>,
         index: u32,
@@ -2236,10 +3066,8 @@ impl RenderCommandEncoder {
         )
     }
 
-    /// `setFragmentSamplerStates:withRange:`, or with `clamps`
-    /// `setFragmentSamplerStates:lodMinClamps:lodMaxClamps:withRange:`. Refused as
-    /// [`RenderCommandEncoder::set_vertex_sampler_states`] is.
-    pub fn set_fragment_sampler_states(
+    /// [`RenderCommandEncoder::set_fragment_sampler_states`]'s encoding.
+    pub(crate) fn set_fragment_sampler_states(
         &mut self,
         samplers: &[Option<&SamplerState>],
         clamps: Option<(&[f32], &[f32])>,
@@ -2255,15 +3083,12 @@ impl RenderCommandEncoder {
         )
     }
 
-    /// `setColorStoreAction:atIndex:`: the store action of color attachment `index`, which the
-    /// descriptor left `Unknown`. As plain Metal does where its validation stops the call (measured
-    /// on an M4): for an attachment without a texture, or over an action the descriptor knew,
-    /// nothing changes; a resolving action where nothing resolves resolves nothing
-    /// (`MultisampleResolve` keeps no sample, `StoreAndMultisampleResolve` stores them); and one
-    /// that does not resolve where a resolve texture is named leaves that texture untouched.
-    /// Refused (`Invalid`, measured): an index past the attachments, `Unknown` itself, and `Store`
-    /// or `StoreAndMultisampleResolve` for a memoryless attachment.
-    pub fn set_color_store_action(&mut self, action: StoreAction, index: u32) -> Result<(), Error> {
+    /// [`RenderCommandEncoder::set_color_store_action`]'s encoding.
+    pub(crate) fn set_color_store_action(
+        &mut self,
+        action: StoreAction,
+        index: u32,
+    ) -> Result<(), Error> {
         self.log(|_| RenderCall::ColorStoreAction(action, index));
         const CALL: &str = "set_color_store_action";
         check_index(CALL, index, MAX_COLOR_ATTACHMENTS as u32)?;
@@ -2298,34 +3123,20 @@ impl RenderCommandEncoder {
         Ok(())
     }
 
-    /// `setDepthStoreAction:`: the depth attachment's store action, which the descriptor left
-    /// `Unknown`; without a depth attachment nothing changes, as plain Metal does where its
-    /// validation stops the call (measured on an M4); one that does not resolve where a resolve
-    /// texture is named leaves that texture untouched and stores the depth by the action, as plain
-    /// Metal does where its validation stops it. Refused (`Invalid`, measured):
-    /// an action over one the descriptor knew, `Unknown` itself, a resolving action without a
-    /// resolve texture, `Store` for a memoryless attachment, and `Store` where the stencil
-    /// attachment is the same texture resolved by `MultisampleResolve`.
-    pub fn set_depth_store_action(&mut self, action: StoreAction) -> Result<(), Error> {
+    /// [`RenderCommandEncoder::set_depth_store_action`]'s encoding.
+    pub(crate) fn set_depth_store_action(&mut self, action: StoreAction) -> Result<(), Error> {
         self.log(|_| RenderCall::DepthStoreAction(action));
         self.set_aspect_store_action("set_depth_store_action", Attachment::Depth, action)
     }
 
-    /// `setStencilStoreAction:`: the stencil attachment's store action, which the descriptor
-    /// left `Unknown`. Refused as [`RenderCommandEncoder::set_depth_store_action`] is, but for
-    /// the last: here `MultisampleResolve` where the depth attachment is the same texture,
-    /// stored; and without a stencil attachment (unmeasured).
-    pub fn set_stencil_store_action(&mut self, action: StoreAction) -> Result<(), Error> {
+    /// [`RenderCommandEncoder::set_stencil_store_action`]'s encoding.
+    pub(crate) fn set_stencil_store_action(&mut self, action: StoreAction) -> Result<(), Error> {
         self.log(|_| RenderCall::StencilStoreAction(action));
         self.set_aspect_store_action("set_stencil_store_action", Attachment::Stencil, action)
     }
 
-    /// `setColorStoreActionOptions:atIndex:`: the color attachment's store action options, which
-    /// change nothing, as plain Metal's: Apple's GPUs ignore them, and plain Metal takes them over
-    /// a store action the descriptor knew and under one that keeps no samples, where its validation
-    /// stops them (measured on an M4, `sample_positions.rs`). Refused (`Invalid`): an index past
-    /// the attachments and an attachment without a texture (unmeasured).
-    pub fn set_color_store_action_options(
+    /// [`RenderCommandEncoder::set_color_store_action_options`]'s encoding.
+    pub(crate) fn set_color_store_action_options(
         &mut self,
         _options: StoreActionOptions,
         index: u32,
@@ -2344,11 +3155,8 @@ impl RenderCommandEncoder {
         }
     }
 
-    /// `setDepthStoreActionOptions:`: the depth attachment's store action options, where the
-    /// descriptor left its store action `Unknown`; they change nothing, as plain Metal's (Metal
-    /// probe case `opt_depth_late` on an M4). Refused (`Invalid`, measured): an attachment without
-    /// a texture, and one whose descriptor knew its store action.
-    pub fn set_depth_store_action_options(
+    /// [`RenderCommandEncoder::set_depth_store_action_options`]'s encoding.
+    pub(crate) fn set_depth_store_action_options(
         &mut self,
         options: StoreActionOptions,
     ) -> Result<(), Error> {
@@ -2360,11 +3168,8 @@ impl RenderCommandEncoder {
         )
     }
 
-    /// `setStencilStoreActionOptions:`: the stencil attachment's store action options. Refused
-    /// as [`RenderCommandEncoder::set_depth_store_action_options`] is; `end_encoding` refuses
-    /// `CustomSamplePositions` under a store action that keeps no samples (unmeasured for a
-    /// stencil attachment, `sample_positions.rs`).
-    pub fn set_stencil_store_action_options(
+    /// [`RenderCommandEncoder::set_stencil_store_action_options`]'s encoding.
+    pub(crate) fn set_stencil_store_action_options(
         &mut self,
         options: StoreActionOptions,
     ) -> Result<(), Error> {
@@ -2491,70 +3296,48 @@ impl RenderCommandEncoder {
         Ok(())
     }
 
-    /// `setViewport:`. A NaN origin x draws nothing, as plain Metal's where its validation stops it
-    /// (measured on an M4). Refused (`Invalid`, measured): any other NaN or infinite field. A depth
-    /// range past `[0, 1]` is refused on a device that takes it neither natively nor by the vertex
-    /// stage's compensation: `NotImplemented` without the features, `Unsupported` on a driver that
-    /// draws the compensated depths inexactly (`render_state.rs`). A refused call keeps the
-    /// viewports set before.
-    pub fn set_viewport(&mut self, viewport: Viewport) -> Result<(), Error> {
+    /// [`RenderCommandEncoder::set_viewport`]'s encoding.
+    pub(crate) fn set_viewport(&mut self, viewport: Viewport) -> Result<(), Error> {
         self.log(|_| RenderCall::Viewport(Box::new(viewport)));
         let refused = render_state::depth_ranges_refused(self.core.device());
         self.state
             .set_viewports("set_viewport", &[viewport], refused)
     }
 
-    /// `setViewports:count:`. Refused as [`RenderCommandEncoder::set_viewport`] is, and for a
-    /// count outside 1 to 16 (measured). On a device without `multiViewport`, a draw that selects
-    /// among more than one viewport (its vertex function writes `[[viewport_array_index]]`, or an
-    /// amplification's mapping offsets the viewport) is refused at the draw,
-    /// `Unsupported(LayeredRendering)` needing the feature; with one it draws through it.
-    pub fn set_viewports(&mut self, viewports: &[Viewport]) -> Result<(), Error> {
+    /// [`RenderCommandEncoder::set_viewports`]'s encoding.
+    pub(crate) fn set_viewports(&mut self, viewports: &[Viewport]) -> Result<(), Error> {
         self.log(|_| RenderCall::Viewports(viewports.into()));
         let refused = render_state::depth_ranges_refused(self.core.device());
         self.state
             .set_viewports("set_viewports", viewports, refused)
     }
 
-    /// `setScissorRect:`. A rectangle past the render area is clipped to it, as plain Metal clips
-    /// it where its validation stops the call (measured on an M4).
-    pub fn set_scissor_rect(&mut self, rect: ScissorRect) -> Result<(), Error> {
+    /// [`RenderCommandEncoder::set_scissor_rect`]'s encoding.
+    pub(crate) fn set_scissor_rect(&mut self, rect: ScissorRect) -> Result<(), Error> {
         self.log(|_| RenderCall::ScissorRect(rect));
         self.state.set_scissors("set_scissor_rect", &[rect])
     }
 
-    /// `setScissorRects:count:`. Each rectangle is clipped to the render area as
-    /// [`RenderCommandEncoder::set_scissor_rect`] clips it, and more than 16 are taken, as plain
-    /// Metal takes them where its validation stops them (Metal probe case `scissors_17` on an M4).
-    /// Refused (`Invalid`): no rectangle (unmeasured). A draw whose pipeline selects no viewport
-    /// draws through the first; one that selects draws each viewport through the rectangle of its
-    /// index, one rectangle serving every viewport and a viewport past two or more drawing nothing,
-    /// as plain Metal draws them where its validation stops a count other than 1 and the viewport
-    /// count (probes).
-    pub fn set_scissor_rects(&mut self, rects: &[ScissorRect]) -> Result<(), Error> {
+    /// [`RenderCommandEncoder::set_scissor_rects`]'s encoding.
+    pub(crate) fn set_scissor_rects(&mut self, rects: &[ScissorRect]) -> Result<(), Error> {
         self.log(|_| RenderCall::ScissorRects(rects.into()));
         self.state.set_scissors("set_scissor_rects", rects)
     }
 
-    /// `setCullMode:`.
-    pub fn set_cull_mode(&mut self, mode: CullMode) {
+    /// [`RenderCommandEncoder::set_cull_mode`]'s encoding.
+    pub(crate) fn set_cull_mode(&mut self, mode: CullMode) {
         self.log(|_| RenderCall::CullMode(mode));
         self.state.set_cull_mode(mode);
     }
 
-    /// `setFrontFacingWinding:`.
-    pub fn set_front_facing_winding(&mut self, winding: Winding) {
+    /// [`RenderCommandEncoder::set_front_facing_winding`]'s encoding.
+    pub(crate) fn set_front_facing_winding(&mut self, winding: Winding) {
         self.log(|_| RenderCall::FrontFacingWinding(winding));
         self.state.set_winding(winding);
     }
 
-    /// `setDepthStencilState:`: `state` is a `&DepthStencilState`, or `None` for nil, which
-    /// makes the encoder's state Metal's default again (a depth compare of `Always` without
-    /// writes, and no stencil test), as plain Metal draws after nil where its validation stops
-    /// it. Refused: a state of another device. A draw refuses a state that
-    /// writes depth in a pass without a depth attachment, or uses the stencil in one without a
-    /// stencil attachment (measured).
-    pub fn set_depth_stencil_state<'a>(
+    /// [`RenderCommandEncoder::set_depth_stencil_state`]'s encoding.
+    pub(crate) fn set_depth_stencil_state<'a>(
         &mut self,
         state: impl Into<Option<&'a DepthStencilState>>,
     ) -> Result<(), Error> {
@@ -2572,29 +3355,20 @@ impl RenderCommandEncoder {
         Ok(())
     }
 
-    /// `setStencilReferenceValue:`: both faces' reference, saturated at 255 as Metal's is
-    /// (measured).
-    pub fn set_stencil_reference_value(&mut self, value: u32) {
+    /// [`RenderCommandEncoder::set_stencil_reference_value`]'s encoding.
+    pub(crate) fn set_stencil_reference_value(&mut self, value: u32) {
         self.log(|_| RenderCall::StencilReferenceValue(value));
         self.state.set_stencil_references(value, value);
     }
 
-    /// `setStencilFrontReferenceValue:backReferenceValue:`, saturated at 255 as Metal's are.
-    pub fn set_stencil_reference_values(&mut self, front: u32, back: u32) {
+    /// [`RenderCommandEncoder::set_stencil_reference_values`]'s encoding.
+    pub(crate) fn set_stencil_reference_values(&mut self, front: u32, back: u32) {
         self.log(|_| RenderCall::StencilReferenceValues(front, back));
         self.state.set_stencil_references(front, back);
     }
 
-    /// `setDepthBias:slopeScale:clamp:`. NaN and infinite factors give Metal's measured depths: a
-    /// NaN constant biases as +inf; an unbounded infinite or NaN bias saturates the depth (at 1 or
-    /// 0, in depth clamp mode at the viewport's larger or smaller depth); a NaN or infinite clamp
-    /// clamps nothing; a clamp that bounds an infinite or NaN bias adds itself to the depth.
-    /// Refused `NotImplemented(NonFiniteDepthBias)`: factors whose effect differs between flat and
-    /// sloped triangles (an infinite slope factor against an unbounded or opposite clamp, or
-    /// against the opposite infinite constant); and at a draw of triangles, a clamp's addition that
-    /// moves a viewport's depth range past `[0, 1]` or that depth clamp mode bounds. A draw refuses
-    /// a clamp other than 0 on a device without `depthBiasClamp` (`Unsupported`).
-    pub fn set_depth_bias(
+    /// [`RenderCommandEncoder::set_depth_bias`]'s encoding.
+    pub(crate) fn set_depth_bias(
         &mut self,
         depth_bias: f32,
         slope_scale: f32,
@@ -2604,36 +3378,28 @@ impl RenderCommandEncoder {
         self.state.set_depth_bias(depth_bias, slope_scale, clamp)
     }
 
-    /// `setDepthClipMode:`. `Clamp` needs `depthClamp` (`Unsupported`).
-    pub fn set_depth_clip_mode(&mut self, mode: DepthClipMode) -> Result<(), Error> {
+    /// [`RenderCommandEncoder::set_depth_clip_mode`]'s encoding.
+    pub(crate) fn set_depth_clip_mode(&mut self, mode: DepthClipMode) -> Result<(), Error> {
         self.log(|_| RenderCall::DepthClipMode(mode));
         let profile = self.core.device().compile_device().profile();
         self.state.set_clip_mode(mode, profile)
     }
 
-    /// `setTriangleFillMode:`. `Lines` needs `fillModeNonSolid` (`Unsupported`).
-    pub fn set_triangle_fill_mode(&mut self, mode: TriangleFillMode) -> Result<(), Error> {
+    /// [`RenderCommandEncoder::set_triangle_fill_mode`]'s encoding.
+    pub(crate) fn set_triangle_fill_mode(&mut self, mode: TriangleFillMode) -> Result<(), Error> {
         self.log(|_| RenderCall::TriangleFillMode(mode));
         let profile = self.core.device().compile_device().profile();
         self.state.set_fill_mode(mode, profile)
     }
 
-    /// `setBlendColorRed:green:blue:alpha:`.
-    pub fn set_blend_color(&mut self, red: f32, green: f32, blue: f32, alpha: f32) {
+    /// [`RenderCommandEncoder::set_blend_color`]'s encoding.
+    pub(crate) fn set_blend_color(&mut self, red: f32, green: f32, blue: f32, alpha: f32) {
         self.log(|_| RenderCall::BlendColor([red, green, blue, alpha]));
         self.state.set_blend_color([red, green, blue, alpha]);
     }
 
-    /// `setTessellationFactorBuffer:offset:instanceStride:` (`tessellation.rs`): the factors a
-    /// patch draw reads, `None` for `nil`, from the offset rounded down to a multiple of 2, each
-    /// instance's at the instance stride rounded down to a multiple of 4: Metal's validation stops
-    /// an offset or a stride that is not a multiple of 4, but plain Metal reads an offset of 2 at
-    /// that byte (Metal probe case `factor_offset_2` on an M4), an odd one from the byte below (1
-    /// read from 0, 3 from 2, 7 from 6), and steps the instances by a stride rounded down to a
-    /// multiple of 4 (Metal probes: strides 2 and 14 drew what 0 and 12 draw, 6 and 10 what 4 and 8
-    /// draw: 13 and 15 what 12 draws, 17 and 19 what 16 draws). Refused (`Invalid`) for a buffer of
-    /// another device, keeping the buffer set before.
-    pub fn set_tessellation_factor_buffer(
+    /// [`RenderCommandEncoder::set_tessellation_factor_buffer`]'s encoding.
+    pub(crate) fn set_tessellation_factor_buffer(
         &mut self,
         buffer: Option<&Buffer>,
         offset: u64,
@@ -2654,26 +3420,14 @@ impl RenderCommandEncoder {
         Ok(())
     }
 
-    /// `setTessellationFactorScale:` (`tessellation.rs`), which a pipeline that enables
-    /// `tessellationFactorScaleEnabled` multiplies its factors by, rounded to `half` as Metal
-    /// rounds it (one infinite as a `half` takes the factors to the maximum, and one that is 0,
-    /// negative or NaN as a `half` culls every patch; and a Metal probe
-    /// on an M4). Every scale is taken, as plain Metal takes those its validation stops (0, a
-    /// negative one, NaN, an infinity and a subnormal `float`; Metal probes on an M4): each culls
-    /// or draws as its `half` does under a pipeline that enables the scale, and a pipeline that
-    /// does not draws as before.
-    pub fn set_tessellation_factor_scale(&mut self, scale: f32) {
+    /// [`RenderCommandEncoder::set_tessellation_factor_scale`]'s encoding.
+    pub(crate) fn set_tessellation_factor_scale(&mut self, scale: f32) {
         self.log(|_| RenderCall::TessellationFactorScale(scale));
         self.factors.scale = Some(scale);
     }
 
-    /// `setVertexAmplificationCount:viewMappings:` (`amplification.rs`): each later draw
-    /// processes its vertices `count` times, amplification `a` offset by `view_mappings[a]`
-    /// (`None` for `nil`, offsets of 0). Refused (`Invalid`): fewer mappings than `count`. A
-    /// draw draws a count above its pipeline's `maxVertexAmplificationCount` as plain Metal does
-    /// where its validation stops it, and refuses one above a maximum of 1 or above 8
-    /// (`DrawProblem::AmplificationCount`); a refused call keeps the amplification set before.
-    pub fn set_vertex_amplification_count(
+    /// [`RenderCommandEncoder::set_vertex_amplification_count`]'s encoding.
+    pub(crate) fn set_vertex_amplification_count(
         &mut self,
         count: u64,
         view_mappings: Option<&[VertexAmplificationViewMapping]>,
@@ -2684,10 +3438,8 @@ impl RenderCommandEncoder {
         Ok(())
     }
 
-    /// `drawPrimitives:vertexStart:vertexCount:instanceCount:baseInstance:` (Metal's shorter
-    /// forms take one instance and a base instance of 0). A draw of no vertices or no instances
-    /// records nothing (the module docs). Refused as the module docs say.
-    pub fn draw_primitives(
+    /// [`RenderCommandEncoder::draw_primitives`]'s encoding.
+    pub(crate) fn draw_primitives(
         &mut self,
         primitive_type: PrimitiveType,
         vertex_start: u32,
@@ -2717,14 +3469,8 @@ impl RenderCommandEncoder {
         self.draw(CALL, assembly, draw, buffers, empty)
     }
 
-    /// `drawIndexedPrimitives:indexCount:indexType:indexBuffer:indexBufferOffset:instanceCount:
-    /// baseVertex:baseInstance:` (Metal's shorter forms take one instance and a base vertex and
-    /// instance of 0). Index positions past the buffer's length draw as the module docs say, and
-    /// the indices are read from the offset's low 32 bits rounded down to a multiple of the index
-    /// size, as plain Metal reads them (an M4 read an offset of 2^32 + 16 into a buffer past 4 GiB
-    /// at 16). A draw of no indices or no instances records nothing. Refused as the
-    /// module docs say, and for an index buffer of another device.
-    pub fn draw_indexed_primitives(
+    /// [`RenderCommandEncoder::draw_indexed_primitives`]'s encoding.
+    pub(crate) fn draw_indexed_primitives(
         &mut self,
         primitive_type: PrimitiveType,
         index_count: u32,
@@ -2809,10 +3555,8 @@ impl RenderCommandEncoder {
         self.draw(call, assembly, draw, buffers, empty)
     }
 
-    /// `drawPrimitives:indirectBuffer:indirectBufferOffset:`: Metal's
-    /// `MTLDrawPrimitivesIndirectArguments` at `indirect_buffer_offset`. Refused as the module
-    /// docs say, and for an indirect buffer of another device.
-    pub fn draw_primitives_indirect(
+    /// [`RenderCommandEncoder::draw_primitives_indirect`]'s encoding.
+    pub(crate) fn draw_primitives_indirect(
         &mut self,
         primitive_type: PrimitiveType,
         indirect_buffer: &Buffer,
@@ -2843,13 +3587,8 @@ impl RenderCommandEncoder {
         self.draw(CALL, assembly, draw, buffers, false)
     }
 
-    /// `drawIndexedPrimitives:indexType:indexBuffer:indexBufferOffset:indirectBuffer:
-    /// indirectBufferOffset:`: Metal's `MTLDrawIndexedPrimitivesIndirectArguments` at
-    /// `indirect_buffer_offset`, drawing `index_type` indices of `index_buffer` from
-    /// `index_buffer_offset`, those past the buffer's length as the module docs say, each offset
-    /// rounded down as the direct draws' are. Refused as the module docs say, and for buffers of
-    /// another device.
-    pub fn draw_indexed_primitives_indirect(
+    /// [`RenderCommandEncoder::draw_indexed_primitives_indirect`]'s encoding.
+    pub(crate) fn draw_indexed_primitives_indirect(
         &mut self,
         primitive_type: PrimitiveType,
         index_type: IndexType,
@@ -2941,18 +3680,8 @@ impl RenderCommandEncoder {
         self.draw(CALL, assembly, draw, buffers, false)
     }
 
-    /// `drawPatches:patchStart:patchCount:patchIndexBuffer:patchIndexBufferOffset:instanceCount:
-    /// baseInstance:` of a tessellation pipeline (`tessellation.rs`): `patch_count` patches of
-    /// `number_of_patch_control_points` control points from `patch_start`, `instance_count`
-    /// instances from `base_instance`, patch `i` the one the patch index buffer's `uint` at
-    /// `patch_start + i` names where one is given (its factors stay at `patch_start + i`), read
-    /// from its offset rounded down to a multiple of 4 as plain Metal reads it. A draw of no
-    /// patches or no instances records nothing; the draw's control points are its pipeline's where
-    /// its function states them, and a pipeline with a control-point index type reads every control
-    /// point's index as 0, as plain Metal draws them. Refused as the module docs say, for a patch
-    /// index buffer of another device, and as Metal's validation refuses it (`Invalid`, measured):
-    /// indices `patch_start + patch_count` past the buffer from the offset.
-    pub fn draw_patches(
+    /// [`RenderCommandEncoder::draw_patches`]'s encoding.
+    pub(crate) fn draw_patches(
         &mut self,
         number_of_patch_control_points: u32,
         patch_start: u32,
@@ -3038,16 +3767,8 @@ impl RenderCommandEncoder {
         self.draw(call, Assembly::Patches, draw, buffers, empty)
     }
 
-    /// `drawPatches:patchIndexBuffer:patchIndexBufferOffset:indirectBuffer:
-    /// indirectBufferOffset:` of a tessellation pipeline: Metal's `MTLDrawPatchIndirectArguments`
-    /// at `indirect_buffer_offset` (a `VkDrawIndirectCommand`'s layout). Refused as
-    /// [`RenderCommandEncoder::draw_patches`] and [`RenderCommandEncoder::draw_primitives_indirect`]
-    /// are, but for the patch indices past the buffer, whose count the arguments hold: a patch
-    /// whose index lies past the buffer's length reads patch index 0 (Metal reads memory past the
-    /// buffer there, which its validation does not check). A pipeline with a control-point index
-    /// type, which Metal's validation stops, reads every index as 0, as the direct draw does (a
-    /// Metal probe `cpi_plain_typed_indirect`).
-    pub fn draw_patches_indirect(
+    /// [`RenderCommandEncoder::draw_patches_indirect`]'s encoding.
+    pub(crate) fn draw_patches_indirect(
         &mut self,
         number_of_patch_control_points: u32,
         patch_index_buffer: Option<&Buffer>,
@@ -3091,20 +3812,8 @@ impl RenderCommandEncoder {
         self.draw(CALL, Assembly::Patches, draw, buffers, false)
     }
 
-    /// `drawIndexedPatches:patchStart:patchCount:patchIndexBuffer:patchIndexBufferOffset:
-    /// controlPointIndexBuffer:controlPointIndexBufferOffset:instanceCount:baseInstance:` of a
-    /// tessellation pipeline whose `tessellationControlPointIndexType` is not `None`: as
-    /// [`RenderCommandEncoder::draw_patches`], but control point `k` of the patch whose index is
-    /// `p` is the index (of the pipeline's type) at position `p · N + k` of the control-point index
-    /// buffer from its offset (measured), `N` the pipeline's control points where its function
-    /// states them, an offset that is not a multiple of the index size rounded down to one, as
-    /// plain Metal reads it, where its validation stops the draw. A pipeline whose type is `None`,
-    /// which Metal's validation stops, draws the patches' own control points, the buffer unread, as
-    /// plain Metal draws them (Metal probe case `indexed_without_type` on an M4). Refused as
-    /// `draw_patches` is, for a control-point index buffer of another device, and as Metal's
-    /// validation refuses it (`Invalid`, measured): `(patch_start + patch_count) · N` indices past
-    /// the buffer from the offset.
-    pub fn draw_indexed_patches(
+    /// [`RenderCommandEncoder::draw_indexed_patches`]'s encoding.
+    pub(crate) fn draw_indexed_patches(
         &mut self,
         number_of_patch_control_points: u32,
         patch_start: u32,
@@ -3169,17 +3878,8 @@ impl RenderCommandEncoder {
         )
     }
 
-    /// `drawIndexedPatches:patchIndexBuffer:patchIndexBufferOffset:controlPointIndexBuffer:
-    /// controlPointIndexBufferOffset:indirectBuffer:indirectBufferOffset:` of a tessellation
-    /// pipeline whose `tessellationControlPointIndexType` is not `None`: the arguments of
-    /// [`RenderCommandEncoder::draw_patches_indirect`], the control points of
-    /// [`RenderCommandEncoder::draw_indexed_patches`]. Refused as both are, but for the indices
-    /// past the buffers, whose counts the arguments hold: an index that lies past the buffer's
-    /// length reads 0 (Metal reads memory past the buffer there, which its validation does not
-    /// check). A pipeline without a control-point index type, which Metal's validation stops, draws
-    /// the patches' own control points, the buffer unread, as the direct draw does (a Metal probe
-    /// `cpi_indexed_untyped_indirect`).
-    pub fn draw_indexed_patches_indirect(
+    /// [`RenderCommandEncoder::draw_indexed_patches_indirect`]'s encoding.
+    pub(crate) fn draw_indexed_patches_indirect(
         &mut self,
         number_of_patch_control_points: u32,
         patch_index_buffer: Option<&Buffer>,
@@ -3359,18 +4059,8 @@ impl RenderCommandEncoder {
         Ok(offset)
     }
 
-    /// `setVisibilityResultMode:offset:` (`visibility.rs`). An offset that is not a multiple of 8
-    /// is rounded down to one, where plain Metal writes the result (measured on an M4). Refused
-    /// (`Invalid`, measured) for `Boolean` and `Counting`: a pass without a visibility result
-    /// buffer, an offset whose 8 bytes run past the buffer, an offset the encoder took before.
-    /// `Counting` is `Unsupported` where the device lacks `occlusionQueryPrecise`. A refused call
-    /// keeps the mode set before. While a mode other than `Disabled` is set, amplified draws draw
-    /// one amplification at a time, whose samples the one query counts as Metal's does
-    /// (`VertexAmplification::one_at_a_time`); a mode set after a draw amplified as views begins
-    /// its query in a new instance of the pass's layers, since a query in a multiview instance
-    /// takes one query per view. Where the device draws the pass's colors in groups, the first
-    /// group's pass counts the results (`render/color_groups.rs`).
-    pub fn set_visibility_result_mode(
+    /// [`RenderCommandEncoder::set_visibility_result_mode`]'s encoding.
+    pub(crate) fn set_visibility_result_mode(
         &mut self,
         mode: VisibilityResultMode,
         offset: u64,
@@ -3443,13 +4133,8 @@ impl RenderCommandEncoder {
         Ok(())
     }
 
-    /// `endEncoding`: begin the pass with its load and store operations, run the draws, and end it.
-    /// A store action still `Unknown` is `DontCare`, as plain Metal stores it where its validation
-    /// stops it: a color attachment's (measured on an M4), and a depth or stencil attachment's,
-    /// resolving or not; a resolve texture is left untouched, as plain Metal leaves it. The encoder
-    /// is consumed either way, so a refusal leaves its command buffer abandoned, as Metal stops
-    /// there.
-    pub fn end_encoding(self) -> Result<(), Error> {
+    /// [`RenderCommandEncoder::end_encoding`]'s encoding.
+    pub(crate) fn end_encoding(self) -> Result<(), Error> {
         // And the pass's later color groups, where it draws in groups (`render/color_groups.rs`).
         let (core, residency, log) = self.end_pass()?.with_later_groups()?;
         core.end_with_replay(
@@ -3473,8 +4158,8 @@ impl RenderCommandEncoder {
         command_buffer: &CommandBuffer,
         descriptor: &RenderPassDescriptor,
         residency: Residency,
-    ) -> Result<RenderCommandEncoder, Error> {
-        command_buffer.open_render(descriptor, Some(residency))
+    ) -> Result<RenderEncoding, Error> {
+        command_buffer.open_render(descriptor, OpenAs::Again(residency))
     }
 
     /// [`end_encoding`](Self::end_encoding)'s pass, all but its core's end and its later color
@@ -3508,7 +4193,7 @@ impl RenderCommandEncoder {
         // Whether a command of the pass may read an attachment's bytes it did not name.
         let unnamed_reads =
             self.barrier_inside || self.reaches_unnamed || !self.executions.is_empty();
-        let RenderCommandEncoder {
+        let RenderEncoding {
             mut core,
             mut earlier,
             current,
@@ -5169,20 +5854,14 @@ impl RenderCommandEncoder {
     }
 
     /// Whether an indexed indirect draw stays one indirect draw whose index fetch the device's
-    /// bound range bounds: the device enables `robustBufferAccess2`, and its driver is measured to
-    /// read zero past the bound index range (`DriverFact::RobustIndexFetchReadsZero`,
-    /// `device/driver_facts.rs`), which Vulkan leaves undefined. Elsewhere the index bounds pass
-    /// draws it (`index_bounds.rs`).
+    /// bound range bounds: the device enables `robustBufferAccess2`, and its driver reads zero
+    /// past the bound index range (`DriverFact::RobustIndexFetchReadsZero`, measured
+    /// `device/driver_facts.rs` or checked on the device, `device_checks`), which Vulkan leaves
+    /// undefined. Elsewhere the index bounds pass draws it (`index_bounds.rs`). Read once, as the
+    /// encoder is assembled ([`robust_index_fetch_of`]): a draw reads it more than once, and the
+    /// device's check may answer meanwhile (`Device::driver_fact`).
     fn robust_index_fetch(&self) -> bool {
-        let device = self.core.device();
-        device
-            .enabled()
-            .features
-            .contains(&VkFeature::RobustBufferAccess2)
-            && device
-                .properties()
-                .driver_facts
-                .contains(&DriverFact::RobustIndexFetchReadsZero)
+        self.robust_index_fetch
     }
 
     /// Bring `live`, the bind state the encoder's last draw bound, to the encoder's tables as a
@@ -6598,7 +7277,7 @@ impl RenderCommandEncoder {
         dropped
     }
 
-    /// Refuse `pipeline` for this pass in `call` as [`RenderCommandEncoder::set_render_pipeline_state`]
+    /// Refuse `pipeline` for this pass in `call` as [`RenderEncoding::set_render_pipeline_state`]
     /// says.
     fn check_pipeline(&self, call: &'static str, state: &RenderPipelineState) -> Result<(), Error> {
         let pipeline = match state.kind() {
@@ -7368,7 +8047,7 @@ impl RenderCommandEncoder {
         if colors > 1 && self.visibility.counting() {
             let defect = RuntimeDriverDefect::OcclusionCountPerColorOutput;
             let device = self.core.device();
-            if device.properties().driver_defects.contains(&defect) {
+            if device.driver_defect(defect) {
                 device.degrade(Degradation::VisibilityCountPerColor, || {
                     (
                         format!(
@@ -7636,7 +8315,7 @@ impl RenderCommandEncoder {
         // barrier wrote (`texture/attached_reads.rs`). An execution's command and a capture draw
         // read the attachment in place: neither takes a copy.
         // A draw that reads through snapshots reads no attachment's texture otherwise
-        // (`RenderCommandEncoder::snapshot_holds`), and stays in its instance: one recorded inline
+        // (`RenderEncoding::snapshot_holds`), and stays in its instance: one recorded inline
         // has begun its render pass instance with no color in the feedback loop layout, so the
         // draw records into a new one (`render/snapshot.rs`). So does a draw that binds a texture
         // the current instance holds in that layout as a storage image.
@@ -8248,6 +8927,9 @@ impl RenderCommandEncoder {
         let bound_each = device
             .binds_each(variant.objects().kinds())
             .then(|| variant.objects().tested_formats(&formats));
+        // A stage past the Function storage an unmeasured device is taken to hold is a risky
+        // path of its command buffer's (`device_checks/learned.rs`).
+        (self.core.command_buffer()).took(variant.objects().risks());
         // The draw's `VkPipeline`: made, or being made on the device's pool while the draw goes
         // on, where its recording can wait for it (`render/pending.rs`): not in an execution's
         // replay, whose host step records now, nor for a draw that records nothing, nor in a pass
@@ -8271,6 +8953,11 @@ impl RenderCommandEncoder {
                 (&pipeline, &formats),
             )?),
         };
+        // One being made leaves the notices of its key's own to a later draw
+        // (`device::unsettled`).
+        if matches!(draw_pipeline, DrawPipeline::Making(_)) {
+            crate::device::unsettled();
+        }
         // A capture draw's pipeline is made on the pool: until it is, the capture records
         // nothing.
         if capture.is_some() && matches!(draw_pipeline, DrawPipeline::Making(_)) {
@@ -8996,8 +9683,9 @@ impl RenderCommandEncoder {
                                 sets: set.as_slice(),
                                 pushed,
                                 push_descriptor: device.shared().push_descriptor,
-                                pushes_after_pipeline_binds: (device.shared())
-                                    .pushes_after_pipeline_binds,
+                                pushes_after_pipeline_binds: device.driver_defect(
+                                    RuntimeDriverDefect::PushedDescriptorsStaleAfterPipelineBinds,
+                                ),
                                 heap: heap_set,
                                 push,
                                 vertex_buffers,
@@ -9685,8 +10373,9 @@ struct Recording<'a> {
     /// command.
     pushed: &'a [binding::SetWrite],
     push_descriptor: Option<vk::PFN_vkCmdPushDescriptorSetKHR>,
-    /// After a pipeline bind the draw's push of set 0 carries at least one write
-    /// (`DeviceShared::pushes_after_pipeline_binds`).
+    /// After a pipeline bind the draw's push of set 0 carries at least one write, where the
+    /// device takes `RuntimeDriverDefect::PushedDescriptorsStaleAfterPipelineBinds` as the draw is
+    /// recorded (`render/bound.rs`).
     pushes_after_pipeline_binds: bool,
     /// Set 1, the command buffer's heap set of the variant, when the variant has one.
     heap: Option<vk::DescriptorSet>,
@@ -10224,7 +10913,7 @@ fn clears(layout: &PassLayout) -> bool {
 /// The extended-range colors of the pass `descriptor` describes, by index, whose `Clear` load
 /// leaves Metal's tile memory holding values the clear's stored codes do not read back
 /// (`ExtendedRange::clear_read_back`): a draw that reads or blends into one sees the codes, where
-/// Metal's sees the clear's halves (`RenderCommandEncoder::degrade_extended_range_blends`).
+/// Metal's sees the clear's halves (`RenderEncoding::degrade_extended_range_blends`).
 fn cleared_off_codes(descriptor: &RenderPassDescriptor) -> BTreeSet<u32> {
     (0u32..)
         .zip(&descriptor.color_attachments)

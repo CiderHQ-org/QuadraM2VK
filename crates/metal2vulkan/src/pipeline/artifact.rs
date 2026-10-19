@@ -1575,8 +1575,8 @@ pub enum PrecisionNote {
     /// `DenormPreserve` and `SignedZeroInfNanPreserve` for 16 bits, under which ANV and RADV
     /// round through the conversion exactly and record no note), under
     /// `HalfRoundingPolicy::Native` (the default): NVIDIA, whose driver folds the conversion's
-    /// round trip even under those controls (`DriverWorkaround::HalfConversionPairFolded`),
-    /// lavapipe, and any device without them. Without them Vulkan leaves the conversion's
+    /// round trip, or keeps a NaN's payload through it, even under those controls
+    /// (`DriverWorkaround::HalfConversionPairFolded`), lavapipe, and any device without them. Without them Vulkan leaves the conversion's
     /// rounding mode and its 16-bit denormals to the device. The recorded
     /// bound, against Metal's `half(float)` (to nearest even on the half grid, half denormals kept,
     /// infinity from 65520 up, `0x7E00` for a NaN):

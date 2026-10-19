@@ -678,7 +678,11 @@ pub(super) fn blending_beside_scratch(
 }
 
 /// [`rects`]'s pipeline descriptor.
-fn rects_descriptor(device: &Device, pf: PixelFormat, blends: bool) -> RenderPipelineDescriptor {
+pub(super) fn rects_descriptor(
+    device: &Device,
+    pf: PixelFormat,
+    blends: bool,
+) -> RenderPipelineDescriptor {
     let ll = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/public/engine/tob_renders.ll");
     let library = device
         .new_library_with_air(&llvm_assemble(&ll).unwrap())

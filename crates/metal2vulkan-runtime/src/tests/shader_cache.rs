@@ -2,8 +2,8 @@
 //! processes, the cap, the sweep at creation, and the directory checks. Each test owns an empty
 //! directory it removes ([`Scratch`]); the entries are the driver's pipeline cache frames
 //! (`driver.rs`), whose decoder checks the identity and a checksum as the artifacts' does. The
-//! driver's own data, in the content directory, crosses builds but not device identities, and is
-//! not loaded past its restart size.
+//! driver's own data, in the build's directory, crosses neither builds nor device identities, and
+//! is not loaded past its restart size; a making's record is named by every input of its creation.
 
 use crate::error::{Error, Problem, ShaderCacheError};
 use crate::shader_cache::driver::{make, open, seal, Identity, Making, Records, Refusal};
@@ -268,7 +268,7 @@ fn the_cap_removes_the_least_recently_used_records_with_the_entries() {
         // Even ones are makings' records, odd ones the build's entries.
         let path = if n % 2 == 0 {
             store.write_record(&wanted, &framed).expect("a write");
-            store.directory().record_path(&wanted)
+            store.directory().entry_path(&wanted)
         } else {
             put(&store, &wanted, n, &payload);
             store.directory().entry_path(&wanted)
@@ -567,38 +567,44 @@ fn driver_frames_check_identity_checksum_and_vulkan_header() {
     assert_eq!(open(&one, &short), None, "a header shorter than Vulkan's");
 }
 
-/// A making's record is named by its description, the driver's identity (a driver update is
-/// another), the instance's layer settings and the device's profile, and by nothing of the
-/// build's: it lives in the content directory, where another build's store finds it.
-#[test]
-fn a_making_s_record_is_named_by_what_it_reads_and_crosses_builds() {
-    let records = |identity: Identity, settings: u8, profile: u8| Records {
+/// The records of a device of `build`, driver `identity`, layer settings `settings` and enables
+/// `enables` (each a filled digest).
+fn records(build: [u8; 32], identity: Identity, settings: u8, enables: u8) -> Records {
+    Records {
+        build,
         identity,
         settings: [settings; 32],
-        profile: [profile; 32],
-    };
+        enables: [enables; 32],
+    }
+}
+
+/// A making's record is named by its description, the build, the driver's identity (a driver
+/// update is another), the instance's layer settings and what the device enabled; it lies in the
+/// build's directory, where another build's store finds nothing.
+#[test]
+fn a_making_s_record_is_named_by_what_it_reads_and_its_build() {
     let making = || {
         Making::new("graphics")
             .words(&[1, 2, 3])
             .text(&(4u32, "five"))
     };
-    let base = records(identity(1), 1, 1).name(making());
+    let base = records(BUILD, identity(1), 1, 1).name(making());
     assert_eq!(
         base,
-        records(identity(1), 1, 1).name(making()),
+        records(BUILD, identity(1), 1, 1).name(making()),
         "a stable name"
     );
     for (other, why) in [
         (
-            records(identity(1), 1, 1).name(Making::new("compute").words(&[1, 2, 3])),
+            records(BUILD, identity(1), 1, 1).name(Making::new("compute").words(&[1, 2, 3])),
             "another kind",
         ),
         (
-            records(identity(1), 1, 1).name(Making::new("graphics").words(&[1, 2, 4])),
+            records(BUILD, identity(1), 1, 1).name(Making::new("graphics").words(&[1, 2, 4])),
             "other words",
         ),
         (
-            records(identity(1), 1, 1).name(
+            records(BUILD, identity(1), 1, 1).name(
                 Making::new("graphics")
                     .words(&[1, 2, 3])
                     .text(&(4u32, "six")),
@@ -606,14 +612,21 @@ fn a_making_s_record_is_named_by_what_it_reads_and_crosses_builds() {
             "another state",
         ),
         (
-            records(Identity::new(0x1002, 1, 8, [1; 16]), 1, 1).name(making()),
+            records(OTHER_BUILD, identity(1), 1, 1).name(making()),
+            "another build",
+        ),
+        (
+            records(BUILD, Identity::new(0x1002, 1, 8, [1; 16]), 1, 1).name(making()),
             "another driver version",
         ),
         (
-            records(identity(1), 2, 1).name(making()),
+            records(BUILD, identity(1), 2, 1).name(making()),
             "other layer settings",
         ),
-        (records(identity(1), 1, 2).name(making()), "another profile"),
+        (
+            records(BUILD, identity(1), 1, 2).name(making()),
+            "other enables",
+        ),
     ] {
         assert_ne!(other, base, "{why}");
     }
@@ -623,10 +636,158 @@ fn a_making_s_record_is_named_by_what_it_reads_and_crosses_builds() {
         .write_record(&base, &seal(&one, &data(1, b"payload")))
         .expect("a write");
     let other = store(scratch.path(), OTHER_BUILD, 1 << 20);
-    let found = other.load_content(&base, |bytes| {
+    let found = other.load_record(&base, |bytes| {
         open(&one, &bytes).map(|at| bytes[at].to_vec())
     });
-    assert_eq!(found, Lookup::Hit(data(1, b"payload")));
+    assert_eq!(found, Lookup::Absent, "another build's store reads nothing");
+}
+
+/// A compute making's record is named by every input of its `vkCreateComputePipelines` call:
+/// two makings that differ in any one of them, of the variant's content (its SPIR-V, layout,
+/// stage, entry point, stage flags and required subgroup size) or of the making's own state (the
+/// module's stage and entry point, the specialization's map and data, the stage flags, the
+/// required subgroup size, whether it is indirect-bindable) or of the device (build, driver,
+/// layer settings, enables), name two records.
+#[test]
+fn a_compute_making_s_record_is_named_by_every_input_of_its_creation() {
+    use crate::pipeline::objects::{compute_making, variant_content, StagePart};
+    use metal2vulkan::cache::SpecializationKey;
+    use metal2vulkan::pipeline::{PipelineLayout, SpecializationLayout};
+    use metal2vulkan::vk::{
+        PipelineShaderStageCreateFlags as StageFlags, ShaderStage, SpecializationMapEntry,
+    };
+    use std::collections::BTreeSet;
+    use std::ffi::CStr;
+
+    /// One making's inputs.
+    #[derive(Clone)]
+    struct Inputs {
+        words: [u8; 32],
+        layout: PipelineLayout,
+        stage: ShaderStage,
+        entry_point: &'static str,
+        stage_flags: StageFlags,
+        required_subgroup_size: Option<u32>,
+        module_stage: vk::ShaderStageFlags,
+        entry: &'static CStr,
+        specialization: SpecializationKey,
+        flags: vk::PipelineShaderStageCreateFlags,
+        subgroup: Option<u32>,
+        bindable: bool,
+        records: (u8, u8, u8, u8),
+    }
+    let specialization = SpecializationLayout::default();
+    let name = |i: &Inputs| {
+        let content = variant_content(
+            &i.layout,
+            [StagePart {
+                stage: i.stage,
+                entry_point: i.entry_point,
+                stage_flags: i.stage_flags,
+                required_subgroup_size: i.required_subgroup_size,
+                specialization: &specialization,
+                words: &i.words,
+            }],
+        );
+        let (build, driver, settings, enables) = i.records;
+        records([build; 32], identity(u32::from(driver)), settings, enables).name(compute_making(
+            &content,
+            (i.module_stage, i.entry),
+            (&i.specialization, i.flags, i.subgroup),
+            i.bindable,
+        ))
+    };
+    let mut key = SpecializationKey::new();
+    key.entries.push(SpecializationMapEntry {
+        constant_id: 0,
+        offset: 0,
+        size: 4,
+    });
+    key.data = 8u32.to_le_bytes().to_vec();
+    let base = Inputs {
+        words: [1; 32],
+        layout: PipelineLayout::default(),
+        stage: ShaderStage::COMPUTE,
+        entry_point: "main",
+        stage_flags: StageFlags::empty(),
+        required_subgroup_size: None,
+        module_stage: vk::ShaderStageFlags::COMPUTE,
+        entry: c"main",
+        specialization: key.clone(),
+        flags: vk::PipelineShaderStageCreateFlags::empty(),
+        subgroup: None,
+        bindable: false,
+        records: (1, 1, 1, 1),
+    };
+    let with = |change: &dyn Fn(&mut Inputs)| {
+        let mut inputs = base.clone();
+        change(&mut inputs);
+        inputs
+    };
+    let other_data = {
+        let mut key = key.clone();
+        key.data = 16u32.to_le_bytes().to_vec();
+        key
+    };
+    let other_map = {
+        let mut key = key.clone();
+        key.entries[0].constant_id = 1;
+        key
+    };
+    let makings = [
+        base.clone(),
+        with(&|i| i.words = [2; 32]),
+        with(&|i| i.layout.push_descriptor_eligible = true),
+        with(&|i| i.stage = ShaderStage::VERTEX),
+        with(&|i| i.entry_point = "other"),
+        with(&|i| i.stage_flags = StageFlags::REQUIRE_FULL_SUBGROUPS),
+        with(&|i| i.required_subgroup_size = Some(32)),
+        with(&|i| i.module_stage = vk::ShaderStageFlags::VERTEX),
+        with(&|i| i.entry = c"other"),
+        with(&|i| i.specialization = other_data.clone()),
+        with(&|i| i.specialization = other_map.clone()),
+        with(&|i| i.flags = vk::PipelineShaderStageCreateFlags::REQUIRE_FULL_SUBGROUPS),
+        with(&|i| i.subgroup = Some(32)),
+        with(&|i| i.bindable = true),
+        with(&|i| i.records.0 = 2),
+        with(&|i| i.records.1 = 2),
+        with(&|i| i.records.2 = 2),
+        with(&|i| i.records.3 = 2),
+    ];
+    let names: BTreeSet<String> = makings.iter().map(name).collect();
+    assert_eq!(
+        names.len(),
+        makings.len(),
+        "every input names its own record"
+    );
+    assert_eq!(name(&base), name(&base.clone()), "a stable name");
+}
+
+/// A making of a build finds the record an earlier making of the build wrote and loads its
+/// driver data; a making of another build over the same directory finds none and loads nothing,
+/// though its making reads the same, and writes its own.
+#[test]
+fn a_making_of_another_build_loads_none_of_an_earlier_build_s_data() {
+    let scratch = Scratch::new();
+    let loads = |store: &Store| store.counters.driver_loads.load(Ordering::Relaxed);
+    let saves = |store: &Store| store.counters.driver_saves.load(Ordering::Relaxed);
+    let first = store(scratch.path(), BUILD, 1 << 20);
+    made(&first, false, false);
+    assert_eq!((loads(&first), saves(&first)), (0, 1));
+    let same = store(scratch.path(), BUILD, 1 << 20);
+    made(&same, false, false);
+    assert_eq!(
+        loads(&same),
+        1,
+        "a making of the same build loads the record"
+    );
+    let other = store(scratch.path(), OTHER_BUILD, 1 << 20);
+    made(&other, false, false);
+    assert_eq!(
+        (loads(&other), saves(&other)),
+        (0, 1),
+        "a making of another build loads nothing and writes its own record"
+    );
 }
 
 /// A description's parts are each framed by their length: parts that join to the same bytes
@@ -652,13 +813,13 @@ fn a_record_of_another_device_is_refused_and_removed() {
     let one = identity(1);
     let store = store(scratch.path(), BUILD, 1 << 20);
     let name = name(&BUILD, 1);
-    let path = store.directory().record_path(&name);
+    let path = store.directory().entry_path(&name);
     for framed in [
         seal(&identity(2), &data(2, b"payload")),
         seal(&one, &data(2, b"payload")),
     ] {
         store.write_record(&name, &framed).expect("a write");
-        let found = store.load_content(&name, |bytes| open(&one, &bytes).map(|_| ()));
+        let found = store.load_record(&name, |bytes| open(&one, &bytes).map(|_| ()));
         assert_eq!(found, Lookup::Rejected);
         assert!(!path.exists(), "the refused record was removed");
     }
@@ -818,9 +979,10 @@ fn fake_driver() -> ash::Device {
 fn made(store: &Store, before: bool, after: bool) -> (Vec<&'static str>, vk::PipelineCache) {
     CALLS.with(|calls| calls.borrow_mut().clear());
     let records = Records {
+        build: *store.directory().build(),
         identity: identity(1),
         settings: [0; 32],
-        profile: NO_PROFILE,
+        enables: NO_PROFILE,
     };
     let created = Cell::new(false);
     let mut handed = None;

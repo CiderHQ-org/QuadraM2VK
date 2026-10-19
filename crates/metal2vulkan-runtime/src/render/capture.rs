@@ -43,7 +43,7 @@
 use super::bound::Bound;
 use super::reroute::Rerecord;
 use super::shadows::InstanceShadows;
-use super::{Assembly, Instance, InterlockedStorage, RenderCommandEncoder};
+use super::{Assembly, Instance, InterlockedStorage, RenderEncoding};
 use crate::attachmentless;
 use crate::binding::CommandUses;
 use crate::clear_reach::{DrawnArea, DrawnTiles, PassReach};
@@ -92,7 +92,7 @@ impl Keeping {
     }
 }
 
-/// A capture draw recording (`RenderCommandEncoder::draw_resident` in capture mode).
+/// A capture draw recording (`RenderEncoding::draw_resident` in capture mode).
 pub(super) struct Capturing {
     /// The device address of the draw's first record.
     pub(super) records: u64,
@@ -158,7 +158,7 @@ fn counts(draw: &DrawCall) -> Option<(u64, u64)> {
     }
 }
 
-/// The reach the pass's capture draws give (`RenderCommandEncoder::capture_reach`): the tile
+/// The reach the pass's capture draws give (`RenderEncoding::capture_reach`): the tile
 /// mask, recorded before the pass's other steps, in the scratch the command buffer holds.
 #[derive(Debug)]
 pub(super) struct CapturedReach {
@@ -181,7 +181,7 @@ struct Placed {
     culls: bool,
 }
 
-impl RenderCommandEncoder {
+impl RenderEncoding {
     /// Keep the draw just recorded (`call` of `assembly` and `draw`, its indices from `index`)
     /// for capture replay where the pass keeps its draws and `capturable` (the module docs);
     /// otherwise the pass keeps none from here on. A draw recorded again (a reroute's, or a
@@ -640,7 +640,7 @@ const CAPTURE_STAGES: vk::PipelineStageFlags2 = vk::PipelineStageFlags2::from_ra
         | vk::PipelineStageFlags2::COMPUTE_SHADER.as_raw(),
 );
 
-/// A pass's capture scratch and kernels (`RenderCommandEncoder::capture_steps`).
+/// A pass's capture scratch and kernels (`RenderEncoding::capture_steps`).
 struct CaptureSteps {
     scratch: crate::Buffer,
     /// The scratch's `VkBuffer`.

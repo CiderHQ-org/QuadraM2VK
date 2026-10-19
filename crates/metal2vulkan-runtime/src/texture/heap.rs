@@ -148,8 +148,9 @@
 use super::first_move::FirstMove;
 use super::heap_tiled::{
     metal_compresses_layout, metal_heap_layout, modelled_size, HeapLayout, HeapTiledCopies,
-    TiledLayout, Untiled, UNMEASURED_FORMAT,
+    TiledLayout, TiledStaging, Untiled, UNMEASURED_FORMAT,
 };
+use super::heap_tiled_words::{self, TiledWords};
 use super::heap_two_planes::{HeapPlaneCopies, TwoPlaneHeapLayout};
 use super::stand_in::StandIn;
 use super::{
@@ -292,8 +293,8 @@ impl HeapShadow {
     /// its bytes. The heap's bytes are the texels' truth: each encoder copies them into the
     /// image at its first use and back at its end (`shadow.rs`), so `replaceRegion` and
     /// `getBytes` reach them, laid out as [`heap_plane_layout`] says, a row of blocks a piece;
-    /// or, for a texture Metal tiles there (`ShadowTarget::Tiled`), as its tiles lay them out
-    /// (`TiledLayout::element`), an element a piece.
+    /// or, for a texture Metal tiles there (`ShadowTarget::Tiled`, `ShadowTarget::TiledWords`),
+    /// as its tiles lay them out (`TiledLayout::element`), an element a piece.
     fn pieces(
         &self,
         plan: &ImagePlan,
@@ -302,8 +303,7 @@ impl HeapShadow {
         mut each: impl FnMut(usize, usize, usize),
     ) -> Result<(), Error> {
         let [x, y, z] = region.origin.map(u64::from);
-        if let Some(ShadowTarget::Tiled { tiles, .. }) = self.copies.target() {
-            let tiled = &tiles.layout;
+        if let Some(tiled) = self.copies.target().and_then(ShadowTarget::tiled_layout) {
             let level = region.level as usize;
             let depth = tiled
                 .levels
@@ -2028,10 +2028,11 @@ impl Device {
     }
 
     /// The image of a texture of plan `p` laid out as `tiled` in a heap over host pages
-    /// (`AliasRoute::Tiled`): its optimal image with the runtime's free usage, in memory of its
-    /// own; `None` where that image takes no copies or has more than one sample, the texture's
-    /// answered bytes do not hold `tiled`, or the moves of its elements do not fit the device
-    /// (`HeapTiledCopies::fit`).
+    /// (`AliasRoute::Tiled`): its optimal image with the runtime's free usage, and the views its
+    /// moves take where they cost it nothing (`heap_tiled_words::with_views`, `Device::if_free`),
+    /// in memory of its own; `None` where that image takes no copies or has more than one sample,
+    /// the texture's answered bytes do not hold `tiled`, or the moves of its elements do not fit
+    /// the device (`HeapTiledCopies::fit`).
     fn tiled_heap_image(
         &self,
         call: &'static str,
@@ -2046,6 +2047,11 @@ impl Device {
         let (plan, _) = plan_texture_images(&p.layout, descriptor.image_usage(), false, &facts)
             .map_err(|refusal| image_error(call, refusal))?;
         let optimal = self.with_free_usage(plan, p.layout.texture_type)?;
+        let texture_type = p.layout.texture_type;
+        let optimal = match heap_tiled_words::with_views(self, &optimal, texture_type, &facts) {
+            Some(candidate) => self.if_free(optimal, candidate, texture_type)?,
+            None => optimal,
+        };
         let copies = ImageUsageFlags::TRANSFER_SRC | ImageUsageFlags::TRANSFER_DST;
         let (planes, tight_len) = heap_plane_layout(
             optimal.format,
@@ -2541,6 +2547,14 @@ impl Device {
     }
 }
 
+/// A tiled heap texture's moves, made before its image (`Device::heap_tiled_image`): through
+/// the image's views (`heap_tiled_words.rs`), or staged through its encoders' scratch
+/// (`heap_tiled_scratch.rs`).
+enum Tiled {
+    Words(Box<TiledWords>),
+    Staged(TiledStaging, Box<HeapTiledCopies>),
+}
+
 impl Device {
     /// The image of a heap's shadow of `plan` (`heap_shadow_image`, `heap_tiled_image`), of
     /// `identity`, its owner made by `owner`. Where its copies in write every aspect (`every`,
@@ -2732,9 +2746,11 @@ impl Device {
 
     /// The image of a heap texture on `AliasRoute::Tiled`: `image`'s plan in memory of its own,
     /// whose elements the encoders move from Metal's tiles, laid out as `tiled`, in the heap's
-    /// bytes (`bytes`) at `place` and back (`shadow.rs`, `heap_tiled.rs`); of an identity of its
-    /// own, of the heap's hazard tracking, and the heap's `options`, started by
-    /// [`new_heap_shadow`](Self::new_heap_shadow). Its drop gives the range back.
+    /// bytes (`bytes`) at `place` and back (`shadow.rs`, `heap_tiled.rs`): through its views where
+    /// its plan holds them and they fit the device (`heap_tiled_words.rs`, made once the image
+    /// is), else through staging; of an identity of its own, of the heap's hazard tracking, and
+    /// the heap's `options`, started by [`new_heap_shadow`](Self::new_heap_shadow). Its drop gives
+    /// the range back.
     fn heap_tiled_image(
         &self,
         bytes: &Buffer,
@@ -2765,11 +2781,20 @@ impl Device {
         let (raw, start) = bytes.at(place.offset);
         let buffer = ShadowBuffer::of(bytes, raw);
         let (heap_bytes, tracked) = bytes.tracked(place.offset..place.offset + tiled.size);
-        let hazard = options.hazard_tracking_mode()?;
-        let staging = HeapTiledCopies::staging(self, &tiled, start, hazard)?;
-        let shape = (&planes[..], tight_len);
-        let tiles = HeapTiledCopies::new(self, &staging, tiled, shape, &regions, hazard)?;
-        let tiles = Box::new(tiles);
+        let facts = self
+            .shared()
+            .textures
+            .facts(self.compile_device().profile());
+        let shaped = (&plan, layout.texture_type, &facts);
+        let target = match TiledWords::new(self, shaped, &tiled, start) {
+            Some(words) => Tiled::Words(Box::new(words)),
+            None => {
+                let staging = TiledStaging::of(&tiled, start);
+                let shape = (&planes[..], tight_len);
+                let tiles = HeapTiledCopies::new(self, tiled, shape, &regions)?;
+                Tiled::Staged(staging, Box::new(tiles))
+            }
+        };
         let shadow_range = UseRange::Image {
             aspects: image_aspects(plan.format).into(),
             levels: 0..plan.levels,
@@ -2781,33 +2806,46 @@ impl Device {
         };
         let mut own = *descriptor;
         own.resource_options = options;
-        self.new_heap_shadow(plan, layout, &own, identity, every, |placement, image| {
-            let copies = ShadowCopies {
-                source: ShadowSource::Bytes {
-                    buffer,
-                    key: heap_bytes.key,
-                    bytes: tracked,
-                    target: ShadowTarget::Tiled {
+        // The shadow's copies, kept here too: the moves' views are the image's, made once it is.
+        let mut made = None;
+        let image =
+            self.new_heap_shadow(plan, layout, &own, identity, every, |placement, image| {
+                let target = match target {
+                    Tiled::Words(words) => ShadowTarget::TiledWords { words },
+                    Tiled::Staged(staging, tiles) => ShadowTarget::Tiled {
                         image,
                         staging,
                         tiles,
                     },
-                    // A heap's bytes join no other memory (`host_aliases.rs`).
-                    alias: None,
-                },
-                shadow_key: identity.key,
-                shadow_range,
-                tracked: identity.tracked,
-                drops_writes: false,
-                backing: Backing::of(bytes, false),
-                merge_scratch: ScratchSpares::default(),
-            };
-            Owner::HeapShadow(Box::new(HeapShadow {
-                placement,
-                place,
-                copies: Arc::new(copies),
-            }))
-        })
+                };
+                let copies = Arc::new(ShadowCopies {
+                    source: ShadowSource::Bytes {
+                        buffer,
+                        key: heap_bytes.key,
+                        bytes: tracked,
+                        target,
+                        // A heap's bytes join no other memory (`host_aliases.rs`).
+                        alias: None,
+                    },
+                    shadow_key: identity.key,
+                    shadow_range,
+                    tracked: identity.tracked,
+                    drops_writes: false,
+                    backing: Backing::of(bytes, false),
+                    merge_scratch: ScratchSpares::default(),
+                });
+                made = Some(Arc::clone(&copies));
+                Owner::HeapShadow(Box::new(HeapShadow {
+                    placement,
+                    place,
+                    copies,
+                }))
+            })?;
+        if let Some(ShadowTarget::TiledWords { words, .. }) = made.as_ref().and_then(|c| c.target())
+        {
+            words.make_views(&image)?;
+        }
+        Ok(image)
     }
 
     /// Announces, once per device, the alias route a heap texture of `layout` took where it is

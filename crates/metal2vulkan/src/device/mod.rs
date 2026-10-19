@@ -41,6 +41,7 @@
 //! The frozen surface is the items named at this root; the submodules are crate-private.
 
 pub(crate) mod check;
+pub(crate) mod checks;
 pub(crate) mod derive;
 pub(crate) mod description;
 pub(crate) mod driver_facts;
@@ -48,6 +49,7 @@ pub(crate) mod enables;
 pub(crate) mod function_storage;
 pub(crate) mod gpus;
 pub(crate) mod khronos;
+pub(crate) mod listed;
 pub(crate) mod mechanism;
 pub(crate) mod metal;
 pub(crate) mod policy;
@@ -55,21 +57,26 @@ pub(crate) mod profile;
 pub(crate) mod requirements;
 pub(crate) mod subgroup;
 
+pub use checks::{
+    checked, decide, Baseline, CheckAnswer, CheckOf, CheckedFact, Decided, DeviceChecks,
+    DeviceFact, FactStatus, IfUnanswered, CHECKED,
+};
 pub use derive::{vk_stage, Device};
 pub use description::{
     AllocationLimits, DeviceDescription, FormatProperties, FormatSupport,
     GeneratedCommandsProperties, SubgroupProperties,
 };
-pub use driver_facts::{DriverDiagnostic, DriverFact};
+pub use driver_facts::{release_name, DriverDiagnostic, DriverFact};
 pub use enables::{EnableSet, Exposure};
+pub use listed::ListEvidence;
 // The mechanism derivation: internal; a pipeline states each mechanism in its `dependencies`.
 pub(crate) use mechanism::mechanism;
 pub use metal::{MetalDeviceProperties, SimdSupport, StageSimd};
 pub use policy::{
-    BatchOrderPolicy, CompletionPolicy, ContainmentPolicy, DecodedTexelsPolicy, DevicePolicy,
-    FloatMathsPolicy, HalfBlendPolicy, HalfRoundingPolicy, HeapCompressionPolicy, NanMinMaxPolicy,
-    ResolvePolicy, RoundingOrderPolicy, SamplingPolicy, TexelConversionPolicy, TileStorePolicy,
-    Unorm8LinearFilterPolicy, YCbCrFilterPolicy,
+    BatchOrderPolicy, CompletionPolicy, ContainmentPolicy, DecodedTexelsPolicy, DeviceChecksPolicy,
+    DevicePolicy, FloatMathsPolicy, HalfBlendPolicy, HalfRoundingPolicy, HeapCompressionPolicy,
+    NanMinMaxPolicy, ResolvePolicy, RoundingOrderPolicy, SamplingPolicy, TexelConversionPolicy,
+    TileStorePolicy, Unorm8LinearFilterPolicy, YCbCrFilterPolicy,
 };
 pub(crate) use profile::whole_point_size;
 pub use profile::{DeviceProfile, SpirvValidation};

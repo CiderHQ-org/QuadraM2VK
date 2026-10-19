@@ -210,8 +210,8 @@
 //! each dispatch's `SHADER_STORAGE_WRITE` → `SHADER_STORAGE_READ` before the next; the last →
 //! `TRANSFER_READ` before the copies back.
 
-mod fetch;
-mod kernel;
+pub(crate) mod fetch;
+pub(crate) mod kernel;
 mod layout;
 mod model;
 mod reciprocal;

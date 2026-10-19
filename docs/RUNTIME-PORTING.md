@@ -138,6 +138,7 @@ narrow refusal that the call's rustdoc describes.
 | `compute_encoder` | `computeCommandEncoder` | `CommandBuffer::compute_command_encoder` |
 | `device` | `device` | `CommandBuffer::device` |
 | `encode_signal` | `encodeSignalEvent:value:` | `CommandBuffer::encode_signal_event` |
+| `encode_signal_when_scheduled` | `encodeSignalEventScheduled:value:` (SPI) | `CommandBuffer::encode_signal_event_scheduled`: the shared event's value is set as the command buffer is scheduled, before it reads `Scheduled` and its scheduled handlers run; the batches waiting for it go in the scheduler's same pass |
 | `encode_wait` | `encodeWaitForEvent:value:` | `CommandBuffer::encode_wait_for_event` |
 | `error` | `error` | `CommandBuffer::error` |
 | `render_encoder` | `renderCommandEncoderWithDescriptor:` | `CommandBuffer::render_command_encoder` *(partial)* |
@@ -149,7 +150,7 @@ narrow refusal that the call's rustdoc describes.
 | `used_resources` | (none: a runtime extension) | `CommandBuffer::used_resources`: the buffers, textures and heaps its ended encoders' commands use, each as what owns its memory, until it completes; what `detach_backing` waits on |
 | `ended_encoders` | (none: a runtime extension) | `CommandBuffer::ended_encoders`: each ended encoder's kind, the event waits and signals before it, and what its own commands use; with `commit_failed`'s `FailedEncoders::Set`, what fails the one submission that uses a detached resource |
 | `add_submission_handler` | (none: a runtime extension) | `CommandBuffer::add_submission_handler`: a handler run once the command buffer's last batch reached its `VkQueue`, on the device's scheduler thread, which submitted it, before it is `Scheduled`; never for one that fails before |
-| `set_submission_check` | (none: a runtime extension) | `CommandBuffer::set_submission_check`: a check of each of Metal's submissions of the command buffer, run once its event waits are met, just before it is submitted; a code it answers fails that submission alone, as Metal fails one that uses a resource detached by then |
+| `set_submission_check` | (none: a runtime extension) | `CommandBuffer::set_submission_check`: a check of each of Metal's submissions of the command buffer, run as Metal schedules it (a `SharedEvent` wait once its value is reached, an `Event` wait once a signal of the value is submitted), just before it is submitted; a code it answers fails that submission alone, as Metal fails one that uses a resource detached by then |
 | `object_id` | (none: Metal names an object by pointer) | `Buffer::object_id`, `Texture::object_id`, `Heap::object_id`: an `ObjectId` unique for the object's life, never reused (a sparse heap's `gpu_address` is 0) |
 
 ### `ComputeCmd`: `MTLComputeCommandEncoder` commands
@@ -577,7 +578,6 @@ These items have no single runtime call. The consumer builds them from the calls
 | Item | How |
 |---|---|
 | `BlitCmd::CopyTextureRegionOptions` | options 0 is `BlitCommandEncoder::copy_from_texture_to_texture`; a public `BlitOption` goes through a buffer (`copy_from_texture_to_buffer`, then `copy_from_buffer_to_texture`) |
-| `CommandBuffer::encode_signal_when_scheduled` | `CommandBuffer::add_scheduled_handler`, whose handler calls `SharedEvent::set_signaled_value` |
 | `RateMap::reset` | a new map: `Device::new_rasterization_rate_map` |
 | `RenderCmd::SetDepthClipModeSpi` | the public `RenderCommandEncoder::set_depth_clip_mode` |
 | `RenderCmd::SetPrimitiveRestartEnabled` | `RenderCommandEncoder::set_primitive_restart_enabled`: indexed strips restart at the index as Metal takes it for their index type, and only there |

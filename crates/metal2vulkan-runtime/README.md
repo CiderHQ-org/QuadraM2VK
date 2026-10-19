@@ -135,14 +135,16 @@ Vulkan-side choices Metal has no counterpart for:
 | `withheld_features`, `withheld_extensions`, `withhold_generated_commands`, `withhold_view_reinterpretation` | Parts of the recommended enables to leave off; the device then compiles for what is enabled. |
 | `messages` | A `MessageSink` for the validation layer's messages and the runtime's notices; without one, notices go to stderr. |
 | `shader_cache` | Where translated shaders are kept, and how much. |
+| `device_checks` | Where the device keeps what its checks of its driver found, and the records of risky paths in use when a device of its setup was lost ([HOWTO](../../docs/HOWTO.md#the-devices-checks-of-its-driver)); its feature status as made is `DeviceProperties::feature_status`, announced once as `metal2vulkan-feature-status`, and as it stands `Device::feature_status`; checks left to the device's checks thread settle after the making, announced once as `metal2vulkan-feature-status-settled` (`wait` runs them all at the making); the command `metal2vulkan-gpu-report` (feature `gpu-report`) prints it. |
 | `gpu_times_from_host` | Answer command buffers' GPU times from the host clock, sparing two timestamps per command buffer. |
 | `announce_each` | Degradation kinds to announce at every occurrence instead of once. |
 | `metal_level` | The macOS release whose Metal the device answers as (the host's by default). |
 | `record_executions` | Keep, per command buffer, which pipeline each dispatch and draw ran (`CommandBuffer::executions`). Off by default. |
+| `encode_at_the_call` | Encode every render encoder at the call, with no resolver thread; by default the device captures render encoders whose calls it has answered before and encodes them on its resolver thread ([docs/API.md section 10](../../docs/API.md#10-accepted-differences), "Render encoders on the resolver"). Every call answers the same either way. |
 
 While a handle lives, equal options give the same device for a physical device, as Metal has one
 `MTLDevice` per GPU. Nothing is read from the environment but the platform's default cache
-directory.
+directory, for the shader cache and the device's checks.
 
 **Adopted from the consumer.** `unsafe Device::from_raw(RawDevice, DevicePolicy)` works on an
 instance and device the consumer made and keeps. `RawDevice` takes the `vkGetInstanceProcAddr`,
@@ -225,6 +227,9 @@ Calls Metal does not have, for a consumer that emulates a Metal device:
 - `RenderCommandEncoder::set_color_resolve_target`, `set_depth_resolve_target` and
   `set_stencil_resolve_target` change where a pass resolves until it ends (the last target set
   wins), as Metal's private calls do.
+- `CommandBuffer::encode_signal_event_scheduled` sets a shared event's value as the command buffer
+  is scheduled, as Metal's private `encodeSignalEventScheduled:value:` does: the command buffers
+  waiting for it go in the scheduler's same pass, with no handler thread woken.
 - `TextureDescriptor::address_mode_map` presents a texture as sampling by other address modes than
   its sampler's.
 - Resource ID reservations, placements and counts (`Device::reserve_resource_ids`,

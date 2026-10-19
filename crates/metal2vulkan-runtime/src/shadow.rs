@@ -139,7 +139,9 @@
 //!   as laid out and a tight one of the image's elements, the tiled texel kernel moving them
 //!   between the two. The rules above are the same; a command writing the bytes two ways merges as
 //!   a buffer's texture does, the shadow's elements copied out tiled, each other byte as the last
-//!   copy in left it.
+//!   copy in left it. Where the image takes an unsigned-integer view of its element's width that
+//!   stores, its copies, keeps and merges are dispatches through that view over the heap's bytes
+//!   themselves, with no staging ([`ShadowTarget::TiledWords`], `texture/heap_tiled_words.rs`).
 
 use super::buffer::{Buffer, CallerMemory, WeakBuffer};
 use super::error::{Error, RuntimeGap};
@@ -148,7 +150,9 @@ use super::rotated::{RotatedCopies, Turn};
 use super::row_copies::RowCopies;
 use super::shadow_copy_back::{CopyBack, WordView};
 use super::shadow_merge::{ScratchSpares, ShadowMerge};
-use super::texture::heap_tiled::HeapTiledCopies;
+use super::texture::heap_tiled::{HeapTiledCopies, TiledLayout, TiledStaging};
+use super::texture::heap_tiled_scratch::TiledScratch;
+use super::texture::heap_tiled_words::TiledWords;
 use super::texture::heap_two_planes::HeapPlaneCopies;
 use super::texture::Texture;
 use super::tracker::{Access, Barrier, Use, UseRange};
@@ -158,6 +162,7 @@ use super::ycbcr::{YCbCrConversion, YCbCrWriteBack};
 use super::Device;
 use crate::device::functions::Vk;
 use ash::vk;
+use metal2vulkan::bind::TiledWordsStep;
 use metal2vulkan::error::{Feature, Unsupported};
 use metal2vulkan::metal::PixelFormat;
 use std::ops::Range;
@@ -389,14 +394,32 @@ pub(super) enum ShadowTarget {
         /// The texture's format, which a refusal names.
         pixel_format: PixelFormat,
     },
-    /// A heap texture's image over host pages: `staging` holds its elements as Metal tiles them
-    /// in the heap's bytes, and `tiles` moves them to and from the image
-    /// (`texture/heap_tiled.rs`).
+    /// A heap texture's image over host pages: `staging` says where its elements lie as Metal
+    /// tiles them in the heap's bytes, and `tiles` moves them to and from the image through its
+    /// encoder's scratch, the copy's (`texture/heap_tiled.rs`, [`ShadowCopy::scratch`]).
     Tiled {
         image: vk::Image,
-        staging: ShadowStaging,
+        staging: TiledStaging,
         tiles: Box<HeapTiledCopies>,
     },
+    /// A heap texture's image over host pages whose elements Metal tiles in the heap's bytes,
+    /// moved through the image's unsigned-integer views (its own, which `words` holds) by `words`
+    /// (`texture/heap_tiled_words.rs`): its copies in and back are dispatches over the heap's
+    /// bytes, recorded over its `VkBuffer` as each is, and its keeps and merges are too
+    /// (`shadow_merge.rs`).
+    TiledWords { words: Box<TiledWords> },
+}
+
+impl ShadowTarget {
+    /// Metal's layout of a tiled heap texture's elements in the heap's bytes, of
+    /// [`ShadowTarget::Tiled`] or [`ShadowTarget::TiledWords`]; `None` for any other shadow.
+    pub(super) fn tiled_layout(&self) -> Option<&TiledLayout> {
+        match self {
+            ShadowTarget::Tiled { tiles, .. } => Some(&tiles.layout),
+            ShadowTarget::TiledWords { words, .. } => Some(&words.layout),
+            _ => None,
+        }
+    }
 }
 
 /// A shadowed texture's staging buffer (see the module): its bytes, from the first texel to the
@@ -653,8 +676,9 @@ impl ShadowCopies {
             }
             | ShadowTarget::Buffer(staging)
             | ShadowTarget::Rotated { staging, .. }
-            | ShadowTarget::Planes { staging, .. }
-            | ShadowTarget::Tiled { staging, .. } => Some(staging.into.src_offset),
+            | ShadowTarget::Planes { staging, .. } => Some(staging.into.src_offset),
+            ShadowTarget::Tiled { staging, .. } => Some(staging.at),
+            ShadowTarget::TiledWords { words, .. } => Some(words.first),
             // Slice 0's region starts at the first texel.
             ShadowTarget::Image { regions, .. } => {
                 Some(regions.first().map_or(0, |region| region.buffer_offset))
@@ -684,15 +708,12 @@ impl ShadowCopies {
             return;
         };
         match target {
-            ShadowTarget::Rotated { .. } | ShadowTarget::Planes { .. } => {}
-            ShadowTarget::Tiled {
-                image,
-                staging,
-                tiles,
-            } => {
-                // SAFETY: the caller's contract, which the tiles' record takes.
-                unsafe { tiles.record_out(device, command_buffer, *image, staging, (to, at)) };
-            }
+            // A tiled heap texture's merge moves its texels itself, through its views or its
+            // scratch (`ShadowMerge::new`).
+            ShadowTarget::Rotated { .. }
+            | ShadowTarget::Planes { .. }
+            | ShadowTarget::Tiled { .. }
+            | ShadowTarget::TiledWords { .. } => {}
             ShadowTarget::Image { image, regions, .. } => {
                 let origin = regions.first().map_or(0, |region| region.buffer_offset);
                 let moved: Vec<vk::BufferImageCopy> = regions
@@ -758,6 +779,10 @@ pub(super) struct ShadowCopy<M = Arc<ShadowMerge>> {
     pub(super) area: Option<[u32; 4]>,
     /// Why a copy in is made, as `WorkCounts` counts its texels; `None` for every other step.
     pub(super) cause: Option<CopyCause>,
+    /// The scratch a staged tiled heap texture's copy in or back goes through, its encoder's
+    /// (`texture/heap_tiled_scratch.rs`, given as the encoder plans or records it); `None` for any
+    /// other copy, and for a keep or merge, whose merge holds its own.
+    pub(super) scratch: Option<Arc<TiledScratch>>,
 }
 
 /// Why a copy in is made, as `WorkCounts` counts its texels.
@@ -985,9 +1010,15 @@ impl ShadowCopy {
             }
             | ShadowTarget::Buffer(staging)
             | ShadowTarget::Rotated { staging, .. }
-            | ShadowTarget::Planes { staging, .. }
-            | ShadowTarget::Tiled { staging, .. } => staging,
-            ShadowTarget::Image { staging: None, .. } => return None,
+            | ShadowTarget::Planes { staging, .. } => staging,
+            ShadowTarget::Tiled { staging, .. } => {
+                let scratch = self.scratch.as_ref()?;
+                let back = staging.back(scratch.staging_at());
+                return Some(RowCopies::new(device, scratch.raw(), buffer.raw(), back));
+            }
+            ShadowTarget::Image { staging: None, .. } | ShadowTarget::TiledWords { .. } => {
+                return None
+            }
         };
         let back = staging.back.clone();
         Some(RowCopies::new(device, staging.raw(), buffer.raw(), back))
@@ -1044,7 +1075,9 @@ impl ShadowCopy {
             );
         let converted = matches!(self.copies.source, ShadowSource::Converted { .. });
         let encoded = matches!(self.copies.source, ShadowSource::YCbCrWrite { .. });
+        let words = matches!(self.copies.target(), Some(ShadowTarget::TiledWords { .. }));
         match self.step {
+            Step::Into | Step::Back if words => vk::PipelineStageFlags2::COMPUTE_SHADER,
             Step::Merge(_) => {
                 vk::PipelineStageFlags2::TRANSFER | vk::PipelineStageFlags2::COMPUTE_SHADER
             }
@@ -1110,6 +1143,20 @@ impl ShadowCopy {
                 Step::Keep(_) | Step::Merge(_) => Vec::new(),
             };
         }
+        // A tiled heap texture's moves through its views are storage reads and writes of both.
+        let (read, write) = match c.target() {
+            Some(ShadowTarget::TiledWords { .. }) => (
+                Access::new(
+                    vk::PipelineStageFlags2::COMPUTE_SHADER,
+                    vk::AccessFlags2::SHADER_STORAGE_READ,
+                ),
+                Access::new(
+                    vk::PipelineStageFlags2::COMPUTE_SHADER,
+                    vk::AccessFlags2::SHADER_STORAGE_WRITE,
+                ),
+            ),
+            _ => (read, write),
+        };
         match &self.step {
             Step::Into => vec![
                 Use::reads(truth, c.tracked, range, read),
@@ -1326,18 +1373,39 @@ impl ShadowCopy {
                 }
                 return;
             }
+            ShadowTarget::TiledWords { words } => {
+                let step = match into_shadow {
+                    true => TiledWordsStep::In,
+                    false => TiledWordsStep::Back,
+                };
+                // SAFETY: the caller's contract, which the moves' record takes, over the buffer's
+                // `VkBuffer` now.
+                unsafe { words.record(device, command_buffer, (buffer, None), step) };
+                return;
+            }
             ShadowTarget::Tiled {
                 image,
                 staging,
                 tiles,
             } => {
-                // SAFETY: the caller's contract, which the tiles' record takes.
+                // Every staged tiled copy in or back is given its encoder's scratch as the
+                // encoder plans or records it (`EncoderCore::scratch_of`).
+                debug_assert!(
+                    self.scratch.is_some(),
+                    "a staged tiled copy without its scratch"
+                );
+                let Some(scratch) = &self.scratch else {
+                    return;
+                };
+                // SAFETY: the caller's contract, which the tiles' record takes; the scratch
+                // holds the texture's parts (`EncoderCore::scratch_of`) and the command
+                // buffer holds it until it completes.
                 unsafe {
                     tiles.record(
                         device,
                         command_buffer,
                         *image,
-                        (buffer, staging),
+                        (buffer, staging, scratch),
                         into_shadow,
                         back,
                     );
@@ -1894,6 +1962,7 @@ impl<M: Clone + KeptArea> ShadowSync<M> {
             kept: false,
             area,
             cause: None,
+            scratch: None,
         });
         for (j, other) in self.entries.iter_mut().enumerate() {
             if j != i && other.copies.shares_truth(&written) {
@@ -2043,6 +2112,7 @@ impl<M: Clone + KeptArea> ShadowSync<M> {
                         kept: shadow.kept,
                         area: needs,
                         cause: Some(cause),
+                        scratch: None,
                     });
                 }
                 entry.standing = Standing::Current;
@@ -2071,6 +2141,7 @@ impl<M: Clone + KeptArea> ShadowSync<M> {
                         kept: shadow.kept,
                         area: Some(area),
                         cause: Some(CopyCause::Bounded),
+                        scratch: None,
                     });
                 }
             }
@@ -2096,6 +2167,7 @@ impl<M: Clone + KeptArea> ShadowSync<M> {
                 kept: false,
                 area: None,
                 cause: None,
+                scratch: None,
             });
         }
         for (shadow, merge) in kept {
@@ -2108,6 +2180,7 @@ impl<M: Clone + KeptArea> ShadowSync<M> {
                 kept: false,
                 area: None,
                 cause: None,
+                scratch: None,
             });
         }
         Ok(copies)

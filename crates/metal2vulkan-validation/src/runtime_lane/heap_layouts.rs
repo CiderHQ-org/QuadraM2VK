@@ -178,7 +178,7 @@ fn plains() -> Vec<Plain> {
 }
 
 /// Bytes that name their place, from `seed`: no two shapes' and no two seeds' alike.
-fn named(len: usize, seed: usize) -> Vec<u8> {
+pub(super) fn named(len: usize, seed: usize) -> Vec<u8> {
     (0..len)
         .map(|i| ((i * 13 + i / 251 + seed) % 251) as u8 + 1)
         .collect()

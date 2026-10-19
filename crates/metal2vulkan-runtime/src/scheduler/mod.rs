@@ -52,10 +52,14 @@
 //!   is held, once otherwise ready and its host step recorded, until the checks of Metal's
 //!   submissions in it ran (`CommandBufferShared::run_checks`), which the thread runs as it runs
 //!   host steps: without its lock, each pass a section of the exit guard. Its checks wait, besides,
-//!   until every event value it waits for was reached on the device or by the host: a value only a
-//!   submitted GPU signal reaches is held for until that signal landed, as Metal submits (and
-//!   checks) only then. A completion turn sees each finished batch's event signals before it
-//!   wakes the thread, as for a gate. A command buffer without a check costs one flag per batch.
+//!   until every shared event's value it waits for was reached on the device or by the host: a
+//!   shared event's value only a submitted GPU signal reaches is held for until that signal
+//!   landed, as Metal holds such a command buffer on the CPU and submits (and checks) it only then.
+//!   An `Event`'s value a submitted signal reaches needs no landing: Metal schedules a command
+//!   buffer waiting for an `Event`, and checks it, once a signaller of the value is committed, the
+//!   GPU waiting for the signal ([`lands`]). A completion turn sees each finished batch's event
+//!   signals before it wakes the thread, as for a gate. A command buffer without a check costs one
+//!   flag per batch.
 //! - **Grouped submissions** (`command_buffer/group.rs`). Under `CompletionPolicy::Grouped`, on a
 //!   driver whose queue merges a submission that signals nothing into the next (Mesa's), a pass
 //!   holds up to four ready batches of one `VkQueue` that signal nothing but its timeline, after
@@ -70,6 +74,13 @@
 //!   buffers (`Group::keeps`). The submission checks of up to three batches right behind a line's
 //!   head that goes run with the head's ([`check_heads`]), so a line of checked batches is found
 //!   ready together.
+//! - **Holds counted by what released them.** A batch found held for an event value (none reached
+//!   by a submitted signal or the host yet, or, for its checks, reached only by a submitted GPU
+//!   signal not yet landed) is counted once as it goes, by what reached the value it waited for
+//!   last (`EventShared::released`): an `Event`'s or a `SharedEvent`'s GPU signal seen landed, a
+//!   host set from a scheduled handler, from a submission handler or elsewhere, or a GPU signal's
+//!   submission; and the time from the host seeing that value reached to its `vkQueueSubmit`'s
+//!   return (`WorkCounts::event_holds_landed_event` and kin).
 //! - **Waits are bounded.** The thread wakes on a commit or a host signal, and at least every
 //!   [`WAIT_SLICE`], so a stop is seen promptly.
 //! - **Woken by completions only when they let a batch go** ([`Awaits`]). A pass that leaves a
@@ -125,23 +136,25 @@ use super::command_buffer::{Group, GroupEnd, Submitting, GROUP_BATCHES};
 use super::device::functions::Functions;
 use super::device::lock;
 use super::error::{CommandBufferError, Error, MemoryKind};
-use super::event::EventShared;
+use super::event::{EventShared, Released};
 use super::event_timeline::WaitFor;
 use super::exit_guard;
 use super::replay::SpareLogs;
 use super::resource::ResourceKey;
 use super::tracker::{self, Footprint, Tracker};
+use super::work_counts::Counters;
 use super::Device;
 use ash::vk;
 use binary::{BinarySignals, Needs};
 use inbox::Inbox;
 use left::{work_through, Kind, Left};
 use order::{Behind, Order};
+use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::sync::atomic::{fence, AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// How long the thread sleeps at most without looking for work.
 const WAIT_SLICE: Duration = Duration::from_millis(100);
@@ -248,9 +261,9 @@ impl Awaits {
     }
 
     /// A head's checks wait for the event values of `waits` to land.
-    fn events(&self, waits: &[(Arc<EventShared>, u64)]) {
+    fn events<'a>(&self, waits: impl Iterator<Item = &'a (Arc<EventShared>, u64)>) {
         let mut list = lock(&self.list);
-        list.events.extend(waits.iter().cloned());
+        list.events.extend(waits.cloned());
         self.any.store(true, Ordering::SeqCst);
     }
 
@@ -397,6 +410,9 @@ pub(crate) struct State {
     pub(crate) group: Group,
     /// Those batches as the order held them, with their logical queues, in order.
     grouped: Vec<(u64, Held)>,
+    /// The device's `vkQueueSubmit` calls as the last one that carried a batch a scheduled
+    /// handler's set released was counted ([`count_hold`]).
+    scheduled_set_submission: u64,
 }
 
 impl State {
@@ -452,6 +468,11 @@ struct Held {
     /// The makings of the pipelines its host step records were raised to a queue's first held
     /// batch's ([`hasten_heads`]).
     hastened: bool,
+    /// A pass found it held for an event value (the module docs): its hold is counted as it goes.
+    on_event: Cell<bool>,
+    /// What released it, so held, as it was held in a group ([`release_of`]): counted once the
+    /// group is submitted.
+    released: Option<(Released, Option<Instant>)>,
 }
 
 /// What a batch's host step waits for (`CommandBufferShared::step_waits`).
@@ -502,6 +523,7 @@ impl Scheduler {
                 lists: BatchLists::default(),
                 group: Group::default(),
                 grouped: Vec::new(),
+                scheduled_set_submission: 0,
             }),
             wake: Condvar::new(),
             awaits: Awaits::default(),
@@ -919,6 +941,8 @@ fn pass(
             gate: None,
             checked: batch.checked,
             hastened: false,
+            on_event: Cell::new(false),
+            released: None,
         });
         order.push(queue, held);
         // The commit's own hold goes without the lock: its batches hold the command buffer now.
@@ -1031,9 +1055,13 @@ fn submit_ready(
             if held.checked && held.buffer.needs_check(held.index) {
                 return None;
             }
-            event_waits(held)
+            let waits = event_waits(held);
+            if waits.is_none() {
+                held.on_event.set(true);
+            }
+            waits
         });
-        let Some((queue, sequence, held, waits)) = next else {
+        let Some((queue, sequence, mut held, waits)) = next else {
             // The batches held go before the pass ends, unless they stay held while their
             // `VkQueue` runs two or more earlier submissions and no head waits for the GPU
             // (`Group::keeps`): a completion turn wakes the thread once one is left, a commit or
@@ -1070,6 +1098,19 @@ fn submit_ready(
             if met > 0 {
                 held.buffer.device().shared().counts.event_waits_met(met);
             }
+        }
+        // A hold for an event value is counted as its `vkQueueSubmit` returned, or, held in a
+        // group, once the group's did.
+        match &submitted {
+            Ok(Submitting::Submitted(_)) => {
+                if let Some(released) = release_of(&held) {
+                    let counts = &held.buffer.device().shared().counts;
+                    let last = &mut state.scheduled_set_submission;
+                    count_hold(counts, released, Instant::now(), last);
+                }
+            }
+            Ok(Submitting::Grouped) => held.released = release_of(&held),
+            _ => {}
         }
         let submitted = match submitted {
             Ok(Submitting::Submitted(submission)) => Ok(submission),
@@ -1196,10 +1237,12 @@ fn settle_group(
         values,
         grouped,
         group,
+        scheduled_set_submission,
         ..
     } = state;
     match outcome {
         Ok(()) => {
+            let now = Instant::now();
             for ((_, held), submission) in grouped.drain(..).zip(group.made()) {
                 let Held {
                     buffer,
@@ -1207,8 +1250,13 @@ fn settle_group(
                     waits: events,
                     binary_needs,
                     binary_signals,
+                    released,
                     ..
                 } = held;
+                if let Some(released) = released {
+                    let counts = &buffer.device().shared().counts;
+                    count_hold(counts, released, now, scheduled_set_submission);
+                }
                 drop(events);
                 binary.submitted(&binary_needs, &binary_signals);
                 if submission.runs_handlers() {
@@ -1303,11 +1351,11 @@ type Work = (Hold<CommandBufferShared>, usize);
 
 /// Look at each line's head of a command buffer with a submission check that is otherwise
 /// ready (its binary semaphores' signals submitted, its events' values reached, its host step
-/// recorded, not `behind` an earlier commit) and waits for its checks: once every value it waits
-/// for was reached on the device or by the host, not only by a submitted GPU signal (or the device
-/// is lost), it goes to `left` as a check, unless there already. What it waits for goes to
-/// `awaits` before the events are read again, as [`Scheduler::completions`] says. Whether a head
-/// still waits for a GPU signal to land.
+/// recorded, not `behind` an earlier commit) and waits for its checks: once every shared event's
+/// value it waits for was reached on the device or by the host, not only by a submitted GPU
+/// signal (or the device is lost; [`lands`]), it goes to `left` as a check, unless there already.
+/// What it waits for goes to `awaits` before the events are read again, as
+/// [`Scheduler::completions`] says. Whether a head still waits for a GPU signal to land.
 ///
 /// Where the line's batches may go in one kernel submission (`command_buffer/group.rs`), the
 /// batches right behind a head that goes (its checks in `left` or none due, otherwise ready, its
@@ -1347,11 +1395,15 @@ fn check_heads(state: &mut State, behind: &[u64], left: &mut Left<Work>, awaits:
             return !due && goes(held);
         }
         match event_waits(held) {
-            None => return false,
-            Some(waits) if !waits.is_empty() && !held.buffer.device().is_lost() => {
-                awaits.events(&held.waits);
+            None => {
+                held.on_event.set(true);
+                return false;
+            }
+            Some(_) if lands(held) && !held.buffer.device().is_lost() => {
+                awaits.events(held.waits.iter().filter(|(event, _)| event.is_shared()));
                 fence(Ordering::SeqCst);
-                if event_waits(held).is_some_and(|waits| !waits.is_empty()) {
+                if lands(held) {
+                    held.on_event.set(true);
                     landing = true;
                     return false;
                 }
@@ -1395,10 +1447,14 @@ fn gate_heads(state: &mut State, behind: &[u64], left: &mut Left<Work>, awaits: 
     } = state;
     let mut waiting = false;
     for held in order.heads_mut(behind) {
-        if !held.segments
-            || !binary.ready(&held.binary_needs)
-            || event_waits(held).is_none()
-            || !held.buffer.needs_host_step(held.index)
+        if !held.segments || !binary.ready(&held.binary_needs) {
+            continue;
+        }
+        if event_waits(held).is_none() {
+            held.on_event.set(true);
+            continue;
+        }
+        if !held.buffer.needs_host_step(held.index)
             || left.holds(Kind::Step, |(buffer, index)| {
                 buffer.same(&held.buffer) && *index == held.index
             })
@@ -1458,6 +1514,20 @@ fn is_behind(
     )
 }
 
+/// Whether a shared event's value `held` waits for is reached only by a submitted GPU signal not
+/// yet landed, which its checks wait for (`command_buffer/checks.rs`): Metal holds a command buffer
+/// waiting for a shared event on the CPU until the value is reached, and submits and checks it
+/// then. An `Event`'s value is not waited for so: Metal schedules a command buffer waiting for an
+/// `Event`, checks it and counts it in flight at the later of its own commit and the commit of one
+/// that signals the event a value at least the wait's, before the signal lands, the GPU waiting for
+/// it (measured by the consumer on an M3 Max, macOS 27.0.1); the batch goes with a Vulkan wait for
+/// the signal's index once that signal is submitted.
+fn lands(held: &Held) -> bool {
+    (held.waits.iter()).any(|(event, value)| {
+        event.is_shared() && matches!(event.wait(*value), Some(WaitFor::Index(_)))
+    })
+}
+
 /// Whether every event value `held` waits for is reached by a submitted signal or the host:
 /// [`event_waits`] would answer, for a batch the order does not take yet.
 fn events_reachable(held: &Held) -> bool {
@@ -1477,4 +1547,53 @@ fn event_waits(held: &Held) -> Option<Vec<(vk::Semaphore, u64)>> {
         }
     }
     Some(waits)
+}
+
+/// What released `held`, where a pass found it held for an event value ([`Held::on_event`]): of
+/// the values it waits for, what reached the one the host saw reached last
+/// ([`EventShared::released`]), with when; a submitted signal's (no time) where no other was; an
+/// `Event`'s landing only where neither was, as a batch waiting for an `Event` goes at its
+/// signal's submission ([`lands`]), whatever lands later.
+fn release_of(held: &Held) -> Option<(Released, Option<Instant>)> {
+    if !held.on_event.get() {
+        return None;
+    }
+    type Found = Option<(Released, Option<Instant>)>;
+    let later = |kept: &mut Found, found @ (_, at): (Released, Option<Instant>)| {
+        if kept.is_none_or(|(_, before)| at > before) {
+            *kept = Some(found);
+        }
+    };
+    let (mut last, mut submitted, mut landed_event): (Found, Found, Found) = (None, None, None);
+    for (event, value) in &held.waits {
+        match event.released(*value) {
+            None => {}
+            Some(found @ (Released::SignalSubmitted, _)) => submitted = Some(found),
+            Some(found @ (Released::LandedEvent, _)) => later(&mut landed_event, found),
+            Some(found) => later(&mut last, found),
+        }
+    }
+    last.or(submitted).or(landed_event)
+}
+
+/// Count a held batch that went at `now`, `released` so ([`release_of`]), in `counts`; one a
+/// scheduled handler's set released counts its `vkQueueSubmit` too, once (`last`: the device's
+/// calls as the last such was counted).
+fn count_hold(
+    counts: &Counters,
+    (released, at): (Released, Option<Instant>),
+    now: Instant,
+    last: &mut u64,
+) {
+    let nanos = at.map_or(0, |at| {
+        u64::try_from(now.saturating_duration_since(at).as_nanos()).unwrap_or(u64::MAX)
+    });
+    counts.event_hold(released, nanos);
+    if released == Released::SetScheduled {
+        let calls = counts.queue_submissions();
+        if calls != *last {
+            *last = calls;
+            counts.submission_after_scheduled_set();
+        }
+    }
 }

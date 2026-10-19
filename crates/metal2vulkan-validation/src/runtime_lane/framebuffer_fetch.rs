@@ -160,7 +160,7 @@ use super::resolves::{lane, quiet, Lane, Shape, FULL, ONE, WHITE};
 use super::Messages;
 use crate::air_library::AirLibrary;
 use crate::runtime_lane::{buffer_with, pipelines_settled, read_buffer, WAIT};
-use metal2vulkan::device::{DriverFact, VkFeature};
+use metal2vulkan::device::VkFeature;
 use metal2vulkan::metal::{
     BlendFactor, IndexType, IndirectCommandType, PixelFormat, PrimitiveType, TextureType,
     TextureUsage,
@@ -314,18 +314,6 @@ pub(super) fn through_inputs(lane: &Lane) -> bool {
         .profile()
         .fragment()
         .rasterization_order_color_access
-}
-
-/// Whether the device announces a split the interlock alone makes (`render-pass-split`, and
-/// `memoryless-backed` for it): in the pixel interlock, but where its driver ran such a pass no
-/// slower split than whole (`DriverFact::InterlockedPassSplitNoSlower`), its faster form.
-fn announces_interlock_splits(lane: &Lane) -> bool {
-    !through_inputs(lane)
-        && !lane
-            .device
-            .properties()
-            .driver_facts
-            .contains(&DriverFact::InterlockedPassSplitNoSlower)
 }
 
 /// Draw `steps` in one pass of `descriptor`, each the fullscreen triangle; the first refusal of
@@ -1122,8 +1110,8 @@ pub(super) const FETCHES: [Degradation; 3] = [
 /// Three passes, each encoded twice: a `SIDE`² `RGBA32Uint` target fetched by
 /// `exf_fetch_count` three times; a `SIDE`² `R32Float` one drawn white under a blend
 /// ([`blended_white`]), then fetched by `fetch_scalar`; and the memoryless pass above. Through the pixel interlock the second
-/// splits (announced but where the device runs such a split no slower than whole), the third backs
-/// its memoryless attachment, and each is announced once. A fetched texture renders into a scratch
+/// splits (unannounced), the third backs its memoryless attachment,
+/// and each is announced once. A fetched texture renders into a scratch
 /// image only where the device lays its image out otherwise with `STORAGE`, the device's own
 /// answer, which the lane does not foresee: where it does, the scratch is announced once, naming
 /// one of the two fetched textures, the first the device met so. Measured at `caea7050`: MoltenVK
@@ -1194,7 +1182,8 @@ fn fetches_degrade_once_per_kind() {
         .into_iter()
         .filter(|&kind| match kind {
             Degradation::FetchThroughScratch => scratch.is_some(),
-            Degradation::RenderPassSplit => announces_interlock_splits(&lane),
+            // A split the interlock alone makes is not announced.
+            Degradation::RenderPassSplit => false,
             _ => interlock,
         })
         .collect();
@@ -1325,8 +1314,7 @@ fn fetched_textures_load_store_and_reach_later_passes() {
 /// attachment, which no inline instance takes, the same pass records no instance inline, and in
 /// the interlock splits there and backs the memoryless attachment. Each holds Metal's texels, and
 /// the scratch is announced once, naming the missing usage and the caller, and the split once
-/// through input attachments, and in the interlock where the device is not measured to run such a
-/// split no slower than whole, with the backing.
+/// through input attachments; in the interlock the split is not announced, nor its backing.
 #[test]
 fn a_callers_image_without_the_fetch_usage_fetches_through_a_scratch() {
     let (messages, cache, lane) = lane();
@@ -1396,7 +1384,9 @@ fn a_callers_image_without_the_fetch_usage_fetches_through_a_scratch() {
     let notices = messages.take_notices();
     messages.restore_notices(notices.clone());
     let mut kinds = vec![Degradation::FetchThroughScratch];
-    let split = through_inputs(&lane) || announces_interlock_splits(&lane);
+    // Through input attachments the stand-in splits the pass; in the pixel interlock the split
+    // the interlock alone makes is not announced.
+    let split = through_inputs(&lane);
     if split {
         kinds.push(Degradation::RenderPassSplit);
     }
@@ -1472,12 +1462,9 @@ fn a_callers_image_without_the_fetch_usage_fetches_through_a_scratch() {
         &floats(0.5),
     );
     if !through_inputs(&lane) {
-        // The split was announced at the pass drawn first, where the device announces it.
-        let backed = announces_interlock_splits(&lane);
-        let kinds: Vec<Degradation> = [Degradation::MemorylessBacked]
-            .into_iter()
-            .filter(|_| backed)
-            .collect();
+        // The interlock alone splits the pass: its backing of the memoryless attachment is not
+        // announced.
+        let kinds: Vec<Degradation> = Vec::new();
         let mut first = made(
             &lane,
             &[
@@ -1515,9 +1502,7 @@ fn a_callers_image_without_the_fetch_usage_fetches_through_a_scratch() {
 /// again and `fetch_scalar` twice (0.25); the white drawn of indices, then `fetch_scalar` (0.5).
 /// In the pixel interlock each splits at the fetch, which backs the memoryless attachment. The
 /// white under a blend ([`blended_white`]), then `fetch_scalar`, holds 0.5 too, and in the pixel
-/// interlock splits there too. A split is announced, and the backing, once each (at the plain
-/// draws' pass), but on a device whose driver runs such a split no slower than whole, where
-/// neither is.
+/// interlock splits there too. Neither such a split nor its backing is announced.
 #[test]
 fn a_plain_draw_before_a_fetch_takes_the_devices_faster_form() {
     let (messages, cache, lane) = lane();
@@ -1575,11 +1560,8 @@ fn a_plain_draw_before_a_fetch_takes_the_devices_faster_form() {
         .map(|()| read());
     expect(&lane, "after an indexed plain draw", indexed, &texels(0.5));
     let interlock = !through_inputs(&lane);
-    let announced_split = |splits: bool| -> Vec<Degradation> {
-        let announced = splits && announces_interlock_splits(&lane);
-        split.into_iter().filter(|_| announced).collect()
-    };
-    let kinds = announced_split(interlock);
+    // The interlock alone splits the pass: neither the split nor its backing is announced.
+    let kinds: Vec<Degradation> = Vec::new();
     let mut first = made(
         &lane,
         &[
@@ -1737,15 +1719,12 @@ fn a_callers_multisampled_image_without_the_fetch_usage_fetches_through_a_scratc
     );
     // Through the attachment's own multisampled storage image the fetching draw's instance
     // leaves the attachment out of its subpass, and the device's resolve needs it in one: the
-    // pass splits there (the RTX 3080's two instances), announced where the
-    // device announces the interlock's splits; the exact resolve, drawn after the pass, needs
-    // none, and through sample planes it reads them: one instance either way.
-    let split = !planes && !exact && announces_interlock_splits(&lane);
+    // pass splits there (the RTX 3080's two instances), unannounced; the exact resolve, drawn after the pass, needs none, and through sample planes
+    // it reads them: one instance either way.
     first.extend(forced(&[
         (Degradation::WrappedImageLayoutTransitions, true),
         (Degradation::SamplePlanes, planes),
         (Degradation::ShaderResolve, exact || planes),
-        (Degradation::RenderPassSplit, split),
     ]));
     let counts = assert_made_once(&messages, &[Degradation::FetchThroughScratch], &first);
     let scratch = notices

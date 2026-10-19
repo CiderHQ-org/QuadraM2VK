@@ -68,6 +68,7 @@ use super::release::{self, Generated};
 use super::residency::Residency;
 use super::tracker::Barrier;
 use super::Device;
+use crate::device_checks::learned::{Risks, Risky};
 use ash::vk;
 use metal2vulkan::bind::{
     replay_preprocess_generated, BindState, BindingPlan, DispatchCommands, GeneratedLayout,
@@ -511,6 +512,11 @@ fn record_total(
     // Where the driver's own preprocessing of an execution after another runs the wrong shader,
     // every execution is preprocessed apart before the first runs.
     let explicit = preprocess_apart(&device.properties().description);
+    // The driver's own preprocessing of an execution after another is a risky path of the
+    // command buffer's where it is taken (`device_checks/learned.rs`).
+    if !explicit {
+        command_buffer.took(Risks::of(Risky::ImplicitPreprocessAfterExecutionSet));
+    }
     let generated =
         GeneratedObjects::create(&device, &pipelines, pipeline_layout, &layout, explicit)?;
     let (memory, reserved) = generated.preprocess_memory(&device, &layout)?;

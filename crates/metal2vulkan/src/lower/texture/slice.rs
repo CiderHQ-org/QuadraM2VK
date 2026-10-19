@@ -27,7 +27,36 @@
 //! loop), each iteration a contained arena leaf load
 //! (`access::imageblock::load`) and a texture write. A block past the imageblock's extent in
 //! either axis is clipped to it (the cells past it are not the imageblock's; Metal leaves them
-//! undefined).
+//! undefined). The counter starts at 0 on every execution of the write.
+//!
+//! **The threadgroup's copy** ([`Cooperative`], [`cooperate`]). A kernel's slice is usually written
+//! by one thread (`if (thread_index == 0)`), whose loop then holds every other thread of its
+//! threadgroup at the next barrier while it copies `width · height` cells one at a time. Where
+//! every invocation of the threadgroup can take the write's part, the whole threadgroup copies the
+//! block instead, each cell once: the write is a synchronization of the predicated walk
+//! (`simd::divergent`), which every invocation reaches in workgroup-uniform control flow with its
+//! own live flag. There a workgroup barrier makes every invocation's cells visible, invocation `i`
+//! of the `n` threads copies the cells whose texel `(u, v)` has `(u + v · W) mod n = i` (`W` the
+//! imageblock's width: the cells of row-major index `m` over rows `W` cells wide with
+//! `m ≡ i - c (mod n)`, `c` the block's first texel's `u + v · W`), and a workgroup barrier keeps
+//! every later access of the cells after the copy. Each texel is converted and stored by exactly
+//! the code the one-invocation copy runs. In a block some invocations skip, the writing
+//! invocations publish the write's operands to the others first: a workgroup vote on the live
+//! flags (where no invocation is live, nothing is written), then each word of an operand computed
+//! in a block some invocations skip stored to the vote word by the live invocations, which all
+//! hold it alike, and read back by every invocation (`simd::workgroup::publish`); every
+//! invocation ran a uniform block's operands as the writers did. Several live invocations write
+//! one block (their operands are equal), as each would in Metal.
+//!
+//! The form is taken in a kernel (not a tile function) for a slice to a static texture slot whose
+//! every operand (coordinate, layer, level, size) is a constant, a parameter, or a value
+//! `simd::uniform::Uniformity` proves the threadgroup holds alike, each published one a `u32` or a
+//! vector of them, where the slot is written only by slices and never read, sampled, or updated by
+//! an atomic in the function, and is not volatile; every slice to a slot takes it or none does.
+//! Then every texel of that slot a dispatch writes is written by the invocation its `(u, v)` names,
+//! in that invocation's program order, as the one-invocation copy writes them all in its own: two
+//! slices that overlap land in program order without image memory ordering between invocations.
+//! Any other slice keeps the one-invocation copy.
 //!
 //! Only these are pinned (else `Unsupported{Imageblocks, NotImplemented}`): the origin operand the
 //! constant zero, the trailing flag the constant `false`, the flag a constant, a field pointer
@@ -44,18 +73,24 @@
 //! (the texel does not depend on the member's format, so no binder check is needed). An integer
 //! element's class is the group's from another operation (no slot has a format input to give it).
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use crate::air::intrinsics::{Elem, TexRole, Texture};
-use crate::air::ir::{Value, ValueId};
+use crate::air::ir::{BlockId, InstId, Value, ValueId};
+use crate::budget::Meter;
 use crate::error::{Error, Feature, RuntimeInput, Unsupported};
 use crate::lower::access::imageblock;
 use crate::lower::arith::legal::held_on;
 use crate::lower::arith::{FloatFmt, Form, Held};
 use crate::lower::select::SelectCx;
+use crate::lower::simd::uniform::Uniformity;
+use crate::lower::strategy::Strategy;
 use crate::memory::leaf::{Leaf, Path};
 use crate::memory::provenance::imageblock_cell;
 use crate::pipeline::facts::RuntimeFact;
 use crate::pipeline::lower_inputs::StorageImageClass;
-use crate::pipeline::sym::{SampledType, SlotClass, SlotRef};
+use crate::pipeline::sym::{SampledType, SlotClass, SlotRef, Stage};
+use crate::spirv::ids::{DemoteTy, ScalarTy};
 
 use super::{
     coord, image_access, is_zero, mark, observe, slot, storage_level, Coord, ImageRef, Operands,
@@ -98,6 +133,40 @@ pub struct Slice {
     /// Each texel of a half-float member stores its bits through the heap group's unsigned
     /// integer twin where the handle's class names one (`super::Write::heap_bits`).
     pub heap_bits: bool,
+    /// The whole threadgroup copies the block ([`cooperate`]); `None`, the writing invocation.
+    pub cooperative: Option<Cooperative>,
+}
+
+/// A slice the whole threadgroup copies (the module docs): a synchronization of the predicated
+/// walk, every invocation taking a share of the cells.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Cooperative {
+    /// The operands that the writing invocations publish where only some invocations write, each
+    /// with its `u32` lanes: those among the coordinate's plane, its layer, the level, and the
+    /// size, in that order, that are results of instructions in blocks `Uniformity` does not prove
+    /// workgroup uniform. Every invocation holds a constant or a parameter alike, and the one
+    /// result of an instruction in a uniform block, which every invocation ran as the writers did.
+    pub published: [Option<(ValueId, u8)>; 4],
+}
+
+impl Cooperative {
+    /// The `u32` words the published operands take.
+    pub fn words(&self) -> u32 {
+        self.published
+            .iter()
+            .flatten()
+            .map(|&(_, lanes)| u32::from(lanes))
+            .sum()
+    }
+}
+
+/// Whether `s` is a slice the whole threadgroup copies, a synchronization of the predicated walk
+/// (`simd::divergent`).
+pub(crate) fn is_cooperative(s: &Strategy) -> bool {
+    matches!(
+        s,
+        Strategy::Texture(TextureStrategy::ImageblockSlice(sl)) if sl.cooperative.is_some()
+    )
 }
 
 impl Slice {
@@ -120,6 +189,9 @@ impl Slice {
                 0
             }
             + 320
+            // The vote and barriers, the share's mapping, and per published word its store under
+            // the live flag, two barriers, its read, and its rebuilt lane.
+            + self.cooperative.map_or(0, |c| 160 + 40 * c.words())
     }
 }
 
@@ -350,5 +422,168 @@ pub(super) fn select(
         heap_small_floats,
         half_nans,
         heap_bits,
+        cooperative: None,
     })))
+}
+
+/// Decide which slice writes of the selected body `strategy` the whole threadgroup copies (the
+/// module docs), and set their [`Slice::cooperative`]. `given` is the body's uniformity where the
+/// caller holds it; it is computed here when a slice may take the form, and returned for the
+/// caller's later passes, which release its ledger bytes.
+pub(crate) fn cooperate(
+    cx: &mut SelectCx<'_>,
+    strategy: &mut [Option<Strategy>],
+    given: Option<Uniformity>,
+    m: &mut Meter,
+) -> Result<Option<Uniformity>, Error> {
+    let is_slice = |s: &Option<Strategy>| {
+        matches!(
+            s,
+            Some(Strategy::Texture(TextureStrategy::ImageblockSlice(_)))
+        )
+    };
+    if cx.stage != Stage::Kernel
+        || crate::lower::access::tile::is_tile(cx)
+        || !strategy.iter().any(is_slice)
+    {
+        return Ok(given);
+    }
+    let u = match given {
+        Some(u) => u,
+        None => Uniformity::of(cx.entry, cx.body, m)?,
+    };
+    // The slots some slice of which keeps the one-invocation copy: one through a switch over
+    // several candidate textures does.
+    let mut serial: BTreeSet<u32> = BTreeSet::new();
+    for s in strategy.iter().flatten() {
+        let Strategy::Texture(TextureStrategy::Switch(sw)) = s else {
+            continue;
+        };
+        for (_, arm) in &sw.arms {
+            if let TextureStrategy::ImageblockSlice(sl) = arm {
+                if let ImageRef::Slot(index) = sl.image {
+                    serial.insert(index);
+                }
+            }
+        }
+    }
+    let homes = homes(cx, strategy, m)?;
+    let mut verdicts: Vec<(usize, u32, Option<Cooperative>)> = Vec::new();
+    for (i, s) in strategy.iter().enumerate() {
+        m.tick(1)?;
+        let Some(Strategy::Texture(TextureStrategy::ImageblockSlice(sl))) = s else {
+            continue;
+        };
+        let ImageRef::Slot(index) = sl.image else {
+            continue;
+        };
+        let verdict = match cx.families.texture.slots.get(&index) {
+            Some(plan) if slice_only(plan) => cooperative(cx, (&u, &homes), sl),
+            _ => None,
+        };
+        if verdict.is_none() {
+            serial.insert(index);
+        }
+        verdicts.push((i, index, verdict));
+    }
+    for (i, index, verdict) in verdicts {
+        if serial.contains(&index) {
+            continue;
+        }
+        if let Some(Some(Strategy::Texture(TextureStrategy::ImageblockSlice(sl)))) =
+            strategy.get_mut(i)
+        {
+            sl.cooperative = verdict;
+            cx.families.texture.cooperative_slices = true;
+        }
+    }
+    Ok(Some(u))
+}
+
+/// Whether slot `plan` is reached in the function only by slice writes and queries: no texel
+/// write, read, sample, gather, or atomic, and it is not volatile.
+fn slice_only(plan: &super::slot::SlotPlan) -> bool {
+    let u = &plan.uses;
+    !(plan.volatile || u.texel_write || u.read || u.sample || u.compare || u.atomic)
+}
+
+/// The operands of slice `sl`: its coordinate's plane, layer and face, its level, and its size.
+fn operands(sl: &Slice) -> [Option<ValueId>; 5] {
+    [
+        Some(sl.at.plane),
+        sl.at.layer,
+        sl.at.face,
+        sl.level,
+        sl.size,
+    ]
+}
+
+/// The block of each instruction whose result some slice write of `strategy` takes as an operand.
+fn homes(
+    cx: &SelectCx<'_>,
+    strategy: &[Option<Strategy>],
+    m: &mut Meter,
+) -> Result<BTreeMap<InstId, BlockId>, Error> {
+    let mut wanted: BTreeSet<InstId> = BTreeSet::new();
+    for s in strategy.iter().flatten() {
+        let Strategy::Texture(TextureStrategy::ImageblockSlice(sl)) = s else {
+            continue;
+        };
+        for v in operands(sl).into_iter().flatten() {
+            if let Some(Value::Inst(at)) = cx.values.value(v) {
+                wanted.insert(at);
+            }
+        }
+    }
+    let mut homes = BTreeMap::new();
+    if wanted.is_empty() {
+        return Ok(homes);
+    }
+    for (b, block) in cx.body.blocks.iter() {
+        for id in block.inst_ids() {
+            m.tick(1)?;
+            if wanted.contains(&id) {
+                homes.insert(id, b);
+            }
+        }
+    }
+    Ok(homes)
+}
+
+/// The threadgroup's copy of slice `sl`, when every operand is one the threadgroup holds alike
+/// (`u`) and each one it publishes (the result of an instruction whose block in `homes` is not
+/// uniform) is a `u32` or a vector of them.
+fn cooperative(
+    cx: &SelectCx<'_>,
+    (u, homes): (&Uniformity, &BTreeMap<InstId, BlockId>),
+    sl: &Slice,
+) -> Option<Cooperative> {
+    let mut published = [None; 4];
+    let mut n = 0;
+    for v in operands(sl).into_iter().flatten() {
+        let value = cx.values.value(v)?;
+        if !u.is_uniform_value(cx.entry, value) {
+            return None;
+        }
+        // A constant or a parameter is held by every invocation where the write runs, and so is
+        // the result of an instruction in a uniform block.
+        let Value::Inst(at) = value else {
+            continue;
+        };
+        if u.is_uniform(*homes.get(&at)?) || published.iter().flatten().any(|&(p, _)| p == v) {
+            continue;
+        }
+        let ty = cx.body.insts.get(at)?.ty;
+        let lanes = match cx.lowered_repr(value, ty).ok()? {
+            DemoteTy::Scalar(ScalarTy::Int { bits: 32 }) => 1,
+            DemoteTy::Vector {
+                elem: ScalarTy::Int { bits: 32 },
+                len,
+            } => len,
+            _ => return None,
+        };
+        *published.get_mut(n)? = Some((v, lanes));
+        n += 1;
+    }
+    Some(Cooperative { published })
 }

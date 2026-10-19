@@ -27,6 +27,7 @@
 //! by the first mipmap generation of each format.
 
 use super::device::DeviceKind;
+use super::device_checks::{ChecksRun, FeatureStatus};
 use super::driver_defects;
 use super::error::{invalid, Error, Problem, RuntimeGap};
 use super::linear_plan::linear_alignment;
@@ -116,22 +117,30 @@ pub struct DeviceProperties {
     /// from.
     pub description: DeviceDescription,
     /// The defects of the device's driver in commands the runtime records for itself, from its
-    /// identity and release (`driver_defects.rs`): what one breaks is taken another way where an
+    /// driver, release and GPU (`driver_defects.rs`, and the known-driver list's,
+    /// [`DeviceDescription::listed_driver_defects`]), each the device checks as its check found it
+    /// ([`feature_status`](Self::feature_status)): what one breaks is taken another way where an
     /// exact one exists, else refused on the device, typed
     /// ([`Needs::RuntimeDriverDefect`](metal2vulkan::error::Needs::RuntimeDriverDefect)).
     pub driver_defects: BTreeSet<RuntimeDriverDefect>,
     /// What the device's driver is measured to answer where Vulkan leaves the result undefined,
-    /// from its identity and release ([`DeviceDescription::driver_facts`]): the runtime relies on
-    /// one only where the driver has it, and elsewhere takes the exact path that needs none.
+    /// from its identity and release ([`DeviceDescription::driver_facts`]), each the device checks
+    /// as its check found it: the runtime relies on one only where the driver has it, and
+    /// elsewhere takes the exact path that needs none.
     pub driver_facts: BTreeSet<DriverFact>,
     /// The answer facts the device's driver is measured to give on another release or GPU, which
     /// the device does not take because its identity (driver, GPU and release) is not measured
     /// ([`DeviceDescription::driver_facts_withheld`]): the runtime takes the exact path instead,
-    /// assumes the driver's measured defects ([`driver_facts`](Self::driver_facts),
-    /// [`driver_defects`](Self::driver_defects)), and says so once as it is made in an
-    /// informational message, `metal2vulkan-unmeasured-driver` (`driver_facts.rs`, no degrade
-    /// notice, as the paths it takes are exact).
+    /// takes the known-driver list's facts and defects ([`driver_facts`](Self::driver_facts),
+    /// [`driver_defects`](Self::driver_defects)), and says so in its feature status. A fact the
+    /// device checks is withheld only until its check answers.
     pub driver_facts_withheld: BTreeSet<DriverFact>,
+    /// How the device decided each driver fact it takes: checked on the device, listed in the
+    /// curated tables, or the exact path, with what its checks cost and whether they came from the
+    /// cache ([`FeatureStatus`]). The device announces it once as it is made in an informational
+    /// message, `metal2vulkan-feature-status` (no degrade notice: a fact is taken only where it
+    /// is Metal's answer). Nothing else here depends on it but the fields above.
+    pub feature_status: FeatureStatus,
     /// The macOS release whose Metal the device answers as, where releases answer differently
     /// ([`MetalLevel`]): the options' (`DeviceOptions::metal_level`), else on macOS the host's
     /// release or the newest measured below it, else the newest. A consumer that answers its
@@ -218,12 +227,21 @@ impl DeviceProperties {
                 texture_sample_counts,
             ),
             max_vertex_amplification_count,
-            driver_defects: driver_defects::of(&description),
+            driver_defects: driver_defects::checked(&description),
             driver_facts: description.driver_facts(),
             driver_facts_withheld: description.driver_facts_withheld(),
+            feature_status: FeatureStatus::unchecked(&description),
             metal_level,
             description,
         }
+    }
+
+    /// The properties with the feature status of a device whose checks went as `run`.
+    pub(crate) fn with_checks(mut self, run: ChecksRun) -> DeviceProperties {
+        let trusted = run.settled != super::device_checks::Settled::Distrusted;
+        let defects = driver_defects::status_rows(&self.description, trusted);
+        self.feature_status = FeatureStatus::of(&self.description, run, defects);
+        self
     }
 
     /// `areRasterOrderGroupsSupported`: the pixel interlock is enabled

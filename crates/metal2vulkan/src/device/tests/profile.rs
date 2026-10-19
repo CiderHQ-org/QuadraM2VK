@@ -853,7 +853,6 @@ fn moltenvk_on_apple_carries_the_early_tests_image_write_defect() {
     );
 }
 
-/// `DriverWorkaround::BothBarycentricFormsRejected`,
 /// `DriverWorkaround::CompositeInsertsWrittenInPlace`, `DriverWorkaround::LoadsForwardedIntoLoops`,
 /// `DriverWorkaround::LocalizedLoadsForwardedPastAtomicsAndCalls` and
 /// `DriverWorkaround::FunctionsInlinedAtEveryCall`, its SPIRV-Cross's, are keyed on MoltenVK's
@@ -864,7 +863,6 @@ fn moltenvk_on_apple_carries_the_early_tests_image_write_defect() {
 fn moltenvk_carries_its_spirv_cross_defects_from_their_measured_release() {
     use crate::device::profile::DriverWorkaround;
     for defect in [
-        DriverWorkaround::BothBarycentricFormsRejected,
         DriverWorkaround::CompositeInsertsWrittenInPlace,
         DriverWorkaround::FunctionsInlinedAtEveryCall,
         DriverWorkaround::LoadsForwardedIntoLoops,
@@ -895,6 +893,45 @@ fn moltenvk_carries_its_spirv_cross_defects_from_their_measured_release() {
             let moltenvk = desc.driver_id == Some(vk::DriverId::MOLTENVK);
             assert_eq!(carries(&desc), moltenvk, "{stem} {defect:?}");
         }
+    }
+}
+
+/// `DriverWorkaround::BothBarycentricFormsRejected`, its SPIRV-Cross's MSL backend's refusal, is
+/// keyed on MoltenVK's identity: carried at every release, 1.4.1 measured and an older and a newer
+/// one, on every vendor's GPU; not by another driver at the same `driverVersion`.
+#[test]
+fn moltenvk_carries_the_barycentric_pair_defect_at_every_release() {
+    use crate::device::profile::DriverWorkaround;
+    let defect = DriverWorkaround::BothBarycentricFormsRejected;
+    let carries = |desc: &DeviceDescription| {
+        Device::new(desc.clone(), DevicePolicy::default())
+            .unwrap()
+            .profile()
+            .fields()
+            .workarounds
+            .contains(&defect)
+    };
+    for stem in ["moltenvk-m3", "moltenvk-m4"] {
+        let mut desc = profile(stem);
+        for (release, vendor) in [
+            (10401, 0x106B),
+            (10500, 0x106B),
+            (10200, 0x106B),
+            (10401, 0x1002),
+        ] {
+            desc.driver_version = release;
+            desc.vendor_id = vendor;
+            assert!(carries(&desc), "{stem} {release} {vendor:04x}");
+        }
+        desc.vendor_id = 0x106B;
+        desc.driver_version = 10401;
+        desc.driver_id = Some(vk::DriverId::MESA_LLVMPIPE);
+        assert!(!carries(&desc), "{stem} under lavapipe");
+    }
+    for (stem, text) in committed_profiles() {
+        let desc = DeviceDescription::from_khronos_json(&text, None).unwrap();
+        let moltenvk = desc.driver_id == Some(vk::DriverId::MOLTENVK);
+        assert_eq!(carries(&desc), moltenvk, "{stem}");
     }
 }
 

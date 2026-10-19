@@ -25,7 +25,8 @@
 //! calibration reading ([`CALIBRATION_CALLS`]), as a completion turn makes them); a sampler, an
 //! occlusion query pool, a buffer in host-visible memory, mapped (and, where the device has device
 //! addresses, [`DEVICE_ADDRESS_CALLS`], its address read), and an image with their memory and
-//! views, a depth image, a render pass and a framebuffer, a descriptor set layout, a pipeline
+//! views, a depth image, a render pass (and its like through `vkCreateRenderPass2`, as the
+//! device's checks make theirs) and a framebuffer, a descriptor set layout, a pipeline
 //! layout with a push constant range and a descriptor pool with a set written, and a compute
 //! pipeline made with a pipeline cache from a shader module, its stage specialized as the runtime's
 //! makings are ([`SPECIALIZED`]), whose data is read; a command buffer, recorded and never
@@ -71,7 +72,7 @@
 use crate::draw_source::SizedIndexBind;
 use crate::dynamic_state::{ColorWriteMasks, ExtendedDynamicState};
 use crate::error::{vulkan, Error};
-use crate::exit_guard::Call;
+use crate::exit_guard::{Call, Calls};
 use crate::generated_commands::{
     Commands, ExecutionSetCreateInfo, ExecutionSetPipelineInfo, ExecutionSetToken,
     LayoutCreateInfo, LayoutToken, EXECUTION_SET_PIPELINES, INDIRECT_BINDABLE, TOKEN_DISPATCH,
@@ -436,7 +437,7 @@ pub(super) unsafe fn prime(
         drawn,
         // SAFETY: the caller's.
         memory: unsafe { instance.get_physical_device_memory_properties(physical) },
-        calls: 0,
+        calls: Calls::NONE,
         held: Vec::new(),
     };
     // SAFETY: the caller's.
@@ -480,12 +481,12 @@ pub(super) unsafe fn prime(
 /// [`EXTENDED_DYNAMIC_STATE_CALLS`], [`PRIMITIVE_RESTART_CALLS`],
 /// [`COLOR_WRITE_MASK_CALLS`], [`DEPTH_BIAS_CALLS`] and [`SIZED_INDEX_BIND_CALLS`] where it has
 /// not their commands, that `calls` (one bit each) does not hold.
-pub(crate) fn missing(calls: u128, has: Has) -> Vec<Call> {
+pub(crate) fn missing(calls: Calls, has: Has) -> Vec<Call> {
     Call::ALL
         .iter()
         .copied()
         .filter(|&call| {
-            calls & call.bit() == 0
+            !calls.contains(call)
                 && !UNPRIMED.contains(&call)
                 && (has.timestamps || !TIMESTAMP_CALLS.contains(&call))
                 && ((has.timestamps && has.host_query_reset)
@@ -538,7 +539,7 @@ struct Primer<'a> {
     drawn: PrimedDraws,
     memory: vk::PhysicalDeviceMemoryProperties,
     /// The table's entry points called, one bit each.
-    calls: u128,
+    calls: Calls,
     /// What was made, released last first.
     held: Vec<Release>,
 }
@@ -884,6 +885,7 @@ impl Primer<'_> {
                 .query_type(vk::QueryType::OCCLUSION)
                 .query_count(1);
             let queries = device.create_query_pool(&info, None).map_err(vulkan)?;
+            self.made(Call::CreateQueryPool);
             self.hold(queries);
 
             // A storage buffer, and a texel buffer of `R32_UINT`, whose uniform texel buffer use
@@ -962,7 +964,9 @@ impl Primer<'_> {
                 .initial_layout(vk::ImageLayout::UNDEFINED);
             let info = self.sharing.image(info);
             let image = device.create_image(&info, None).map_err(vulkan)?;
+            self.made(Call::CreateImage);
             let requirements = device.get_image_memory_requirements(image);
+            self.made(Call::GetImageMemoryRequirements);
             let memory = match self.allocate(requirements, vk::MemoryPropertyFlags::empty(), false)
             {
                 Ok(memory) => memory,
@@ -973,6 +977,7 @@ impl Primer<'_> {
             };
             self.hold(image);
             device.bind_image_memory(image, memory, 0).map_err(vulkan)?;
+            self.made(Call::BindImageMemory);
             let info = vk::ImageViewCreateInfo::default()
                 .image(image)
                 .view_type(vk::ImageViewType::TYPE_2D)
@@ -1048,7 +1053,32 @@ impl Primer<'_> {
                 .height(1)
                 .layers(1);
             let framebuffer = device.create_framebuffer(&info, None).map_err(vulkan)?;
+            self.made(Call::CreateFramebuffer);
             self.hold(framebuffer);
+            // The same pass through `vkCreateRenderPass2` (core in Vulkan 1.2), as a device check
+            // makes its passes (`device_checks/kit.rs`).
+            let attachments = [vk::AttachmentDescription2::default()
+                .format(format)
+                .samples(vk::SampleCountFlags::TYPE_1)
+                .load_op(vk::AttachmentLoadOp::DONT_CARE)
+                .store_op(vk::AttachmentStoreOp::DONT_CARE)
+                .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
+                .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
+                .initial_layout(vk::ImageLayout::UNDEFINED)
+                .final_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)];
+            let colors = [vk::AttachmentReference2::default()
+                .attachment(0)
+                .layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                .aspect_mask(vk::ImageAspectFlags::COLOR)];
+            let subpasses = [vk::SubpassDescription2::default()
+                .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
+                .color_attachments(&colors)];
+            let info = vk::RenderPassCreateInfo2::default()
+                .attachments(&attachments)
+                .subpasses(&subpasses);
+            let render_pass2 = device.create_render_pass2(&info, None).map_err(vulkan)?;
+            self.made(Call::CreateRenderPass2);
+            self.hold(render_pass2);
 
             // A compute pipeline with one storage buffer binding and a push constant range,
             // made with a pipeline cache.

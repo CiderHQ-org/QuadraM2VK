@@ -3,10 +3,10 @@
 //! its arguments owned, in order, before the call runs.
 //!
 //! - **Encoded again** by opening the pass again from the descriptor
-//!   ([`RenderCommandEncoder::replaying`]: no refusal of a committed command buffer, the residency
+//!   ([`RenderEncoding::replaying`]: no refusal of a committed command buffer, the residency
 //!   the encoders ended before it left), running each call again, and ending the pass as
 //!   `end_encoding` ends it, but into the ended encoder's place
-//!   ([`RenderCommandEncoder::finish_replay`]).
+//!   ([`RenderEncoding::finish_replay`]).
 //! - **Kept** as the compute encoder's log is (`EncoderCore::end_with_replay`): where a command
 //!   named a buffer over host pages, and the pass left no segment for later (no indirect command
 //!   buffer's execution, no draw whose pipeline was still being made). A pass whose draws' tile
@@ -14,7 +14,7 @@
 //!   buffer, where an encoding again would leave the first one's beside its own.
 //! - **Per-stage calls** share a variant, with the [`Table`] they set.
 
-use super::RenderCommandEncoder;
+use super::RenderEncoding;
 use crate::amplification::VertexAmplificationViewMapping;
 use crate::buffer::Buffer;
 use crate::command_buffer::CommandBuffer;
@@ -73,17 +73,10 @@ impl RenderLog {
         let RenderLog {
             descriptor,
             calls,
-            mut indexed,
+            indexed,
         } = *self;
         drop(descriptor);
-        if indexed.capacity() * std::mem::size_of::<DrawIndexed>() > SPARE_LOG_BYTES {
-            return None;
-        }
-        indexed.clear();
-        Some(RenderRoom {
-            calls: calls.cleared()?,
-            indexed,
-        })
+        RenderRoom { calls, indexed }.cleared()
     }
 
     /// The bytes it holds.
@@ -101,8 +94,8 @@ impl RenderLog {
     /// Run its calls again on `encoder`, a later color group's of its pass
     /// (`render/color_groups.rs`). A call refused there was refused in the first group's
     /// encoder, whose answer the program had, or is a divergence the later group's encoder notes
-    /// (`RenderCommandEncoder::group_outcome`): either way the calls after it run.
-    pub(crate) fn replay_into(&self, encoder: &mut RenderCommandEncoder) {
+    /// (`RenderEncoding::group_outcome`): either way the calls after it run.
+    pub(crate) fn replay_into(&self, encoder: &mut RenderEncoding) {
         for call in &self.calls.calls {
             let _ = render(encoder, (&self.calls, &self.indexed), call);
         }
@@ -114,12 +107,75 @@ impl RenderLog {
         command_buffer: &CommandBuffer,
         residency: Residency,
     ) -> Result<(Replayed, Option<Residency>), Error> {
-        let mut encoder =
-            RenderCommandEncoder::replaying(command_buffer, &self.descriptor, residency)?;
+        let mut encoder = RenderEncoding::replaying(command_buffer, &self.descriptor, residency)?;
         for call in &self.calls.calls {
             render(&mut encoder, (&self.calls, &self.indexed), call)?;
         }
         encoder.finish_replay()
+    }
+}
+
+impl RenderRoom {
+    /// Empty lists, which allocate nothing until a call is logged.
+    pub(crate) fn new() -> RenderRoom {
+        RenderRoom {
+            calls: CallLog::new(),
+            indexed: Vec::new(),
+        }
+    }
+
+    /// Log the call `call` makes of the log (a captured encoder's, `render/captured.rs`).
+    pub(super) fn push(&mut self, call: impl FnOnce(&mut CallLog<RenderCall>) -> RenderCall) {
+        let call = call(&mut self.calls);
+        let extra = call.extra();
+        self.calls.push(call, extra);
+    }
+
+    /// Log a `draw_indexed_primitives` call, whose arguments `draw` makes of the log.
+    pub(super) fn push_indexed(
+        &mut self,
+        draw: impl FnOnce(&mut CallLog<RenderCall>) -> DrawIndexed,
+    ) {
+        let draw = draw(&mut self.calls);
+        // Fewer than the log's calls, each of 24 bytes or more.
+        let at = self.indexed.len() as u32;
+        self.indexed.push(draw);
+        let call = RenderCall::DrawIndexedPrimitives(at);
+        self.calls.push(call, std::mem::size_of::<DrawIndexed>());
+    }
+
+    /// Whether no call is logged.
+    pub(super) fn is_empty(&self) -> bool {
+        self.calls.calls.is_empty()
+    }
+
+    /// The calls logged.
+    pub(super) fn len(&self) -> usize {
+        self.calls.calls.len()
+    }
+
+    /// Run its calls on `encoder`, in order: a call refused there goes to `failed`, and the calls
+    /// after it run.
+    pub(super) fn run_on(&self, encoder: &mut RenderEncoding, mut failed: impl FnMut(Error)) {
+        for call in &self.calls.calls {
+            if let Err(error) = render(encoder, (&self.calls, &self.indexed), call) {
+                failed(error);
+            }
+        }
+    }
+
+    /// Its lists emptied for another piece, its calls and handles let go of: `None` where their
+    /// room is more than `SPARE_LOG_BYTES` (`CallLog::cleared`).
+    pub(crate) fn cleared(self) -> Option<RenderRoom> {
+        let RenderRoom { calls, mut indexed } = self;
+        if indexed.capacity() * std::mem::size_of::<DrawIndexed>() > SPARE_LOG_BYTES {
+            return None;
+        }
+        indexed.clear();
+        Some(RenderRoom {
+            calls: calls.cleared()?,
+            indexed,
+        })
     }
 }
 
@@ -344,7 +400,7 @@ pub(crate) struct DrawIndexedPatchesIndirect {
     pub(super) indirect_buffer_offset: u64,
 }
 
-impl RenderCommandEncoder {
+impl RenderEncoding {
     /// Log the call `call` makes of the log, before it runs, where the encoder logs (the module
     /// docs).
     pub(crate) fn log(&mut self, call: impl FnOnce(&mut CallLog<RenderCall>) -> RenderCall) {
@@ -375,7 +431,7 @@ impl RenderCommandEncoder {
 /// Run `call` again on `encoder`, its slices in `log`'s arenas and an indexed draw's arguments in
 /// `indexed`.
 fn render(
-    encoder: &mut RenderCommandEncoder,
+    encoder: &mut RenderEncoding,
     (log, indexed): (&CallLog<RenderCall>, &[DrawIndexed]),
     call: &RenderCall,
 ) -> Result<(), Error> {

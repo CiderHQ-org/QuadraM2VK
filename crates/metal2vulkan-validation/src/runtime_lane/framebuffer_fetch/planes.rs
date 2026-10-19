@@ -194,15 +194,8 @@ fn sample_planes_carry_every_sample() {
     // own multisampled storage image, the fetching draw reads the attachment out of its subpass and
     // the plain draw before it in theirs, and only a single-sampled pass keeps such draws in one
     // instance: the pass splits there (on the RTX 3080 too, through its multisampled storage
-    // images). The interlock alone makes that split, so on a driver measured to
-    // run such a split no slower than whole (`DriverFact::InterlockedPassSplitNoSlower`, ANV on the
-    // Iris Xe of RPL-P and the RPL-S, MoltenVK on the M3 Max, NVIDIA on the RTX 3090 and the RTX
-    // 5080 Laptop GPU) it is the device's faster form and is not announced.
+    // images). The interlock alone makes that split, which is not announced.
     first.extend(forced(&[
-        (
-            Degradation::RenderPassSplit,
-            super::announces_interlock_splits(&lane),
-        ),
         (Degradation::DontCareStore, !metals || planes),
         (Degradation::FetchThroughScratch, scratch),
         (Degradation::FetchedTargetStorage, scratch),

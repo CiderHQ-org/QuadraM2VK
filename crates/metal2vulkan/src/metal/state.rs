@@ -510,6 +510,31 @@ pub fn depth16_bias(depth_bias: f32, slope_scale: f32, clamp: f32) -> [f32; 3] {
     [units, slope_scale, clamp]
 }
 
+/// The code Metal stores in a `Depth16Unorm` depth for a flat triangle at depth `depth` under the
+/// render encoder's `setDepthBias:slopeScale:clamp:` factors `depth_bias` and `slope_scale` (no
+/// clamp), by [`depth_bias`]'s rule: where `depth_bias` is finite and either factor is nonzero,
+/// Metal's `c ± 1` units of 1/65535 as `float` are added to the depth, the sum rounded toward zero
+/// and clamped to `[0, 1]`; the depth (or that sum) scaled by 65535 exactly is stored rounded to
+/// nearest, a tie up (0.5 is `0x8000`). Every code of the Metal probes of the M3 Max and the M4
+/// (`runtime_lane::unorm_depth_bias`'s rows) is this rule's; the device's own check of
+/// `DriverDeviation::MetalDepth16Stores` and `MetalDepth16BiasedStores` compares with it.
+pub fn depth16_code(depth: f32, depth_bias: f32, slope_scale: f32) -> u16 {
+    let biased = if depth_bias.is_finite() && (depth_bias != 0.0 || slope_scale != 0.0) {
+        let bias = (depth16_units(depth_bias) / 65535.0) as f32;
+        // Two `float`s sum exactly in `f64` here (their exponents lie within 29 of each other).
+        let exact = f64::from(depth) + f64::from(bias);
+        let nearest = exact as f32;
+        if f64::from(nearest).abs() > exact.abs() {
+            f32::from_bits(nearest.to_bits() - 1)
+        } else {
+            nearest
+        }
+    } else {
+        depth
+    };
+    (f64::from(biased.clamp(0.0, 1.0)) * 65535.0 + 0.5).floor() as u16
+}
+
 /// The side of the depth bias a fragment stage that stores Metal's `Depth16Unorm` codes itself
 /// adds for the factors `depth_bias`, `slope_scale` and `clamp` ([`depth16_bias`]'s), where every
 /// triangle's biased depth lies on it: `Some(true)` where Metal's units are above 0, the slope
@@ -819,5 +844,32 @@ mod tests {
             assert_eq!(restart, topology.name().unwrap().ends_with("_STRIP"));
         }
         assert_eq!(index_type(IndexType::UInt32), vk::IndexType::UINT32);
+    }
+
+    /// Metal's 16-bit codes at the anchors its probes measured (`runtime_lane::unorm_depth_bias`
+    /// holds the rule to every code of them): a tie up, a depth just under a midpoint, the
+    /// constant's extra unit either side, a slope alone bringing one unit, and the clamp.
+    #[test]
+    fn depth16_codes_are_metal_s_at_the_probes_anchors() {
+        for (depth, constant, slope, code) in [
+            (0x3f00_0000, 0.0, 0.0, 32768),
+            (0x3e99_999a, 0.0, 0.0, 19661),
+            (0x3f66_6666, 0.0, 0.0, 58981),
+            (0x0000_0000, 0.25, 0.0, 1),
+            (0x0000_0000, -0.25, 0.0, 0),
+            (0x0000_0000, 30000.0, 0.0, 30001),
+            (0x3dcc_cccd, -1000.0, 0.0, 5552),
+            (0x3ac9_00ca, 0.0, 0.0, 101),
+            (0x3ac9_00c9, 0.5, 0.0, 102),
+            (0x3ea4_74a5, 0.0, 0.5, 21051),
+            (0x3f7f_ff00, 4.0, 0.0, 65535),
+        ] {
+            let z = f32::from_bits(depth);
+            assert_eq!(
+                depth16_code(z, constant, slope),
+                code,
+                "{depth:#010x} by {constant}"
+            );
+        }
     }
 }

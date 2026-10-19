@@ -498,6 +498,10 @@ pub fn plan_kernel(cx: &mut SelectCx<'_>, tier: Tier) -> Result<DispatchPlan, Er
     if cx.families.stage_io.reads_grid_position {
         builtins.insert(KernelBuiltin::ThreadPositionInGrid);
     }
+    // An imageblock slice the whole threadgroup copies shares its cells by the linear index.
+    if cx.families.texture.cooperative_slices {
+        builtins.insert(KernelBuiltin::ThreadIndexInThreadgroup);
+    }
     // A tile function's staging reads the tile and its threads.
     if crate::lower::access::tile::stages_any(&cx.families.access) {
         for b in crate::lower::access::tile::BUILTINS {
@@ -667,6 +671,29 @@ pub fn grid_position(cx: &mut EmitCx<'_>, fb: &mut FunctionBuilder<'_>) -> BResu
     decl.value(fb, KernelBuiltin::ThreadPositionInGrid, &mut |fb| {
         cx.push_field(fb, PushField::DispatchRegion)
     })
+}
+
+/// The calling invocation's linear index in its threadgroup and the threadgroup's thread count
+/// `sx · sy · sz`, derived in the open block: an imageblock slice the whole threadgroup copies
+/// shares its cells by them (`lower::texture::slice`), and its kernel's plan reads
+/// `ThreadIndexInThreadgroup` for it ([`plan_kernel`]). Not a tile function's.
+pub fn linear_index(
+    cx: &mut EmitCx<'_>,
+    fb: &mut FunctionBuilder<'_>,
+) -> BResult<(SValue, SValue)> {
+    let decl: &crate::lower::emit::Declared = cx.decl;
+    let Some(decl) = decl.families.dispatch.kernel.as_ref() else {
+        return Err(cx.fail("a linear index outside a kernel"));
+    };
+    if decl.tile {
+        return Err(cx.fail("a tile function's linear index"));
+    }
+    let lin = decl.value(fb, KernelBuiltin::ThreadIndexInThreadgroup, &mut |fb| {
+        cx.push_field(fb, PushField::DispatchRegion)
+    })?;
+    let size = decl.running_threads(fb)?;
+    let n = KernelDecl::volume(fb, size)?;
+    Ok((lin, n))
 }
 
 /// Project a builtin's `u32`/`uvec3` value `v` onto `p`, or `None` when the arith family does not

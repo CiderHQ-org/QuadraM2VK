@@ -23,8 +23,8 @@
 //! - **Without colour copies** where the driver copies the multisampled stencil wrong
 //!   ([`copies_break`]): the texels of a combined depth/stencil attachment and of the shadow
 //!   differ in size, and a driver with `RuntimeDriverDefect::MultisampledDepthStencilColourCopies`
-//!   (`driver_defects.rs` says how each breaks: lavapipe writes sample 0 alone, Ampere GA10x loses
-//!   the device) copies between them wrong. Such a shadow of more than one sample is copied by a
+//!   (`driver_defects.rs` and the known-driver list say how each breaks: lavapipe writes sample 0
+//!   alone, Ampere GA10x loses the device) copies between them wrong. Such a shadow of more than one sample is copied by a
 //!   kernel that reads the stencil aspect through a sampled view and by stencil draws that write
 //!   it back a bit at a time (`stencil_copy.rs`), exact where the attachment's image is sampled
 //!   and the device runs them; it is refused where the image is not sampled (`Unsupported`,
@@ -75,11 +75,17 @@ pub(super) fn copies_break(
     format: Format,
     samples: u32,
 ) -> Option<RuntimeDriverDefect> {
-    let combined = super::texture::image_aspects(format).contains(ImageAspectFlags::DEPTH);
-    if samples <= 1 || !combined {
+    if !through_colour_copies(format, samples) {
         return None;
     }
     super::depth_stencil_scratch::copies_defect(defects, ImageAspectFlags::STENCIL)
+}
+
+/// Whether a shadow of `samples` samples is copied to and from the stencil aspect of an
+/// attachment of `format` through maintenance8's depth-stencil/colour copies: more than one
+/// sample of a combined depth/stencil format.
+fn through_colour_copies(format: Format, samples: u32) -> bool {
+    samples > 1 && super::texture::image_aspects(format).contains(ImageAspectFlags::DEPTH)
 }
 
 /// A pass's shadow of its stencil, and the buffer its single-sample copies pass through.
@@ -132,6 +138,14 @@ impl ShadowStencil {
             return Err(Error::Unsupported(Unsupported::runtime_driver_defect(
                 feature, defect,
             )));
+        }
+        // Copied image to image through maintenance8's depth-stencil/colour copies, where the
+        // driver is not known to break them: a risky path of the command buffer's
+        // (`device_checks/learned.rs`).
+        if broken.is_none() && through_colour_copies(stencil.format, stencil.samples) {
+            maker.took(super::depth_stencil_scratch::copies_risk(
+                ImageAspectFlags::STENCIL,
+            ));
         }
         let [width, height] = stencil.extent;
         let samples = stencil.samples;

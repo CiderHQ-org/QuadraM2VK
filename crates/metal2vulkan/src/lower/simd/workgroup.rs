@@ -86,6 +86,7 @@ use crate::memory::arena::MIN_ARENA_BYTES;
 use crate::memory::leaf::Coherence;
 use crate::pipeline::facts::RuntimeFact;
 use crate::pipeline::sym::{SpecKey, Stage};
+use crate::spirv::builder::constructs::{ArmEnd, ArmFn};
 use crate::spirv::builder::{FunctionBuilder, ModuleBuilder};
 use crate::spirv::error::{BResult, BuildError, Dangling};
 use crate::spirv::ids::{ConstId, DemoteTy, GlobalId, TypeId, Value as SValue};
@@ -557,6 +558,41 @@ pub(super) fn emu(cx: &mut EmitCx<'_>, fb: &mut FunctionBuilder<'_>) -> BResult<
 /// (`simd::Declared::vote`); it is only reached by atomics, which the barriers order. The result is
 /// workgroup uniform; the caller is in workgroup-uniform control flow.
 pub fn vote(cx: &mut EmitCx<'_>, fb: &mut FunctionBuilder<'_>, live: SValue) -> BResult<SValue> {
+    let (p, sem) = vote_word(cx, fb)?;
+    let zero = k(fb, 0)?;
+    let one = k(fb, 1)?;
+    vote_at(fb, p, sem, live, (zero, one))
+}
+
+/// The `u32` `v` of the invocations where `live` holds, which all hold it alike, read by every
+/// invocation of the workgroup through [`vote`]'s word: each invocation where `live` holds stores
+/// `v` (every such store is of the same word), a workgroup barrier, each reads the word, and a
+/// barrier keeps the next exchange or vote from writing it before every invocation has read. Where
+/// no invocation is live, each reads the word as it was, a value the caller does not use (an
+/// imageblock slice the whole threadgroup copies publishes its operands so after a vote, and
+/// copies only where the vote found a live invocation, `texture::slice`). The caller is in
+/// workgroup-uniform control flow.
+pub fn publish(
+    cx: &mut EmitCx<'_>,
+    fb: &mut FunctionBuilder<'_>,
+    live: SValue,
+    v: SValue,
+) -> BResult<SValue> {
+    let (p, sem) = vote_word(cx, fb)?;
+    let relaxed = Semantics::RELAXED;
+    let store: ArmFn<'_, ()> = Box::new(move |fb, _| {
+        fb.atomic_store(p, Scope::Workgroup, relaxed, v)?;
+        Ok(ArmEnd::FallThrough(Vec::new()))
+    });
+    fb.if_(&mut (), live, store, None)?;
+    fb.control_barrier(Scope::Workgroup, Scope::Workgroup, sem)?;
+    let x = fb.atomic_load(p, Scope::Workgroup, relaxed)?;
+    fb.control_barrier(Scope::Workgroup, Scope::Workgroup, sem)?;
+    Ok(x)
+}
+
+/// A pointer to the word [`vote`] votes in, and the semantics of the barriers around it.
+fn vote_word(cx: &mut EmitCx<'_>, fb: &mut FunctionBuilder<'_>) -> BResult<(SValue, Semantics)> {
     if let Some(word) = cx.decl.families.simd.vote {
         let flags = MemFlags {
             threadgroup: true,
@@ -567,16 +603,13 @@ pub fn vote(cx: &mut EmitCx<'_>, fb: &mut FunctionBuilder<'_>, live: SValue) -> 
             MemoryOrder::AcquireRelease,
             barrier::memory_model(cx.plan),
         );
-        let zero = k(fb, 0)?;
-        let one = k(fb, 1)?;
         let p = fb.module().global_value(word)?;
-        return vote_at(fb, p, sem, live, (zero, one));
+        return Ok((p, sem));
     }
     let e = emu(cx, fb)?;
     let zero = k(fb, 0)?;
-    let one = k(fb, 1)?;
     let p = e.word_ptr(fb, zero, 0)?;
-    vote_at(fb, p, e.sem, live, (zero, one))
+    Ok((p, e.sem))
 }
 
 /// [`vote`] in the word at `p`, with workgroup barriers of semantics `sem`.

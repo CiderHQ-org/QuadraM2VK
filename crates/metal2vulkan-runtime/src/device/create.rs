@@ -34,6 +34,7 @@ use super::keeper::keep_drivers_loaded;
 use super::properties::DeviceKind;
 use super::{device_error, lock, Device, DeviceShared, InstanceShared, Parts};
 use crate::degradation::{Degradation, DegradeNotice};
+use crate::device_checks::DeviceChecksOptions;
 use crate::enables::{host_image_copy_names, listed_reported, listed_structures, Enables};
 use crate::error::{vulkan, Error, InstanceApiVersion, LoaderNotFound};
 use crate::exit_guard;
@@ -109,6 +110,13 @@ pub struct DeviceOptions {
     /// Where the devices keep translated shaders: by default, the platform's per-user cache
     /// directory.
     pub shader_cache: ShaderCacheOptions,
+    /// Where the devices keep what their checks of their drivers found (`device_checks`), by
+    /// default the platform's per-user cache directory's `metal2vulkan-device-checks`, and whether
+    /// a making waits for every check (`DeviceChecksOptions::wait`). A device reads the answers of
+    /// its setup where they are kept; else it runs the checks of `Settle::AtCreation` as it is
+    /// made and the rest on its checks thread after, or all as it is made under `wait`. Under
+    /// `DeviceChecksPolicy::Distrusted` it does none of it. No Metal counterpart.
+    pub device_checks: DeviceChecksOptions,
     /// Leave `VK_EXT_device_generated_commands` disabled on a device that has it. The runtime
     /// enables it otherwise (with `VK_KHR_maintenance5`, which it requires), and runs an
     /// execution of commands a kernel writes on the GPU alone where every record it may hold is
@@ -171,6 +179,25 @@ pub struct DeviceOptions {
     /// No Metal counterpart.
     #[doc(hidden)]
     pub record_executions: bool,
+    /// Answer every call the device's memo keys `Ok` at the call, without an earlier answer to
+    /// go by (`render/captured.rs`): a call whose encoding on the resolver refuses then fails its
+    /// command buffer, counted (`WorkCounts::answered_calls_refused`). Off by default.
+    /// Validation's checks of the memo's keys turn it on. No Metal counterpart.
+    #[doc(hidden)]
+    pub answer_untaught: bool,
+    /// Encode every render encoder at the program's call, as Metal's own encoders do: the device
+    /// starts no resolver thread, and none of its render encoders is captured. Off by default:
+    /// the device captures a render encoder whose pass, state and calls it has seen answered
+    /// before, answers each call at the call, and encodes the calls on its resolver thread while
+    /// the program goes on (docs/API.md, "Render encoders on the resolver"). Either way every
+    /// call returns the same answer, and the command buffers record the same commands. Capture
+    /// pays where most of a frame's passes are captured with no encoder at the call between
+    /// them; where most open at the call (passes over the caller's image or a buffer's bytes),
+    /// or are taken back to the call, the resolver's work comes back to the program's thread
+    /// with the cost of its log on top. `WorkCounts::render_encoders_captured`,
+    /// `render_encoders_demoted` and `render_opens_unkeyed_passes` and kin tell which. No Metal
+    /// counterpart.
+    pub encode_at_the_call: bool,
 }
 
 /// One setting of an instance layer (`VkLayerSettingEXT`).
@@ -268,10 +295,49 @@ impl MessageSink {
         Arc::ptr_eq(&self.0, &other.0)
     }
 
-    /// Hand `message` to the sink; a panic inside it is caught.
+    /// Hand `message` to the sink; a panic inside it is caught. Counted on this thread
+    /// ([`heard_here`]).
     pub(crate) fn deliver(&self, message: &DebugMessage) {
+        heard();
         crate::exit_guard::program(|| (self.0)(message));
     }
+}
+
+thread_local! {
+    /// The messages this thread handed to a sink, or wrote on stderr for a device without one
+    /// ([`heard_here`]).
+    static HEARD: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Count a message this thread delivers: to a sink ([`MessageSink::deliver`]), or on stderr for a
+/// device without one.
+pub(crate) fn heard() {
+    let _ = HEARD.try_with(|heard| heard.set(heard.get() + 1));
+}
+
+/// The messages this thread delivered so far ([`heard`]): a call that reads it before and after
+/// learns whether it announced anything (`render/captured.rs`, `resolver.rs`).
+pub(crate) fn heard_here() -> u64 {
+    HEARD.try_with(std::cell::Cell::get).unwrap_or(0)
+}
+
+thread_local! {
+    /// The draws this thread recorded whose notices a later draw may deliver ([`unsettled`]).
+    static UNSETTLED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Count a draw this thread records with a `VkPipeline` other than its key's own made one (one
+/// being made, or its residual form): a later draw that finds the key's own made at the state's
+/// creation announces its notices then (`RenderVariant::first_use`).
+pub(crate) fn unsettled() {
+    let _ = UNSETTLED.try_with(|unsettled| unsettled.set(unsettled.get() + 1));
+}
+
+/// The messages this thread delivered so far and the draws it recorded whose notices a later draw
+/// may deliver ([`heard`], [`unsettled`]): a call that reads it before and after learns whether
+/// its notices all came in the call (`render/captured.rs`).
+pub(crate) fn settled_mark() -> u64 {
+    heard_here() + UNSETTLED.try_with(std::cell::Cell::get).unwrap_or(0)
 }
 
 impl std::fmt::Debug for MessageSink {
@@ -1241,6 +1307,37 @@ fn create_on(
         .map_err(vulkan)?;
     // SAFETY: the device was just created: its word is the loader's.
     let loader_word = unsafe { LoaderWord::of_device(raw.handle()) };
+    // The device's own checks of its driver, before any object of its own (`device_checks`):
+    // their answers go to the description, and the compile device is made again from it.
+    let settled = {
+        let making = crate::device_checks::Making {
+            instance: &instance.raw,
+            device: &raw,
+            loader_word: &loader_word,
+            queue: (queue_family, 0),
+        };
+        let target = crate::device_checks::Target {
+            physical,
+            description: &enabled,
+            enabled: &set,
+            compile: &compile,
+        };
+        let device_checks = &options.device_checks;
+        // SAFETY: the device was just made from the instance on `physical` with `set` enabled
+        // and its queues, which nothing uses yet; the word is its loader's.
+        unsafe { crate::device_checks::settle(&making, &target, device_checks, options.policy) }
+    };
+    let (compile, enabled) = match checked(compile, enabled, settled.checks, options.policy) {
+        Ok(made) => made,
+        Err(error) => {
+            // SAFETY: the device is the runtime's, and nothing was made from it.
+            unsafe {
+                loader_word.restore();
+                release::object(&raw, release::WholeDevice);
+            }
+            return Err(error);
+        }
+    };
     let primary = families.get(queue_family as usize);
     let memory_reads = MemoryReads::of(
         primary.map_or(vk::QueueFlags::empty(), |family| family.queue_flags),
@@ -1262,6 +1359,8 @@ fn create_on(
         gpu_times_from_host: options.gpu_times_from_host,
         announce_each: options.announce_each.clone(),
         record_executions: options.record_executions,
+        answer_untaught: options.answer_untaught,
+        encode_at_the_call: options.encode_at_the_call,
         view_reinterpretation,
         generated_commands,
         host_image_copy,
@@ -1275,6 +1374,9 @@ fn create_on(
         owned: true,
         cache: cache.clone(),
         metal_level: level,
+        checks: settled.run,
+        learned: settled.learned,
+        pending_checks: settled.pending,
     };
     // SAFETY: the device was made from these parts just now.
     let device = unsafe { Device::assemble(parts) }?;
@@ -1296,6 +1398,25 @@ fn create_on(
         }
     }
     Ok(device)
+}
+
+/// The compile device and its description with `checks`, the device's checks' answers, where
+/// there are any: the compile device made again from the description that holds them, under
+/// `policy`; else `compile` and `description` as they are.
+pub(super) fn checked(
+    compile: metal2vulkan::device::Device,
+    description: DeviceDescription,
+    checks: metal2vulkan::device::DeviceChecks,
+    policy: DevicePolicy,
+) -> Result<(metal2vulkan::device::Device, DeviceDescription), Error> {
+    if checks.is_empty() {
+        return Ok((compile, description));
+    }
+    let mut checked = description;
+    checked.checks = checks;
+    let compile =
+        metal2vulkan::device::Device::new(checked.clone(), policy).map_err(device_error)?;
+    Ok((compile, checked))
 }
 
 /// The id name of the informational message a device whose driver keeps its internal pipeline
@@ -1344,7 +1465,7 @@ impl Made {
             .iter()
             .find(|(of, _)| *of == physical)
             .and_then(|(_, device)| device.upgrade())
-            .map(Device)
+            .map(Device::of)
     }
 }
 
@@ -1363,6 +1484,7 @@ fn same_options(a: &DeviceOptions, b: &DeviceOptions) -> bool {
         loader,
         kinds,
         shader_cache,
+        device_checks,
         withhold_generated_commands,
         withhold_view_reinterpretation,
         instance_api_version,
@@ -1370,6 +1492,8 @@ fn same_options(a: &DeviceOptions, b: &DeviceOptions) -> bool {
         announce_each,
         metal_level,
         record_executions,
+        answer_untaught,
+        encode_at_the_call,
     } = a;
     *policy == b.policy
         && *layers == b.layers
@@ -1381,6 +1505,7 @@ fn same_options(a: &DeviceOptions, b: &DeviceOptions) -> bool {
         && *loader == b.loader
         && *kinds == b.kinds
         && *shader_cache == b.shader_cache
+        && *device_checks == b.device_checks
         && *withhold_generated_commands == b.withhold_generated_commands
         && *withhold_view_reinterpretation == b.withhold_view_reinterpretation
         && *instance_api_version == b.instance_api_version
@@ -1388,6 +1513,8 @@ fn same_options(a: &DeviceOptions, b: &DeviceOptions) -> bool {
         && *announce_each == b.announce_each
         && *metal_level == b.metal_level
         && *record_executions == b.record_executions
+        && *answer_untaught == b.answer_untaught
+        && *encode_at_the_call == b.encode_at_the_call
 }
 
 /// The group of `made` for `options`: the live one, or a new one on a new instance. Its index.

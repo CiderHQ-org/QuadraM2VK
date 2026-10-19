@@ -2614,6 +2614,16 @@ impl Buffer {
         }
     }
 
+    /// Where the buffer's byte 0 lies in its `VkBuffer`, as [`at`](Self::at) places it, read
+    /// without a look at a no-copy buffer's pages that counts as a read apart
+    /// (`HostImport::note_read_apart`): a heap's buffer's at its offset in the heap's.
+    pub(super) fn zero_in_vk_buffer(&self) -> u64 {
+        match &self.0.bytes {
+            Bytes::Own(own) => own.shape().base,
+            Bytes::Heap(bytes) => bytes.bytes.zero_in_vk_buffer() + bytes.offset,
+        }
+    }
+
     /// [`base`](Self::base) and [`device_address`](Self::device_address) together, from one look
     /// at where the buffer lies, a no-copy buffer's pages read for `reason`
     /// (`HostImport::note_read_apart`): what a binding of it reads (`argument_table::bound_buffer`),
@@ -3174,6 +3184,11 @@ impl Buffer {
     /// A buffer outside a heap stays as it is, not aliasable, as plain Metal leaves it where its
     /// validation stops the call.
     pub fn make_aliasable(&self) -> Result<(), Error> {
+        // What a captured encoder's calls handed the device's resolver is encoded first, so this
+        // reads and changes what the commands encoded before it see (`resolver.rs`).
+        self.device()
+            .shared()
+            .drain_resolver(crate::resolver::Drain::Object);
         let Bytes::Heap(bytes) = &self.0.bytes else {
             return Ok(());
         };

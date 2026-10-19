@@ -11,6 +11,7 @@ mod air_input;
 mod argument_buffers;
 mod bind_shape_of;
 pub(crate) mod constant_blob_footprint;
+mod device_check_bounds;
 mod engine_absent_handles;
 mod engine_absent_threadgroup;
 mod engine_absent_value_arguments;

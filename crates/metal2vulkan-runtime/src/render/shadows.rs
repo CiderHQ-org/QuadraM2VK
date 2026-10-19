@@ -558,7 +558,8 @@ fn count_colors(
     drawn: Option<([u32; 4], &[bool])>,
     area: Option<&DrawnArea>,
 ) {
-    let tiles = area.and_then(DrawnArea::covered_tiles);
+    // Counted once, where a color is loaded within its draws' bounds.
+    let mut tiles = None;
     let colors = layout.colors.iter().enumerate();
     for (index, color) in colors.filter_map(|(index, color)| Some((index, color.as_ref()?))) {
         let Some(copies) = color.target.texture.shadow() else {
@@ -574,8 +575,11 @@ fn count_colors(
             _ => ColorTaken::Loaded,
         };
         counts.shadow_color_taken(taken);
-        if let (ColorTaken::LoadedWithin, Some((covered, bounded))) = (taken, tiles) {
-            counts.shadow_attachment_tiles(covered, bounded);
+        if taken == ColorTaken::LoadedWithin {
+            let tiles = *tiles.get_or_insert_with(|| area.and_then(DrawnArea::covered_tiles));
+            if let Some((covered, bounded)) = tiles {
+                counts.shadow_attachment_tiles(covered, bounded);
+            }
         }
     }
 }

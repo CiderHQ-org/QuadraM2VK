@@ -11,7 +11,7 @@
 //!   retaining it: a command buffer released at the value crashed there. It signals a fence from
 //!   the last of those handlers. That is MoltenVK's behavior, not a guarantee of Vulkan's, and the
 //!   device's driver defects name it (`RuntimeDriverDefect::ReadsCommandBuffersAfterTheirSignal`,
-//!   `driver_defects.rs`).
+//!   on the known-driver list).
 //! - **Only there**. Every other driver signals the fence with the value, so a command buffer there
 //!   ends at its value alone and its commit takes no fence ([`ends_at_fence`]): NVIDIA's
 //!   `vkCreateFence` on the commit path waited up to 1.9 s for other processes' work. A queue whose

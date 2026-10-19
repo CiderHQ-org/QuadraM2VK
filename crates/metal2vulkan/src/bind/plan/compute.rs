@@ -30,16 +30,18 @@
 //!   slot receiving imageblock slices takes any pixel format: a narrow element's texel is its lanes
 //!   and zeros in every format, as Metal writes it.
 //! - **Tile functions** (`RuntimeFact::TileFunction`). The render area (`BindState::render_area`,
-//!   at least one pixel in each axis, `BindError::InvalidRenderArea` otherwise) is specialized, a
+//!   at least one pixel in each axis, `BindError::InvalidRenderArea` otherwise) is pushed, a value
+//!   the function reads as data (`PushField::Specialized`, `SpecKey::read_as_data`), so every pass
+//!   size takes one pipeline; a
 //!   layered pass is `Unsupported{TileShading, NotImplemented}`, and each attachment the function
 //!   stages is a `WriteSource::TileAttachment` in the view format its staging reads
 //!   (`lower::access::tile::staging_format`).
 //! - **Tile threadgroup memory** (`RuntimeFact::TileThreadgroupMemory`). A tile function that reads
 //!   its `[[threadgroup(n)]]` arguments specializes each argument's offset in its tile's memory
-//!   (`SpecKey::TgOffset`, from `BindState::tile_threadgroup`), the tile's bytes
-//!   (`SpecKey::TileThreadgroupLength`, the pass's length rounded up to 16) and the tiles across
-//!   the render area (`SpecKey::TileGridWidth`), and binds the pass's tile memory
-//!   (`WriteSource::TileMemory`, every tile's bytes). An argument the encoder did not set is
+//!   (`SpecKey::TgOffset`, from `BindState::tile_threadgroup`) and the tile's bytes
+//!   (`SpecKey::TileThreadgroupLength`, the pass's length rounded up to 16), pushes the tiles
+//!   across the render area (`SpecKey::TileGridWidth`, read as data), and binds the pass's tile
+//!   memory (`WriteSource::TileMemory`, every tile's bytes). An argument the encoder did not set is
 //!   `BindError::MissingThreadgroupMemory`; one past the tile's memory or not 16-byte aligned
 //!   `BindError::TileThreadgroupArgument`. The tile's bytes start the threadgroup total.
 //! - **Kept imageblock bytes** (`RuntimeFact::TileImageblock`). A tile function whose explicit
@@ -158,14 +160,14 @@ impl TileMemoryPlan {
         (u64::from(self.grid[0]) * u64::from(self.grid[1]) * self.tile_bytes).max(TG_ALIGN)
     }
 
-    /// The value of tile memory specialization constant `key` (`SpecKey::TgOffset`,
-    /// `TileThreadgroupLength` and `TileGridWidth`; a fragment function's tile, `ImageblockWidth`
-    /// and `ImageblockHeight`), or `None` for another key or an argument without its fact.
+    /// The value of tile memory specialization constant `key` (`SpecKey::TgOffset` and
+    /// `TileThreadgroupLength`; a fragment function's tile, `ImageblockWidth` and
+    /// `ImageblockHeight`), or `None` for another key or an argument without its fact. The grid's
+    /// width a function reads as data (`slots::pass_value`).
     pub(crate) fn spec(&self, key: SpecKey) -> Option<u64> {
         match key {
             SpecKey::TgOffset(index) => self.offsets.get(&index).map(|&o| u64::from(o)),
             SpecKey::TileThreadgroupLength => Some(self.tile_bytes),
-            SpecKey::TileGridWidth => Some(u64::from(self.grid[0])),
             SpecKey::ImageblockWidth => Some(u64::from(self.tile[0])),
             SpecKey::ImageblockHeight => Some(u64::from(self.tile[1])),
             _ => None,
@@ -662,16 +664,11 @@ fn plan(p: &ComputePipeline, device: &Device, shape: &BindShape) -> Result<Bindi
             SpecKey::ImageblockHeight if imageblock.is_some() => {
                 u64::from(shape.imageblock_size.height)
             }
-            // A tile dispatch's render area.
-            SpecKey::RenderAreaWidth => u64::from(shape.render_area[0]),
-            SpecKey::RenderAreaHeight => u64::from(shape.render_area[1]),
-            // A tile function's tile threadgroup memory.
-            SpecKey::TgOffset(_) | SpecKey::TileThreadgroupLength | SpecKey::TileGridWidth => {
-                tile_memory
-                    .as_ref()
-                    .and_then(|m| m.spec(c.key))
-                    .ok_or_else(|| internal(format!("{:?} without its facts", c.key)))?
-            }
+            // A tile function's tile threadgroup memory (its grid's width it reads as data).
+            SpecKey::TgOffset(_) | SpecKey::TileThreadgroupLength => tile_memory
+                .as_ref()
+                .and_then(|m| m.spec(c.key))
+                .ok_or_else(|| internal(format!("{:?} without its facts", c.key)))?,
             other => return Err(internal(format!("a compute specialization {other:?}"))),
         };
         fixed.push((c.key, v));

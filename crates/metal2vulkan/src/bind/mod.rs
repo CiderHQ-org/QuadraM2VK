@@ -88,10 +88,12 @@
 //! [`two_plane_texels_module`]; a blit into such a texture of a heap writes the heap's bytes at
 //! Metal's rows through [`plane_bytes_copy_module`]. A heap texture over host pages keeps its
 //! elements in the heap's bytes in Metal's tiled layout, moved between its image and those bytes
-//! through [`tiled_texels_module`]. A render pass that loads an extended-range, padded 10-bit or
-//! bfloat color attachment and draws first rewrites the bits its codes leave unused through
-//! [`unused_bits_module`] of its format, in the 32 x 32 tiles a mask names, as Metal's tile store
-//! does; under the exact tile store it also raises a signed normalized attachment's minimum codes
+//! through [`tiled_texels_module`], or, where its image has an unsigned-integer view of its
+//! element's width that stores, through [`tiled_words_module`] with no copy. A render pass that
+//! loads an extended-range, padded 10-bit or bfloat color attachment and draws first rewrites the
+//! bits its codes leave unused through [`unused_bits_module`] of its format, in the 32 x 32 tiles
+//! a mask names, as Metal's tile store does; under the exact tile store it also raises a signed
+//! normalized attachment's minimum codes
 //! and normalizes an `RGB9E5Float` attachment's words there. The tiles a pass's draws reach, which Metal's tile store writes back, are the mask one
 //! dispatch of [`tile_reach_module`] bins its captured primitives into: [`capture_assembly_module`]
 //! assembles them from a pass's capture draws' records, and [`capture_settle_module`] widens the
@@ -108,6 +110,11 @@
 //! without the formats through a twin of its codes or an 11-bit format's values ([`EtcDecode`], in
 //! the texels [`EtcTexels`] names), which [`etc_decode_module`] writes; a 4:2:2 texture through a
 //! twin of its texels' codes ([`ChromaDecode`]), which [`chroma_decode_module`] writes.
+//! The device's checks of its rasterizer draw the modules of a [`RasterCheck`]: the shared vertex
+//! stage [`raster_check_vertex`], the fragment stages [`fragcoord_depth_check_fragment`],
+//! [`center_varyings_check_fragment`], [`coverage_count_check_fragment`],
+//! [`early_tests_check_fragment`] and [`barycentric_pair_check_fragment`], and the kernel
+//! [`depth_samples_check_kernel`].
 //! [`sampler_desc`] gives the Vulkan sampler a plan's sampler write needs, [`heap_classes`] the
 //! classes of the handle heap's arrays on a profile, [`FunctionTableWords`] the words of a
 //! visible-function table's buffer, and [`FunctionTableSnapshot`] the one buffer of a command's
@@ -122,7 +129,9 @@
 //! device has no shader residency: a plan binds its bytes where a function reads the texture's
 //! residency. An [`ArgumentBufferLayout`] says where an argument encoder (`MTLArgumentEncoder`)
 //! writes each argument of an argument buffer: a function's (`Function::argument_buffer_layout`),
-//! or one of [`ArgumentDescriptor`]s ([`ArgumentBufferLayout::from_descriptors`]).
+//! or one of [`ArgumentDescriptor`]s ([`ArgumentBufferLayout::from_descriptors`]). The device's
+//! own checks of its driver's answers run each [`CheckKernel`] ([`half_quantize_check`]) and
+//! [`index_fetch_check_module`] ([`IndexFetchCheck`]), and compare with Metal's answers.
 //!
 //! The frozen surface is the items named at this root; the submodules are crate-private.
 
@@ -137,6 +146,7 @@ pub(crate) mod compressed_blit;
 pub(crate) mod depth_magnitude;
 pub(crate) mod depth_stencil_copy;
 pub(crate) mod depth_stencil_resolve;
+pub(crate) mod device_checks;
 pub(crate) mod dispatch;
 pub(crate) mod etc_decode;
 pub(crate) mod extended_shadow;
@@ -155,6 +165,7 @@ pub(crate) mod plane_bytes_copy;
 pub(crate) mod plane_copy;
 pub(crate) mod plane_words;
 pub(crate) mod pvrtc_decode;
+pub(crate) mod raster_checks;
 pub(crate) mod rate_map;
 pub(crate) mod replay;
 pub(crate) mod resident;
@@ -173,6 +184,7 @@ pub(crate) mod tessellation_scan;
 pub(crate) mod tile_map;
 pub(crate) mod tile_reach;
 pub(crate) mod tiled_texels;
+pub(crate) mod tiled_words;
 pub(crate) mod two_plane_texels;
 pub(crate) mod unused_bits;
 pub(crate) mod visibility_combine;
@@ -211,6 +223,18 @@ pub use depth_stencil_copy::{
 pub use depth_stencil_resolve::{
     depth_stencil_resolve_modules, DepthPick, DepthStencilResolveDraw, DepthStencilResolveModules,
     ResolveWrite,
+};
+pub use device_checks::{
+    array_length_check_module, block_decode_cases, canonical_nans_check,
+    color_outputs_check_fragment, color_write_draws, color_write_modules, composite_inserts_check,
+    depth_writes_check_fragment, float_denormals_check, half_quantize_check, half_round_trip_check,
+    half_round_trip_unsupported, index_fetch_check_module, loads_forwarded_check,
+    localized_loads_check, narrow_mask_check, pushed_uniform_check_module, sampled_fetch_cases,
+    sampled_fetch_check_module, sampler_clamp_check_module, storage_write_modules, storage_writes,
+    texel_fetch_check_module, BlockDecodeCase, CheckKernel, ColorDraw, ColorOutput,
+    ColorWriteModules, DescriptorCheck, IndexFetchCheck, MathMode, SampledFetchCase,
+    SampledFetchCheck, StorageWrite, StorageWriteModule, Sweep, SweepKernel, TexelFetch,
+    TexelFetchCheck, COLOR_WRITE_FACTS, STORAGE_WRITE_FACTS,
 };
 pub use dispatch::{Dispatch, DispatchCommands, DispatchRegion, IndirectArgs};
 pub use extended_shadow::{extended_shadow_module, ExtendedShadowModule};
@@ -280,6 +304,11 @@ pub use plane_bytes_copy::{
 pub use plane_copy::{plane_copy_module, PlaneCopyModule, PlaneRows};
 pub use plane_words::{plane_words_module, PlaneWordsModule};
 pub use pvrtc_decode::{pvrtc_decode_module, PvrtcDecode};
+pub use raster_checks::{
+    barycentric_pair_check_fragment, center_varyings_check_fragment, coverage_count_check_fragment,
+    cube_gradients_check_fragment, cube_gradients_check_kernel, depth_samples_check_kernel,
+    early_tests_check_fragment, fragcoord_depth_check_fragment, raster_check_vertex, RasterCheck,
+};
 pub use rotate_texels::{rotate_texels_module, RotateTexelsModule};
 pub use rows_copy::{rows_copy_module, RowsCopyModule};
 pub use sample_interleave::{
@@ -306,6 +335,9 @@ pub use tessellation_scan::{
 pub use tile_map::{SparseTileMap, TileMapError, TileMapping};
 pub use tile_reach::{tile_reach_module, TileReachModule};
 pub use tiled_texels::{tiled_texels_module, TiledLevelMove, TiledTexelsModule};
+pub use tiled_words::{
+    tiled_words_module, TiledTexelView, TiledWordsLevel, TiledWordsModule, TiledWordsStep,
+};
 pub use two_plane_texels::{two_plane_texels_module, PlaneLayout, TwoPlaneTexelsModule};
 pub use unused_bits::{unused_bits_module, TexelWords, UnusedBitsModule};
 pub use visibility_combine::{

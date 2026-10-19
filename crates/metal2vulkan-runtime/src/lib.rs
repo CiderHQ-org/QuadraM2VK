@@ -69,13 +69,14 @@ mod depth_stencil_scratch;
 mod descriptor_arena;
 mod detach;
 mod device;
+mod device_checks;
 #[cfg(unix)]
 mod dma_buf;
 mod draw_source;
 mod driver_defects;
 mod driver_facts;
 #[doc(hidden)]
-pub use driver_facts::unmeasured_driver_message;
+pub use driver_facts::feature_status_message;
 mod dynamic_library;
 mod dynamic_state;
 mod enables;
@@ -168,6 +169,7 @@ mod render_values;
 mod replay;
 mod residency;
 mod resolve;
+mod resolver;
 mod resource;
 mod resource_ids;
 mod retained;
@@ -236,6 +238,9 @@ pub use depth_stencil::DepthStencilState;
 pub use device::{
     DebugMessage, Device, DeviceHandles, DeviceKind, DeviceOptions, LayerSetting,
     LayerSettingValue, MessageKind, MessageSeverity, MessageSink, RawDevice,
+};
+pub use device_checks::{
+    CheckCost, CheckRun, CheckSource, DeviceChecksOptions, FeatureStatus, Learning, Settle, Settled,
 };
 #[cfg(unix)]
 pub use dma_buf::{DmaBufChunk, DmaBufRequest, DmaBufSource};

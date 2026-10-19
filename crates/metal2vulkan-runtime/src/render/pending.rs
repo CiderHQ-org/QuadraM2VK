@@ -42,6 +42,7 @@ use crate::tracker::LegacyBarrier;
 use crate::visibility::Lent;
 use ash::vk;
 use metal2vulkan::cache::VariantKey;
+use metal2vulkan::error::RuntimeDriverDefect;
 use metal2vulkan::pipeline::SpecKey;
 use std::sync::Mutex;
 
@@ -182,7 +183,9 @@ impl PendingDraw {
                     sets: &owned.sets,
                     pushed: &owned.pushed,
                     push_descriptor: shared.push_descriptor,
-                    pushes_after_pipeline_binds: shared.pushes_after_pipeline_binds,
+                    pushes_after_pipeline_binds: device.driver_defect(
+                        RuntimeDriverDefect::PushedDescriptorsStaleAfterPipelineBinds,
+                    ),
                     heap: owned.heap,
                     push: &owned.push,
                     vertex_buffers: &owned.vertex_buffers,

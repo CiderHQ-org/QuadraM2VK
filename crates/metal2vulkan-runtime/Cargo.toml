@@ -27,6 +27,13 @@ path = "src/lib.rs"
 # validation/fixtures/public/examples/runtime_examples.metal on the system default device, from the
 # workspace checkout (its committed LLVM text, assembled by `llvm-as`), or a metallib passed as the
 # first argument.
+# `metal2vulkan-gpu-report` (feature `gpu-report`): a device's feature status, its checks of its
+# driver and what each cost (docs/HOWTO.md, "GPU report").
+[[bin]]
+name = "metal2vulkan-gpu-report"
+path = "src/bin/gpu_report.rs"
+required-features = ["gpu-report"]
+
 [[example]]
 name = "compute_dispatch"
 path = "examples/compute_dispatch.rs"
@@ -59,6 +66,13 @@ ash = { workspace = true, features = ["std", "loaded"] }
 libc.workspace = true
 # The shader cache's entry names and the binary archive's keys.
 sha2.workspace = true
+# Optional: `metal2vulkan-gpu-report`'s JSON.
+serde_json = { workspace = true, optional = true }
+
+[features]
+default = []
+# The `metal2vulkan-gpu-report` command: a device's feature status, in text or JSON.
+gpu-report = ["dep:serde_json"]
 
 [dev-dependencies]
 serde_json.workspace = true

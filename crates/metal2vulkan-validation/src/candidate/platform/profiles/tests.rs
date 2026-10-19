@@ -120,6 +120,17 @@ fn every_committed_profile_is_within_itself() {
     }
 }
 
+/// No committed profile carries an answer of a device's checks of its driver: those are found on
+/// the device as it is made (`DeviceDescription::checks`), never stated by a profile.
+#[test]
+fn no_committed_profile_carries_check_answers() {
+    for stem in committed_profiles().unwrap() {
+        for description in [committed(&stem), read_at(&committed(&stem), AT_1_2)] {
+            assert!(description.checks.is_empty(), "{stem}");
+        }
+    }
+}
+
 /// A profile that states features a device lacks is named member by member: the floor with four
 /// optional features SwiftShader lacks (`shaderInt16`, 8- and 16-bit storage access, and formatless
 /// storage-image reads) names each of them on SwiftShader.

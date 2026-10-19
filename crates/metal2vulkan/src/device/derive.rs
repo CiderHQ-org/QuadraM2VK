@@ -7,6 +7,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
+use crate::device::checks::Baseline;
 use crate::device::description::{
     AllocationLimits, DeviceDescription, GeneratedCommandsProperties, APPLE_VENDOR_ID,
 };
@@ -14,8 +15,9 @@ use crate::device::driver_facts::Standing;
 use crate::device::function_storage;
 use crate::device::metal::MetalDeviceProperties;
 use crate::device::policy::{
-    ContainmentPolicy, DevicePolicy, FloatMathsPolicy, HalfRoundingPolicy, NanMinMaxPolicy,
-    RoundingOrderPolicy, SamplingPolicy, Unorm8LinearFilterPolicy, YCbCrFilterPolicy,
+    ContainmentPolicy, DeviceChecksPolicy, DevicePolicy, FloatMathsPolicy, HalfRoundingPolicy,
+    NanMinMaxPolicy, RoundingOrderPolicy, SamplingPolicy, Unorm8LinearFilterPolicy,
+    YCbCrFilterPolicy,
 };
 use crate::device::profile::{
     BufferAccess, Containment, CubeGradientRoute, CubeGradients, DescriptorCaps, DeviceProfile,
@@ -69,8 +71,10 @@ impl Device {
     /// `device::enables` states), and a policy that turns containment off while guest isolation
     /// is on (`InvalidDescriptor`).
     pub fn new(desc: DeviceDescription, policy: DevicePolicy) -> Result<Device, Error> {
-        // The driver's measured deviations at its release, never its name.
-        let deviations = super::driver_facts::deviations(&desc);
+        // The driver's measured deviations at its release, never its name, and those the
+        // device's checks decide where the policy takes them.
+        let trusted = policy.device_checks == DeviceChecksPolicy::Trusted;
+        let deviations = super::driver_facts::deviations(&desc, trusted);
         Device::with_deviations(desc, policy, deviations)
     }
 
@@ -84,7 +88,8 @@ impl Device {
         deviation: DriverDeviation,
         taken: bool,
     ) -> Result<Device, Error> {
-        let mut deviations = super::driver_facts::deviations(&desc);
+        let trusted = policy.device_checks == DeviceChecksPolicy::Trusted;
+        let mut deviations = super::driver_facts::deviations(&desc, trusted);
         match taken {
             true => {
                 deviations.entry(deviation).or_insert(Standing::Measured);
@@ -365,7 +370,7 @@ fn derive_fields(
         vertex_formats,
         storage_formats,
         image_formats,
-        workarounds: workarounds(desc),
+        workarounds: workarounds(desc, policy.device_checks == DeviceChecksPolicy::Trusted),
         api_version: api,
         // The feature, which both description readers list from 1.3 (core without a member),
         // so the extended dynamic states a pipeline makes are exactly what it requires.
@@ -430,7 +435,10 @@ fn derive_fields(
             RoundingOrderRoute::Native
         },
         // The device's measured value, keyed on its identity as the workarounds are, or the floor.
-        function_storage: function_storage::of(desc),
+        function_storage: function_storage::of(
+            desc,
+            policy.device_checks == DeviceChecksPolicy::Trusted,
+        ),
         // The measured deviations, one per pipeline kind (the graphics one per macOS release's
         // reading of SPIRV-Cross's fixup). Unmeasured, a MoltenVK driver's route is unknown, since
         // it hands the gradients to Metal by some route; another driver's is Vulkan's rule.
@@ -469,21 +477,48 @@ fn derive_fields(
     }
 }
 
-/// The driver workarounds of the driver `desc` names (`driver_id`), on its GPU (`vendor_id`, or its
-/// generation's `device_id`s) where the defect is the GPU's, and those its release has by the
-/// measured table (`driver_facts::DEFECTS`), in order.
-fn workarounds(desc: &DeviceDescription) -> Vec<DriverWorkaround> {
-    let mut found = by_identity(desc);
+/// The driver workarounds `desc` takes: its baseline ([`baseline_workarounds`]), each one the
+/// device checks as its check found it where `trusted` (the reader order, `device::checks`), in
+/// order.
+fn workarounds(desc: &DeviceDescription, trusted: bool) -> Vec<DriverWorkaround> {
+    let baseline = baseline_workarounds(desc).into_keys().collect();
+    super::driver_facts::checked_workarounds(desc, baseline, trusted)
+        .into_iter()
+        .collect()
+}
+
+/// The driver workarounds the tables give `desc`, each with what gives it as its feature status
+/// names it: the measured table's rows at its release (`driver_facts::DEFECTS`, listed), and,
+/// assumed where no row names the setup, the driver's identity (`driver_id`, on its GPU's
+/// `vendor_id` or its generation's `device_id`s where the defect is the GPU's, [`by_identity`])
+/// and every driver but Apple's rasterizer and tessellator. The reader order's baseline
+/// (`device::checks`).
+pub(crate) fn baseline_workarounds(
+    desc: &DeviceDescription,
+) -> BTreeMap<DriverWorkaround, Baseline> {
+    let driver = desc.driver_id;
+    let mut found: BTreeMap<DriverWorkaround, Baseline> = super::driver_facts::defect_rows(desc)
+        .into_iter()
+        .map(|(workaround, row)| (workaround, Baseline::listed(row)))
+        .collect();
+    for workaround in by_identity(desc) {
+        found.entry(workaround).or_insert_with(|| {
+            Baseline::assumed(format!("{driver:?} by its identity, every release"))
+        });
+    }
     // Every rasterizer but Apple's hands a clipped primitive's fragments their coverage by the
     // whole primitive (or, lavapipe, by its own pieces), never by Apple's pieces; and every
     // tessellator but Apple's orders a patch's triangles its own way.
-    if !(desc.driver_id == Some(vk::DriverId::MOLTENVK) && desc.vendor_id == APPLE_VENDOR_ID) {
-        found.push(DriverWorkaround::ClippedCoverageNotMetals);
-        found.push(DriverWorkaround::TessellatorNotMetals);
+    if !(driver == Some(vk::DriverId::MOLTENVK) && desc.vendor_id == APPLE_VENDOR_ID) {
+        for workaround in [
+            DriverWorkaround::ClippedCoverageNotMetals,
+            DriverWorkaround::TessellatorNotMetals,
+        ] {
+            found.entry(workaround).or_insert_with(|| {
+                Baseline::assumed("every driver but MoltenVK on Apple's GPUs".to_owned())
+            });
+        }
     }
-    found.extend(super::driver_facts::defects(desc));
-    found.sort();
-    found.dedup();
     found
 }
 
@@ -491,10 +526,17 @@ fn workarounds(desc: &DeviceDescription) -> Vec<DriverWorkaround> {
 fn by_identity(desc: &DeviceDescription) -> Vec<DriverWorkaround> {
     match desc.driver_id {
         Some(vk::DriverId::GOOGLE_SWIFTSHADER) => vec![DriverWorkaround::BufferAtomicsUncontained],
+        // A fragment reading both barycentric forms, on every GPU and release: SPIRV-Cross's MSL
+        // backend, through which MoltenVK converts every shader, refuses both in one shader
+        // ("Cannot declare both BaryCoordNV and BaryCoordNoPerspNV in same shader in MSL.",
+        // MoltenVK 1.4.1 on the Apple M3 Max and the M4), whatever the GPU. Its check does not run
+        // there, as the refusal is logged as an error.
         Some(vk::DriverId::MOLTENVK) if desc.vendor_id == APPLE_VENDOR_ID => vec![
             DriverWorkaround::EarlyTestsDropMultisampledImageWrites,
             DriverWorkaround::DiscardDropsSimdgroupStores,
+            DriverWorkaround::BothBarycentricFormsRejected,
         ],
+        Some(vk::DriverId::MOLTENVK) => vec![DriverWorkaround::BothBarycentricFormsRejected],
         // The uniform buffer's reads, on 128-bit vectors (`subgroupSize` 4) alone.
         Some(vk::DriverId::MESA_LLVMPIPE) if desc.subgroup.size == 4 => vec![
             DriverWorkaround::ClippedTrianglesSplitPixelFragments,

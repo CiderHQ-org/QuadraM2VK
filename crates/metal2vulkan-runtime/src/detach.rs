@@ -128,6 +128,9 @@ impl Device {
         if self.is_lost() {
             return Err(Error::DeviceLost);
         }
+        // The pages the commands handed to the device's resolver name are theirs first: each
+        // call's encoding holds the pages its call saw (`resolver.rs`).
+        self.shared().drain_resolver(crate::resolver::Drain::Object);
         let shared = self.shared();
         let rebinds = &shared.rebinds;
         let key = buffer.identity().key;

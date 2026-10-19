@@ -77,10 +77,10 @@
 //!   of a texture the attachment renders in place, at the binding's own first level and slice,
 //!   with feedback loop usage (`Texture::snapshot_color`, `texture::feedback_candidate`), not
 //!   through a view of another format, and which no later fetch can render through a stand-in
-//!   (`RenderCommandEncoder::keeps_own_attachment`), no two of the colors of one image (whose
+//!   (`RenderEncoding::keeps_own_attachment`), no two of the colors of one image (whose
 //!   snapshot is one); the draw costs no more so than the split would
-//!   (`RenderCommandEncoder::snapshot_cheaper`: at any area where every such color is a texture
-//!   whose image lies over its buffer's bytes, `RenderCommandEncoder::over_bytes`; else its
+//!   (`RenderEncoding::snapshot_cheaper`: at any area where every such color is a texture
+//!   whose image lies over its buffer's bytes, `RenderEncoding::over_bytes`; else its
 //!   scissors' area times [`SNAPSHOT_PIXEL_COST`] for each color against each color's level
 //!   times its texel bytes, whatever the snapshot's form, so a 4-byte color's reader,
 //!   `RGBA8Unorm`'s or `BGRA8Unorm`'s, takes the snapshot up to a fifth of the render area, an
@@ -88,7 +88,7 @@
 //!   `fragmentStoresAndAtomics`) and the variant is made; no slot takes the snapshot slot as
 //!   storage. The draw's instance holds those colors in the feedback loop layout from its render
 //!   pass instance's begin, which records in a secondary: where the current instance
-//!   cannot (`RenderCommandEncoder::snapshot_apart`: it records inline, `render/inline_first.rs`
+//!   cannot (`RenderEncoding::snapshot_apart`: it records inline, `render/inline_first.rs`
 //!   and `render/inline_splits.rs`, its render pass instance begun already; it ran an execution
 //!   of render commands; a draw of it bound such a color's image as a storage image; or it
 //!   leaves the color out), the draw records into a new instance, with no copy
@@ -102,7 +102,7 @@
 //!   share of their colors' pixels and texel bytes, a line at 64 of them, each power of two
 //!   after, and as the device ends (`metal2vulkan-snapshot-readers`, `reader_sizes.rs`).
 
-use super::{Reformat, RenderCommandEncoder};
+use super::{Reformat, RenderEncoding};
 use crate::copy_plan::block_bytes;
 use crate::dynamic_state::ColorWriteMasks;
 use crate::pipeline::{GraphicsState as DrawingState, Settled};
@@ -115,7 +115,7 @@ use metal2vulkan::pipeline::{SlotClass, SlotRef, SnapshotForm, Stage};
 use std::collections::BTreeSet;
 
 /// What a draw asks to read through snapshots, before its plan
-/// ([`RenderCommandEncoder::snapshot_wanted`]): the fragment slots, and the colors they read.
+/// ([`RenderEncoding::snapshot_wanted`]): the fragment slots, and the colors they read.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(super) struct Wanted {
     pub(super) slots: BTreeSet<u32>,
@@ -134,7 +134,7 @@ pub(super) fn form(plan: &BindingPlan, slot: u32) -> Option<SnapshotForm> {
 }
 
 /// What the snapshot draw costs at each pixel a draw's scissors bound, for each color it
-/// snapshots, in bytes of the split's copy (`RenderCommandEncoder::snapshot_cheaper`): one more
+/// snapshots, in bytes of the split's copy (`RenderEncoding::snapshot_cheaper`): one more
 /// fragment invocation at the pixel, inside the pixel interlock, that reads the texel and stores
 /// its snapshot, and the drawing draw's read of it. The invocation's cost, not the snapshot's
 /// bytes: a snapshot of a color's codes, 4 bytes a pixel, costs about what one of the fetched
@@ -248,7 +248,7 @@ pub(super) fn phase_hole(holes: &[PushHole]) -> Option<(vk::ShaderStageFlags, u3
     })
 }
 
-impl RenderCommandEncoder {
+impl RenderEncoding {
     /// What a draw of `pipeline` (its state's base) through `reformats` asks to read through
     /// snapshots, where it can ask (the module docs' checks that come before the plan); `None`
     /// where it reads no attachment so or takes the split.
@@ -533,7 +533,7 @@ pub(super) fn is_snapshot_slot(slots: &BTreeSet<u32>, slot: &SlotRef) -> bool {
     slot.stage == Stage::Fragment && slot.class == SlotClass::Texture && slots.contains(&slot.index)
 }
 
-/// [`RenderCommandEncoder::snapshot_fallback`]'s message, from anywhere the device is known.
+/// [`RenderEncoding::snapshot_fallback`]'s message, from anywhere the device is known.
 pub(super) fn snapshot_fallback(device: &crate::Device, reason: &'static str) {
     if !crate::pipeline::creation_log_enabled() {
         return;

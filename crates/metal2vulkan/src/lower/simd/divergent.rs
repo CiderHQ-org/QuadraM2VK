@@ -15,7 +15,8 @@
 //!   multiply-add, and control barrier (a simdgroup barrier is a workgroup barrier in the
 //!   emulated tier; a threadgroup barrier after an early return must be reached by the returned
 //!   invocations too, or the barriers of the live ones would pair with the returned ones' next
-//!   exchange). A block that holds one is a sync block.
+//!   exchange), and every imageblock slice the whole threadgroup copies (`texture::slice`). A
+//!   block that holds one is a sync block.
 //! - **Uniform facts** for the walk: the blocks `uniform::Uniformity` proves workgroup uniform
 //!   (every invocation is live there, so the walk emits them as they are), and the branch
 //!   conditions and switch selectors it proves uniform (a construct that branches on one in a
@@ -39,11 +40,12 @@
 //! `Uniformity` does not prove uniform is walked predicated, whatever its tier ([`barriers`]
 //! outside the emulated tier, `workgroup::check` in it), so every invocation reaches each such
 //! barrier, the returned ones inactive: the remaining invocations synchronize among themselves,
-//! Apple's reading. Outside the emulated tier only the workgroup barriers are synchronizations
-//! ([`SyncSet::WorkgroupBarriers`]): a subgroup operation runs where `live` holds, so it sees the
-//! live invocations that execute it, its tangle in the source under maximal reconvergence. A loop
-//! vote there uses a workgroup word of its own (`RuntimeFact::PredicationVote`), declared when a
-//! synchronization lies in a loop.
+//! Apple's reading. Outside the emulated tier only the workgroup barriers and the threadgroup's
+//! slice copies are synchronizations ([`SyncSet::WorkgroupBarriers`]): a subgroup operation runs
+//! where `live` holds, so it sees the live invocations that execute it, its tangle in the source
+//! under maximal reconvergence. A loop vote there uses a workgroup word of its own
+//! (`RuntimeFact::PredicationVote`), declared when a synchronization lies in a loop or a
+//! threadgroup's slice copy in a divergent block publishes its operands through it.
 
 use std::collections::BTreeMap;
 
@@ -73,9 +75,10 @@ pub enum SyncSet {
     #[default]
     Emulated,
     /// Every other tier: the control barriers emitted at `Workgroup` scope
-    /// (`barrier::is_workgroup_barrier`, which knows the function's `stage` and `tier`). A
-    /// subgroup or quad operation, a multiply-add, and a subgroup-scope barrier run where `live`
-    /// holds, like any other instruction.
+    /// (`barrier::is_workgroup_barrier`, which knows the function's `stage` and `tier`), and the
+    /// imageblock slices the whole threadgroup copies (`texture::slice`). A subgroup or quad
+    /// operation, a multiply-add, and a subgroup-scope barrier run where `live` holds, like any
+    /// other instruction.
     WorkgroupBarriers { stage: Stage, tier: Tier },
 }
 
@@ -86,6 +89,7 @@ impl SyncSet {
             SyncSet::Emulated => is_sync(s),
             SyncSet::WorkgroupBarriers { stage, tier } => {
                 barrier::is_workgroup_barrier(s, stage, tier)
+                    || crate::lower::texture::cooperative_slice(s)
             }
         }
     }
@@ -103,7 +107,8 @@ pub struct Predication {
     /// Which instructions are synchronizations.
     pub set: SyncSet,
     /// Outside the emulated tier: the module declares a workgroup word for the loop votes
-    /// (`RuntimeFact::PredicationVote`), because a synchronization lies in a loop. The emulated
+    /// (`RuntimeFact::PredicationVote`), because a synchronization lies in a loop, or for the vote
+    /// and published operands of a threadgroup's slice copy in a divergent block. The emulated
     /// tier votes in its scratch's first word.
     pub vote_word: bool,
 }
@@ -131,7 +136,8 @@ impl Predication {
 }
 
 /// Whether strategy `s` synchronizes the workgroup in the emulated tier: it exchanges lanes, reads
-/// the simdgroup's active lanes, or is a control barrier.
+/// the simdgroup's active lanes, is a control barrier, or is an imageblock slice the whole
+/// threadgroup copies.
 pub fn is_sync(s: &Strategy) -> bool {
     matches!(
         s,
@@ -141,7 +147,7 @@ pub fn is_sync(s: &Strategy) -> bool {
                     | SimdStrategy::Matrix(MatrixStrategy::Mac(_))
                     | SimdStrategy::Agx(AgxStrategy::MatMad(_))
             )
-    )
+    ) || crate::lower::texture::cooperative_slice(s)
 }
 
 /// Plan the predicated walk of the kernel of `cx` with synchronizations `set`: the uniform and sync
@@ -275,7 +281,8 @@ pub fn barriers(
             return Ok(None);
         }
         let mut p = plan(cx, strategy, u, set, cross, m)?;
-        p.vote_word = sync_in_loop(cx, &p, m)?;
+        // A threadgroup's slice copy in a divergent block publishes its operands through the word.
+        p.vote_word = sync_in_loop(cx, &p, m)? || divergent_slice(cx, strategy, &p);
         Ok(Some(p))
     })();
     if given.is_none() {
@@ -296,6 +303,22 @@ pub fn barriers(
     }
     cx.families.simd.predication = Some(p);
     Ok(())
+}
+
+/// Whether an imageblock slice the whole threadgroup copies lies in a block of `p` that is not
+/// workgroup uniform: its writing invocations vote and publish its operands in the vote word
+/// (`texture::slice`).
+fn divergent_slice(cx: &SelectCx<'_>, strategy: &[Option<Strategy>], p: &Predication) -> bool {
+    cx.body.blocks.iter().any(|(b, block)| {
+        !p.is_uniform(b)
+            && block.inst_ids().any(|id| {
+                cx.values
+                    .inst(id)
+                    .and_then(|v| strategy.get(v.index()))
+                    .and_then(Option::as_ref)
+                    .is_some_and(crate::lower::texture::cooperative_slice)
+            })
+    })
 }
 
 /// Whether a sync block of `p` lies in a loop of the kernel's CFG, so the walk may vote: it votes

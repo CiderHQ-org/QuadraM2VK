@@ -10,6 +10,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::device::checks::DeviceChecks;
 use crate::device::profile::{FloatControls, Limits};
 use crate::device::requirements::{ApiVersion, FormatUsage, VkExtension, VkFeature};
 use crate::vk;
@@ -76,6 +77,14 @@ pub struct DeviceDescription {
     /// `maxBufferLength` and the runtime's heap sizes read them from the `Device`.
     #[cfg_attr(feature = "serde", serde(default))]
     pub allocation: AllocationLimits,
+    /// What the device's own checks of its driver's answers found ([`DeviceChecks`], the reader
+    /// order of `device::checks`): empty where no check ran, and then every fact takes its
+    /// baseline, the curated tables. The runtime fills it from its checks or their cache. A
+    /// deviation a check decides is the profile's as any deviation is (`Device::new`), so a
+    /// different answer is a different profile; the runtime's facts and defects read it too
+    /// ([`DeviceDescription::driver_facts`]).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub checks: DeviceChecks,
 }
 
 /// A device's allocation sizes, [`DeviceDescription::allocation`]: device facts that size
@@ -179,6 +188,7 @@ impl DeviceDescription {
             khr_format_feature_flags2: false,
             generated_commands: None,
             allocation: AllocationLimits::default(),
+            checks: DeviceChecks::new(),
         }
     }
 

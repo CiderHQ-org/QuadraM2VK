@@ -1135,7 +1135,8 @@ pub fn selector_form(
 /// `private_bytes` (the private arena, and each typed `alloca`, call stacks among them, and each
 /// constant held as a `Private` variable that an access indexes at run time), may take a thread
 /// up to `device::function_storage::ceiling`: the profile's `function_storage`, or Metal's 192 KiB
-/// for a vertex or fragment function on a device not measured. Past it the entry is
+/// for a vertex or fragment function on a device not measured that did not learn the floor off.
+/// Past it the entry is
 /// `Unsupported{PrivateMemory}`, or `Unsupported{Recursion}` with a call stack, needing more.
 /// Past the profile's own value (a device not measured holds the floor, 16 KiB) an entry within
 /// that ceiling records `PrecisionNote::FunctionStorageAssumed`, which it returns. A private arena
@@ -1613,6 +1614,9 @@ fn finish(
     // control flow, every one of another stage), whose subgroup-tier form needs `Ballot`, before
     // the simd class selects the tier; the emulated tier reads a kernel's same analysis below.
     let uniformity = simd::partly_live(&mut cx, &sel.strategy, m)?;
+    // The imageblock slice writes the whole threadgroup copies, synchronizations of the
+    // predicated walk below.
+    let uniformity = texture::cooperate_slices(&mut cx, &mut sel.strategy, uniformity, m)?;
     simd::finish(&mut cx)?;
     tessellation::finish(&mut cx)?;
     sync::barrier::finish(&mut cx)?;

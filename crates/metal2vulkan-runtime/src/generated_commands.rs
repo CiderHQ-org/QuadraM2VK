@@ -44,13 +44,14 @@ pub const PREPROCESS_WRITE: vk::AccessFlags = vk::AccessFlags::COMMAND_PREPROCES
 
 /// Whether the executions of a range are preprocessed apart on the device `description` names:
 /// where its driver's own preprocessing of an execution recorded after another runs the wrong
-/// shader (`RuntimeDriverDefect::ImplicitPreprocessAfterExecutionSet`, `driver_defects.rs`), the
+/// shader (`RuntimeDriverDefect::ImplicitPreprocessAfterExecutionSet`, on the known-driver list), the
 /// commands layout is made [`explicitly_preprocessed`](LayoutCreateInfo::explicitly_preprocessed),
 /// every execution of the range is preprocessed ([`Commands::preprocess`]) before the first runs,
 /// and each runs preprocessed ([`Commands::execute_preprocessed`]). Validation's executor decides
-/// its device replay's executions by it too.
+/// its device replay's executions by it too. The defect is as the device takes it: listed for its
+/// setup, or learned off there (`DeviceDescription::checks`).
 pub fn preprocess_apart(description: &DeviceDescription) -> bool {
-    crate::driver_defects::of(description)
+    crate::driver_defects::checked(description)
         .contains(&RuntimeDriverDefect::ImplicitPreprocessAfterExecutionSet)
 }
 

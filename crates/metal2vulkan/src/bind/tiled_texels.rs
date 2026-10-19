@@ -290,24 +290,30 @@ fn compact(f: &mut FunctionBuilder<'_>, v: Value) -> BResult<Value> {
     Ok(v)
 }
 
-/// The tile's shorter side's bits, and whether x's side is the longer.
-fn sides(f: &mut FunctionBuilder<'_>, l: Level) -> BResult<(Value, Value)> {
-    let [tx, ty] = l.tile_log2;
+/// The shorter side's bits of a tile of `2^tx x 2^ty` elements, and whether x's side is the
+/// longer.
+fn sides(f: &mut FunctionBuilder<'_>, [tx, ty]: [Value; 2]) -> BResult<(Value, Value)> {
     let x_longer = f.binary(BinOp::UGreaterThan, tx, ty)?;
     let short = f.select(x_longer, ty, tx)?;
     Ok((short, x_longer))
 }
 
 /// `(1 << bits) - 1`.
-fn low_mask(f: &mut FunctionBuilder<'_>, bits: Value) -> BResult<Value> {
+pub(super) fn low_mask(f: &mut FunctionBuilder<'_>, bits: Value) -> BResult<Value> {
     let one = u32_value(f, 1)?;
     let bit = f.binary(BinOp::ShiftLeftLogical, one, bits)?;
     f.binary(BinOp::ISub, bit, one)
 }
 
-/// The Morton index of the element at `(x, y)` of its tile.
-fn morton(f: &mut FunctionBuilder<'_>, l: Level, x: Value, y: Value) -> BResult<Value> {
-    let (short, x_longer) = sides(f, l)?;
+/// The Morton index of the element at `(x, y)` of its tile of `2^tx x 2^ty` elements
+/// (`tile_log2`): x's bit lowest, the longer side's extra bits on top.
+pub(super) fn morton(
+    f: &mut FunctionBuilder<'_>,
+    tile_log2: [Value; 2],
+    x: Value,
+    y: Value,
+) -> BResult<Value> {
+    let (short, x_longer) = sides(f, tile_log2)?;
     let mask = low_mask(f, short)?;
     let xl = f.binary(BinOp::BitwiseAnd, x, mask)?;
     let yl = f.binary(BinOp::BitwiseAnd, y, mask)?;
@@ -325,7 +331,7 @@ fn morton(f: &mut FunctionBuilder<'_>, l: Level, x: Value, y: Value) -> BResult<
 
 /// The element `(x, y)` of its tile at Morton index `m`.
 fn demorton(f: &mut FunctionBuilder<'_>, l: Level, m: Value) -> BResult<(Value, Value)> {
-    let (short, x_longer) = sides(f, l)?;
+    let (short, x_longer) = sides(f, l.tile_log2)?;
     let both = f.binary(BinOp::IAdd, short, short)?;
     let mask = low_mask(f, both)?;
     let low = f.binary(BinOp::BitwiseAnd, m, mask)?;
@@ -362,7 +368,7 @@ fn tiled_byte(
     let ym = low_mask(f, ty)?;
     let xi = f.binary(BinOp::BitwiseAnd, x, xm)?;
     let yi = f.binary(BinOp::BitwiseAnd, y, ym)?;
-    let m = morton(f, l, xi, yi)?;
+    let m = morton(f, l.tile_log2, xi, yi)?;
     let element = f.binary(BinOp::IAdd, tile, m)?;
     let element = f.binary(BinOp::ShiftLeftLogical, element, l.unit_log2)?;
     let chain = f.binary(BinOp::IMul, image, l.chain_stride)?;

@@ -350,6 +350,8 @@ mod detach;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
 mod detach_textures;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
+mod device_checks;
+#[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
 mod device_commands;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
 mod device_lockstep;
@@ -416,6 +418,8 @@ mod fatal_signals;
 mod fence_stages;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
 mod fetch_costs;
+#[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
+mod first_dispatch_makings;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
 mod first_use;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
@@ -617,6 +621,8 @@ mod primitive_ids;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
 mod private_memory;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
+mod profile_records;
+#[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
 mod property_reads;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
 mod pvrtc_textures;
@@ -640,6 +646,8 @@ mod read_through_views;
 mod rebind_reach;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
 mod rebinds;
+#[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
+mod recorded_regions;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
 mod recursion_frames;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
@@ -760,6 +768,8 @@ mod tile_shadows;
 mod tile_states;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
 mod tile_threadgroups;
+#[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
+mod tiled_word_moves;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
 mod topology_classes;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
@@ -893,9 +903,9 @@ const METAL_CACHE_KEPT: &str = "metal2vulkan-driver-pipeline-cache-kept";
 /// [`creation_checked`] of `heard`, every message `device`'s making delivered to a sink that hears
 /// every message (not the lane's, which keeps notices and failures alone): its notices exactly
 /// its [`creation_kinds`], one each, and its other messages exactly the informational ones the
-/// device sends as it is made, each once and in this order: `metal2vulkan-unmeasured-driver`
-/// exactly where its identity is not measured, as the runtime reads it
-/// (`unmeasured_driver_message`, the fact the device's own message reads); then
+/// device sends as it is made, each once and in this order: its feature status,
+/// `metal2vulkan-feature-status`, as the runtime reads it off its properties
+/// (`feature_status_message`, what the device's own message reads); then
 /// [`METAL_CACHE_KEPT`] exactly where its driver keeps its internal pipeline cache and that cache
 /// is Metal's own ([`metal_cache_kept`], read from the driver apart from the runtime), an
 /// informational message naming the device and ending in its id name; and nothing else.
@@ -910,11 +920,12 @@ pub(crate) fn creation_heard_checked(
         .cloned()
         .partition(|message| message.degradation.is_some());
     creation_checked(device, level_named, &notices)?;
-    let unmeasured = metal2vulkan_runtime::unmeasured_driver_message(device.properties());
+    let status = metal2vulkan_runtime::feature_status_message(device.properties());
     let cache_kept = metal_cache_kept(device);
     let mut expected: Vec<String> = Vec::new();
     let mut rest = &informed[..];
-    if let Some(message) = &unmeasured {
+    {
+        let message = &status;
         expected.push(message.text.clone());
         match rest.split_first() {
             Some((first, after))

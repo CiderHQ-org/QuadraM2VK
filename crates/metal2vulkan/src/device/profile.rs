@@ -601,13 +601,19 @@ pub enum FunctionStorage {
     /// fragment function may keep more, up to the 192 KiB a thread Metal was measured to hold, and
     /// records `PrecisionNote::FunctionStorageAssumed`; any other stage past the floor is refused.
     Assumed(u64),
+    /// The device was not measured, and it learned the floor off
+    /// (`DeviceFact::FunctionStorageFloor`: it was lost while such a vertex or fragment function
+    /// ran): it holds this many, the floor, and every stage past it is refused.
+    Floor(u64),
 }
 
 impl FunctionStorage {
     /// The bytes a thread holds, measured or assumed.
     pub fn bytes(self) -> u64 {
         match self {
-            FunctionStorage::Measured(b) | FunctionStorage::Assumed(b) => b,
+            FunctionStorage::Measured(b)
+            | FunctionStorage::Assumed(b)
+            | FunctionStorage::Floor(b) => b,
         }
     }
 }
@@ -1203,6 +1209,7 @@ pub(crate) const REGISTER_ALLOCATOR_MODULE_WORD_BOUND: u32 = 400_000;
 /// [`Needs::DriverDefect`]: crate::error::Needs::DriverDefect
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum DriverWorkaround {
     /// The driver's `robustBufferAccess` does not keep a storage buffer's atomic inside the
     /// buffer: SwiftShader (`VK_DRIVER_ID_GOOGLE_SWIFTSHADER`) masks an atomic by the texel's
@@ -1233,7 +1240,9 @@ pub enum DriverWorkaround {
     /// invocation, and a `Centroid` input is read at the first covered sample, where one triangle
     /// whose vertices all lie in the clip volume gives the whole coverage and the pixel center.
     /// Link refuses a multisampled pipeline whose fragment function reads `[[sample_mask]]` or a
-    /// centroid varying there (`link::graphics`).
+    /// centroid varying there (`link::graphics`). Apple's GPU splits a clipped triangle too, but
+    /// along Metal's own seams (it holds no `ClippedCoverageNotMetals`), so no device whose
+    /// rasterizer is Apple's has this defect, and its check does not run there.
     ClippedTrianglesSplitPixelFragments,
     /// The driver's compiler drops a zero-extending mask (`OpBitwiseAnd` with `2^N - 1`) whose
     /// operand is a signed clamp to exactly `N` bits' range (`SMax` and `SMin` in either order,
@@ -1249,17 +1258,21 @@ pub enum DriverWorkaround {
     /// emitted as `OpBitFieldUExtract(x, 0, N)` there (`lower::arith::ops::mask`), which is the
     /// same bits on every device.
     NarrowMaskAfterSignedClamp,
-    /// The driver's compiler folds a `half` round trip, an `OpFConvert` from 32- to 16-bit floats
-    /// and its widening back, each decorated `NoContraction`, into the 32-bit value it started
-    /// from, in an entry declaring `RoundingModeRTE`, `DenormPreserve` and
-    /// `SignedZeroInfNanPreserve` for 16 bits. Vulkan assumes no value-changing transform of an
-    /// operation decorated `NoContraction`, and rounds a conversion between types correctly
-    /// ("Precision and Operation of SPIR-V Instructions"). Measured on the GeForce RTX 3090
-    /// (`deviceID` 0x2204) under NVIDIA's 615.71.09 (`VK_DRIVER_ID_NVIDIA_PROPRIETARY`): of the
-    /// 2^32 `f32` values, the round trip left 2,231,288,832 off Metal's `half(float)`, under each
-    /// combination of those modes and with or without the decoration. Keyed on NVIDIA's driver
-    /// on every GPU, the others unmeasured. Such a profile rounds a `half` in another form
-    /// (`lower::arith::narrow::controlled_modes`).
+    /// A `half` round trip, an `OpFConvert` from 32- to 16-bit floats and its widening back, each
+    /// decorated `NoContraction`, in an entry declaring `RoundingModeRTE`, `DenormPreserve` and
+    /// `SignedZeroInfNanPreserve` for 16 bits, is not Metal's `half(float)` on the device: its
+    /// compiler folds the pair into the 32-bit value it started from, or a NaN keeps its payload
+    /// through the pair where Metal answers `0x7E00`. Vulkan assumes no value-changing transform of
+    /// an operation decorated `NoContraction`, and rounds a conversion between types correctly
+    /// ("Precision and Operation of SPIR-V Instructions"); a NaN's bits it leaves to the device.
+    /// Measured on the GeForce RTX 3090 (`deviceID` 0x2204) under NVIDIA's 615.71.09
+    /// (`VK_DRIVER_ID_NVIDIA_PROPRIETARY`): of the 2^32 `f32` values, the round trip left
+    /// 2,231,288,832 off Metal's `half(float)`, under each combination of those modes and with or
+    /// without the decoration. On the RTX 5080 Laptop GPU under the same release the pair rounds
+    /// every finite value its check tries as Metal does, but a NaN sampled from a 32-bit float
+    /// texel kept its payload through it (`0x7FBFFFFF` came out `0x7DFF`; the validation lane
+    /// `half_texel_nans`). Keyed on NVIDIA's driver on every GPU, the others unmeasured. Such a
+    /// profile rounds a `half` in another form (`lower::arith::narrow::controlled_modes`).
     HalfConversionPairFolded,
     /// The driver refuses a fragment shader that reads both barycentric builtins,
     /// `BaryCoordKHR` and `BaryCoordNoPerspKHR`, at pipeline creation, where Metal compiles a

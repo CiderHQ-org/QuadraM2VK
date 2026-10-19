@@ -22,6 +22,7 @@
 
 use super::RenderCall;
 use super::RenderCommandEncoder;
+use super::RenderEncoding;
 use crate::buffer::Buffer;
 use crate::error::Error;
 
@@ -32,6 +33,63 @@ impl RenderCommandEncoder {
     /// sets no stride; any other stride past 32 bits is taken modulo `2^32`, as plain Metal
     /// reads it and its validation takes it (an M4). Refused as `set_vertex_buffer` is.
     pub fn set_vertex_buffer_with_stride(
+        &mut self,
+        buffer: Option<&Buffer>,
+        offset: u64,
+        stride: u64,
+        index: u32,
+    ) -> Result<(), Error> {
+        self.on(|encoding| encoding.set_vertex_buffer_with_stride(buffer, offset, stride, index))
+    }
+
+    /// `setVertexBytes:length:attributeStride:atIndex:`: as
+    /// [`set_vertex_bytes`](Self::set_vertex_bytes), the bytes read at `stride`, its low 32 bits,
+    /// by a layout of `MTLBufferLayoutStrideDynamic`. At `MTLAttributeStrideStatic` (`u64::MAX`)
+    /// a draw whose layout reads them so is refused (`Bind(MissingVertexStride)`): an M4 read
+    /// element 0 of the bytes and zeros past it there, which the fetch does not emulate. Refused as
+    /// `set_vertex_bytes` is.
+    pub fn set_vertex_bytes_with_stride(
+        &mut self,
+        bytes: &[u8],
+        stride: u64,
+        index: u32,
+    ) -> Result<(), Error> {
+        self.on(|encoding| encoding.set_vertex_bytes_with_stride(bytes, stride, index))
+    }
+
+    /// `setVertexBuffers:offsets:attributeStrides:withRange:`: `buffers[i]` at offset
+    /// `offsets[i]` and stride `strides[i]` at index `first + i`, each as
+    /// [`set_vertex_buffer_with_stride`](Self::set_vertex_buffer_with_stride). Refused as that
+    /// is, and when the slices' lengths differ; a refusal binds none of them.
+    pub fn set_vertex_buffers_with_strides(
+        &mut self,
+        buffers: &[Option<&Buffer>],
+        offsets: &[u64],
+        strides: &[u64],
+        first: u32,
+    ) -> Result<(), Error> {
+        self.on(|encoding| {
+            encoding.set_vertex_buffers_with_strides(buffers, offsets, strides, first)
+        })
+    }
+
+    /// `setVertexBufferOffset:attributeStride:atIndex:`: as
+    /// [`set_vertex_buffer_offset`](Self::set_vertex_buffer_offset), with the index's stride set
+    /// as [`set_vertex_buffer_with_stride`](Self::set_vertex_buffer_with_stride) sets it.
+    /// Refused as both are.
+    pub fn set_vertex_buffer_offset_with_stride(
+        &mut self,
+        offset: u64,
+        stride: u64,
+        index: u32,
+    ) -> Result<(), Error> {
+        self.on(|encoding| encoding.set_vertex_buffer_offset_with_stride(offset, stride, index))
+    }
+}
+
+impl RenderEncoding {
+    /// [`RenderCommandEncoder::set_vertex_buffer_with_stride`]'s encoding.
+    pub(crate) fn set_vertex_buffer_with_stride(
         &mut self,
         buffer: Option<&Buffer>,
         offset: u64,
@@ -52,13 +110,8 @@ impl RenderCommandEncoder {
         )
     }
 
-    /// `setVertexBytes:length:attributeStride:atIndex:`: as
-    /// [`set_vertex_bytes`](Self::set_vertex_bytes), the bytes read at `stride`, its low 32 bits,
-    /// by a layout of `MTLBufferLayoutStrideDynamic`. At `MTLAttributeStrideStatic` (`u64::MAX`)
-    /// a draw whose layout reads them so is refused (`Bind(MissingVertexStride)`): an M4 read
-    /// element 0 of the bytes and zeros past it there, which the fetch does not emulate. Refused as
-    /// `set_vertex_bytes` is.
-    pub fn set_vertex_bytes_with_stride(
+    /// [`RenderCommandEncoder::set_vertex_bytes_with_stride`]'s encoding.
+    pub(crate) fn set_vertex_bytes_with_stride(
         &mut self,
         bytes: &[u8],
         stride: u64,
@@ -74,11 +127,8 @@ impl RenderCommandEncoder {
         )
     }
 
-    /// `setVertexBuffers:offsets:attributeStrides:withRange:`: `buffers[i]` at offset
-    /// `offsets[i]` and stride `strides[i]` at index `first + i`, each as
-    /// [`set_vertex_buffer_with_stride`](Self::set_vertex_buffer_with_stride). Refused as that
-    /// is, and when the slices' lengths differ; a refusal binds none of them.
-    pub fn set_vertex_buffers_with_strides(
+    /// [`RenderCommandEncoder::set_vertex_buffers_with_strides`]'s encoding.
+    pub(crate) fn set_vertex_buffers_with_strides(
         &mut self,
         buffers: &[Option<&Buffer>],
         offsets: &[u64],
@@ -104,11 +154,8 @@ impl RenderCommandEncoder {
         )
     }
 
-    /// `setVertexBufferOffset:attributeStride:atIndex:`: as
-    /// [`set_vertex_buffer_offset`](Self::set_vertex_buffer_offset), with the index's stride set
-    /// as [`set_vertex_buffer_with_stride`](Self::set_vertex_buffer_with_stride) sets it.
-    /// Refused as both are.
-    pub fn set_vertex_buffer_offset_with_stride(
+    /// [`RenderCommandEncoder::set_vertex_buffer_offset_with_stride`]'s encoding.
+    pub(crate) fn set_vertex_buffer_offset_with_stride(
         &mut self,
         offset: u64,
         stride: u64,

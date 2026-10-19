@@ -960,6 +960,7 @@ impl CommandBufferShared {
                 value: at.value,
                 fence,
                 relayed: &self.relayed,
+                risks: self.risks.read(),
             };
             let submitted =
                 scheduler

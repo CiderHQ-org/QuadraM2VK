@@ -83,6 +83,19 @@
 //! measurement's lines count the kernel submissions of its timed frames, the objects each lists
 //! and the time each spent in the ioctl.
 //!
+//! `frame_costs_hops` measures the checked device in the guest's shape with no host imports, under
+//! the default `CompletionPolicy::Grouped`, without and then with the guest's hops
+//! ([`Run::hops`]): the first queue's command buffers wait, by turns, for the command buffer just
+//! before them: for the value it sets on a shared event as it is scheduled (the consumer's signal
+//! at scheduling: a scheduled handler that sets it, then
+//! `CommandBuffer::encode_signal_event_scheduled`, [`AtScheduling`]), for its signal of the
+//! guest's FIFO shared event, and for its signal of an `Event` (the consumer's paging event), each
+//! a hold of the scheduler's for an event value, the fourth of four waiting for nothing; twice each
+//! in turn. These runs write GPU timestamps, to time each hop on the GPU. Its lines also count the
+//! scheduler's holds by what released them and the time from the value's reach to the batch's
+//! `vkQueueSubmit` (`WorkCounts::event_holds_landed_event` and kin), and give a frame's wall time
+//! through its last command buffer's completion, the hops' included.
+//!
 //! `frame_costs_over_buffers` measures the plain device with window layers that are textures over
 //! `Shared` buffers at tight rows (2048 bytes, which RADV and ANV render in place, as linear images
 //! over the buffers' memory) in place of private textures, their passes loaded and stored, loaded
@@ -164,7 +177,7 @@ use super::memoryless::memoryless_options;
 use super::render_arguments::{Members, ORDERED};
 use super::renders::public_render;
 use super::submit_costs::Execbuffers;
-use super::{buffer_with, loader, open_device, ScratchCache, WAIT};
+use super::{buffer_with, loader, open_device, pipelines_settled, ScratchCache, WAIT};
 use crate::air_library::AirLibrary;
 use crate::candidate::engine::graphics::Assembly;
 use crate::candidate::engine::resources::pixel_format;
@@ -178,18 +191,18 @@ use metal2vulkan::error::RuntimeDriverDefect;
 use metal2vulkan::library::{FunctionConstantValue, FunctionConstantValues};
 use metal2vulkan::metal::{
     BlendFactor, ColorWriteMask, DataType, IndexType, PixelFormat, PrimitiveType, RenderStages,
-    ResourceUsage, SamplerMinMagFilter, TextureType, TextureUsage,
+    ResourceUsage, SamplerMinMagFilter, TextureType, TextureUsage, TriangleFillMode,
 };
 use metal2vulkan::pipeline::{ColorAttachmentDescriptor, RenderPipelineDescriptor, StageSource};
 use metal2vulkan_devtools::{engine_dir, llvm_assemble};
 use metal2vulkan_runtime::{
-    Buffer, ClearColor, CommandBuffer, CommandBufferStatus, CommandQueue, Degradation,
-    DegradationCategory, Device, DeviceOptions, EventRef, Library, LoadAction, MessageSink,
+    host_time, Buffer, ClearColor, CommandBuffer, CommandBufferStatus, CommandQueue, Degradation,
+    DegradationCategory, Device, DeviceOptions, Event, EventRef, Library, LoadAction, MessageSink,
     PipelineOptions, Region, RenderCommandEncoder, RenderPassDescriptor, RenderPipelineState,
-    ResourceOptions, SamplerState, ShaderCacheOptions, SharedEvent, StoreAction, SubmissionCheck,
-    Texture, TextureDescriptor, WorkCounts,
+    ResourceOptions, SamplerState, Settled, ShaderCacheOptions, SharedEvent, StoreAction,
+    SubmissionCheck, Texture, TextureDescriptor, WorkCounts,
 };
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::ops::Range;
 use std::sync::{Arc, Mutex};
@@ -287,6 +300,10 @@ const IMPORTS: [usize; 2] = [260, 520];
 /// queue's that wait for the second's paging event first (every 10th, about 10%).
 const SECOND_QUEUE_EVERY: usize = 20;
 const PAGING_WAIT_EVERY: usize = 10;
+/// In a run with the guest's hops ([`Run::hops`]), the turns of the first queue's command buffers:
+/// a wait for the scheduled handler's set, for the FIFO event's signal, for the `Event`'s signal,
+/// none.
+const HOP_TURNS: u64 = 4;
 /// The bytes of each, over pages of its own.
 const IMPORT_BYTES: usize = 512 << 10;
 /// The most allocations a frame's draw makes on the encoding thread on average, its state changes
@@ -306,11 +323,13 @@ const DRAW_ALLOCATIONS_DEBUG: f64 = 20.0;
 /// The most allocations a frame's pass open (`render_command_encoder`) makes on the encoding
 /// thread on average, once every pipeline is made, [`FIRST_LOCK_ALLOCATIONS`] more on Apple's
 /// platforms: its shape's lists (`color_list.rs`), its encoder's default viewport and scissor
-/// rectangle (`render_state::ViewportList`) and its attachments' extents are held in place.
-/// Measured: 4.00 on ANV (UHD 770), and on lavapipe in a build with debug assertions; 5.00 on
-/// the M3 Max through MoltenVK.
+/// rectangle (`render_state::ViewportList`) and its attachments' extents are held in place; the
+/// encoder holds its encoding boxed (`render/captured.rs`), one allocation, so it moves as a
+/// pointer between the call, the device's resolver and the encoder. Measured at the call (no
+/// resolver): 5.00 on lavapipe in a build with debug assertions; before the box, 4.00 on ANV
+/// (UHD 770) and lavapipe, 5.00 on the M3 Max through MoltenVK.
 #[cfg(not(m2v_system_alloc))]
-const OPEN_ALLOCATIONS: f64 = 4.5;
+const OPEN_ALLOCATIONS: f64 = 5.5;
 /// The most allocations a frame's pass end (`end_encoding`) makes on the encoding thread on
 /// average, once every pipeline is made: its instances' shapes' lists are held in place
 /// (`color_list.rs`), its attachments' uses are listed in one list sized at once, and it lists
@@ -366,11 +385,36 @@ struct Run {
     imports: usize,
     completion: CompletionPolicy,
     guest: bool,
+    /// In the guest's shape, whether the first queue's command buffers wait for the one before
+    /// them by turns ([`HOP_TURNS`], [`Hops`]), and how the value set at scheduling is signalled.
+    hops: Option<AtScheduling>,
     /// Whether the [`REPEATED`] draws of each pass are drawn again with no call before them.
     repeats: bool,
     shape: Shape,
     /// Whether the index and rectangle buffers lie over host pages ([`Workload::host_pages`]).
     host: bool,
+    /// Whether two frames are in flight ([`Workload::in_flight`]).
+    in_flight: bool,
+    /// Whether each pass makes a call the device's memo does not key before its first draw
+    /// ([`Workload::taken_back`]).
+    taken_back: bool,
+    /// Whether the rectangles are bound at offsets that move from frame to frame
+    /// ([`Workload::moving`]).
+    moving: bool,
+    /// Where each command buffer encodes a blit at the call ([`Workload::blit`]).
+    blit: Option<BlitAt>,
+    /// Whether the device encodes every encoder at the call, with no resolver
+    /// (`DeviceOptions::encode_at_the_call`).
+    at_the_call: bool,
+}
+
+/// Where a command buffer encodes a blit at the call ([`Workload::blit`]).
+#[derive(Clone, Copy, Debug)]
+enum BlitAt {
+    /// Before its passes.
+    Before,
+    /// After its passes, before its commit.
+    After,
 }
 
 impl Run {
@@ -381,9 +425,15 @@ impl Run {
         imports: 0,
         completion: CompletionPolicy::Grouped,
         guest: false,
+        hops: None,
         repeats: false,
         shape: Shape::Window,
         host: false,
+        in_flight: false,
+        taken_back: false,
+        moving: false,
+        blit: None,
+        at_the_call: false,
     };
     const CHECKED: Run = Run {
         checked: true,
@@ -425,6 +475,15 @@ impl Run {
         }
     }
 
+    /// The checked device's run in the guest's shape with no host imports, with the guest's hops
+    /// where `hops` says how a value is set at scheduling.
+    const fn hops(hops: Option<AtScheduling>) -> Run {
+        Run {
+            hops,
+            ..Run::over_imports(0, CompletionPolicy::Grouped, true)
+        }
+    }
+
     /// The plain device's run with layers over buffers, its passes loading and storing them so.
     const fn over_buffers(load: LoadAction, store: StoreAction) -> Run {
         Run {
@@ -446,13 +505,39 @@ impl Run {
                 format!("{device}, layers over buffers, {load:?} load, {store:?} store")
             }
         };
-        let device = match self.guest {
-            false => device,
-            true => format!("{device}, the guest's queues and events"),
+        let device = match (self.guest, self.hops) {
+            (false, _) => device,
+            (true, None) => format!("{device}, the guest's queues and events"),
+            (true, Some(AtScheduling::Handler)) => {
+                format!("{device}, the guest's queues, events and hops, sets by scheduled handlers")
+            }
+            (true, Some(AtScheduling::Signal)) => {
+                format!("{device}, the guest's queues, events and hops, signals at scheduling")
+            }
         };
         let device = match self.repeats {
             false => device,
             true => format!("{device}, draws repeated with no call before them"),
+        };
+        let device = match self.in_flight {
+            false => device,
+            true => format!("{device}, two frames in flight"),
+        };
+        let device = match self.taken_back {
+            false => device,
+            true => format!("{device}, each pass taken back to the call"),
+        };
+        let device = match self.moving {
+            false => device,
+            true => format!("{device}, rectangles at offsets moving each frame"),
+        };
+        let device = match self.at_the_call {
+            false => device,
+            true => format!("{device}, no resolver"),
+        };
+        let device = match self.blit {
+            None => device,
+            Some(at) => format!("{device}, a blit at the call {at:?} each command buffer's passes"),
         };
         let device = match self.shape {
             Shape::Window => device,
@@ -603,6 +688,26 @@ struct Workload {
     guest: Option<GuestEvents>,
     /// Whether each pass draws its [`REPEATED`] draws again with no call before them.
     repeats: bool,
+    /// Whether each frame waits at its end for the frame before it, not for itself: two frames
+    /// in flight, as a guest that draws its next frame while the GPU runs its last, so a queue
+    /// holds up to two frames' command buffers. The frame before's last command buffers.
+    in_flight: bool,
+    previous: RefCell<Vec<Option<CommandBuffer>>>,
+    /// Whether each pass sets its triangle fill mode before its first draw: a call the device's
+    /// memo does not key, which takes a captured encoder back to the call, one drain of the
+    /// device's resolver a pass (`render/captured.rs`).
+    taken_back: bool,
+    /// Whether each frame binds the rectangles 7 rectangles further on than the frame before it,
+    /// around the buffer, as a ring buffer's offsets move (`render/captured.rs` keys an offset by
+    /// its class); the frames encoded so far.
+    moving: bool,
+    frames: Cell<u64>,
+    /// Where each command buffer fills 16 bytes of `scratch` in a blit encoder, at the call: an
+    /// encoder the device's resolver does not encode, before the command buffer's passes or after
+    /// them, as the guest's command buffers mix them with captured passes. Its open drains the
+    /// resolver where a captured pass came before it, and its command buffer commits at the call.
+    blit: Option<BlitAt>,
+    scratch: Buffer,
     /// The frame's shape, and each command buffer's passes as their draws ([`Shape::layout`]).
     shape: Shape,
     layout: Vec<Vec<usize>>,
@@ -844,7 +949,7 @@ impl Workload {
         device: Device,
         checked: bool,
         layers: Layers,
-        (guest, repeats, shape, host): (bool, bool, Shape, bool),
+        (guest, repeats, shape, host): (Option<Option<AtScheduling>>, bool, Shape, bool),
     ) -> Workload {
         let library = |name: &str| {
             device.new_library_with_air(&llvm_assemble(&engine_dir().join(name)).unwrap())
@@ -914,15 +1019,33 @@ impl Workload {
         Workload {
             layers,
             layer_buffers,
-            queues: (0..1 + usize::from(guest))
+            queues: (0..1 + usize::from(guest.is_some()))
                 .map(|_| device.new_command_queue().unwrap())
                 .collect(),
-            guest: guest.then(|| GuestEvents {
+            guest: guest.map(|hops| GuestEvents {
                 fifo: device.new_shared_event().unwrap(),
                 paging: device.new_shared_event().unwrap(),
                 values: Cell::new((0, 0)),
+                hops: hops.map(|at_scheduling| Hops {
+                    at_scheduling,
+                    scheduled: device.new_shared_event().unwrap(),
+                    local: device.new_event().unwrap(),
+                    values: Cell::new((0, 0)),
+                    count: Cell::new(0),
+                    last: RefCell::new(None),
+                    frame: RefCell::new(Vec::new()),
+                    committing: Cell::new(false),
+                    times: RefCell::default(),
+                }),
             }),
             repeats,
+            in_flight: false,
+            previous: RefCell::new(Vec::new()),
+            taken_back: false,
+            moving: false,
+            frames: Cell::new(0),
+            blit: None,
+            scratch: device.new_buffer(16, ResourceOptions::private()).unwrap(),
             shape,
             layout: shape.layout(),
             checks: checked.then(Arc::default),
@@ -1086,7 +1209,7 @@ impl Workload {
                         .unwrap();
                 }
                 encoder
-                    .set_vertex_buffer(Some(&self.rects), 16 * n as u64, 0)
+                    .set_vertex_buffer(Some(&self.rects), self.rect_offset(n), 0)
                     .unwrap();
                 encoder
                     .set_fragment_texture(Some(&self.textures[n % TEXTURES]), 0)
@@ -1114,6 +1237,17 @@ impl Workload {
             }
         }
         self.draw_call(encoder);
+    }
+
+    /// The offset of the `n`th draw's rectangle of the frame: 16 bytes a draw, moved 7 rectangles
+    /// a frame around the buffer where the run moves them ([`Workload::moving`]).
+    fn rect_offset(&self, n: usize) -> u64 {
+        let rects = (BUFFERS * DRAWS) as u64;
+        let shift = match self.moving {
+            true => 7 * self.frames.get(),
+            false => 0,
+        };
+        16 * ((n as u64 + shift) % rects)
     }
 
     /// The draw call of every draw: its rectangle's six indices.
@@ -1165,8 +1299,16 @@ impl Workload {
 
     /// [`frame`](Self::frame), reading `reads` around each step too (so its times are not the
     /// plain frame's).
+    /// Fill the scratch's 16 bytes in a blit encoder of `command_buffer` ([`Workload::blit`]).
+    fn fill_scratch(&self, command_buffer: &CommandBuffer) {
+        let mut blit = command_buffer.blit_command_encoder().unwrap();
+        blit.fill_buffer(&self.scratch, 0..16, 0).unwrap();
+        blit.end_encoding().unwrap();
+    }
+
     fn frame_reading(&self, reads: Reads) -> Frame {
         let mut frame = Frame::default();
+        self.frames.set(self.frames.get() + 1);
         // Each queue's last command buffer of the frame.
         let mut lasts: Vec<Option<CommandBuffer>> = self.queues.iter().map(|_| None).collect();
         let counts = || reads.work_counts.then(|| self.device.work_counts());
@@ -1184,6 +1326,9 @@ impl Workload {
             if let Some(guest) = &self.guest {
                 guest.begin(&command_buffer, queue, buffer);
             }
+            if let Some(BlitAt::Before) = self.blit {
+                self.fill_scratch(&command_buffer);
+            }
             for &draws in passes {
                 let descriptor = self.pass(pass);
                 let before = counts();
@@ -1195,6 +1340,11 @@ impl Workload {
                     begun[0].add(Begun::since(&self.device, before));
                 }
                 for draw in 0..draws {
+                    if self.taken_back && draw == 0 {
+                        encoder
+                            .set_triangle_fill_mode(TriangleFillMode::Fill)
+                            .unwrap();
+                    }
                     let first = match self.shape {
                         Shape::Window => pass * DRAWS + draw,
                         _ => n,
@@ -1221,6 +1371,9 @@ impl Workload {
                 }
                 pass += 1;
             }
+            if let Some(BlitAt::After) = self.blit {
+                self.fill_scratch(&command_buffer);
+            }
             if let Some(guest) = &self.guest {
                 guest.end(&command_buffer, queue);
             }
@@ -1241,10 +1394,14 @@ impl Workload {
             frame.commit.push(committed);
             if let Some(before) = &before {
                 begun[3].add(Begun::since(&self.device, before));
+                // Handed to the scheduler's thread, or to the device's resolver, which hands
+                // its batches there after its encoders (`resolver.rs`).
                 let after = self.device.work_counts();
-                frame
-                    .handed
-                    .push(after.commits_handed_off > before.commits_handed_off);
+                let handed = |c: &WorkCounts| c.commits_handed_off + c.commits_answered;
+                frame.handed.push(handed(&after) > handed(before));
+            }
+            if let Some(guest) = &self.guest {
+                guest.committed(&command_buffer, queue);
             }
             lasts[queue] = Some(command_buffer);
         }
@@ -1254,13 +1411,21 @@ impl Workload {
         frame.switches = switches
             .zip(thread_switches())
             .map(|(before, after)| after.since(before));
-        for last in lasts.iter().flatten() {
+        // Two frames in flight: this frame waits for the one before it.
+        let waited = match self.in_flight {
+            true => self.previous.replace(lasts),
+            false => lasts,
+        };
+        for last in waited.iter().flatten() {
             last.wait_until_completed_for(WAIT).unwrap();
         }
         frame.done = start.elapsed();
         frame.whole = at_start.map(|before| Begun::since(&self.device, &before));
-        for last in lasts.iter().flatten() {
+        for last in waited.iter().flatten() {
             assert_eq!(last.status(), CommandBufferStatus::Completed);
+        }
+        if let Some(hops) = self.guest.as_ref().and_then(|guest| guest.hops.as_ref()) {
+            hops.settle();
         }
         frame
     }
@@ -1437,6 +1602,9 @@ impl Begun {
 /// A frame's steps of one kind ([`Frame`]'s `open`, `draws`, `end` or `commit`).
 type StepsOf = fn(&Frame) -> &[Step];
 
+/// A count of the device's [`WorkCounts`].
+type CountOf = fn(&WorkCounts) -> u64;
+
 /// One frame's steps and times ([`Workload::frame`]).
 #[derive(Default)]
 struct Frame {
@@ -1462,7 +1630,8 @@ struct Frame {
     /// Its voluntary ones inside its commits.
     commit_blocks: Option<u64>,
     /// Whether each commit handed its batches to the scheduler's thread
-    /// (`WorkCounts::commits_handed_off`), where it read the work counts; none elsewhere.
+    /// (`WorkCounts::commits_handed_off`), or itself to the device's resolver, which hands them
+    /// there (`WorkCounts::commits_answered`), where it read the work counts; none elsewhere.
     handed: Vec<bool>,
 }
 
@@ -1633,11 +1802,24 @@ fn device(
     heard: &Heard,
     completion: CompletionPolicy,
 ) -> Device {
+    device_with(cache, (announced, false), heard, (completion, false))
+}
+
+/// [`device`]'s, encoding every encoder at the call where `at_the_call`
+/// (`DeviceOptions::encode_at_the_call`: no resolver), and writing GPU timestamps where `stamped`
+/// (a run with the guest's hops times them).
+fn device_with(
+    cache: &ScratchCache,
+    (announced, at_the_call): (bool, bool),
+    heard: &Heard,
+    (completion, stamped): (CompletionPolicy, bool),
+) -> Device {
     let mut options = DeviceOptions::default();
+    options.encode_at_the_call = at_the_call;
     options.policy.completion = completion;
     options.shader_cache = ShaderCacheOptions::in_directory(cache.path());
     options.loader = loader();
-    options.gpu_times_from_host = true;
+    options.gpu_times_from_host = !stamped;
     let sink = Arc::clone(heard);
     options.messages = Some(MessageSink::new(move |message| {
         if let Some(notice) = &message.degradation {
@@ -1663,12 +1845,26 @@ fn measure(runs: &[Run]) {
     for &run in runs {
         let cache = ScratchCache::new().unwrap();
         let heard = Heard::default();
-        let work = Workload::new(
-            device(&cache, run.announced, &heard, run.completion),
+        let mut work = Workload::new(
+            device_with(
+                &cache,
+                (run.announced, run.at_the_call),
+                &heard,
+                (run.completion, run.hops.is_some()),
+            ),
             run.checked,
             run.layers,
-            (run.guest, run.repeats, run.shape, run.host),
+            (
+                run.guest.then_some(run.hops),
+                run.repeats,
+                run.shape,
+                run.host,
+            ),
         );
+        work.in_flight = run.in_flight;
+        work.taken_back = run.taken_back;
+        work.moving = run.moving;
+        work.blit = run.blit;
         let _imports = imports(&work.device, run.imports);
         let label = run.label();
         let name = work.device.name().to_owned();
@@ -1704,7 +1900,10 @@ fn measure(runs: &[Run]) {
         let threads_before = other_threads_cpu();
         let allocations_before = others_allocations();
         let kernel_before = Execbuffers::read();
+        let hops = || work.guest.as_ref().and_then(|guest| guest.hops.as_ref());
+        hops().map(Hops::take);
         let frames: Vec<Frame> = (0..TIMED).map(|_| work.frame()).collect();
+        let hop_times = hops().map(Hops::take);
         let kernel = Execbuffers::read();
         let allocations = others_allocations();
         let threads = other_threads_cpu();
@@ -1807,6 +2006,124 @@ fn measure(runs: &[Run]) {
             per_frame(|c| c.commits_handed_off),
             (checks - checks_before) as f64 / TIMED as f64,
             per_frame(|c| c.render_passes_made),
+        );
+        eprintln!(
+            "FRAME-COST {name} {label}: a frame's resolver: {:.1} render encoders captured, {:.1} \
+             taken back to the call, {:.1} calls and {:.1} commits answered at the call; {:.1} \
+             drains that waited, {:.3} ms waiting, {:.1} that found nothing; {:.1} wakes; the \
+             resolver encoding {:.3} ms; {:.1} failures, {:.1} answered calls refused, {:.1} \
+             notices delivered on the resolver",
+            per_frame(|c| c.render_encoders_captured),
+            per_frame(|c| c.render_encoders_demoted),
+            per_frame(|c| c.calls_answered),
+            per_frame(|c| c.commits_answered),
+            per_frame(|c| c.resolver_drains),
+            per_frame(|c| c.resolver_drain_nanos) / 1e6,
+            per_frame(|c| c.resolver_drains_idle),
+            per_frame(|c| c.resolver_wakes),
+            per_frame(|c| c.resolver_busy_nanos) / 1e6,
+            per_frame(|c| c.resolver_failures),
+            per_frame(|c| c.answered_calls_refused),
+            per_frame(|c| c.resolver_notices),
+        );
+        // Each drain's waits by what drained, as (count, ms) a frame.
+        let by = |count: fn(&WorkCounts) -> u64, nanos: fn(&WorkCounts) -> u64| {
+            format!("{:.1} ({:.3} ms)", per_frame(count), per_frame(nanos) / 1e6)
+        };
+        eprintln!(
+            "FRAME-COST {name} {label}: a frame's drains that waited, by what drained: commits \
+             {}, encoders {}, render opens {}, taken back {}, drops {}, objects {}; {:.2} pieces \
+             a drain; {:.1} drains encoded {:.1} pieces in the resolver's place, {:.3} ms; {:.1} \
+             wakes drains waited for; the resolver's wakes {:.3} us each to running",
+            by(
+                |c| c.resolver_drains_commits,
+                |c| c.resolver_drain_commits_nanos
+            ),
+            by(
+                |c| c.resolver_drains_encoders,
+                |c| c.resolver_drain_encoders_nanos
+            ),
+            by(
+                |c| c.resolver_drains_render_opens,
+                |c| c.resolver_drain_render_opens_nanos
+            ),
+            by(
+                |c| c.resolver_drains_taken_back,
+                |c| c.resolver_drain_taken_back_nanos
+            ),
+            by(
+                |c| c.resolver_drains_drops,
+                |c| c.resolver_drain_drops_nanos
+            ),
+            by(
+                |c| c.resolver_drains_objects,
+                |c| c.resolver_drain_objects_nanos
+            ),
+            per_frame(|c| c.resolver_drain_pieces) / per_frame(|c| c.resolver_drains).max(1e-9),
+            per_frame(|c| c.resolver_drains_encoding),
+            per_frame(|c| c.resolver_drain_encoded_pieces),
+            per_frame(|c| c.resolver_drain_encoding_nanos) / 1e6,
+            per_frame(|c| c.resolver_drain_wakes),
+            per_frame(|c| c.resolver_wake_nanos) / 1e3 / per_frame(|c| c.resolver_wakes).max(1e-9),
+        );
+        let taken_back: [(&str, CountOf); 18] = [
+            ("set_*_buffers", |c| c.taken_back_plural_buffers),
+            ("set_*_textures", |c| c.taken_back_plural_textures),
+            ("set_*_sampler_states", |c| c.taken_back_plural_samplers),
+            ("set_*_buffer_offset", |c| c.taken_back_buffer_offsets),
+            ("store actions", |c| c.taken_back_store_actions),
+            ("render state", |c| c.taken_back_render_state),
+            ("other calls", |c| c.taken_back_other_calls),
+            ("unkeyed pipelines", |c| c.taken_back_unkeyed_pipelines),
+            ("unseen pipelines", |c| c.taken_back_unseen_pipelines),
+            ("unkeyed draws", |c| c.taken_back_unkeyed_draws),
+            ("index copies", |c| c.taken_back_index_copies),
+            ("unsettled draws", |c| c.taken_back_unsettled_draws),
+            ("draws of a new object", |c| c.taken_back_new_objects),
+            ("draws of a new binding", |c| c.taken_back_new_bindings),
+            ("draws of a new offset class", |c| {
+                c.taken_back_new_offset_classes
+            }),
+            ("draws of a new bytes length", |c| {
+                c.taken_back_new_bytes_lengths
+            }),
+            ("draws in a new state", |c| c.taken_back_new_draw_states),
+            ("unseen ends", |c| c.taken_back_unseen_ends),
+        ];
+        let taken_back: Vec<String> = (taken_back.iter())
+            .filter(|(_, count)| per_frame(*count) > 0.0)
+            .map(|(why, count)| format!("{why} {:.2}", per_frame(*count)))
+            .collect();
+        eprintln!(
+            "FRAME-COST {name} {label}: a frame's encoders taken back, by what took them back: \
+             {}",
+            match taken_back.is_empty() {
+                true => "none".to_owned(),
+                false => taken_back.join(", "),
+            },
+        );
+        eprintln!(
+            "FRAME-COST {name} {label}: a frame's render encoders captured {:.2}, opened at the \
+             call {:.2}: descriptors the memo keys no pass of {:.2}, shadows inherited {:.2}, \
+             opens that announced {:.2}, passes the memo keys none of {:.2}, passes it had not \
+             seen {:.2}",
+            per_frame(|c| c.render_encoders_captured),
+            per_frame(|c| c.render_opens_unkeyed_descriptors)
+                + per_frame(|c| c.render_opens_inheriting_shadows)
+                + per_frame(|c| c.render_opens_announced)
+                + per_frame(|c| c.render_opens_unkeyed_passes)
+                + per_frame(|c| c.render_opens_unseen_passes),
+            per_frame(|c| c.render_opens_unkeyed_descriptors),
+            per_frame(|c| c.render_opens_inheriting_shadows),
+            per_frame(|c| c.render_opens_announced),
+            per_frame(|c| c.render_opens_unkeyed_passes),
+            per_frame(|c| c.render_opens_unseen_passes),
+        );
+        eprintln!(
+            "FRAME-COST {name} {label}: a frame's waits for a command buffer slot of its queue: \
+             {:.2}, {:.3} ms",
+            per_frame(|c| c.slot_waits),
+            per_frame(|c| c.slot_wait_nanos) / 1e6,
         );
         eprintln!(
             "FRAME-COST {name} {label}: a frame's set 0: {:.1} writes pushed; {:.1} switches \
@@ -1913,6 +2230,81 @@ fn measure(runs: &[Run]) {
             per_buffer(|c| c.scheduler_wakes_host),
             per_buffer(|c| c.scheduler_sleep_slices),
         );
+        let each = |holds: fn(&WorkCounts) -> u64, nanos: fn(&WorkCounts) -> u64| {
+            let held = per_frame(holds);
+            let us = per_frame(nanos) / 1e3 / held.max(f64::MIN_POSITIVE);
+            (held, us)
+        };
+        let landed_event = each(
+            |c| c.event_holds_landed_event,
+            |c| c.event_holds_landed_event_nanos,
+        );
+        let landed_shared = each(
+            |c| c.event_holds_landed_shared_event,
+            |c| c.event_holds_landed_shared_event_nanos,
+        );
+        let scheduled = each(
+            |c| c.event_holds_set_scheduled,
+            |c| c.event_holds_set_scheduled_nanos,
+        );
+        let submission = each(
+            |c| c.event_holds_set_submission,
+            |c| c.event_holds_set_submission_nanos,
+        );
+        let host = each(|c| c.event_holds_set_host, |c| c.event_holds_set_host_nanos);
+        let at_scheduling = each(
+            |c| c.event_holds_signal_scheduled,
+            |c| c.event_holds_signal_scheduled_nanos,
+        );
+        eprintln!(
+            "FRAME-COST {name} {label}: the scheduler's holds for event values a frame, by what \
+             released them, each with its mean time from the value's reach to its vkQueueSubmit's \
+             return: {:.2} an Event's GPU signal landed ({:.1} us), {:.2} a SharedEvent's ({:.1} \
+             us), {:.2} a scheduled handler's set ({:.1} us, in {:.2} vkQueueSubmit calls), {:.2} \
+             a submission handler's set ({:.1} us), {:.2} another host set ({:.1} us), {:.2} a \
+             signal at scheduling ({:.1} us), {:.2} a GPU signal submitted",
+            landed_event.0,
+            landed_event.1,
+            landed_shared.0,
+            landed_shared.1,
+            scheduled.0,
+            scheduled.1,
+            per_frame(|c| c.submissions_after_scheduled_sets),
+            submission.0,
+            submission.1,
+            host.0,
+            host.1,
+            at_scheduling.0,
+            at_scheduling.1,
+            per_frame(|c| c.event_holds_signal_submitted),
+        );
+        let turns = [
+            "a scheduled handler's set",
+            "a SharedEvent's GPU signal",
+            "an Event's GPU signal",
+        ];
+        for (turn, what) in turns.into_iter().enumerate() {
+            let Some(times) = hop_times.as_ref().map(|times| &times[turn]) else {
+                break;
+            };
+            if times.is_empty() {
+                continue;
+            }
+            let of = |part: fn(&HopTimes) -> f64| percentiles(times.iter().map(part).collect());
+            let [whole, whole_high] = of(|t| t.whole);
+            let [host, host_high] = of(|t| t.to_submit);
+            let [submit, submit_high] = of(|t| t.submit);
+            let [start, start_high] = of(|t| t.to_gpu);
+            eprintln!(
+                "FRAME-COST {name} {label}: hops for {what}, {:.1} a frame, from the value's reach \
+                 (the signaller's GPU end, or for a set its kernel end; its waiter's commit where \
+                 later) to the waiter's GPU start, p50 (p90) us: {whole:.1} ({whole_high:.1}) in \
+                 all; to its submission's start {host:.1} ({host_high:.1}), the submission \
+                 {submit:.1} ({submit_high:.1}), its end to the GPU's start {start:.1} \
+                 ({start_high:.1})",
+                times.len() as f64 / TIMED as f64,
+            );
+        }
         eprintln!(
             "FRAME-COST {name} {label}: condition-variable notifies a command buffer (each a \
              system call): {:.2} to the queue waiters, {:.2} to the handler threads, {:.2} on \
@@ -1994,6 +2386,12 @@ fn measure(runs: &[Run]) {
                 );
             }
         }
+        // Every notice comes in the program's call (`render/captured.rs`), over every frame.
+        assert_eq!(
+            work.device.work_counts().resolver_notices,
+            0,
+            "{name} {label}: notices delivered on the resolver"
+        );
     }
 }
 
@@ -2044,6 +2442,42 @@ fn others_allocations() -> Option<u64> {
     Some(alloc::process_allocations()? - alloc::thread_allocations()?)
 }
 
+/// The allocations the process's threads but this one made so far, by each thread's name
+/// (`/proc/self/task/<id>/comm`, cut to 15 bytes, as Linux keeps it; `ended` for a thread gone
+/// since), where they are counted and the system names threads (Linux).
+#[cfg(not(m2v_system_alloc))]
+fn others_allocations_by_name() -> Option<BTreeMap<String, u64>> {
+    let own: u64 = std::fs::read_link("/proc/thread-self")
+        .ok()?
+        .file_name()?
+        .to_str()?
+        .parse()
+        .ok()?;
+    let mut by_name = BTreeMap::new();
+    for (id, allocations) in alloc::allocations_by_thread()? {
+        if id == own {
+            continue;
+        }
+        let name = std::fs::read_to_string(format!("/proc/self/task/{id}/comm"))
+            .map_or_else(|_| "ended".to_owned(), |name| name.trim().to_owned());
+        *by_name.entry(name).or_default() += allocations;
+    }
+    Some(by_name)
+}
+
+/// What [`others_allocations_by_name`] counted between `before` and `after`, each thread name's
+/// that moved, as one line.
+#[cfg(not(m2v_system_alloc))]
+fn allocations_moved(before: &BTreeMap<String, u64>, after: &BTreeMap<String, u64>) -> String {
+    let moved: Vec<String> = (after.iter())
+        .filter_map(|(name, &now)| {
+            let then = before.get(name).copied().unwrap_or(0);
+            (now > then).then(|| format!("{name} {}", now - then))
+        })
+        .collect();
+    moved.join(", ")
+}
+
 #[test]
 #[ignore = "a measurement, not a check: run by name with --run-ignored all"]
 fn frame_costs() {
@@ -2074,6 +2508,27 @@ fn frame_costs_repeating() {
     measure(&[Run::REPEATING]);
 }
 
+/// The guest's new image's frames ([`Shape::NewImage`]) and frames of the guest's 52 command
+/// buffers of one pass, each with two frames in flight ([`Run::in_flight`]): a queue then holds
+/// up to two frames' command buffers and waits for a slot past its `maxCommandBufferCount` (64).
+#[test]
+#[ignore = "a measurement, not a check: run by name with --run-ignored all"]
+fn frame_costs_in_flight() {
+    measure(&[
+        Run {
+            in_flight: true,
+            ..Run::shaped(Shape::NewImage)
+        },
+        Run {
+            in_flight: true,
+            ..Run::shaped(Shape::Passes {
+                buffers: 52,
+                passes: 1,
+            })
+        },
+    ]);
+}
+
 #[test]
 #[ignore = "a measurement, not a check: run by name with --run-ignored all"]
 fn frame_costs_guest_passes() {
@@ -2088,6 +2543,77 @@ fn frame_costs_guest_passes() {
         }),
         Run::shaped(Shape::NewImage),
     ]);
+}
+
+/// The guest's old image's passes ([`Shape::Passes`]), each taken back to the call before its first
+/// draw by a call the device's memo does not key ([`Run::taken_back`]): one drain of the device's
+/// resolver a pass, and its cost, against the same frame without the resolver.
+#[test]
+#[ignore = "a measurement, not a check: run by name with --run-ignored all"]
+fn frame_costs_taken_back() {
+    measure(&[false, true].map(|at_the_call| Run {
+        taken_back: true,
+        at_the_call,
+        ..Run::shaped(Shape::Passes {
+            buffers: 100,
+            passes: 1,
+        })
+    }));
+}
+
+/// The guest's new image's frame ([`Shape::NewImage`]) with each pass taken back to the call at
+/// its first draw ([`Run::taken_back`]), with the device's resolver and without it.
+#[test]
+#[ignore = "a measurement, not a check: run by name with --run-ignored all"]
+fn frame_costs_new_image_taken_back() {
+    measure(&[false, true].map(|at_the_call| Run {
+        taken_back: true,
+        at_the_call,
+        ..Run::shaped(Shape::NewImage)
+    }));
+}
+
+/// The guest's new image's frame ([`Shape::NewImage`]) with its rectangles bound at offsets that
+/// move each frame ([`Run::moving`]), as the guest's ring buffers move: what the device's memo
+/// answers of it (`render/captured.rs`), and what is taken back to the call.
+#[test]
+#[ignore = "a measurement, not a check: run by name with --run-ignored all"]
+fn frame_costs_moving_offsets() {
+    measure(&[Run {
+        moving: true,
+        ..Run::shaped(Shape::NewImage)
+    }]);
+}
+
+/// The guest's new image's frames as they are, and with a blit at the call in each command
+/// buffer, after its passes and before them ([`Workload::blit`]), each on a device with no
+/// resolver and then on one with it: what the resolver takes off the encoding thread, and the
+/// drains the encoders and commits at the call make, by what drained
+/// (`WorkCounts::resolver_drains_commits` and kin).
+#[test]
+#[ignore = "a measurement, not a check: run by name with --run-ignored all"]
+fn frame_costs_blits_at_the_call() {
+    let runs = [None, Some(BlitAt::After), Some(BlitAt::Before)]
+        .into_iter()
+        .flat_map(|blit| {
+            [true, false].map(|at_the_call| Run {
+                blit,
+                at_the_call,
+                ..Run::shaped(Shape::NewImage)
+            })
+        });
+    measure(&runs.collect::<Vec<_>>());
+}
+
+/// The guest's new image's frames on a device with no resolver: every encoder encoded at the
+/// call, for a profile of the encoding thread's draw path.
+#[test]
+#[ignore = "a measurement, not a check: run by name with --run-ignored all"]
+fn frame_costs_new_image_at_the_call() {
+    measure(&[Run {
+        at_the_call: true,
+        ..Run::shaped(Shape::NewImage)
+    }]);
 }
 
 /// Passes whose draws switch between two pipeline states of one layout at every draw
@@ -2159,6 +2685,145 @@ struct GuestEvents {
     paging: SharedEvent,
     /// The last values signalled to each.
     values: Cell<(u64, u64)>,
+    /// The guest's hops, in a run with them.
+    hops: Option<Hops>,
+}
+
+/// The guest's hops between the first queue's command buffers ([`Run::hops`]), by turns
+/// ([`HOP_TURNS`]): the shared event a scheduled handler sets, the `Event` the GPU signals, the
+/// last values of each, and the first queue's command buffers so far.
+struct Hops {
+    at_scheduling: AtScheduling,
+    scheduled: SharedEvent,
+    local: Event,
+    values: Cell<(u64, u64)>,
+    count: Cell<u64>,
+    /// The first queue's last command buffer, which the next one's wait is for, and this frame's
+    /// hops: each turn, its signaller and waiter, and the waiter's commit's host time (taken as it
+    /// commits, where `committing`).
+    last: RefCell<Option<CommandBuffer>>,
+    frame: RefCell<Vec<(u64, CommandBuffer, CommandBuffer, f64)>>,
+    committing: Cell<bool>,
+    /// The hops' times so far, by turn ([`Hops::settle`]).
+    times: RefCell<[Vec<HopTimes>; 3]>,
+}
+
+/// How a run with the guest's hops sets the value its command buffers set at scheduling.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AtScheduling {
+    /// A scheduled handler sets it (`SharedEvent::set_signaled_value`), as the consumer did.
+    Handler,
+    /// `CommandBuffer::encode_signal_event_scheduled`.
+    Signal,
+}
+
+/// One hop's times, in microseconds: from the value's reach (the signaller's GPU end, or for a
+/// set its kernel end; the waiter's commit where later) to the waiter's GPU start, and its parts:
+/// to the start of its submission (`kernel_start_time`), the submission, and from its end to the
+/// GPU's start.
+struct HopTimes {
+    whole: f64,
+    to_submit: f64,
+    submit: f64,
+    to_gpu: f64,
+}
+
+impl Hops {
+    /// Before a first queue's command buffer's encoders: its turn's wait for the one before it,
+    /// whose FIFO signal was `fifo`; or, at the last turn, the scheduled handler that sets the
+    /// shared event's next value, which the next one waits for.
+    fn begin(&self, command_buffer: &CommandBuffer, fifo: &SharedEvent, fifo_value: u64) {
+        let (scheduled, local) = self.values.get();
+        let turn = self.count.get() % HOP_TURNS;
+        let waits = match turn {
+            0 => scheduled > 0,
+            1 => fifo_value > 0,
+            2 => local > 0,
+            _ => false,
+        };
+        if let (true, Some(last)) = (waits, self.last.borrow().clone()) {
+            (self.frame.borrow_mut()).push((turn, last, command_buffer.clone(), 0.0));
+            self.committing.set(true);
+        }
+        match turn {
+            0 if scheduled > 0 => command_buffer
+                .encode_wait_for_event(EventRef::from(&self.scheduled), scheduled)
+                .unwrap(),
+            1 if fifo_value > 0 => command_buffer
+                .encode_wait_for_event(EventRef::from(fifo), fifo_value)
+                .unwrap(),
+            2 if local > 0 => command_buffer
+                .encode_wait_for_event(EventRef::from(&self.local), local)
+                .unwrap(),
+            3 => {
+                match self.at_scheduling {
+                    AtScheduling::Handler => {
+                        let event = self.scheduled.clone();
+                        command_buffer
+                            .add_scheduled_handler(Box::new(move |_: &CommandBuffer| {
+                                event.set_signaled_value(scheduled + 1);
+                            }))
+                            .unwrap();
+                    }
+                    AtScheduling::Signal => command_buffer
+                        .encode_signal_event_scheduled(&self.scheduled, scheduled + 1)
+                        .unwrap(),
+                }
+                self.values.set((scheduled + 1, local));
+            }
+            _ => {}
+        }
+    }
+
+    /// A first queue's command buffer was committed: the next one's wait is for it, and a hop's
+    /// waiter takes its commit's time.
+    fn committed(&self, command_buffer: &CommandBuffer) {
+        let at = host_time();
+        if self.committing.replace(false) {
+            if let Some(hop) = self.frame.borrow_mut().last_mut() {
+                hop.3 = at;
+            }
+        }
+        *self.last.borrow_mut() = Some(command_buffer.clone());
+    }
+
+    /// The frame completed: its hops' times, from their command buffers' kernel and GPU times.
+    fn settle(&self) {
+        let mut times = self.times.borrow_mut();
+        for (turn, signaller, waiter, committed) in self.frame.borrow_mut().drain(..) {
+            waiter.wait_until_completed_for(WAIT).unwrap();
+            let reach = match turn {
+                0 => signaller.kernel_end_time(),
+                _ => signaller.gpu_end_time().unwrap(),
+            };
+            let ready = reach.max(committed);
+            let start = waiter.gpu_start_time().unwrap();
+            let us = |seconds: f64| seconds * 1e6;
+            times[turn as usize].push(HopTimes {
+                whole: us(start - ready),
+                to_submit: us(waiter.kernel_start_time() - ready),
+                submit: us(waiter.kernel_end_time() - waiter.kernel_start_time()),
+                to_gpu: us(start - waiter.kernel_end_time()),
+            });
+        }
+    }
+
+    /// The hops' times so far, by turn, taken.
+    fn take(&self) -> [Vec<HopTimes>; 3] {
+        self.times.take()
+    }
+
+    /// After its encoders: at the turn before the `Event`'s wait, the `Event`'s next value.
+    fn end(&self, command_buffer: &CommandBuffer) {
+        let (scheduled, local) = self.values.get();
+        if self.count.get() % HOP_TURNS == 1 {
+            command_buffer
+                .encode_signal_event(EventRef::from(&self.local), local + 1)
+                .unwrap();
+            self.values.set((scheduled, local + 1));
+        }
+        self.count.set(self.count.get() + 1);
+    }
 }
 
 impl GuestEvents {
@@ -2169,17 +2834,30 @@ impl GuestEvents {
         command_buffer
             .add_submission_handler(Box::new(|_: &CommandBuffer| {}))
             .unwrap();
-        let (_, paging) = self.values.get();
+        let (fifo, paging) = self.values.get();
         if queue == 0 && pass % PAGING_WAIT_EVERY == PAGING_WAIT_EVERY / 2 && paging > 0 {
             command_buffer
                 .encode_wait_for_event(EventRef::from(&self.paging), paging)
                 .unwrap();
+        }
+        if let (Some(hops), 0) = (&self.hops, queue) {
+            hops.begin(command_buffer, &self.fifo, fifo);
+        }
+    }
+
+    /// Its commit was made: the hops' record of it.
+    fn committed(&self, command_buffer: &CommandBuffer, queue: usize) {
+        if let (Some(hops), 0) = (&self.hops, queue) {
+            hops.committed(command_buffer);
         }
     }
 
     /// After its encoders: every command buffer signals the FIFO event's next value, the second
     /// queue's the paging event's next one first.
     fn end(&self, command_buffer: &CommandBuffer, queue: usize) {
+        if let (Some(hops), 0) = (&self.hops, queue) {
+            hops.end(command_buffer);
+        }
         let (fifo, mut paging) = self.values.get();
         if queue == 1 {
             paging += 1;
@@ -2196,6 +2874,23 @@ impl GuestEvents {
 
 #[test]
 #[ignore = "a measurement, not a check: run by name with --run-ignored all"]
+fn frame_costs_hops() {
+    let hops = [
+        None,
+        Some(AtScheduling::Handler),
+        Some(AtScheduling::Signal),
+    ];
+    measure(
+        &hops
+            .repeat(2)
+            .into_iter()
+            .map(Run::hops)
+            .collect::<Vec<_>>(),
+    );
+}
+
+#[test]
+#[ignore = "a measurement, not a check: run by name with --run-ignored all"]
 fn frame_costs_over_buffers() {
     measure(&[
         Run::over_buffers(LoadAction::Load, StoreAction::Store),
@@ -2204,21 +2899,75 @@ fn frame_costs_over_buffers() {
     ]);
 }
 
-/// One frame of a plain device, once every pipeline is made and every pool piece done, its
-/// allocations counted; and the device's name.
+/// How long [`warmed`] waits for the device's checks thread to answer the checks left to it.
+const CHECKS_SETTLE: Duration = Duration::from_secs(300);
+
+/// Once the device's checks thread answered every check left to it (`Settled::InBackground`;
+/// at once where none was left), [`WARM`] frames of `work`, then frames until one whose draws all
+/// took their own pipelines, made before it (none pooled a making or took its key's residual
+/// form), and whose captured passes were all answered whole from the device's memo, which learns
+/// a draw only once its own pipeline is made (`render/captured.rs`), with the device's pipeline
+/// pool idle before it: a device may make a draw's pipeline in the background, its frames
+/// completing meanwhile, so frames alone do not settle it. The checks thread, which a device
+/// whose setup's answers are not kept yet runs after its making, allocates on its own thread and
+/// may switch a runtime fact as it answers (`device_checks/background.rs`), so no counted frame
+/// runs beside it.
+fn warmed(work: &Workload) {
+    let started = Instant::now();
+    while matches!(
+        work.device.feature_status().settled,
+        Settled::Running { .. }
+    ) {
+        assert!(
+            started.elapsed() < CHECKS_SETTLE,
+            "{}: the device's checks thread did not settle in {CHECKS_SETTLE:?}",
+            work.device.name()
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    eprintln!(
+        "FRAME-COST {}: the device's checks settled {:.1} ms after the warm-up began: {:?}",
+        work.device.name(),
+        started.elapsed().as_secs_f64() * 1e3,
+        work.device.feature_status().settled
+    );
+    for _ in 0..WARM {
+        work.frame();
+    }
+    for _ in 0..WARM * 10 {
+        let before = pipelines_settled(&work.device);
+        work.frame();
+        let after = work.device.work_counts();
+        let moved = |count: CountOf| count(&after) - count(&before);
+        if moved(|c| c.pipelines_pooled) == 0
+            && moved(|c| c.residual_form_draws) == 0
+            && moved(|c| c.render_encoders_demoted) == 0
+        {
+            return;
+        }
+    }
+    panic!("no frame settled in {} frames", WARM * 11);
+}
+
+/// One frame of a plain device that encodes every encoder at the call (no resolver: the steps'
+/// counts are those of the encoding the resolver runs elsewhere), once every pipeline is made and
+/// every pool piece done, its allocations counted; and the device's name.
 #[cfg(not(m2v_system_alloc))]
 fn counted() -> (String, Frame) {
     let cache = ScratchCache::new().unwrap();
     let heard = Heard::default();
     let work = Workload::new(
-        device(&cache, false, &heard, CompletionPolicy::default()),
+        device_with(
+            &cache,
+            (false, true),
+            &heard,
+            (CompletionPolicy::default(), false),
+        ),
         false,
         Layers::Private,
-        (false, false, Shape::Window, false),
+        (None, false, Shape::Window, false),
     );
-    for _ in 0..WARM {
-        work.frame();
-    }
+    warmed(&work);
     let frame = work.frame();
     (work.device.name().to_string(), frame)
 }
@@ -2269,7 +3018,8 @@ fn a_frame_s_draws_and_pass_ends_allocate_within_their_bounds() {
 /// opening through the end, once every pipeline is made, and its commits none
 /// (`WorkCounts::encoder_command_buffers_begun`, counted in each step: the scheduler's thread
 /// submits earlier command buffers meanwhile, and what their submissions begin lands in whichever
-/// step runs then). Its batches' submissions, counted over the whole frame through its last
+/// step runs then), on a device that encodes every encoder at the call; the frame's counts are
+/// held again on a device with its resolver ([`begun_in_a_frame`]). Its batches' submissions, counted over the whole frame through its last
 /// command buffer's completion, begin none but the barrier command buffers they record to keep
 /// (`command_buffer/kept_barriers.rs`), where the device keeps them: every device whose driver
 /// reads no command buffer after its timeline's signal
@@ -2290,18 +3040,33 @@ fn a_frame_s_draws_and_pass_ends_allocate_within_their_bounds() {
 /// (`WorkCounts::groups_sent_for_waits`).
 #[test]
 fn a_frame_s_passes_and_commits_begin_their_command_buffers_within_their_bound() {
+    for at_the_call in [true, false] {
+        begun_in_a_frame(at_the_call);
+    }
+}
+
+/// [`a_frame_s_passes_and_commits_begin_their_command_buffers_within_their_bound`] on a device
+/// that encodes every encoder at the call (no resolver) where `at_the_call`, else on a device as
+/// the consumer makes its own. A step's count is the device's: what the resolver begins on its
+/// own thread for the encoders it captured (`render/captured.rs`) lands in whichever step runs
+/// then, or in none. So a step's own begins are held on the first device, and the frame's on
+/// both.
+fn begun_in_a_frame(at_the_call: bool) {
     let cache = ScratchCache::new().unwrap();
     let heard = Heard::default();
     let work = Workload::new(
-        device(&cache, false, &heard, CompletionPolicy::default()),
+        device_with(
+            &cache,
+            (false, at_the_call),
+            &heard,
+            (CompletionPolicy::default(), false),
+        ),
         false,
         Layers::Private,
-        (false, false, Shape::Window, false),
+        (None, false, Shape::Window, false),
     );
     // Every pipeline made, and every pool piece done, before the frame that counts.
-    for _ in 0..WARM {
-        work.frame();
-    }
+    warmed(&work);
     let counted = work.device.work_counts();
     let frame = work.frame_reading(Reads {
         work_counts: true,
@@ -2345,22 +3110,43 @@ fn a_frame_s_passes_and_commits_begin_their_command_buffers_within_their_bound()
         each(end.all),
         each(commit.all),
     );
+    // The encoders encoded at the call begin theirs in the frame's steps; the device's resolver
+    // begins those of the encoders it captured on its own thread (`render/captured.rs`), whose
+    // begins land in whichever step runs then, or in none.
     let pass = open.encoder + draws.encoder + end.encoder;
+    let encoders = whole.encoder;
     let bound = PASS_BEGINS * passes - (inline - split);
     assert!(
-        pass <= bound,
-        "{pass} command buffers encoders began in {passes} passes, more than {PASS_BEGINS} each \
-         but one fewer for each of the {} inline passes that did not split",
+        encoders <= bound,
+        "{encoders} command buffers encoders began in {passes} passes, more than {PASS_BEGINS} \
+         each but one fewer for each of the {} inline passes that did not split",
         inline - split
     );
-    assert_eq!(
-        commit.encoder, 0,
-        "command buffers encoders began in commits"
+    let captured = (after.render_encoders_captured - counted.render_encoders_captured)
+        - (after.render_encoders_demoted - counted.render_encoders_demoted);
+    eprintln!(
+        "FRAME-COST {}: {:.2} passes a pass encoded by the resolver",
+        work.device.name(),
+        captured as f64 / passes as f64,
     );
-    assert_eq!(
-        whole.encoder, pass,
-        "command buffers encoders began outside the frame's steps"
-    );
+    match at_the_call {
+        true => {
+            assert_eq!(captured, 0, "passes encoded by a device without a resolver");
+            assert_eq!(
+                commit.encoder, 0,
+                "command buffers encoders began in commits"
+            );
+            assert_eq!(
+                encoders, pass,
+                "command buffers encoders began outside the frame's steps"
+            );
+        }
+        false => assert!(
+            pass <= encoders,
+            "{pass} command buffers begun in the frame's steps, of {encoders} the frame's encoders \
+             began"
+        ),
+    }
     // What they were begun for: each command buffer's one encoder its own once, and the rest
     // its draws' secondaries; no segment, continuation or device submission of its own.
     let begun = |by: fn(&WorkCounts) -> u64| by(&after) - by(&counted);
@@ -2369,7 +3155,7 @@ fn a_frame_s_passes_and_commits_begin_their_command_buffers_within_their_bound()
     assert_eq!(own, passes, "encoders' own command buffers begun");
     assert_eq!(
         own + secondaries,
-        pass,
+        encoders,
         "command buffers encoders began besides their own and their draws' secondaries"
     );
     assert_eq!(
@@ -2419,6 +3205,10 @@ fn a_frame_s_passes_and_commits_begin_their_command_buffers_within_their_bound()
             "{own} command buffers begun by {passes} command buffers' submissions, not kept"
         ),
     }
+    assert_eq!(
+        after.resolver_notices, 0,
+        "notices delivered on the resolver"
+    );
 }
 
 /// A frame's pass opens (`render_command_encoder`) allocate at most [`OPEN_ALLOCATIONS`] each on
@@ -2441,8 +3231,13 @@ fn a_frame_s_pass_opens_allocate_within_their_bound() {
 /// A checked frame's commits allocate at most [`COMMIT_ALLOCATIONS`] each on average on the
 /// encoding thread ([`FIRST_LOCK_ALLOCATIONS`] more on Apple's platforms), and the process's other
 /// threads at most [`SUBMIT_ALLOCATIONS`] per command buffer (the scheduler thread's pass, the
-/// check, the submission, the completion), once every pipeline is made. Every commit hands its
-/// batches to the scheduler's thread (`WorkCounts::commits_handed_off`), which the test checks: no
+/// check, the submission, the completion), and for each pass the device's resolver encodes and
+/// each commit it makes what their steps would allocate at the call ([`OPEN_ALLOCATIONS`],
+/// [`DRAW_ALLOCATIONS`] a draw, [`PASS_END_ALLOCATIONS`], [`COMMIT_ALLOCATIONS`]), once every
+/// pipeline is made and the device's checks settled ([`warmed`]). It prints the other threads'
+/// allocations by thread name. Every commit hands its batches to the
+/// scheduler's thread, or itself to the resolver, which hands them there
+/// (`WorkCounts::commits_handed_off`, `WorkCounts::commits_answered`), which the test checks: no
 /// commit submits, so which thread submits moves nothing between the two counts.
 /// The other threads' count is the process's: the test needs a process of its own, as nextest
 /// runs each test in.
@@ -2455,13 +3250,13 @@ fn a_frame_s_commits_allocate_within_their_bound() {
         device(&cache, false, &heard, CompletionPolicy::default()),
         true,
         Layers::Private,
-        (false, false, Shape::Window, false),
+        (None, false, Shape::Window, false),
     );
     // Every pipeline made, and every pool piece done, before the frames that count.
-    for _ in 0..WARM {
-        work.frame();
-    }
+    warmed(&work);
     const FRAMES: usize = 4;
+    let counted = work.device.work_counts();
+    let by_name = others_allocations_by_name();
     let before = others_allocations().unwrap();
     // The work counts read around each step tell which commits handed their batches off.
     let frames: Vec<Frame> = (0..FRAMES)
@@ -2473,6 +3268,14 @@ fn a_frame_s_commits_allocate_within_their_bound() {
         })
         .collect();
     let others = others_allocations().unwrap() - before;
+    if let Some((before, after)) = by_name.zip(others_allocations_by_name()) {
+        eprintln!(
+            "FRAME-COST {}: the other threads' allocations over the frames, by name: {}",
+            work.device.name(),
+            allocations_moved(&before, &after)
+        );
+    }
+    let after = work.device.work_counts();
     let commits: Vec<u64> = (frames.iter())
         .flat_map(|frame| &frame.commit)
         .map(|step| step.allocations.unwrap())
@@ -2485,26 +3288,60 @@ fn a_frame_s_commits_allocate_within_their_bound() {
     let each = commits.iter().sum::<u64>() as f64 / buffers;
     let other = others as f64 / buffers;
     let bound = COMMIT_ALLOCATIONS + FIRST_LOCK_ALLOCATIONS;
+    // The device's resolver encodes the passes it captured (`render/captured.rs`) on its own
+    // thread: what their steps allocate at the call, each within its step's bound, lands among
+    // the other threads'.
+    let delta = |by: fn(&WorkCounts) -> u64| by(&after) - by(&counted);
+    let captured = (delta(|c| c.render_encoders_captured) - delta(|c| c.render_encoders_demoted))
+        as f64
+        / buffers;
+    let draw_bound = match cfg!(debug_assertions) {
+        true => DRAW_ALLOCATIONS_DEBUG,
+        false => DRAW_ALLOCATIONS,
+    };
+    // And a commit answered at the call commits there after them, making the allocations the
+    // commit's step would make at the call.
+    let answered = delta(|c| c.commits_answered) as f64 / buffers;
+    let encoded = captured * (OPEN_ALLOCATIONS + DRAWS as f64 * draw_bound + PASS_END_ALLOCATIONS)
+        + answered * COMMIT_ALLOCATIONS;
+    let other_bound = SUBMIT_ALLOCATIONS + encoded;
     eprintln!(
         "FRAME-COST {}: {each:.2} allocations a commit ({handed} of {} handed their batches to \
-         the scheduler's thread), at most {bound} kept; {other:.2} on the other threads a \
-         command buffer, at most {SUBMIT_ALLOCATIONS} kept",
+         the scheduler's thread or themselves to the resolver, {} to the resolver), at most \
+         {bound} kept; {other:.2} on the other threads a command buffer, at most {other_bound:.2} \
+         kept ({captured:.2} passes a command buffer encoded by the resolver); over the frames, \
+         {} pipelines pooled, {} draws of residual forms, {} variants' pipelines made, {} command \
+         pools made, {} slot waits",
         work.device.name(),
         commits.len(),
+        delta(|c| c.commits_answered),
+        delta(|c| c.pipelines_pooled),
+        delta(|c| c.residual_form_draws),
+        delta(|c| c.variant_pipelines_made),
+        delta(|c| c.command_pools_made),
+        delta(|c| c.slot_waits),
     );
     assert_eq!(
         handed,
         commits.len(),
-        "every commit hands its batches to the scheduler's thread"
+        "every commit hands its batches to the scheduler's thread, or itself to the resolver"
+    );
+    assert_eq!(
+        delta(|c| c.commits_handed_off),
+        commits.len() as u64,
+        "every command buffer's batches reach the scheduler's thread"
     );
     assert!(
         each <= bound,
         "{each:.2} allocations a commit, more than {bound}"
     );
     assert!(
-        other <= SUBMIT_ALLOCATIONS,
-        "{other:.2} allocations on the other threads a command buffer, more than \
-         {SUBMIT_ALLOCATIONS}"
+        other <= other_bound,
+        "{other:.2} allocations on the other threads a command buffer, more than {other_bound:.2}"
+    );
+    assert_eq!(
+        after.resolver_notices, 0,
+        "notices delivered on the resolver"
     );
 }
 

@@ -771,10 +771,13 @@ fn event_commands_are_refused_where_metal_stops_them() {
 }
 
 /// The consumer's signal-when-scheduled, composed: a scheduled handler that sets a shared event,
-/// which another queue's command buffer waits for.
+/// which another queue's command buffer waits for. Committed first, that one is held for the
+/// value, and goes once the handler's set reached it, in a submission of its own
+/// (`WorkCounts::event_holds_set_scheduled`, `WorkCounts::submissions_after_scheduled_sets`).
 #[test]
 fn a_scheduled_handler_signals_a_shared_event() {
     on_device(|device| {
+        let before = device.work_counts();
         let (first, second) = (
             device.new_command_queue().unwrap(),
             device.new_command_queue().unwrap(),
@@ -802,6 +805,79 @@ fn a_scheduled_handler_signals_a_shared_event() {
         completed(&scheduled);
         completed(&waiting);
         assert_eq!(gate.signaled_value(), 1);
+        let after = device.work_counts();
+        assert_eq!(
+            after.event_holds_set_scheduled - before.event_holds_set_scheduled,
+            1
+        );
+        assert_eq!(
+            after.submissions_after_scheduled_sets - before.submissions_after_scheduled_sets,
+            1
+        );
+    });
+}
+
+/// `encode_signal_event_scheduled`, as the M3 Max shows it (macOS 27.0.1): the value is set before
+/// the signaller reads `Scheduled`, so its scheduled handler reads both; another queue's command
+/// buffer committed before it and waiting for the value goes once it is scheduled, released by the
+/// signal in the scheduler's pass (`WorkCounts::event_holds_signal_scheduled`), with no handler's
+/// set. Refused with an encoder open (Metal asserts); after the commit it sets nothing, as Metal's.
+#[test]
+fn a_command_buffer_signals_a_shared_event_as_it_is_scheduled() {
+    on_device(|device| {
+        let (first, second) = (
+            device.new_command_queue().unwrap(),
+            device.new_command_queue().unwrap(),
+        );
+        let event = device.new_shared_event().unwrap();
+        let scratch = device.new_buffer(BIG, ResourceOptions::private()).unwrap();
+        let before = device.work_counts();
+        let waiting = second.command_buffer().unwrap();
+        waiting
+            .encode_wait_for_event(EventRef::from(&event), 1)
+            .unwrap();
+        let mut encoder = waiting.blit_command_encoder().unwrap();
+        encoder.fill_buffer(&scratch, 0..BIG, 2).unwrap();
+        encoder.end_encoding().unwrap();
+        waiting.commit().unwrap();
+        let signalling = first.command_buffer().unwrap();
+        signalling.encode_signal_event_scheduled(&event, 1).unwrap();
+        let mut encoder = signalling.blit_command_encoder().unwrap();
+        encoder.fill_buffer(&scratch, 0..BIG, 1).unwrap();
+        assert_eq!(
+            signalling.encode_signal_event_scheduled(&event, 2),
+            Err(invalid(
+                "encode_signal_event_scheduled",
+                Problem::EncoderOpen
+            ))
+        );
+        encoder.end_encoding().unwrap();
+        let seen: Arc<Mutex<Option<(u64, CommandBufferStatus)>>> = Arc::default();
+        let (seen_by_handler, read) = (Arc::clone(&seen), event.clone());
+        signalling
+            .add_scheduled_handler(Box::new(move |command_buffer: &CommandBuffer| {
+                *seen_by_handler.lock().unwrap() =
+                    Some((read.signaled_value(), command_buffer.status()));
+            }))
+            .unwrap();
+        signalling.commit().unwrap();
+        signalling.encode_signal_event_scheduled(&event, 3).unwrap();
+        completed(&signalling);
+        completed(&waiting);
+        assert_eq!(
+            *seen.lock().unwrap(),
+            Some((1, CommandBufferStatus::Scheduled))
+        );
+        assert_eq!(event.signaled_value(), 1);
+        let after = device.work_counts();
+        assert_eq!(
+            after.event_holds_signal_scheduled - before.event_holds_signal_scheduled,
+            1
+        );
+        assert_eq!(
+            after.event_holds_set_scheduled,
+            before.event_holds_set_scheduled
+        );
     });
 }
 

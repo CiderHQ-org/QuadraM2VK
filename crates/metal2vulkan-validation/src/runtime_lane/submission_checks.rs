@@ -15,11 +15,18 @@
 //! - **Reached through an indirect command alone.** A buffer an indirect command binds, which
 //!   no encoder makes resident, is the submission's from the commit on; detached behind a wait,
 //!   that submission fails.
-//! - **A GPU signal in flight**. A submission whose `Event` or `SharedEvent` wait another command
-//!   buffer's GPU signal meets is checked only once that signal landed (the check reads a companion
+//! - **A GPU signal in flight**. A submission whose `SharedEvent` wait another command buffer's
+//!   GPU signal meets is checked only once that signal landed (the check reads a companion
 //!   `SharedEvent` the signaller signals first); detached while the signaller runs, it fails. A
 //!   `SharedEvent` the host signals while a GPU signal of it is in flight is checked without
 //!   waiting for the GPU.
+//! - **Metal's rule for `Event` waits** (measured by the consumer on an M3 Max, macOS 27.0.1). A
+//!   command buffer waiting for `Event`s is scheduled, checked and counted in flight at the first
+//!   commit after which each event it waits for has a committed signaller of a value at least the
+//!   wait's, or holds such a value: behind a signaller committed first, at its own commit; behind
+//!   none, held until one is; behind a lower signal, held until one reaches its value; waiting
+//!   for two events, held until each has a signaller; a higher signal counts. Scheduled before
+//!   the signal landed, it then runs though detached.
 
 use super::degrade_notices::on_device;
 use super::failed_commits::{Shape, HELD, KERNEL, SHAPES};
@@ -34,7 +41,7 @@ use metal2vulkan::metal::IndirectCommandType;
 use metal2vulkan::pipeline::LinkedFunctions;
 use metal2vulkan_runtime::{
     Buffer, CommandBuffer, CommandBufferError, CommandBufferStatus, ComputePipelineState, Device,
-    EncoderKind, Event, EventRef, IndirectCommandBufferDescriptor, ObjectId, PipelineOptions,
+    EncoderKind, EventRef, IndirectCommandBufferDescriptor, ObjectId, PipelineOptions,
     ResourceOptions, SharedEvent, Size, Submission, SubmissionCheck,
 };
 use std::collections::{BTreeSet, HashSet};
@@ -372,67 +379,57 @@ const FILL: u64 = 64 << 20;
 /// signaller still to run when the host acts.
 const ATTEMPTS: u32 = 7;
 
-/// The event a waiting command buffer waits for, by its kind.
-enum Waited {
-    Event(Event),
-    Shared(SharedEvent),
-}
-
-impl Waited {
-    fn new(device: &Device, shared: bool) -> Waited {
-        if shared {
-            Waited::Shared(device.new_shared_event().unwrap())
-        } else {
-            Waited::Event(device.new_event().unwrap())
-        }
-    }
-
-    fn event(&self) -> EventRef<'_> {
-        match self {
-            Waited::Event(event) => EventRef::from(event),
-            Waited::Shared(event) => EventRef::from(event),
-        }
-    }
-}
-
-/// One try of a GPU-signal test: a command buffer that waits for `waited`'s value 1 and fills
-/// `target`'s first word, committed with a check, then a signaller on another queue that fills a
-/// 64-MiB buffer `fills` times, signals `landed` to 1, fills a word, and signals `waited` to 1,
-/// committed and scheduled. `landed` reaches 1 no later than `waited` does (one queue's signals
-/// land in order), so it reads 0 only while `waited`'s signal has not landed.
-struct InFlight {
-    waiter: CommandBuffer,
-    signaller: CommandBuffer,
+/// What a GPU-signal test's command buffers use: the waiter's target, the signaller's buffers,
+/// a companion event the signaller signals first, and the waiter's check.
+struct Parts {
     target: Buffer,
     landed: SharedEvent,
     detach: Arc<Detach>,
-    /// Kept until the work completes.
-    _big: Buffer,
-    _words: Buffer,
+    big: Buffer,
+    words: Buffer,
 }
 
-impl InFlight {
-    fn start(device: &Device, waited: &Waited, fills: u64) -> InFlight {
-        let target = buffer_with(device, &[0; 16]).unwrap();
-        let words = buffer_with(device, &[0; 4]).unwrap();
-        let big = device.new_buffer(FILL, ResourceOptions::private()).unwrap();
-        let landed = device.new_shared_event().unwrap();
-        let detach = Arc::new(Detach::default());
+impl Parts {
+    fn new(device: &Device) -> Parts {
+        Parts {
+            target: buffer_with(device, &[0; 16]).unwrap(),
+            landed: device.new_shared_event().unwrap(),
+            detach: Arc::new(Detach::default()),
+            big: device.new_buffer(FILL, ResourceOptions::private()).unwrap(),
+            words: buffer_with(device, &[0; 4]).unwrap(),
+        }
+    }
 
+    /// A command buffer of a new queue that waits for each of `waits` and fills `target`'s first
+    /// word, with a check that reads `landed` ([`Detach::check_reading`]); not committed.
+    fn waiter(&self, device: &Device, waits: &[(EventRef<'_>, u64)]) -> CommandBuffer {
         let waiter = device
             .new_command_queue()
             .unwrap()
             .command_buffer()
             .unwrap();
-        waiter.encode_wait_for_event(waited.event(), 1).unwrap();
+        for &(event, value) in waits {
+            waiter.encode_wait_for_event(event, value).unwrap();
+        }
         let mut blit = waiter.blit_command_encoder().unwrap();
-        blit.fill_buffer(&target, 0..4, 0x5a).unwrap();
+        blit.fill_buffer(&self.target, 0..4, 0x5a).unwrap();
         blit.end_encoding().unwrap();
         waiter
-            .set_submission_check(detach.check_reading(&landed))
+            .set_submission_check(self.detach.check_reading(&self.landed))
             .unwrap();
-        waiter.commit().unwrap();
+        waiter
+    }
 
+    /// A command buffer of a new queue that fills a 64-MiB buffer `fills` times, signals
+    /// `landed` to 1, fills a word, and signals each of `signals`; not committed. `landed`
+    /// reaches 1 no later than `signals` land (one queue's signals land in order), so it reads 0
+    /// only while they have not.
+    fn signaller(
+        &self,
+        device: &Device,
+        fills: u64,
+        signals: &[(EventRef<'_>, u64)],
+    ) -> CommandBuffer {
         let signaller = device
             .new_command_queue()
             .unwrap()
@@ -440,26 +437,47 @@ impl InFlight {
             .unwrap();
         let mut blit = signaller.blit_command_encoder().unwrap();
         for fill in 0..fills {
-            blit.fill_buffer(&big, 0..FILL, fill as u8).unwrap();
+            blit.fill_buffer(&self.big, 0..FILL, fill as u8).unwrap();
         }
         blit.end_encoding().unwrap();
         signaller
-            .encode_signal_event(EventRef::from(&landed), 1)
+            .encode_signal_event(EventRef::from(&self.landed), 1)
             .unwrap();
         let mut blit = signaller.blit_command_encoder().unwrap();
-        blit.fill_buffer(&words, 0..4, 0x11).unwrap();
+        blit.fill_buffer(&self.words, 0..4, 0x11).unwrap();
         blit.end_encoding().unwrap();
-        signaller.encode_signal_event(waited.event(), 1).unwrap();
+        for &(event, value) in signals {
+            signaller.encode_signal_event(event, value).unwrap();
+        }
+        signaller
+    }
+
+    /// The companion event's value as each check of the waiter ran.
+    fn checked(&self) -> Vec<u64> {
+        self.detach.landed.lock().unwrap().clone()
+    }
+}
+
+/// One try of a GPU-signal test: a waiter of `waited`'s value 1, committed with a check, then a
+/// signaller of it on another queue ([`Parts::signaller`]), committed and scheduled.
+struct InFlight {
+    waiter: CommandBuffer,
+    signaller: CommandBuffer,
+    parts: Parts,
+}
+
+impl InFlight {
+    fn start(device: &Device, waited: &SharedEvent, fills: u64) -> InFlight {
+        let parts = Parts::new(device);
+        let waiter = parts.waiter(device, &[(EventRef::from(waited), 1)]);
+        waiter.commit().unwrap();
+        let signaller = parts.signaller(device, fills, &[(EventRef::from(waited), 1)]);
         signaller.commit().unwrap();
         signaller.wait_until_scheduled().unwrap();
         InFlight {
             waiter,
             signaller,
-            target,
-            landed,
-            detach,
-            _big: big,
-            _words: words,
+            parts,
         }
     }
 
@@ -468,61 +486,268 @@ impl InFlight {
         self.signaller.wait_until_completed_for(WAIT).unwrap();
         self.waiter.wait_until_completed_for(WAIT).unwrap();
         assert_eq!(self.signaller.status(), CommandBufferStatus::Completed);
-        let landed = self.detach.landed.lock().unwrap();
+        let landed = self.parts.checked();
         assert_eq!(landed.len(), 1, "the waiter's submission is checked once");
         landed[0]
     }
 }
 
-/// A submission whose `Event` (then `SharedEvent`) wait another command buffer's GPU signal
-/// meets is checked only once that signal landed: the companion event the signaller signals
-/// first reads 1 in the check, every try. Its buffer detached once the signaller is scheduled,
-/// while its signal is in flight (the companion still reads 0 after the detach), the submission
-/// fails with code 8 and its fill does not run. A try whose signaller finished before the
-/// detach proves nothing of the detach, and the next doubles the signaller's work; one try at
-/// least must catch it in flight.
+/// A submission whose `SharedEvent` wait another command buffer's GPU signal meets is checked
+/// only once that signal landed: the companion event the signaller signals first reads 1 in the
+/// check, every try. Its buffer detached once the signaller is scheduled, while its signal is in
+/// flight (the companion still reads 0 after the detach), the submission fails with code 8 and
+/// its fill does not run. A try whose signaller finished before the detach proves nothing of the
+/// detach, and the next doubles the signaller's work; one try at least must catch it in flight.
 #[test]
 fn a_submission_detached_while_a_gpu_signal_is_in_flight_fails() {
     on_device(|device, _| {
-        for shared in [false, true] {
-            let mut caught = None;
-            for attempt in 0..ATTEMPTS {
-                let fills = 4u64 << attempt;
-                let waited = Waited::new(device, shared);
-                let run = InFlight::start(device, &waited, fills);
-                run.detach.detach(&run.target);
-                let in_flight = run.landed.signaled_value() == 0;
-                let at_check = run.finish();
-                assert_eq!(
-                    at_check, 1,
-                    "shared {shared}: checked before the GPU signal landed"
-                );
-                if !in_flight {
-                    continue;
-                }
-                assert_eq!(
-                    run.waiter.status(),
-                    CommandBufferStatus::Error,
-                    "shared {shared}"
-                );
-                assert_eq!(
-                    run.waiter.error(),
-                    Some(CommandBufferError::Injected(DETACHED)),
-                    "shared {shared}"
-                );
-                assert_eq!(
-                    read_buffer(&run.target, 0, 4).unwrap(),
-                    [0; 4],
-                    "shared {shared}"
-                );
-                caught = Some(fills);
-                break;
+        let mut caught = None;
+        for attempt in 0..ATTEMPTS {
+            let fills = 4u64 << attempt;
+            let waited = device.new_shared_event().unwrap();
+            let run = InFlight::start(device, &waited, fills);
+            run.parts.detach.detach(&run.parts.target);
+            let in_flight = run.parts.landed.signaled_value() == 0;
+            let at_check = run.finish();
+            assert_eq!(at_check, 1, "checked before the GPU signal landed");
+            if !in_flight {
+                continue;
             }
-            let fills = caught.unwrap_or_else(|| {
-                panic!("shared {shared}: the signaller never ran at the detach in {ATTEMPTS} tries")
-            });
-            println!("IN-FLIGHT shared={shared} caught with {fills} fills of {FILL} bytes");
+            assert_eq!(run.waiter.status(), CommandBufferStatus::Error);
+            assert_eq!(
+                run.waiter.error(),
+                Some(CommandBufferError::Injected(DETACHED))
+            );
+            assert_eq!(read_buffer(&run.parts.target, 0, 4).unwrap(), [0; 4]);
+            caught = Some(fills);
+            break;
         }
+        let fills = caught
+            .unwrap_or_else(|| panic!("the signaller never ran at the detach in {ATTEMPTS} tries"));
+        println!("IN-FLIGHT caught with {fills} fills of {FILL} bytes");
+    });
+}
+
+/// One shape of Metal's rule for a command buffer waiting for `Event`s, over two events (by
+/// index into them, each signalled to a value): `before`'s signals, by a command buffer
+/// completed before the waiter's commit; the waiter's `waits`; `short`'s, by a command buffer
+/// committed and completed after the waiter's commit, which leave it held; and `long`'s, by a
+/// long signaller ([`Parts::signaller`]) committed last, or first with `long_first`; with no
+/// `long` signals, there is none, and the waiter is scheduled at its own commit.
+struct EventRule {
+    name: &'static str,
+    before: &'static [(usize, u64)],
+    waits: &'static [(usize, u64)],
+    short: &'static [(usize, u64)],
+    long: &'static [(usize, u64)],
+    long_first: bool,
+}
+
+/// The shapes of Metal's rule for `Event` waits.
+const EVENT_RULES: &[EventRule] = &[
+    EventRule {
+        name: "a signaller committed after the waiter",
+        before: &[],
+        waits: &[(0, 1)],
+        short: &[],
+        long: &[(0, 1)],
+        long_first: false,
+    },
+    EventRule {
+        name: "a signaller committed before the waiter",
+        before: &[],
+        waits: &[(0, 1)],
+        short: &[],
+        long: &[(0, 1)],
+        long_first: true,
+    },
+    EventRule {
+        name: "a higher signal committed after the waiter",
+        before: &[],
+        waits: &[(0, 3)],
+        short: &[],
+        long: &[(0, 5)],
+        long_first: false,
+    },
+    EventRule {
+        name: "a higher signal committed before the waiter",
+        before: &[],
+        waits: &[(0, 3)],
+        short: &[],
+        long: &[(0, 5)],
+        long_first: true,
+    },
+    EventRule {
+        name: "a lower signal, then one of the value",
+        before: &[],
+        waits: &[(0, 2)],
+        short: &[(0, 1)],
+        long: &[(0, 2)],
+        long_first: false,
+    },
+    EventRule {
+        name: "two events, one signalled, then the other",
+        before: &[],
+        waits: &[(0, 1), (1, 1)],
+        short: &[(0, 1)],
+        long: &[(1, 1)],
+        long_first: false,
+    },
+    EventRule {
+        name: "an event already at the value",
+        before: &[(0, 1)],
+        waits: &[(0, 1)],
+        short: &[],
+        long: &[],
+        long_first: false,
+    },
+];
+
+/// Let the scheduler act on what is committed: an empty command buffer of a new queue,
+/// committed and waited for until scheduled (the scheduler's pass that took it looked at every
+/// head committed before it), then a moment for a check that pass found due to run.
+fn settle(device: &Device) {
+    let probe = device
+        .new_command_queue()
+        .unwrap()
+        .command_buffer()
+        .unwrap();
+    probe.commit().unwrap();
+    probe.wait_until_scheduled().unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(10));
+}
+
+/// A command buffer of a new queue that only signals each of `signals`, committed and waited
+/// for.
+fn signal_now(device: &Device, signals: &[(EventRef<'_>, u64)]) {
+    let signaller = device
+        .new_command_queue()
+        .unwrap()
+        .command_buffer()
+        .unwrap();
+    for &(event, value) in signals {
+        signaller.encode_signal_event(event, value).unwrap();
+    }
+    signaller.commit().unwrap();
+    signaller.wait_until_completed_for(WAIT).unwrap();
+    assert_eq!(signaller.status(), CommandBufferStatus::Completed);
+}
+
+/// Check that `waiter`, committed while no signaller of `rule`'s long signals is, is held,
+/// unchecked; `rule`'s short signals completed meanwhile.
+fn held<'a>(
+    device: &Device,
+    rule: &EventRule,
+    (waiter, parts): (&CommandBuffer, &Parts),
+    refs: &impl Fn(&[(usize, u64)]) -> Vec<(EventRef<'a>, u64)>,
+) {
+    let name = rule.name;
+    settle(device);
+    if !rule.short.is_empty() {
+        signal_now(device, &refs(rule.short));
+        settle(device);
+    }
+    assert_eq!(
+        waiter.status(),
+        CommandBufferStatus::Committed,
+        "{name}: scheduled with no signaller of each value committed"
+    );
+    assert_eq!(
+        parts.checked(),
+        Vec::<u64>::new(),
+        "{name}: checked while held"
+    );
+}
+
+/// One try of `rule` with a long signaller of `fills` fills: whether that signaller still ran
+/// as the waiter read `Scheduled` (always, with none). The waiter is held, unchecked, until the
+/// last signal it needs is committed ([`held`]); then it is scheduled and checked once (before
+/// that signal landed, where it still ran), and runs though detached as soon as it read
+/// `Scheduled`.
+fn event_rule_try(device: &Device, rule: &EventRule, fills: u64) -> bool {
+    let name = rule.name;
+    let events = [device.new_event().unwrap(), device.new_event().unwrap()];
+    let refs = |list: &[(usize, u64)]| -> Vec<(EventRef<'_>, u64)> {
+        (list.iter())
+            .map(|&(at, value)| (EventRef::from(&events[at]), value))
+            .collect()
+    };
+    if !rule.before.is_empty() {
+        signal_now(device, &refs(rule.before));
+    }
+    let parts = Parts::new(device);
+    let waiter = parts.waiter(device, &refs(rule.waits));
+    let signaller =
+        (!rule.long.is_empty()).then(|| parts.signaller(device, fills, &refs(rule.long)));
+    match &signaller {
+        Some(signaller) if rule.long_first => {
+            signaller.commit().unwrap();
+            waiter.commit().unwrap();
+        }
+        Some(signaller) => {
+            waiter.commit().unwrap();
+            held(device, rule, (&waiter, &parts), &refs);
+            signaller.commit().unwrap();
+        }
+        None => waiter.commit().unwrap(),
+    }
+    waiter.wait_until_scheduled().unwrap();
+    let in_flight = parts.landed.signaled_value() == 0;
+    // Metal checked it as it scheduled it: a detach now fails nothing.
+    parts.detach.detach(&parts.target);
+    if let Some(signaller) = &signaller {
+        signaller.wait_until_completed_for(WAIT).unwrap();
+        assert_eq!(signaller.status(), CommandBufferStatus::Completed, "{name}");
+    }
+    waiter.wait_until_completed_for(WAIT).unwrap();
+    assert_eq!(waiter.status(), CommandBufferStatus::Completed, "{name}");
+    assert_eq!(
+        read_buffer(&parts.target, 0, 4).unwrap(),
+        [0x5a; 4],
+        "{name}"
+    );
+    let checked = parts.checked();
+    assert_eq!(
+        checked.len(),
+        1,
+        "{name}: the waiter's submission is checked once"
+    );
+    if in_flight {
+        assert_eq!(checked[0], 0, "{name}: checked after the GPU signal landed");
+    }
+    in_flight
+}
+
+/// Metal's rule for a command buffer waiting for `Event`s, each shape of [`EVENT_RULES`]: held,
+/// unchecked, until each value it waits for has a committed signaller (or is held), then
+/// scheduled and checked while that signaller still runs, in one try at least, the GPU waiting
+/// for the signal; detached once scheduled, it runs. Such a waiter is never held for a landing
+/// (`WorkCounts::event_holds_landed_event`). A try whose signaller finished before the waiter
+/// read `Scheduled` proves nothing of the timing, and the next doubles the signaller's work.
+#[test]
+fn an_event_waiter_is_scheduled_once_each_value_has_a_committed_signaller() {
+    on_device(|device, _| {
+        let before = device.work_counts();
+        for rule in EVENT_RULES {
+            let caught = (0..ATTEMPTS)
+                .map(|attempt| 4u64 << attempt)
+                .find(|&fills| event_rule_try(device, rule, fills));
+            let fills = caught.unwrap_or_else(|| {
+                panic!(
+                    "{}: the signaller never ran as the waiter was scheduled in {ATTEMPTS} tries",
+                    rule.name
+                )
+            });
+            println!(
+                "EVENT-RULE {}: caught with {fills} fills of {FILL} bytes",
+                rule.name
+            );
+        }
+        let after = device.work_counts();
+        assert_eq!(
+            after.event_holds_landed_event, before.event_holds_landed_event,
+            "a waiter for an Event was held for its signal to land"
+        );
     });
 }
 
@@ -536,15 +761,12 @@ fn a_wait_the_host_meets_is_checked_without_waiting_for_the_gpu() {
         let mut caught = None;
         for attempt in 0..ATTEMPTS {
             let fills = 4u64 << attempt;
-            let waited = Waited::new(device, true);
+            let waited = device.new_shared_event().unwrap();
             let run = InFlight::start(device, &waited, fills);
-            let Waited::Shared(event) = &waited else {
-                unreachable!()
-            };
-            event.set_signaled_value(1);
+            waited.set_signaled_value(1);
             let at_check = run.finish();
             assert_eq!(run.waiter.status(), CommandBufferStatus::Completed);
-            assert_eq!(read_buffer(&run.target, 0, 4).unwrap(), [0x5a; 4]);
+            assert_eq!(read_buffer(&run.parts.target, 0, 4).unwrap(), [0x5a; 4]);
             if at_check == 0 {
                 caught = Some(fills);
                 break;

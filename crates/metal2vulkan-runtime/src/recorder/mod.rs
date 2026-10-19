@@ -114,6 +114,7 @@ macro_rules! per_slot {
         }
     };
 }
+pub(crate) use per_slot;
 
 /// One device's slot (the module docs): its commands, until it is dropped, after the device is
 /// destroyed.
@@ -207,7 +208,8 @@ impl Drop for Slot {
 /// # Safety
 ///
 /// `device` is live, and its functions are its driver's (or its topmost layer's, or routed for
-/// its pipeline makings, `compiles.rs`), not already routed here.
+/// its pipeline makings, `compiles.rs`, and its loss watch, `device_checks/learned.rs`), not
+/// already routed here.
 pub(crate) unsafe fn route(device: ash::Device) -> (ash::Device, Option<Slot>) {
     let Some(index) = TAKEN.iter().position(|taken| {
         taken

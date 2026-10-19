@@ -515,6 +515,7 @@ pub enum Needs {
 /// (`ProfileFields::deviations_beyond`); elsewhere the translation takes its conservative route.
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum DriverDeviation {
     /// How the driver hands a kernel's cube sample's explicit gradients to the GPU
     /// (`ProfileFields::cube_gradients`'s compute route, `CubeGradientRoute::Unmeasured`): as
@@ -638,12 +639,13 @@ pub enum DriverDeviation {
     MetalNorm16ColorWrites,
     /// The device's `GLSL.std.450` `NMin`, `NMax` and `NClamp` on 32-bit floats are Metal's own
     /// `fmin`, `fmax` and `clamp` (`VkProperty::MetalMinMax`): a NaN operand loses, two NaNs and a
-    /// tie answer the second operand's bits, an `f32` denormal compares as a zero but is returned
-    /// itself, and `clamp(x, lo, hi)` is `fmin(fmax(x, lo), hi)`, in every math mode, of every
-    /// operand class, and of every `half` held widened. Where the profile takes it, Metal's `fmin`,
-    /// `fmax`, `min3`, `max3` and `clamp` on `float` and `half` are those instructions. Unmeasured,
-    /// the module picks the operand itself (`math::metal_min_max`), by NaN tests and comparisons,
-    /// exact.
+    /// tie answer an operand's bits (Metal's call answers the second, and its compiler, which takes
+    /// `fmin` and `fmax` as commutative, the first where it exchanges them), an `f32` denormal
+    /// compares as a zero but is returned itself, and `clamp(x, lo, hi)` is `fmin(fmax(x, lo), hi)`,
+    /// in every math mode, of every operand class, and of every `half` held widened. Where the
+    /// profile takes it, Metal's `fmin`, `fmax`, `min3`, `max3` and `clamp` on `float` and `half`
+    /// are those instructions. Unmeasured, the module picks the operand itself
+    /// (`math::metal_min_max`), by NaN tests and comparisons, exact.
     MetalMinMax,
     /// The device's 16-bit `OpFAdd` and `OpFSub` decorated `NoContraction`, and its 16-bit
     /// `Fma(a, b, -0.0)` decorated `NoContraction`, are Metal's own `half` `+`, `-` and `*`
@@ -781,13 +783,16 @@ pub enum DriverDeviation {
 
 /// A defect of a device's driver in a command the runtime records for itself, never in a
 /// translation (which [`DriverWorkaround`] covers). The runtime keys it on the driver's
-/// identity and release (`driverID`, `driverVersion`; `runtime::driver_defects`), lists the
-/// device's in its properties, and takes another way where an exact one exists, else refuses,
+/// identity, release and GPU (`driverID`, `driverVersion`, `deviceID`): its own table of the
+/// defects a check may settle (`runtime::driver_defects`), and the known-driver list's
+/// ([`DeviceDescription::listed_driver_defects`](crate::device::DeviceDescription::listed_driver_defects)).
+/// It lists the device's in its properties, and takes another way where an exact one exists, else refuses,
 /// what the driver would run wrong ([`Needs::RuntimeDriverDefect`]), or runs it announced as a
 /// degradation where a refusal would withhold a feature of the families the device claims. No
 /// compile profile, cache key or digest holds it.
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum RuntimeDriverDefect {
     /// `vkCmdCopyImage` between a multisampled depth/stencil image and a multisampled colour
     /// image (maintenance8's depth-stencil/colour copies) does not copy every sample, or loses

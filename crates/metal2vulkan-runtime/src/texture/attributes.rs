@@ -67,6 +67,11 @@ impl Texture {
     /// `NonVolatile` to every request and change nothing, as plain Metal answers where its
     /// validation stops each, a query included.
     pub fn set_purgeable_state(&self, state: PurgeableState) -> Result<PurgeableState, Error> {
+        // What a captured encoder's calls handed the device's resolver is encoded first, so this
+        // reads and changes what the commands encoded before it see (`resolver.rs`).
+        self.device()
+            .shared()
+            .drain_resolver(crate::resolver::Drain::Object);
         if self.heap().is_some() {
             return Ok(PurgeableState::NonVolatile);
         }

@@ -96,6 +96,17 @@ metal2vulkan kernel.ll kernel.spv --profile device.json --emit-meta kernel.json
   under `$TMPDIR/metal2vulkan-repros` (or `METAL2VULKAN_REPRO_DIR`).
 - `metal2vulkan --help` lists every option.
 
+### GPU report
+
+```sh
+cargo install --git https://github.com/steelbrain/metal2vulkan metal2vulkan-runtime --features gpu-report
+metal2vulkan-gpu-report          # --device N, --all, --json, --checks-dir DIR
+```
+
+It makes a device and prints how it takes each driver fact (checked on the device, listed, learned
+off after a lost device, or the exact path) and what its checks cost
+([HOWTO](docs/HOWTO.md#the-devices-checks-of-its-driver)).
+
 ## Library
 
 The flow follows Metal's object lifecycle: describe the device, parse a library, compile a

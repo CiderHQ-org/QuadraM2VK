@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use crate::bind::{
     self, BlockDecode, CompressedBlit, DepthStandInForm, PlanesCopy, RewritePhase, RewriteProgram,
-    TessellationScanKernel, TexelWords, YCbCrOutput,
+    TessellationScanKernel, TexelWords, YCbCrRange,
 };
 use crate::device::{Device, DevicePolicy};
 use crate::error::{Error, Feature};
@@ -163,15 +163,13 @@ fn modules() -> Vec<Build> {
             Box::new(move |d| Ok(bind::shadow_merge_kept_image_module(d, view)?.spirv)),
         );
     }
-    for output in [
-        YCbCrOutput::Converted,
-        YCbCrOutput::Codes,
-        YCbCrOutput::Srgb,
-    ] {
-        push(
-            format!("ycbcr_convert_module({output:?})"),
-            Box::new(move |d| Ok(bind::ycbcr_convert_module(d, output)?.spirv)),
-        );
+    for codes in bind::ycbcr_convert::every_layout() {
+        for range in [YCbCrRange::Video, YCbCrRange::Full] {
+            push(
+                format!("ycbcr_convert_module({codes:?}, {range:?})"),
+                Box::new(move |d| Ok(bind::ycbcr_convert_module(d, codes, range)?.spirv)),
+            );
+        }
     }
     for copy in PlanesCopy::ALL {
         push(

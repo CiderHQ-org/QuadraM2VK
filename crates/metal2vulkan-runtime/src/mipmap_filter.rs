@@ -29,9 +29,10 @@
 //! (`bind::MipmapFilterChain::plan`'s `fetch`), where the image has sampled usage, the view's
 //! format (the image's own, or the UNORM twin of an 8-bit sRGB one) is one the image views as and
 //! samples, and the fetch is exact: the extended-range formats' integer carriers on every device,
-//! the normalized and 16-bit float formats on a driver measured to return values whose recovery
-//! reads every code back (`DriverFact::SampledFetchRecoversCodes`). Vulkan states no precision for
-//! those conversions, so on any other driver the level is copied in. The command buffer holds the
+//! the normalized and 16-bit float formats on a device whose driver returns values whose recovery
+//! reads every code back (`DriverFact::SampledFetchRecoversCodes`, checked on the device or
+//! measured), as it holds at each `generate_mipmaps`. Vulkan states no precision for those
+//! conversions, so on any other driver the level is copied in. The command buffer holds the
 //! block's lease and the dispatches' descriptor sets until it completes. Where the device lacks
 //! `shaderInt64` (the kernel's), where its limits do not fit the chain (a level or a level's words
 //! past `maxStorageBufferRange`, the scratch past `max_buffer_length`, a dispatch past
@@ -393,9 +394,6 @@ fn fetch_view(plan: &ImagePlan, facts: &ImageFacts<'_>, device: &super::Device) 
             .optimal(view)
             .contains(FormatFeatureFlags2::SAMPLED_IMAGE);
     let exact = !MipmapFilterChain::fetch_converts(view)
-        || device
-            .properties()
-            .driver_facts
-            .contains(&DriverFact::SampledFetchRecoversCodes);
+        || device.driver_fact(DriverFact::SampledFetchRecoversCodes);
     (sampled && exact).then_some(view)
 }

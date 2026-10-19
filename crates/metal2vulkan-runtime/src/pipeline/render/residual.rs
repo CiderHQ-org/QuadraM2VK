@@ -124,6 +124,7 @@ impl RenderVariant {
             }
         }
         device.shared().counts.residual_form_drawn();
+        crate::device::unsettled();
         Some(drawn)
     }
 }

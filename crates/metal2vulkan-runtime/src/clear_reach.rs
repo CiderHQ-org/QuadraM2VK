@@ -288,6 +288,21 @@ const MOST_RECTS: usize = 1024;
 /// the widest render area.
 const ROW_WORDS: usize = 8;
 
+/// The words of [`DrawnArea::covered_tiles`]'s grid it holds in place: a 3840x2160 area's 68 rows
+/// of two words of tiles.
+const GRID_WORDS: usize = 256;
+
+/// Set the bits `bits` of `row`'s words, a word at a time.
+fn set_bits(row: &mut [u64], bits: std::ops::Range<usize>) {
+    let mut at = bits.start;
+    while at < bits.end {
+        let (word, bit) = (at / 64, at % 64);
+        let take = (64 - bit).min(bits.end - at);
+        row[word] |= (u64::MAX >> (64 - take)) << bit;
+        at += take;
+    }
+}
+
 /// The pixels a pass's draws may write, as far as the host bounds them: each draw that draws
 /// writes only inside its viewports' pixels within their scissor rectangles
 /// (`EncoderState::vk_scissors`), so a tile none of those reaches is one Metal's draws do not,
@@ -394,23 +409,31 @@ impl DrawnArea {
         if (tx1 - tx0) as usize > ROW_WORDS * 64 {
             return Some((bounded, bounded));
         }
-        let mut covered = 0;
-        for ty in ty0..ty1 {
-            let (top, bottom) = (ty * TILE, (ty + 1) * TILE);
-            let mut row = [0u64; ROW_WORDS];
-            for &[rx0, ry0, rx1, ry1] in self.rects.iter() {
-                if rx0 >= rx1 || ry0 >= ry1 || ry0 >= bottom || ry1 <= top {
-                    continue;
-                }
-                for tile in rx0 / TILE - tx0..rx1.div_ceil(TILE) - tx0 {
-                    row[(tile / 64) as usize] |= 1 << (tile % 64);
-                }
+        // The grid of the bounds' tiles, a row of them in `words` words, one row after another:
+        // each rectangle sets its own rows' bits a word at a time, so the count costs the rows
+        // each rectangle reaches, not every row for every rectangle. Held in place up to
+        // `GRID_WORDS`.
+        let words = (tx1 - tx0).div_ceil(64) as usize;
+        let rows = (ty1 - ty0) as usize;
+        let mut held = [0u64; GRID_WORDS];
+        let mut grown = Vec::new();
+        let grid = match rows * words <= GRID_WORDS {
+            true => &mut held[..rows * words],
+            false => {
+                grown.resize(rows * words, 0);
+                &mut grown[..]
             }
-            covered += row
-                .iter()
-                .map(|word| u64::from(word.count_ones()))
-                .sum::<u64>();
+        };
+        for &[rx0, ry0, rx1, ry1] in self.rects.iter() {
+            if rx0 >= rx1 || ry0 >= ry1 {
+                continue;
+            }
+            let columns = (rx0 / TILE - tx0) as usize..(rx1.div_ceil(TILE) - tx0) as usize;
+            for row in (ry0 / TILE - ty0) as usize..(ry1.div_ceil(TILE) - ty0) as usize {
+                set_bits(&mut grid[row * words..(row + 1) * words], columns.clone());
+            }
         }
+        let covered = grid.iter().map(|word| u64::from(word.count_ones())).sum();
         Some((covered, bounded))
     }
 
@@ -802,7 +825,7 @@ fn rect([width, height]: [u32; 2]) -> vk::Rect2D {
 
 #[cfg(test)]
 mod tests {
-    use super::{dont_care_clear, DrawnArea};
+    use super::{dont_care_clear, DrawnArea, TILE};
     use ash::vk;
     use metal2vulkan::metal::format::{ClearRoute, ExtendedRange};
     use metal2vulkan::metal::PixelFormat;
@@ -881,6 +904,73 @@ mod tests {
             assert_eq!(area.covered_tiles(), *expected, "case {case}");
         }
         assert_eq!(DrawnArea::unbounded().covered_tiles(), None);
+    }
+
+    /// The covered count is the tiles of the bounds some rectangle overlaps, checked tile by tile
+    /// over rectangles of many sizes and places: across words of a row of tiles, over areas whose
+    /// grid it holds in place and over larger ones, overlapping and apart.
+    #[test]
+    fn covered_tiles_are_the_bounds_tiles_a_rectangle_overlaps() {
+        let rect = |[x, y, w, h]: [u32; 4]| vk::Rect2D {
+            offset: vk::Offset2D {
+                x: x as i32,
+                y: y as i32,
+            },
+            extent: vk::Extent2D {
+                width: w,
+                height: h,
+            },
+        };
+        // A fixed pseudo-random walk (a 64-bit LCG), so every run checks the same rectangles.
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = |below: u32| {
+            seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            ((seed >> 33) % u64::from(below)) as u32
+        };
+        for case in 0..400 {
+            // Render areas from a few tiles to 8192x4096, past the grid held in place.
+            let extent = match case % 4 {
+                0 => [100, 70],
+                1 => [1920, 1080],
+                2 => [3840, 2160],
+                _ => [8192, 4096],
+            };
+            let count = 1 + next(12);
+            let rects: Vec<vk::Rect2D> = (0..count)
+                .map(|_| {
+                    let [x, y] = [next(extent[0]), next(extent[1])];
+                    let w = 1 + next(extent[0] - x);
+                    let h = 1 + next(extent[1] - y);
+                    rect([x, y, w, h])
+                })
+                .collect();
+            let mut area = DrawnArea::default();
+            area.add(&rects);
+            let [x0, y0, x1, y1] = area.bounds().unwrap();
+            let (tx0, ty0) = (x0 / TILE, y0 / TILE);
+            let (tx1, ty1) = (x1.div_ceil(TILE), y1.div_ceil(TILE));
+            let overlaps = |tx: u32, ty: u32| {
+                area.rects.iter().any(|&[rx0, ry0, rx1, ry1]| {
+                    rx0 < (tx + 1) * TILE
+                        && tx * TILE < rx1
+                        && ry0 < (ty + 1) * TILE
+                        && ty * TILE < ry1
+                })
+            };
+            let covered = (ty0..ty1)
+                .flat_map(|ty| (tx0..tx1).map(move |tx| (tx, ty)))
+                .filter(|&(tx, ty)| overlaps(tx, ty))
+                .count() as u64;
+            let bounded = u64::from(tx1 - tx0) * u64::from(ty1 - ty0);
+            assert_eq!(
+                area.covered_tiles(),
+                Some((covered, bounded)),
+                "case {case}: {:?}",
+                area.rects
+            );
+        }
     }
 
     /// The tiles a pass's rectangles reach are the tiles each overlaps, whether one of them

@@ -145,7 +145,8 @@ pub enum RuntimeFact {
     },
     /// The kernel is a tile function (`Device::compile_tile_pipeline`): a dispatch covers the
     /// render pass's render area (`BindState::render_area`, `SpecKey::RenderAreaWidth` and
-    /// `SpecKey::RenderAreaHeight`) in tiles of the imageblock size (`BindState::imageblock_size`),
+    /// `SpecKey::RenderAreaHeight`, which it reads as data) in tiles of the imageblock size
+    /// (`BindState::imageblock_size`),
     /// one threadgroup per tile, and stages the color attachments it reaches through the
     /// threadgroup's imageblock. A layered pass is not modeled: the planner refuses a render
     /// target array length above 1.
@@ -278,7 +279,9 @@ pub enum RuntimeFact {
     /// The kernel's predicated walk votes in a workgroup word of its own
     /// (`lower::simd::divergent::VOTE_BYTES`, 4 bytes beside its threadgroup arena): it runs a
     /// workgroup barrier that part of the workgroup skips in the source in every invocation, and
-    /// a loop holding one iterates while any invocation is still in it. The planner counts the word
+    /// a loop holding one iterates while any invocation is still in it; an imageblock slice the
+    /// whole threadgroup copies where part of it skips the write votes there and publishes its
+    /// operands through the word (`lower::texture::slice`). The planner counts the word
     /// with the arena's static part and `[[threadgroup(n)]]` lengths against
     /// `maxComputeSharedMemorySize`, and the reflected static threadgroup length includes it. A
     /// kernel in the emulated tier votes in its scratch instead
@@ -351,12 +354,12 @@ pub enum RuntimeFact {
     /// memory of its tile that the render pass keeps across its tile dispatches, at the offset
     /// and in the tile memory the encoder sets (`setThreadgroupMemoryLength:offset:atIndex:` and
     /// the pass's `threadgroupMemoryLength`, `BindState::tile_threadgroup`). The binder
-    /// specializes `SpecKey::TgOffset(index)`, `SpecKey::TileThreadgroupLength` and
-    /// `SpecKey::TileGridWidth`, binds the pass's `SyntheticBinding::TileMemory`, and refuses an
-    /// index the encoder did not set (`BindError::MissingThreadgroupMemory`). A fragment
-    /// function's threadgroup arguments are the same memory: its draws read and write it in the
-    /// buffer, at its tile, which `SpecKey::ImageblockWidth` and `SpecKey::ImageblockHeight` (the
-    /// pass's tile size) place.
+    /// specializes `SpecKey::TgOffset(index)` and `SpecKey::TileThreadgroupLength`, pushes
+    /// `SpecKey::TileGridWidth` (read as data), binds the pass's `SyntheticBinding::TileMemory`,
+    /// and refuses an index the encoder did not set (`BindError::MissingThreadgroupMemory`). A
+    /// fragment function's threadgroup arguments are the same memory: its draws read and write it
+    /// in the buffer, at its tile, which `SpecKey::ImageblockWidth` and `SpecKey::ImageblockHeight`
+    /// (the pass's tile size) place.
     TileThreadgroupMemory { index: u32 },
     /// The function reads texture buffer slot `slot` (not as `ulong` texels), and applies the
     /// bound texture buffer's swizzle to each read under the slot's `SpecKey::TextureSwizzle`

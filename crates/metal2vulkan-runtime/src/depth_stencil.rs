@@ -66,6 +66,17 @@ impl Device {
 }
 
 impl DepthStencilState {
+    /// The state's address: no other object's while it lives.
+    pub(crate) fn address(&self) -> usize {
+        Arc::as_ptr(&self.0) as usize
+    }
+
+    /// Another reference to the state, whose allocation the device's answer memo holds weakly
+    /// while a key names its [`address`](Self::address) (`render/captured.rs`).
+    pub(crate) fn held(&self) -> Arc<dyn std::any::Any + Send + Sync> {
+        self.0.clone()
+    }
+
     /// `device`: the device that made the state.
     pub fn device(&self) -> &Device {
         &self.0.device

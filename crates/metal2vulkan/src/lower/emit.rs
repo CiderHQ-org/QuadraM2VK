@@ -476,6 +476,21 @@ impl<'a> EmitCx<'a> {
         }
     }
 
+    /// Bind AIR value `v` to `x` in place of its binding in the open block, which this returns: a
+    /// family that emits an instruction from operand values published to it (an imageblock slice
+    /// the whole threadgroup copies, `texture::slice`) puts each binding back with
+    /// [`EmitCx::restore`] before the construct it emitted them in closes.
+    pub(crate) fn rebind(&mut self, v: ValueId, x: SValue) -> Option<SValue> {
+        self.env.get_mut(v.index()).and_then(|slot| slot.replace(x))
+    }
+
+    /// Put back AIR value `v`'s binding `was`, which [`EmitCx::rebind`] returned.
+    pub(crate) fn restore(&mut self, v: ValueId, was: Option<SValue>) {
+        if let Some(slot) = self.env.get_mut(v.index()) {
+            *slot = was;
+        }
+    }
+
     /// Forget every value of the previous block: a value another block defined is read only
     /// through its demotion variable, so a missed load is an invariant error, never a stale id.
     fn open_block(&mut self) {
@@ -1364,8 +1379,8 @@ pub fn emit_module(e: &Entry, plan: &Plan, m: &mut Meter) -> Result<Emitted, Err
             let mut module = mb.finalize()?;
             // Every read of a constant the function reads as data takes its local value, and the
             // constants nothing else reads leave.
-            if let Some((body, local)) = &em.cx.localized {
-                module.localize_specs(*body, local)?;
+            for (function, local) in em.cx.localized.iter().chain(&wrapper.localized) {
+                module.localize_specs(*function, local)?;
             }
             m.charge(std::mem::size_of_val(offers.as_slice()))?;
             Ok((module, offers, loop_free, merged))

@@ -31,6 +31,7 @@
 
 use super::RenderCall;
 use super::RenderCommandEncoder;
+use super::RenderEncoding;
 use crate::argument_table::check_index;
 use crate::command_buffer::CommandBuffer;
 use crate::error::{invalid, Error, Problem};
@@ -105,6 +106,34 @@ impl RenderCommandEncoder {
         target: Option<ResolveTarget>,
         index: u32,
     ) -> Result<(), Error> {
+        self.on(|encoding| encoding.set_color_resolve_target(target, index))
+    }
+
+    /// The depth attachment resolves into `target` (`None`: nowhere), whatever the descriptor
+    /// named. Refused as [`RenderCommandEncoder::set_color_resolve_target`] is, and as the
+    /// descriptor's depth resolve is where the stencil attachment is the same texture (both
+    /// aspects into one texture, the stencil stored while the depth resolves).
+    pub fn set_depth_resolve_target(&mut self, target: Option<ResolveTarget>) -> Result<(), Error> {
+        self.on(|encoding| encoding.set_depth_resolve_target(target))
+    }
+
+    /// The stencil attachment resolves into `target` (`None`: nowhere). Refused as
+    /// [`RenderCommandEncoder::set_depth_resolve_target`] is, the aspects swapped.
+    pub fn set_stencil_resolve_target(
+        &mut self,
+        target: Option<ResolveTarget>,
+    ) -> Result<(), Error> {
+        self.on(|encoding| encoding.set_stencil_resolve_target(target))
+    }
+}
+
+impl RenderEncoding {
+    /// [`RenderCommandEncoder::set_color_resolve_target`]'s encoding.
+    pub(crate) fn set_color_resolve_target(
+        &mut self,
+        target: Option<ResolveTarget>,
+        index: u32,
+    ) -> Result<(), Error> {
         self.log(|_| RenderCall::ColorResolveTarget(target.clone().map(Box::new), index));
         const CALL: &str = "set_color_resolve_target";
         check_index(CALL, index, MAX_COLOR_ATTACHMENTS as u32)?;
@@ -152,18 +181,17 @@ impl RenderCommandEncoder {
         Ok(())
     }
 
-    /// The depth attachment resolves into `target` (`None`: nowhere), whatever the descriptor
-    /// named. Refused as [`RenderCommandEncoder::set_color_resolve_target`] is, and as the
-    /// descriptor's depth resolve is where the stencil attachment is the same texture (both
-    /// aspects into one texture, the stencil stored while the depth resolves).
-    pub fn set_depth_resolve_target(&mut self, target: Option<ResolveTarget>) -> Result<(), Error> {
+    /// [`RenderCommandEncoder::set_depth_resolve_target`]'s encoding.
+    pub(crate) fn set_depth_resolve_target(
+        &mut self,
+        target: Option<ResolveTarget>,
+    ) -> Result<(), Error> {
         self.log(|_| RenderCall::DepthResolveTarget(target.clone().map(Box::new)));
         self.set_aspect_resolve_target("set_depth_resolve_target", Attachment::Depth, target)
     }
 
-    /// The stencil attachment resolves into `target` (`None`: nowhere). Refused as
-    /// [`RenderCommandEncoder::set_depth_resolve_target`] is, the aspects swapped.
-    pub fn set_stencil_resolve_target(
+    /// [`RenderCommandEncoder::set_stencil_resolve_target`]'s encoding.
+    pub(crate) fn set_stencil_resolve_target(
         &mut self,
         target: Option<ResolveTarget>,
     ) -> Result<(), Error> {
@@ -246,7 +274,7 @@ fn problem(call: &'static str, p: RenderPassProblem) -> Error {
 /// The resolve of the depth/stencil attachment `ds` made again from both aspects' targets and
 /// the descriptor's filters, with `stores` as the depth's and the stencil's store actions (`None`
 /// for an aspect without an attachment): a late store action that does not resolve drops its
-/// aspect's resolve (`RenderCommandEncoder::set_depth_store_action`).
+/// aspect's resolve (`RenderEncoding::set_depth_store_action`).
 pub(super) fn remade(
     call: &'static str,
     maker: &CommandBuffer,

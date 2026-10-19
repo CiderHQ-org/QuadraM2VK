@@ -537,6 +537,17 @@ impl HostLayout {
         })
     }
 
+    /// Whether the host bytes `host` of 16-byte blocks hold, in a row, a block whose first byte
+    /// is 0: a BC7 block of the reserved mode, which sets no mode bit.
+    pub(super) fn holds_zero_led_block(&self, host: &[u8]) -> bool {
+        let n = self.row_bytes as usize;
+        self.rows().any(|(h, _)| {
+            (host[h..h + n].as_chunks::<16>().0)
+                .iter()
+                .any(|block| block[0] == 0)
+        })
+    }
+
     /// Unpacks `packed` into the host bytes `host`, leaving the bytes between rows untouched;
     /// rows that overlap are written in order, image by image and row by row, so the later
     /// row's bytes stay.

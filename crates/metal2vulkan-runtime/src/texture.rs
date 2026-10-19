@@ -151,6 +151,8 @@ pub(crate) mod first_move;
 mod first_move_lifetimes;
 pub(super) mod heap;
 pub(super) mod heap_tiled;
+pub(super) mod heap_tiled_scratch;
+pub(super) mod heap_tiled_words;
 pub(super) mod heap_two_planes;
 pub(crate) mod held_depth;
 pub(crate) mod host_copy;
@@ -3204,7 +3206,7 @@ impl Device {
     }
 
     /// Announce `compressed-texel-decode` for a texture of `layout` in a BC format made on a
-    /// device whose driver is not measured to decode its texels as Metal does (the format's
+    /// device that does not take its driver's decode as Metal's (the format's
     /// [`block_decode_fact`]).
     pub(super) fn degrade_block_decode(&self, layout: &TextureLayout) {
         self.degrade_device_decode(layout.pixel_format, layout.texture_type, layout.extent);
@@ -3222,16 +3224,38 @@ impl Device {
         let Some(fact) = block_decode_fact(pixel_format) else {
             return;
         };
-        if self.properties().driver_facts.contains(&fact) {
+        if self.driver_fact(fact) {
             return;
         }
         self.degrade(Degradation::CompressedTexelDecode, || {
             let object =
                 format!("a {pixel_format:?} {texture_type:?} texture of {width}x{height}x{depth}");
             let why = format!(
-                "the device's driver is not measured to decode the format's texels as Metal \
-                 does (DriverFact::{fact:?}): Vulkan leaves the decode's arithmetic to the \
-                 implementation"
+                "the device's driver is neither checked nor measured to decode the format's \
+                 texels as Metal does (DriverFact::{fact:?}): Vulkan leaves the decode's \
+                 arithmetic to the implementation"
+            );
+            (object, why)
+        });
+    }
+
+    /// Announce `compressed-texel-decode` for `texture`, a BC7 texture into which `call` writes
+    /// a block of the reserved mode (its first byte 0), on a device that does not take its
+    /// driver's decode of such a block as Metal's opaque black
+    /// (`DriverFact::Bc7ReservedBlockIsMetals`, which the caller read).
+    fn degrade_reserved_block(&self, call: &'static str, texture: &Texture) {
+        self.degrade(Degradation::CompressedTexelDecode, || {
+            let [width, height, depth] = texture.0.record.extent();
+            let object = format!(
+                "a {:?} {:?} texture of {width}x{height}x{depth}",
+                texture.pixel_format(),
+                texture.texture_type()
+            );
+            let why = format!(
+                "{call} writes a block of BC7's reserved mode (its first byte 0), which Metal \
+                 reads as opaque black, and the device's driver is neither checked nor measured \
+                 to decode such a block so (DriverFact::Bc7ReservedBlockIsMetals; NVIDIA's, \
+                 RADV's and ANV's read it transparent black)"
             );
             (object, why)
         });
@@ -3369,7 +3393,9 @@ impl Heap {
 /// otherwise, RADV's the second. BC6H `Bc6hBlockDecodeIsMetals` and BC7 (its sRGB form through its
 /// unorm view and Metal's table, `metal::texel_format::srgb_raw`) `Bc7BlockDecodeIsMetals`,
 /// measured as the others, where every driver was taken to decode them as Metal does (lavapipe's
-/// BC7 lies a `float` ulp off). Every other format is `None`.
+/// BC7 lies a `float` ulp off). A BC7 block of the reserved mode is
+/// `DriverFact::Bc7ReservedBlockIsMetals`'s, which NVIDIA's decodes otherwise: a host write of
+/// one announces it (`Device::degrade_reserved_block`). Every other format is `None`.
 pub(super) fn block_decode_fact(pf: PixelFormat) -> Option<DriverFact> {
     use PixelFormat as P;
     match pf {
@@ -4563,6 +4589,11 @@ impl Texture {
     /// leaves a `Shared` and a `Private` one where its validation stops the call. Refused for a
     /// sparse heap's texture (`NotImplemented(SparseHeaps)`, not measured).
     pub fn make_aliasable(&self) -> Result<(), Error> {
+        // What a captured encoder's calls handed the device's resolver is encoded first, so this
+        // reads and changes what the commands encoded before it see (`resolver.rs`).
+        self.device()
+            .shared()
+            .drain_resolver(crate::resolver::Drain::Object);
         if let (Some(place), Some(heap)) = (self.heap_place(), &self.0.heap) {
             heap.make_aliasable(place.offset, place.size, &place.aliasable);
             return Ok(());
@@ -4963,6 +4994,10 @@ impl Texture {
         bytes_per_image: u64,
     ) -> Result<(), Error> {
         const CALL: &str = "replace_region";
+        // What the device's resolver was handed is encoded first (`resolver.rs`).
+        self.device()
+            .shared()
+            .drain_resolver(crate::resolver::Drain::Object);
         let Some(HostCopy {
             region: image_region,
             host,
@@ -4985,6 +5020,16 @@ impl Texture {
             }
             None => bytes,
         };
+        // A BC7 block of the reserved mode, which the device's driver decodes otherwise than
+        // Metal where it lacks the fact: read only there.
+        if block_decode_fact(self.pixel_format()) == Some(DriverFact::Bc7BlockDecodeIsMetals)
+            && !self
+                .device()
+                .driver_fact(DriverFact::Bc7ReservedBlockIsMetals)
+            && host.holds_zero_led_block(bytes)
+        {
+            self.device().degrade_reserved_block(CALL, self);
+        }
         let image = match &self.0.storage {
             Storage::Image(image) => image,
             Storage::Texels(texels)
@@ -5140,6 +5185,10 @@ impl Texture {
         slice: u64,
     ) -> Result<(), Error> {
         const CALL: &str = "get_bytes";
+        // What the device's resolver was handed is encoded first (`resolver.rs`).
+        self.device()
+            .shared()
+            .drain_resolver(crate::resolver::Drain::Object);
         let Some(HostCopy {
             region: image_region,
             host,

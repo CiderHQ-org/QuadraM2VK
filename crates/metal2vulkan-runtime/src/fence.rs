@@ -64,6 +64,7 @@ use super::error::Error;
 use super::predication::Event;
 use super::render::RenderCall;
 use super::render::RenderCommandEncoder;
+use super::render::RenderEncoding;
 use super::render::{FRAGMENT_DRAW_STAGES, GEOMETRY_DRAW_STAGES};
 use super::replay::{BlitCall, ComputeCall, Resource};
 use super::resource::{ResourceKey, ResourceRef};
@@ -281,15 +282,7 @@ impl RenderCommandEncoder {
     /// `after_stages` and every stage before them (the module docs), and its work outside its
     /// draws; Metal's `Tile` stage, or no stage, after all of its work.
     pub fn update_fence(&mut self, fence: &Fence, after_stages: RenderStages) -> Result<(), Error> {
-        self.log(|_| RenderCall::UpdateFence(fence.clone(), after_stages));
-        // The update follows the encoder's work, its later color groups' passes too, which
-        // record in its core after the first group's: their encoders' calls change nothing
-        // (`render/color_groups.rs`).
-        if self.later_group_encoder() {
-            return Ok(());
-        }
-        self.core()
-            .update_fence("update_fence", fence, after_stages_of(after_stages))
+        self.on(|encoding| encoding.update_fence(fence, after_stages))
     }
 
     /// `waitForFence:beforeStages:`: the encoder's draws' work in `before_stages` and every stage
@@ -303,14 +296,7 @@ impl RenderCommandEncoder {
         fence: &Fence,
         before_stages: RenderStages,
     ) -> Result<(), Error> {
-        self.log(|_| RenderCall::WaitForFence(fence.clone(), before_stages));
-        // All of the encoder's work waits, its later color groups' passes too
-        // (`render/color_groups.rs`).
-        if self.later_group_encoder() {
-            return Ok(());
-        }
-        self.core()
-            .wait_for_fence("wait_for_fence", fence, before_stages_of(before_stages))
+        self.on(|encoding| encoding.wait_for_fence(fence, before_stages))
     }
 
     /// `memoryBarrierWithScope:afterStages:beforeStages:`: the writes of the encoder's draws
@@ -325,6 +311,67 @@ impl RenderCommandEncoder {
     /// target, and a tile dispatch runs between render pass instances
     /// (`render/tile_dispatch.rs`).
     pub fn memory_barrier_with_scope(
+        &mut self,
+        scope: BarrierScope,
+        after_stages: RenderStages,
+        before_stages: RenderStages,
+    ) {
+        self.on(|encoding| encoding.memory_barrier_with_scope(scope, after_stages, before_stages))
+    }
+
+    /// `memoryBarrierWithResources:count:afterStages:beforeStages:`: as
+    /// [`memory_barrier_with_scope`](Self::memory_barrier_with_scope) over buffers and textures,
+    /// for the writes to `resources`, which splits the pass; an empty list orders nothing.
+    ///
+    /// Refused, changing nothing (`Invalid`): a resource of another device.
+    pub fn memory_barrier_with_resources(
+        &mut self,
+        resources: &[ResourceRef<'_>],
+        after_stages: RenderStages,
+        before_stages: RenderStages,
+    ) -> Result<(), Error> {
+        self.on(|encoding| {
+            encoding.memory_barrier_with_resources(resources, after_stages, before_stages)
+        })
+    }
+}
+
+impl RenderEncoding {
+    /// [`RenderCommandEncoder::update_fence`]'s encoding.
+    pub(crate) fn update_fence(
+        &mut self,
+        fence: &Fence,
+        after_stages: RenderStages,
+    ) -> Result<(), Error> {
+        self.log(|_| RenderCall::UpdateFence(fence.clone(), after_stages));
+        // The update follows the encoder's work, its later color groups' passes too, which
+        // record in its core after the first group's: their encoders' calls change nothing
+        // (`render/color_groups.rs`).
+        if self.later_group_encoder() {
+            return Ok(());
+        }
+        self.core()
+            .update_fence("update_fence", fence, after_stages_of(after_stages))
+    }
+
+    /// [`RenderCommandEncoder::wait_for_fence`]'s encoding.
+    pub(crate) fn wait_for_fence(
+        &mut self,
+        fence: &Fence,
+        before_stages: RenderStages,
+    ) -> Result<(), Error> {
+        self.log(|_| RenderCall::WaitForFence(fence.clone(), before_stages));
+        // All of the encoder's work waits, its later color groups' passes too
+        // (`render/color_groups.rs`).
+        if self.later_group_encoder() {
+            return Ok(());
+        }
+        self.core()
+            .wait_for_fence("wait_for_fence", fence, before_stages_of(before_stages))
+    }
+
+    /// [`RenderCommandEncoder::memory_barrier_with_scope`]'s encoding.
+    pub(crate) fn memory_barrier_with_scope(
         &mut self,
         scope: BarrierScope,
         after_stages: RenderStages,
@@ -345,12 +392,8 @@ impl RenderCommandEncoder {
         self.barrier_before_next_draw();
     }
 
-    /// `memoryBarrierWithResources:count:afterStages:beforeStages:`: as
-    /// [`memory_barrier_with_scope`](Self::memory_barrier_with_scope) over buffers and textures,
-    /// for the writes to `resources`, which splits the pass; an empty list orders nothing.
-    ///
-    /// Refused, changing nothing (`Invalid`): a resource of another device.
-    pub fn memory_barrier_with_resources(
+    /// [`RenderCommandEncoder::memory_barrier_with_resources`]'s encoding.
+    pub(crate) fn memory_barrier_with_resources(
         &mut self,
         resources: &[ResourceRef<'_>],
         after_stages: RenderStages,

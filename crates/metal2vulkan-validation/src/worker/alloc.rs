@@ -13,7 +13,7 @@
 //!
 //! [`thread_allocations`] counts the allocations (and reallocations) the calling thread made, for a
 //! measurement of what one call allocates; no other thread's moves it. [`process_allocations`]
-//! counts every thread's.
+//! counts every thread's, and [`allocations_by_thread`] each thread's apart, by its id.
 //!
 //! [`peak_bytes`] is the high-water mark of live bytes above the budget's baseline (the live bytes
 //! at [`enable_budget`], the fixed runtime state the budget does not charge), which no measurement
@@ -46,6 +46,49 @@ thread_local! {
     /// The allocations and reallocations this thread made ([`thread_allocations`]). Constant
     /// and without a destructor, so reading it neither allocates nor fails while a thread ends.
     static THREAD_ALLOCATIONS: Cell<u64> = const { Cell::new(0) };
+    /// This thread's slot of [`SLOTS`], claimed at its first allocation (`usize::MAX` before).
+    /// Constant and without a destructor, as [`THREAD_ALLOCATIONS`].
+    static THREAD_SLOT: Cell<usize> = const { Cell::new(usize::MAX) };
+}
+
+/// The most threads [`allocations_by_thread`] tells apart: a thread past them counts in
+/// [`process_allocations`] alone.
+const THREAD_SLOTS: usize = 512;
+
+/// One thread's id and the allocations and reallocations it made, on a cache line of its own, so
+/// threads counting into theirs share none.
+#[repr(align(64))]
+struct Slot {
+    id: AtomicU64,
+    allocations: AtomicU64,
+}
+
+impl Slot {
+    const fn new() -> Slot {
+        Slot {
+            id: AtomicU64::new(0),
+            allocations: AtomicU64::new(0),
+        }
+    }
+}
+
+/// Each thread's slot, in the order the threads first allocated ([`allocations_by_thread`]).
+static SLOTS: [Slot; THREAD_SLOTS] = [const { Slot::new() }; THREAD_SLOTS];
+/// The slots claimed so far (past [`THREAD_SLOTS`] where more threads allocated).
+static SLOTS_CLAIMED: AtomicUsize = AtomicUsize::new(0);
+
+/// The calling thread's id as the system names it (Linux's thread id, its `/proc/self/task`
+/// entry), or 0 where the system gives none this way.
+fn thread_id() -> u64 {
+    #[cfg(target_os = "linux")]
+    {
+        // SAFETY: `gettid` reads the calling thread's id and has no other effect.
+        u64::try_from(unsafe { libc::gettid() }).unwrap_or(0)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        0
+    }
 }
 
 /// A [`System`]-backed allocator that counts live bytes, tracks their peak, and enforces the
@@ -107,6 +150,18 @@ unsafe impl GlobalAlloc for CountingAllocator {
 fn reserve(bytes: usize) -> bool {
     THREAD_ALLOCATIONS.with(|count| count.set(count.get() + 1));
     PROCESS_ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+    THREAD_SLOT.with(|slot| {
+        if slot.get() == usize::MAX {
+            let claimed = SLOTS_CLAIMED.fetch_add(1, Ordering::Relaxed);
+            if let Some(claimed) = SLOTS.get(claimed) {
+                claimed.id.store(thread_id(), Ordering::Relaxed);
+            }
+            slot.set(claimed);
+        }
+        if let Some(own) = SLOTS.get(slot.get()) {
+            own.allocations.fetch_add(1, Ordering::Relaxed);
+        }
+    });
     match LIVE_BYTES.try_update(Ordering::Relaxed, Ordering::Relaxed, |live| {
         live.checked_add(bytes)
             .filter(|next| *next <= LIMIT_BYTES.load(Ordering::Relaxed))
@@ -137,6 +192,25 @@ pub fn thread_allocations() -> Option<u64> {
 /// run).
 pub fn process_allocations() -> Option<u64> {
     installed().then(|| PROCESS_ALLOCATIONS.load(Ordering::Relaxed))
+}
+
+/// Each thread's id (Linux's thread id, its `/proc/self/task` entry; 0 elsewhere) and the
+/// allocations and reallocations it made, for every thread that allocated (the first
+/// `THREAD_SLOTS` of them; a thread that ended among them), or `None` when the allocator is not
+/// installed: with a thread's name, what the runtime's threads allocated apart from the rest of
+/// the process.
+pub fn allocations_by_thread() -> Option<Vec<(u64, u64)>> {
+    installed().then(|| {
+        let claimed = SLOTS_CLAIMED.load(Ordering::Relaxed).min(THREAD_SLOTS);
+        (SLOTS[..claimed].iter())
+            .map(|slot| {
+                (
+                    slot.id.load(Ordering::Relaxed),
+                    slot.allocations.load(Ordering::Relaxed),
+                )
+            })
+            .collect()
+    })
 }
 
 /// Whether this process counts its allocations (some binary installed [`CountingAllocator`]).

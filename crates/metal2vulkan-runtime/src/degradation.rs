@@ -544,9 +544,9 @@ degradations! {
         /// amplification as multiview, or a view mapping that moves a draw to one layer), each run
         /// of them in an instance over those layers; or a memory barrier over buffers or textures
         /// orders its draws after it behind those before it, which a barrier between instances
-        /// does. Not where the interlock alone splits the pass, on a device whose driver ran such a
-        /// pass no slower split than whole (`DriverFact::InterlockedPassSplitNoSlower`): its faster
-        /// form.
+        /// does. Not where the interlock alone splits the pass, which every device runs split
+        /// unannounced: faster split on every GPU measured, but for four plain draws before a
+        /// fetch, which ANV and the M4 ran faster whole (`docs/FAST-PATHS.md`).
         RenderPassSplit = "render-pass-split", Performance,
             "each instance after the first loads the attachments and each before the last \
              stores them, with a barrier from everything before to everything after between \
@@ -697,7 +697,8 @@ degradations! {
         /// and a format no rule covers), or an attachment whose image the exact resolve can
         /// neither read nor copy: an image without input attachment usage of a format the device
         /// does not copy (`color_resolve.rs`). Not where `DriverFact::ColorResolveAverageIsMetals`
-        /// holds, for any format: MoltenVK's resolve is Metal's own.
+        /// holds for the attachment's format (`color_resolve::average_is_metals`): MoltenVK's
+        /// resolve is Metal's own.
         /// Measured against Metal's rules at 2 and 4 samples
         /// (`runtime_lane::resolve_rounding::the_device_resolve_rounds_as_announced`, which holds
         /// the bound) on RADV (Mesa 26.0.8, the Radeon 780M and the RX 7900 XTX), ANV (Mesa
@@ -1080,12 +1081,12 @@ degradations! {
         /// render pass's separate multisampled 32-bit float depth texture copied to and from its
         /// scratch image (`depth_stencil_scratch.rs`), by the sample-rate `FragDepth` draw
         /// (`sample_copy.rs`, `depth_copy.rs`), on a device whose copies go by draws and whose
-        /// driver's fragment depth is not measured to store every value unchanged
-        /// (`depth_copy::drawn`): measured to change some values (MoltenVK, NVIDIA's), or not
-        /// measured at all (any other driver, and lavapipe releases not measured). Both copies
-        /// take the one decision and announce through `depth_copy::announce_changes`. The reason
-        /// names the values that driver changes, or, on a driver not measured, those Vulkan leaves
-        /// to it (outside `[0, 1]`, denormals, -0).
+        /// fragment depth does not store every value unchanged as the device's check finds it, or
+        /// as the tables have it where the check does not answer (`depth_copy::drawn`): the
+        /// values a driver is measured to change (MoltenVK, NVIDIA's), or those of another
+        /// driver. Both copies take the one decision and announce through
+        /// `depth_copy::announce_changes`. The reason names the values that driver changes, or,
+        /// on a driver no row names, those Vulkan leaves to it (outside `[0, 1]`, denormals, -0).
         DrawnDepthCopy = "drawn-depth-copy", Precision,
             "each sample's depth is written by a fragment-depth draw, where Metal copies its \
              bytes: the values the driver's fragment depth changes or may change, which the \
@@ -1516,13 +1517,20 @@ degradations! {
              offset as its address; neither holds a buffer, so only the address's value \
              differs";
         /// A texture of a BC1 to BC5 format (`BC1_RGBA` to `BC5_RGSnorm`, the sRGB forms too)
-        /// made on a device whose driver is not measured to decode their texels as Metal does
-        /// (BC1 to BC3 `DriverFact::ColorBlockDecodeIsMetals`: MoltenVK 1.4.1 on Apple's GPUs,
-        /// RADV from Mesa 26.2.4 on the 780M; BC4 and BC5 `DriverFact::ChannelBlockDecodeIsMetals`:
-        /// MoltenVK 1.4.1 on Apple's GPUs). Only a texture without a decoded twin
+        /// made on a device whose driver is neither checked nor measured to decode their texels
+        /// as Metal does (BC1 to BC3 `DriverFact::ColorBlockDecodeIsMetals`, BC4 and BC5
+        /// `DriverFact::ChannelBlockDecodeIsMetals`; measured on MoltenVK 1.4.1 on Apple's GPUs,
+        /// the first on RADV from Mesa 26.2.4 on the 780M). Only a texture without a decoded twin
         /// (`decoded-block-twin`): one over the caller's host pages or laid out apart from a heap's
         /// bytes, a memoryless or sparse texture, one over a surface or the caller's image, one
-        /// whose twin's format the device cannot sample, filter and copy into.
+        /// whose twin's format the device cannot sample, filter and copy into. Also a BC6H or BC7
+        /// texture, which keeps no twin, made on a device whose driver is neither checked nor
+        /// measured to decode it as Metal does (`DriverFact::Bc6hBlockDecodeIsMetals`,
+        /// `DriverFact::Bc7BlockDecodeIsMetals`), and a `replace_region` of a BC7 texture whose
+        /// bytes hold a block of the reserved mode (its first byte 0), which Metal reads as opaque
+        /// black, on one whose driver is not so for that block
+        /// (`DriverFact::Bc7ReservedBlockIsMetals`; NVIDIA's 615.71.09, RADV's and ANV's, Mesa
+        /// 26.2.4, read it transparent black).
         CompressedTexelDecode = "compressed-texel-decode", Precision,
             "a read, sample or gather of its texels answers the device's decode of its blocks \
              (an sRGB form's code through Metal's table), where Metal interpolates with 6-bit \
@@ -1532,10 +1540,10 @@ degradations! {
              (signed 0.021), RADV's (Mesa 26.2.4, the Radeon 780M) a BC4 or BC5 signed texel \
              with an endpoint of -128 up to 1.7/255; its blocks' bytes, copies and sizes are \
              Metal's";
-        /// A texture of a BC1 to BC5 format made on a device whose driver is not measured to
-        /// decode its texels as Metal does (`compressed-texel-decode`'s facts), whose image is its
-        /// own for good: it keeps a decoded twin, Metal's texels, which its samples read
-        /// (`texture/decoded_twin.rs`), and announces no `compressed-texel-decode`.
+        /// A texture of a BC1 to BC5 format made on a device whose driver is neither checked nor
+        /// measured to decode its texels as Metal does (`compressed-texel-decode`'s facts), whose
+        /// image is its own for good: it keeps a decoded twin, Metal's texels, which its samples
+        /// read (`texture/decoded_twin.rs`), and announces no `compressed-texel-decode`.
         DecodedBlockTwin = "decoded-block-twin", Performance,
             "a second image of its decoded texels beside its blocks, 4 to 8 times their bytes \
              (R8G8B8A8_UNORM for BC1 to BC3, R32_SFLOAT and R32G32_SFLOAT for BC4 and BC5), \
@@ -1714,14 +1722,15 @@ degradations! {
         /// depth, a `replace_region` whose bytes hold one), on a device whose driver stores one a
         /// write on the GPU gives it as a zero (no `DriverFact::DepthImageKeepsDenormals`: RADV,
         /// ANV; a host copy keeps it) or whose depth test compares one otherwise than Metal's (no
-        /// `DriverFact::DepthTestKeepsDenormals`: every driver measured but MoltenVK on an Apple
-        /// M4). Metal's texel keeps it, and its depth test compares a positive one above zero and
-        /// a negative one not below zero. Where the driver stores it and only its depth test
-        /// differs, a single-sample `Depth32Float` render target's passes test the smallest normal
-        /// in its place (`texture/signed_depth.rs`): Metal's answer but for a fragment at exactly
-        /// 2^-126, which passes `Equal` and fails `Greater` against it, where Metal's fails and
-        /// passes; the payload says so. A draw at a denormal depth stores zero on Metal too, and
-        /// announces nothing.
+        /// `DriverFact::DepthTestKeepsDenormals`, as the device's check finds it as it is made:
+        /// every driver measured but MoltenVK on an Apple M4). Metal's texel keeps it, and its
+        /// depth test compares a positive one above zero and a negative one not below zero. Where
+        /// the driver stores it and only its depth test differs, a single-sample `Depth32Float`
+        /// render target's passes test the smallest normal in its place
+        /// (`texture/signed_depth.rs`): Metal's answer but for a fragment at exactly 2^-126, which
+        /// passes `Equal` and fails `Greater` against it, where Metal's fails and passes; the
+        /// payload says so. A draw at a denormal depth stores zero on Metal too, and announces
+        /// nothing.
         DepthDenormals = "depth-denormals", Precision,
             "a denormal depth may read, sample and copy out as a zero, or the depth test may \
              compare it as zero (a positive one) or below zero (a negative one), where Metal \
@@ -2109,16 +2118,16 @@ impl Degradation {
             // answer fact now, only the exact path, and assumes its driver's defects.
             "metal2vulkan-degrade-beyond-measured-driver-release",
             "none: a device whose driver, GPU and release were not measured takes the exact path \
-             in place of an answer measured elsewhere, which degrades nothing; it says so in the \
-             informational message metal2vulkan-unmeasured-driver",
+             in place of an answer measured elsewhere, which degrades nothing; it says so in its \
+             feature status, the informational message metal2vulkan-feature-status",
         ),
         (
             // A device whose identity was not measured announced it as a performance degradation.
             // The paths it takes are exact, so nothing is degraded, and a consumer that ends on a
             // degrade notice would end on a driver update.
             "metal2vulkan-degrade-unmeasured-driver",
-            "none: the paths an unmeasured identity takes are exact; the device says so in the \
-             informational message metal2vulkan-unmeasured-driver",
+            "none: the paths an unmeasured identity takes are exact; the device says so in its \
+             feature status, the informational message metal2vulkan-feature-status",
         ),
         (
             // A stage that kept a `half` result's `float` value under the opt-in
@@ -2835,7 +2844,10 @@ impl Device {
     fn deliver(&self, message: &DebugMessage) {
         match self.shared().instance.sink() {
             Some(sink) => sink.deliver(message),
-            None => eprintln!("{}", message.text),
+            None => {
+                crate::device::heard();
+                eprintln!("{}", message.text);
+            }
         }
     }
 
@@ -2852,6 +2864,8 @@ impl Device {
         match misplaced {
             None => self.deliver(&message),
             Some(place) => {
+                // Announced here, though the notice thread delivers it.
+                crate::device::heard();
                 let shared = self.shared();
                 crate::misplaced_notices::deliver(
                     shared.instance.sink(),
@@ -3792,7 +3806,11 @@ impl Device {
         // resolve), a format without a closed rule resolves as Metal's too.
         let rounded = colors.clone().find(|color| {
             color.resolve.as_ref().is_some_and(|r| r.shader.is_none())
-                && !color_resolve::average_is_metals(self, color.target.samples)
+                && !color_resolve::average_is_metals(
+                    self,
+                    color.target.format,
+                    color.target.samples,
+                )
         });
         if let Some(color) = rounded {
             // Under the device's resolve, a format of Metal's rule at its count resolves by that
@@ -4059,8 +4077,8 @@ impl Device {
     /// (more than one instance, for the first of `causes` that holds), a memoryless attachment's
     /// backing image, a fetched color render target's scratch image, and a depth/stencil render
     /// target's made for custom sample positions (`render.rs`, `attachment_stand_in.rs`). A split
-    /// the interlock alone makes on a device that runs it no slower than whole is not announced,
-    /// nor the backing it gives a memoryless attachment.
+    /// the interlock alone makes is not announced, nor the backing it gives a memoryless
+    /// attachment (`docs/FAST-PATHS.md`).
     pub(super) fn degrade_instances<S: std::borrow::Borrow<PassShape>>(
         &self,
         layout: &PassLayout,
@@ -4105,15 +4123,11 @@ impl Device {
         let hidden = shapes.windows(2).any(|pair| {
             of(&pair[0]).depth_stencil.is_none() && of(&pair[1]).depth_stencil.is_some()
         });
-        // On a device whose driver ran a pass the interlock splits no slower split than whole
-        // (`DriverFact::InterlockedPassSplitNoSlower`), a split the interlock alone makes (each
-        // instance's shape differs from the one before in the colors its subpass leaves out
-        // alone, and no other cause holds) is the device's faster form: announced neither as a
-        // split nor by the memoryless backing it gives an attachment.
-        let split_form = self
-            .properties()
-            .driver_facts
-            .contains(&DriverFact::InterlockedPassSplitNoSlower);
+        // A split the interlock alone makes (each instance's shape differs from the one before in
+        // the colors its subpass leaves out alone, and no other cause holds) is announced neither
+        // as a split nor by the memoryless backing it gives an attachment (`docs/FAST-PATHS.md`:
+        // faster split on every GPU measured, but for four plain draws before a fetch on ANV and
+        // the M4).
         let storage_alone = |pair: &[S]| {
             let (a, b) = (of(&pair[0]), of(&pair[1]));
             a.storage != b.storage
@@ -4122,8 +4136,7 @@ impl Device {
                     ..a.clone()
                 } == *b
         };
-        let chosen = split_form
-            && instances > 1
+        let chosen = instances > 1
             && shapes.windows(2).all(storage_alone)
             && !shadow
             && !shader_tests

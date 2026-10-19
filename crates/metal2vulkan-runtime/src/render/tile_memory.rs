@@ -48,6 +48,7 @@
 
 use super::RenderCall;
 use super::RenderCommandEncoder;
+use super::RenderEncoding;
 use crate::argument_table::{check_index, BUFFER_SLOTS};
 use crate::buffer::Buffer;
 use crate::error::{internal, invalid, Error, Problem};
@@ -127,6 +128,18 @@ impl RenderCommandEncoder {
     /// offset that is not a multiple of 16 bytes, or an argument that ends past the pass's
     /// `threadgroupMemoryLength` (`TileThreadgroupArgument`).
     pub fn set_threadgroup_memory_length(
+        &mut self,
+        length: u64,
+        offset: u64,
+        index: u32,
+    ) -> Result<(), Error> {
+        self.on(|encoding| encoding.set_threadgroup_memory_length(length, offset, index))
+    }
+}
+
+impl RenderEncoding {
+    /// [`RenderCommandEncoder::set_threadgroup_memory_length`]'s encoding.
+    pub(crate) fn set_threadgroup_memory_length(
         &mut self,
         length: u64,
         offset: u64,

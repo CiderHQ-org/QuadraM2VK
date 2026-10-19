@@ -9,10 +9,12 @@ use crate::device::requirements::{ApiVersion, FormatUsage, VkExtension, VkFeatur
 use crate::error::{DescriptorError, Error};
 use crate::vk;
 
+mod checks;
 mod description;
 mod driver_facts;
 mod enables;
 mod host_identity;
+mod listed;
 mod mechanism;
 mod profile;
 mod render_vocabulary;

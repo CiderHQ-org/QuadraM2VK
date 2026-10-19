@@ -28,14 +28,14 @@
 //!   depth rewritten into a Vulkan range inside `[0, 1]`, clip distances for Metal's planes; in
 //!   clamp mode a range whose one clamp is one depth collapses the Vulkan range to it instead.
 //!   Elsewhere `set_viewport` refuses the range (`depth_ranges_refused`): `NotImplemented` without
-//!   the features, and `Unsupported` on MoltenVK, whose rasterizer (Metal's on Apple's GPUs) draws
-//!   the compensated depths about 2e-4 off where Metal's own viewport draws them exactly (a probe,
-//!   `RuntimeDriverDefect::NormalizedDepthPastUnitRange`). A negative width is mirrored there
-//!   still. Metal clamps each vertex's depth before the interpolation (Metal probes on the M3 Max
-//!   and an M4): through a range with a negative depth in clip mode, or past `[0, 1]` in clamp
-//!   mode, a draw of lines or triangles takes that clamp in the vertex stage's compensation,
-//!   natively too (`VertexClamp`), announcing the primitives that cross Metal's planes or guard
-//!   band and the draws that cannot take it.
+//!   the features, and `Unsupported` where the device's check finds the compensated depths drawn
+//!   inexactly (`RuntimeDriverDefect::NormalizedDepthPastUnitRange`: MoltenVK's rasterizer, Metal's
+//!   on Apple's GPUs, draws them about 2e-4 off where Metal's own viewport draws them exactly, a
+//!   probe). A negative width is mirrored there still. Metal clamps each vertex's depth before the
+//!   interpolation (Metal probes on the M3 Max and an M4): through a range with a negative depth in
+//!   clip mode, or past `[0, 1]` in clamp mode, a draw of lines or triangles takes that clamp in
+//!   the vertex stage's compensation, natively too (`VertexClamp`), announcing the primitives that
+//!   cross Metal's planes or guard band and the draws that cannot take it.
 //! - **The implicit scissor.** Metal clips a draw to the pixels its viewport overlaps: a point
 //!   wider than its viewport is cut there, fractional edges included, and a viewport of no width
 //!   or height draws nothing (measured at an integer origin). Each Vulkan scissor is therefore
@@ -232,42 +232,21 @@ impl EncoderState {
         }
     }
 
-    /// `setViewports:count:` (one viewport for `setViewport:`), checked as the module says: a
-    /// depth range past `[0, 1]` refused as `refused` says (`depth_ranges_refused`), `None` on a
-    /// device that takes it natively or by the vertex stage's compensation.
+    /// `setViewports:count:` (one viewport for `setViewport:`), checked as
+    /// [`checked_viewports`] checks it.
     pub(super) fn set_viewports(
         &mut self,
         call: &'static str,
         viewports: &[Viewport],
         refused: Option<Error>,
     ) -> Result<(), Error> {
-        check_count(call, viewports.len())?;
-        // A NaN origin x draws nothing, as plain Metal's: a viewport of no width.
-        let viewports: ViewportList<Viewport> = viewports
-            .iter()
-            .map(|v| match v.origin_x.is_nan() {
-                true => Viewport {
-                    origin_x: 0.0,
-                    width: 0.0,
-                    ..*v
-                },
-                false => *v,
-            })
-            .collect();
-        for v in viewports.iter() {
-            let fields = [v.origin_x, v.origin_y, v.width, v.height, v.znear, v.zfar];
-            if fields.iter().any(|f| !f.is_finite()) {
-                return Err(invalid(
-                    call,
-                    Problem::RenderState(RenderStateProblem::ViewportNotFinite),
-                ));
-            }
-        }
-        if let Some(error) = refused.filter(|_| viewports.iter().any(outside_depth)) {
-            return Err(error);
-        }
-        self.viewports = viewports;
+        self.viewports = checked_viewports(call, viewports, refused)?;
         Ok(())
+    }
+
+    /// The depth/stencil state set.
+    pub(super) fn depth_stencil(&self) -> Option<&DepthStencilState> {
+        self.depth_stencil.as_ref()
     }
 
     /// `setScissorRects:count:` (one rectangle for `setScissorRect:`), checked as the module
@@ -1159,14 +1138,51 @@ pub(super) fn native_depth_range(device: &Device) -> bool {
     device.shared().depth_ranges.native
 }
 
+/// `setViewports:count:`'s viewports as the encoder takes them (one viewport for
+/// `setViewport:`), checked as the module says: a depth range past `[0, 1]` refused as `refused`
+/// says (`depth_ranges_refused`), `None` on a device that takes it natively or by the vertex
+/// stage's compensation.
+pub(super) fn checked_viewports(
+    call: &'static str,
+    viewports: &[Viewport],
+    refused: Option<Error>,
+) -> Result<ViewportList<Viewport>, Error> {
+    check_count(call, viewports.len())?;
+    // A NaN origin x draws nothing, as plain Metal's: a viewport of no width.
+    let viewports: ViewportList<Viewport> = viewports
+        .iter()
+        .map(|v| match v.origin_x.is_nan() {
+            true => Viewport {
+                origin_x: 0.0,
+                width: 0.0,
+                ..*v
+            },
+            false => *v,
+        })
+        .collect();
+    for v in viewports.iter() {
+        let fields = [v.origin_x, v.origin_y, v.width, v.height, v.znear, v.zfar];
+        if fields.iter().any(|f| !f.is_finite()) {
+            return Err(invalid(
+                call,
+                Problem::RenderState(RenderStateProblem::ViewportNotFinite),
+            ));
+        }
+    }
+    if let Some(error) = refused.filter(|_| viewports.iter().any(outside_depth)) {
+        return Err(error);
+    }
+    Ok(viewports)
+}
+
 /// Why `device` does not take a viewport depth range past `[0, 1]`, `None` where it does:
 /// natively (`native_depth_range`), or by the vertex stage's compensation, which needs
 /// `shaderClipDistance` for Metal's planes and `depthClamp` to replace Vulkan's own clipping
 /// (`EncoderState::compensation`), on a driver that rasterizes the compensated depths exactly.
 /// Refused: `NotImplemented(ViewportDepthRange)` without the features, and
 /// `Unsupported(ViewportDepthRange)` with `RuntimeDriverDefect::NormalizedDepthPastUnitRange`
-/// where the driver draws normalized depths past `[0, 1]` inexactly (MoltenVK,
-/// `driver_defects.rs`).
+/// where the driver draws normalized depths past `[0, 1]` inexactly, as the device's check finds
+/// it as it is made (MoltenVK's row where the check does not answer, `driver_defects.rs`).
 pub(super) fn depth_ranges_refused(device: &Device) -> Option<Error> {
     if native_depth_range(device) {
         return None;

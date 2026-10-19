@@ -171,6 +171,51 @@ Apple's M3 Max and M4, with a few per-GPU facts measured elsewhere. A driver,
 GPU or release that was not measured takes the conservative, exact route. A newer MoltenVK release
 takes the measured facts and records `PrecisionNote::BeyondMeasuredDeviation`.
 
+The runtime's own driver facts (`DriverFact`, `DeviceDescription::driver_facts`) and defects
+(`RuntimeDriverDefect`, the device's `driver_defects`) come from two tables. Those a check on the
+device may settle are taken on a measured identity alone: the driver, vendor, GPU and release a
+venue ran. The rest are on the known-driver list, each entry a driver, a range of its releases and a
+GPU family (a set of `device_id`s, never a name): a defect from the first release known to have it
+until one is known without it, and an answer from the release measured on, open-ended, on the GPUs
+measured, or on every GPU of the driver where its source or structure makes the answer the driver's
+(MoltenVK handing the work to Metal, Mesa's common code, lavapipe). A device the list names nowhere
+follows Vulkan's specification. `DeviceDescription::listed_driver_defects` reads the list's
+defects, and `DeviceDescription::listed_past_evidence` names each listed answer a device takes past
+the last release or the GPUs measured (`ListEvidence`); the feature status names a listed fact's
+entry, and for one taken past its evidence, `measured through <release> on <GPUs>`.
+
+A fact the device can check itself (the facts in `device::CHECKED`; each device's feature status
+lists how it decided each one) is decided on the device first, a workaround the tables take by the
+driver's identity included. The runtime runs a short check of the driver's answer on the device and
+hands the answers to the description (`DeviceDescription::checks`, a `DeviceChecks`); every reader
+takes them in one order (`device::decide`): a check that read Metal's answer takes a deviation or
+answer fact and clears a defect, one that read the other answer does the opposite, an unanswered
+check takes the exact path (or the tables' answer, for a defect whose workaround refuses work the tables let
+run), and a fact with no answer takes the tables'. A checked deviation is in the compile profile,
+so another answer is another fingerprint and cache key; a passed check records no precision note.
+`DevicePolicy::device_checks = DeviceChecksPolicy::Distrusted`, which `exact_answers()` sets,
+takes the tables alone. `DeviceDescription::fact_status` lists how each fact is decided
+(`Decided`: by its check, by a measured row that names the setup, assumed for every setup of a kind
+such as a driver by its identity, by no row, the exact path, or learned off); the runtime's
+`DeviceProperties::feature_status` adds its own defects and what the checks cost, and the device
+announces it as the informational message `metal2vulkan-feature-status`. The runtime runs a check
+as the device is made where its fact decides a refusal or shapes a layout, and the rest on the
+device's checks thread after it (`Settle`; `DeviceChecksOptions::wait` runs all at the making):
+until an answer is in its fact takes the tables' answer, a fact the runtime reads then takes the
+answer on the running device, and a fact translation reads keeps its compile profile for the
+device's life, its answer kept for the setup's next device (`CheckOf::NextDevice` in its row).
+`Device::feature_status` is the status as it stands; the device announces the settled status once
+as `metal2vulkan-feature-status-settled`.
+
+Last in that order, a fact the device learned off (`DeviceChecks::learn`) takes its exact side
+where the steps before left the direct one (`Decided::LearnedOff`, with what its record says): the
+runtime read a record that its setup's device was lost while a submission that took the fact's
+direct path was in flight (docs/HOWTO.md, "Learned from a lost device"). The facts it learns are
+three runtime defects whose direct path can lose the device, and `DeviceFact::FunctionStorageFloor`:
+an unmeasured device that learned it holds every stage to the 16 KiB floor
+(`FunctionStorage::Floor`), so a vertex or fragment function past it is refused
+(`Unsupported{PrivateMemory}`) rather than run on the assumption. `Distrusted` reads no record.
+
 Metal semantics the translation keeps on every device, beyond Vulkan's: Metal's 32-lane
 simdgroups (including lockstep races on threadgroup memory within a barrier interval), and the
 bit-exact `fneg`, `fabs` and `half`-to-`float` widening of NaNs and denormals. Under the exact
@@ -556,7 +601,10 @@ for dependency in &pipeline.dependencies {
   (`Mechanism`: a specialization constant, a push field, a plan-time check, a variant). The plan
   acts on them; you do not have to.
 - The format class of a bound texture is read by the shader as push data, not specialized, so binds
-  that differ only in their textures' formats share one `VkPipeline`. Other bound values (a slot's
+  that differ only in their textures' formats share one `VkPipeline`; so are the render area a
+  tile function covers and the tiles across it, the row stride of the pass's tile memory
+  (`BindState::render_area`), so tile dispatches and draws over passes of different sizes share
+  one too. Other bound values (a slot's
   presence, a sampler's word, whether a uniform buffer's descriptor range starts at its bind offset)
   are specialization constants. The last lets a driver load the constants ahead of the shader:
   inline bytes take that form, and so does a buffer bound at a multiple of
@@ -1216,7 +1264,10 @@ fast forms record, and each `PrecisionNote`'s rustdoc states its bound.
   attachment of the later draws' subpass alone; or a tile dispatch runs between two instances; or
   some of its draws render some of its layers, each run of them in an instance over those layers; or
   a memory barrier over buffers or textures orders its draws after it behind those before it, which
-  a barrier between instances does. Cost: each instance after the first loads the attachments and
+  a barrier between instances does. Not where the interlock alone splits the pass, which every
+  device runs split unannounced: faster split on every GPU measured, but for four plain draws
+  before a fetch, which ANV and the M4 ran faster whole. Cost: each instance after the first loads
+  the attachments and
   each before the last stores them, with a barrier from everything before to everything after
   between them: on a tiler, a tile flush per split.
 - `metal2vulkan-degrade-amplification-draws` (performance). `AmplificationDraws`: A draw under
@@ -1617,11 +1668,11 @@ fast forms record, and each `PrecisionNote`'s rustdoc states its bound.
 - `metal2vulkan-degrade-drawn-depth-copy` (precision). `DrawnDepthCopy`: A blit copy into a
   multisampled 32-bit float depth texture from a colour one or a buffer, or a render pass's
   separate multisampled 32-bit float depth texture copied to and from its scratch image, by the
-  sample-rate `FragDepth` draw, on a device whose copies go by draws and whose driver's fragment
-  depth is not measured to store every value unchanged: measured to change some values (MoltenVK,
-  NVIDIA's), or not measured at all (any other driver, and lavapipe releases not measured). The
-  reason names the values that driver changes, or, on a driver not measured, those Vulkan leaves to
-  it (outside `[0, 1]`, denormals, -0). Cost: each sample's depth is written by a fragment-depth
+  sample-rate `FragDepth` draw, on a device whose copies go by draws and whose fragment depth does
+  not store every value unchanged, as the device's own check finds it as it is made (or the tables
+  where the check does not answer). The reason names the values the driver is measured to change
+  (MoltenVK's, NVIDIA's), or, on a driver no row names, those Vulkan leaves to it (outside
+  `[0, 1]`, denormals, -0). Cost: each sample's depth is written by a fragment-depth
   draw, where Metal copies its bytes: the values the driver's fragment depth changes or may change,
   which the reason names, can land changed; every other value lands as Metal's copy leaves it.
 - `metal2vulkan-degrade-undeclared-usage-shadow` (performance). `UndeclaredUsageShadow`: A texture
@@ -1886,25 +1937,31 @@ fast forms record, and each `PrecisionNote`'s rustdoc states its bound.
   address's value differs.
 - `metal2vulkan-degrade-compressed-texel-decode` (precision). `CompressedTexelDecode`: A texture of
   a BC1 to BC5 format (`BC1_RGBA` to `BC5_RGSnorm`, the sRGB forms too) made on a device whose
-  driver is not measured to decode their texels as Metal does (BC1 to BC3
-  `DriverFact::ColorBlockDecodeIsMetals`: MoltenVK 1.4.1 on Apple's GPUs, RADV from Mesa 26.2.4 on
-  the 780M; BC4 and BC5 `DriverFact::ChannelBlockDecodeIsMetals`: MoltenVK 1.4.1 on Apple's GPUs).
-  Cost: a read, sample or gather of its texels answers the device's decode of its blocks (an sRGB
-  form's code through Metal's table), where Metal interpolates with 6-bit weights: NVIDIA's
-  (615.71.09, the RTX 3090 and RTX 5080 Laptop GPU) answers a BC1 to BC3 channel up to 3/255 off
-  Metal's (BC3's alpha 6/255), BC4 and BC5 up to 7.3/255 (signed 0.064); ANV's up to 1.3/255 (signed
-  0.013), lavapipe's 2.3/255 (signed 0.021), RADV's (Mesa 26.2.4, the Radeon 780M) a BC4 or BC5
-  signed texel with an endpoint of -128 up to 1.7/255; its blocks' bytes, copies and sizes are
-  Metal's.
+  driver is neither checked nor measured to decode their texels as Metal does (BC1 to BC3
+  `DriverFact::ColorBlockDecodeIsMetals`, BC4 and BC5 `DriverFact::ChannelBlockDecodeIsMetals`;
+  measured on MoltenVK 1.4.1 on Apple's GPUs, the first on RADV from Mesa 26.2.4 on the 780M). Also
+  a BC6H or BC7 texture, which keeps no decoded twin, made on a device whose driver is neither
+  checked nor measured to decode it as Metal does (`DriverFact::Bc6hBlockDecodeIsMetals`,
+  `DriverFact::Bc7BlockDecodeIsMetals`), and a `replace_region` of a BC7 texture whose bytes hold a
+  block of the reserved mode (its first byte 0), which Metal reads as opaque black, on one whose
+  driver is not so for that block (`DriverFact::Bc7ReservedBlockIsMetals`; NVIDIA's 615.71.09,
+  RADV's and ANV's, Mesa 26.2.4, read it transparent black). Cost: a read, sample or gather of its
+  texels answers the device's decode of its blocks (an sRGB form's code through Metal's table),
+  where Metal interpolates with 6-bit weights: NVIDIA's (615.71.09, the RTX 3090 and RTX 5080 Laptop
+  GPU) answers a BC1 to BC3 channel up to 3/255 off Metal's (BC3's alpha 6/255), BC4 and BC5 up to
+  7.3/255 (signed 0.064); ANV's up to 1.3/255 (signed 0.013), lavapipe's 2.3/255 (signed 0.021),
+  RADV's (Mesa 26.2.4, the Radeon 780M) a BC4 or BC5 signed texel with an endpoint of -128 up to
+  1.7/255; its blocks' bytes, copies and sizes are Metal's.
 - `metal2vulkan-degrade-decoded-block-twin` (performance). `DecodedBlockTwin`: A texture of a BC1 to
-  BC5 format made on a device whose driver is not measured to decode its texels as Metal does
-  (`compressed-texel-decode`'s facts), whose image is its own for good: it keeps a decoded twin,
-  Metal's texels, which its samples read, and announces no `compressed-texel-decode`. Cost: a second
-  image of its decoded texels beside its blocks, 4 to 8 times their bytes (R8G8B8A8_UNORM for BC1 to
-  BC3, R32_SFLOAT and R32G32_SFLOAT for BC4 and BC5), and a decode after each write into it: a pass
-  on the GPU for a blit, a copy from a texture or a CPU copy through a submission; on the CPU, on
-  the device's decode thread, where its CPU copies go on the host or the staging queue, and then
-  once as it is made, the first command buffer that may read it waiting for that at its submission.
+  BC5 format made on a device whose driver is neither checked nor measured to decode its texels as
+  Metal does (`compressed-texel-decode`'s facts), whose image is its own for good: it keeps a
+  decoded twin, Metal's texels, which its samples read, and announces no `compressed-texel-decode`.
+  Cost: a second image of its decoded texels beside its blocks, 4 to 8 times their bytes
+  (R8G8B8A8_UNORM for BC1 to BC3, R32_SFLOAT and R32G32_SFLOAT for BC4 and BC5), and a decode after
+  each write into it: a pass on the GPU for a blit, a copy from a texture or a CPU copy through a
+  submission; on the CPU, on the device's decode thread, where its CPU copies go on the host or the
+  staging queue, and then once as it is made, the first command buffer that may read it waiting for
+  that at its submission.
 - `metal2vulkan-degrade-cpu-block-decode` (performance). `CpuBlockDecode`: A CPU copy into a texture
   with a decoded twin (`replace_region`) whose CPU copies go on the host or the staging queue: its
   region is decoded on the CPU, on the device's decode thread, and copied into the twin; the first
@@ -2030,15 +2087,16 @@ fast forms record, and each `PrecisionNote`'s rustdoc states its bound.
   `Depth32Float` or `Depth32Float_Stencil8` texture's depth, a `replace_region` whose bytes hold
   one), on a device whose driver stores one a write on the GPU gives it as a zero (no
   `DriverFact::DepthImageKeepsDenormals`: RADV, ANV; a host copy keeps it) or whose depth test
-  compares one otherwise than Metal's (no `DriverFact::DepthTestKeepsDenormals`: every driver
-  measured but MoltenVK on an Apple M4). Where the driver stores it and only its depth test differs,
-  a single-sample `Depth32Float` render target's passes test the smallest normal in its place (the
-  magnitude stand-in of `signed-depth-test`): Metal's answer but for a fragment at exactly 2^-126,
-  which passes `Equal` and fails `Greater` against it, where Metal's fails and passes; the payload
-  says so. Cost: a denormal depth may read, sample and copy out as a zero, or the depth test may
-  compare it as zero (a positive one) or below zero (a negative one), where Metal keeps it and
-  compares a positive one above zero and a negative one not below it; a render target whose passes
-  test the smallest normal in its place differs only for a fragment at exactly 2^-126.
+  compares one otherwise than Metal's (no `DriverFact::DepthTestKeepsDenormals`, as the device's
+  check finds it as it is made: every driver measured but MoltenVK on an Apple M4). Where the driver
+  stores it and only its depth test differs, a single-sample `Depth32Float` render target's passes
+  test the smallest normal in its place (the magnitude stand-in of `signed-depth-test`): Metal's
+  answer but for a fragment at exactly 2^-126, which passes `Equal` and fails `Greater` against it,
+  where Metal's fails and passes; the payload says so. Cost: a denormal depth may read, sample and
+  copy out as a zero, or the depth test may compare it as zero (a positive one) or below zero (a
+  negative one), where Metal keeps it and compares a positive one above zero and a negative one not
+  below it; a render target whose passes test the smallest normal in its place differs only for a
+  fragment at exactly 2^-126.
 - `metal2vulkan-degrade-signed-depth-test` (precision). `SignedDepthTest`: A depth test that may
   compare a negative value or a NaN stored in the 32-bit float depth of a render target as it is, or
   a pass with depth writes that may store such a value with its sign, where Metal's test compares
@@ -2513,8 +2571,8 @@ fast forms record, and each `PrecisionNote`'s rustdoc states its bound.
   (MoltenVK on an Apple GPU) nor made Metal's by its float controls (`RoundingModeRTE`,
   `DenormPreserve` and `SignedZeroInfNanPreserve` for 16 bits: ANV and RADV round through the
   conversion under them, exactly, with no note), under `HalfRoundingPolicy::Native`: NVIDIA, whose
-  driver folds the conversion's round trip even under those controls
-  (`DriverWorkaround::HalfConversionPairFolded`), lavapipe, and any device without them.
+  driver folds the conversion's round trip, or keeps a NaN's payload through it, even under those
+  controls (`DriverWorkaround::HalfConversionPairFolded`), lavapipe, and any device without them.
 - `metal2vulkan-degrade-native-half-quantize` (precision). `PrecisionNote::NativeHalfQuantize`:
   Native half rounding (a quantize): the module rounds a `half` result it computes in `float` by the
   device's `OpQuantizeToF16`, a result the quantize flushes to zero rounded by the translation to
@@ -2572,11 +2630,11 @@ fast forms record, and each `PrecisionNote`'s rustdoc states its bound.
   four-channel sRGB color read through an input attachment is Metal's decode of its code.
 - `metal2vulkan-degrade-beyond-measured-driver-release` (retired). No replacement: a device whose
   driver, GPU and release were not measured takes the exact path in place of an answer measured
-  elsewhere, which degrades nothing; it says so in the informational message
-  metal2vulkan-unmeasured-driver.
+  elsewhere, which degrades nothing; it says so in its feature status, the informational message
+  metal2vulkan-feature-status.
 - `metal2vulkan-degrade-unmeasured-driver` (retired). No replacement: the paths an unmeasured
-  identity takes are exact; the device says so in the informational message
-  metal2vulkan-unmeasured-driver.
+  identity takes are exact; the device says so in its feature status, the informational message
+  metal2vulkan-feature-status.
 - `metal2vulkan-degrade-deferred-half-rounding` (retired). No replacement: the opt-in deferred half
   rounding is removed; every half result rounds where it is computed, under native half rounding
   (metal2vulkan-degrade-native-half-conversion or metal2vulkan-degrade-native-half-quantize) or
@@ -2622,10 +2680,54 @@ each item named states the rule in full.
   are loads where the other form's are pushed constants (`WorkCounts::residual_form_draws`,
   `residual_form_makings`).
 - **A dispatch's `VkPipeline` is made while the dispatch goes on**, the same way: one pipeline per
-  threadgroup size and edge region, made on the pool. So is a tile dispatch's, its pass recorded
+  threadgroup size and edge region, made on the pool. A compute state's creation makes the ones its
+  kernel's dispatches made in earlier processes (at most 16 a variant, kept in the shader cache,
+  `WorkCounts::creation_dispatch_pipelines_made`), as Metal compiles in
+  `newComputePipelineState`; only a key not dispatched before is made at its dispatch. So is a
+  tile dispatch's, its pass recorded
   once it is made, the making ranked from the dispatch as one a committed command buffer waits for
   (`WorkCounts::tile_pipelines_pooled`); a failed making fails the command buffer, as a draw's
   does, `FailedPipeline` naming the dispatch by its order among the encoder's tile dispatch calls.
+
+**Render encoders on the resolver**
+
+- **A render encoder's calls may be encoded on the device's resolver thread.** Where the device's
+  memo answers a pass and its calls (plain passes and draws of primitives, the argument tables'
+  and the render state's setters; `render/captured.rs`), each call returns at the call the answer
+  its encoding there would return, decided by its arguments or by an earlier call answered `Ok`
+  with the same state, and the resolver encodes the calls in their order while the program goes
+  on; any other call takes the encoder back to the call, after what was handed to the resolver
+  is encoded: by the calling thread itself, in the resolver's place, unless the resolver is
+  part-way through a piece, so no call waits for the resolver's thread to wake. A command buffer
+  whose encoders were all so encoded commits on the resolver after them, reading `Committed` from
+  the program's call. What differs is when a failure that is not a refusal shows: an out-of-memory, lost-device or internal failure of such an encoding, or of
+  such a commit, fails the command buffer as it completes (`CommandBufferError`; counted in
+  `WorkCounts::resolver_failures`, announced as `metal2vulkan-resolver`), as Metal reports such
+  failures on the command buffer, where at the call the call itself would have returned it; a
+  refusal there of a call answered `Ok`, a defect of the answer, fails it as
+  `CommandBufferError::Internal` (`WorkCounts::answered_calls_refused`). Notices stay in the
+  program's call: the memo learns a call only from an encoding at the call that announced
+  nothing and left nothing for a later draw to announce, so a call that would announce a notice
+  is encoded at the call; so are passes attaching a buffer's or a heap's bytes or the caller's
+  image, draws binding the caller's image, and indexed draws that read their indices through a
+  copy. A message the resolver's thread delivers anyway is counted
+  (`WorkCounts::resolver_notices`, which the device tests hold at 0) and makes the memo
+  forget its keys. A buffer's bind offset is keyed by its alignment class up to 256 bytes, so a
+  ring buffer's moving offsets stay answered. `WorkCounts::render_encoders_captured`,
+  `calls_answered`, `commits_answered` and `resolver_drains` count the work; the drains that
+  waited are counted apart by what drained (`resolver_drains_commits` and kin) with the time
+  each kind waited, those that encoded in the resolver's place apart
+  (`resolver_drains_encoding`), and `resolver_wake_nanos` times the resolver's wakes. Encoders
+  taken back (`render_encoders_demoted`) are counted apart by what took them back
+  (`taken_back_plural_buffers` and kin): the call's kind, or for a draw its key's first
+  difference from what the memo's keys bind (a new object, a new binding, a new offset class or
+  bytes length, a new state, or a key seen while its pipeline was being made); encoders opened
+  at the call are counted by why (`render_opens_unkeyed_passes` and kin: a descriptor or pass the
+  memo keys none of, shadows inherited, an open that announced, a pass it had not seen).
+  `DeviceOptions::encode_at_the_call` (and `RawDevice::encode_at_the_call` for an adopted device)
+  encodes every render encoder at the call, with no resolver: the program's thread then does all
+  of the encoding, as with Metal's encoders, and spares the capture's log where most passes open
+  at the call or are taken back.
 
 **Binary archives and dynamic libraries**
 
@@ -2718,8 +2820,9 @@ each item named states the rule in full.
 
 - **Multisampled blit copies between depth or stencil and colour formats** copy each sample's
   bytes as plain Metal does (its validation stops them), through `VK_KHR_maintenance8` or
-  sample-rate draws. The two pairs the draws cannot copy exactly are refused: a 16-bit depth, and a
-  copy into a 32-bit float depth on a driver not measured to store fragment depths unchanged.
+  sample-rate draws. A 16-bit depth, whose codes the draws would convert, is refused; a copy into a
+  32-bit float depth whose fragment depth the device does not find stored unchanged runs announced
+  (`drawn-depth-copy`).
 - **A blit copy of 24-bit depth between textures of different formats is refused**: Apple's
   reference GPUs make no `Depth24Unorm_Stencil8` texture, so there is no Metal answer to match.
 

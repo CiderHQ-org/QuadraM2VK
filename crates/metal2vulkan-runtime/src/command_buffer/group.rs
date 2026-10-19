@@ -82,6 +82,7 @@ use super::submit::Submission;
 use super::{submission_error, CommandBufferShared};
 use crate::degradation::Degradation;
 use crate::device::relay::Relayed;
+use crate::device_checks::learned::Risks;
 use crate::error::CommandBufferError;
 use crate::exit_guard::{self, Call};
 use crate::gpu_time;
@@ -275,6 +276,8 @@ pub(crate) struct After<'a> {
     pub(crate) value: u64,
     pub(crate) fence: Option<vk::Fence>,
     pub(crate) relayed: &'a Arc<Relayed>,
+    /// The risky paths its command buffer took (`device_checks/learned.rs`).
+    pub(crate) risks: Risks,
 }
 
 impl Group {
@@ -479,15 +482,27 @@ impl Group {
             }
             None => (held_value, None),
         };
+        // The risky paths every batch's command buffer took: the submission signals `value`
+        // past each of them.
+        let risks = (self.members.iter())
+            .map(|member| member.submission.buffer().risks.read())
+            .fold(
+                after.as_ref().map_or(Risks::NONE, |after| after.risks),
+                Risks::with,
+            );
         let submits = &submits[..submitting];
         // SAFETY: as each batch's own submission (`submit.rs`): every command buffer is
         // executable and submitted once; every wait is for a signal submitted before; the one
         // timeline signal is above the queue's value; the `VkQueue` is used under its lock.
-        let submitted =
-            shared.submit_logged((queue, Some(value)), fence, &relayed, |vk_queue| unsafe {
+        let submitted = shared.submit_logged(
+            (queue, Some(value)),
+            (fence, risks),
+            &relayed,
+            |vk_queue| unsafe {
                 shared.counts.queue_submitted(buffers);
                 raw.queue_submit(vk_queue, submits, fence.unwrap_or(vk::Fence::null()))
-            });
+            },
+        );
         exit_guard::called(Call::QueueSubmit);
         self.events.clear();
         let several = count + usize::from(!alone) > 1;
@@ -556,12 +571,18 @@ fn submit_alone(device: &Device, after: After<'_>) -> Result<(), vk::Result> {
         value,
         fence,
         relayed,
+        risks,
     } = after;
     // SAFETY: the batch's submission's own (`submit.rs`).
-    let submitted = shared.submit_logged((queue, Some(value)), fence, relayed, |vk_queue| unsafe {
-        shared.counts.queue_submitted(buffers);
-        raw.queue_submit(vk_queue, infos, fence.unwrap_or(vk::Fence::null()))
-    });
+    let submitted = shared.submit_logged(
+        (queue, Some(value)),
+        (fence, risks),
+        relayed,
+        |vk_queue| unsafe {
+            shared.counts.queue_submitted(buffers);
+            raw.queue_submit(vk_queue, infos, fence.unwrap_or(vk::Fence::null()))
+        },
+    );
     exit_guard::called(Call::QueueSubmit);
     submitted
 }
@@ -584,10 +605,15 @@ fn signal_alone(
         .push_next(&mut timeline);
     // SAFETY: a submission of the signals a failed group's end held, each above its semaphore's
     // value (no batch signalled them); the `VkQueue` is used under its lock.
-    let submitted = shared.submit_logged((queue, value), None, relayed, |vk_queue| unsafe {
-        shared.counts.queue_submitted(0);
-        raw.queue_submit(vk_queue, &[info], vk::Fence::null())
-    });
+    let submitted = shared.submit_logged(
+        (queue, value),
+        (None, Risks::NONE),
+        relayed,
+        |vk_queue| unsafe {
+            shared.counts.queue_submitted(0);
+            raw.queue_submit(vk_queue, &[info], vk::Fence::null())
+        },
+    );
     exit_guard::called(Call::QueueSubmit);
     submitted
 }

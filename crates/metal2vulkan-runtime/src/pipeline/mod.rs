@@ -59,6 +59,8 @@ pub(super) mod pool;
 mod predicted;
 mod raster_samples;
 pub(super) mod reaper;
+mod record_frame;
+mod region_record;
 mod render;
 pub(super) mod shared_layouts;
 mod sources;
@@ -401,6 +403,8 @@ pub(super) struct Variant {
     objects: Arc<VariantObjects>,
     plans: Mutex<Lru<BindShape, Arc<BindingPlan>>>,
     pipelines: making::Making<RegionKey, RawPipeline>,
+    /// The keys of its record (`region_record.rs`), once read.
+    record: region_record::RegionRecord,
 }
 
 /// What a region's `VkPipeline` is made from.
@@ -621,6 +625,12 @@ impl ComputePipelineState {
                 let _ = crate::binding::make_neutrals(device, &plan);
             }
             device.keep_room();
+            // The `VkPipeline`s the base's dispatches made in earlier processes, made here, where
+            // Metal compiles (`dispatch_making.rs`): none for a base under stand-ins, which no
+            // dispatch runs.
+            if !stand_in {
+                base.make_recorded();
+            }
         }
         device.degrade_absent_reads(&base.shared_pipeline().dependencies, |_| {
             function.function.info().name.to_string()
@@ -1339,6 +1349,7 @@ impl Variant {
             objects: Arc::new(objects),
             plans: Mutex::new(Lru::counted(PLANS)),
             pipelines: making::Making::counted(PIPELINES),
+            record: region_record::RegionRecord::default(),
         });
         for (place, made) in kept {
             if let kept::Place::Region(region) = place {
@@ -1390,19 +1401,24 @@ impl Variant {
     /// The `VkPipeline` of `region`, from the memo or made now, outside the memo's lock
     /// (`making.rs`), for a dispatch that binds `formats` and waits for it: one an execution of
     /// commands or a host step records, or one of an encoder encoded again (an encoder's own
-    /// dispatch or tile dispatch hands its making to the pool, `dispatch_making.rs`).
+    /// dispatch or tile dispatch hands its making to the pool, `dispatch_making.rs`). A key made
+    /// here joins the variant's record (`region_record.rs`); one its state's creation made
+    /// announces its notices at its first dispatch.
     pub(super) fn region_pipeline(
         &self,
         region: &DispatchRegion,
         formats: crate::degradation::BoundFormats<'_>,
     ) -> Result<Arc<RawPipeline>, Error> {
         let key = RegionKey::of(region);
-        self.pipelines.get_or_make(&key, || {
+        let made = self.pipelines.get_or_make(&key, || {
             let made = self
                 .objects
                 .pipeline(&key, graphics::Notices::Now(Some(formats)))?;
+            self.note_region(&key);
             Ok(made.kept_at(&self.objects, kept::Place::Region(key.clone())))
-        })
+        })?;
+        self.first_use(&made, &key, formats);
+        Ok(made)
     }
 
     /// The value of each of the kernel's specialization constants where `key` specializes it

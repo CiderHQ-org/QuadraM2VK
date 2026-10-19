@@ -51,6 +51,7 @@ use super::memory_log::{self, MemoryLog};
 use super::range::RangeAllocator;
 use super::sharing::Sharing;
 use super::work_counts::Counters;
+use crate::device_checks::learned::{Risky, Watch};
 use crate::release;
 use ash::vk;
 use metal2vulkan::vk::DriverId;
@@ -802,6 +803,9 @@ pub(super) struct Memory {
     parked_count: u64,
     /// The memory log, where `METAL2VULKAN_LOG_MEMORY` is set (`memory_log.rs`).
     log: Option<MemoryLog>,
+    /// The device's watch of its loss (`device_checks/learned.rs`), which a block freed at once
+    /// while batches may be in flight notes as a risky path.
+    learning: Option<Arc<Watch>>,
     /// A bind into memory that queued work uses waits for that work on the device's driver
     /// ([`binds_wait`]), so an image bound while such work may be queued takes a block of its own
     /// ([`allocate_image_while_queued`]).
@@ -839,6 +843,7 @@ impl Memory {
             parked: Vec::new(),
             parked_count: 0,
             log: None,
+            learning: None,
             binds_wait: binds_wait(driver),
         }
     }
@@ -847,6 +852,12 @@ impl Memory {
     /// (`memory_log.rs`).
     pub(super) fn log_to(&mut self, log: Option<MemoryLog>) {
         self.log = log;
+    }
+
+    /// Note each block freed at once from now on, while batches may be in flight, on `watch`
+    /// (`device_checks/learned.rs`).
+    pub(super) fn learn_by(&mut self, watch: Arc<Watch>) {
+        self.learning = Some(watch);
     }
 
     /// Say `what` happened to `block`, where the log is on: its device address from its buffer of
@@ -1220,6 +1231,12 @@ impl Memory {
     ) -> Option<Box<dyn Send>> {
         let Some(parking) = &self.parking else {
             self.say_block(device, "freed a block", &block);
+            // Memory a device address lay in, freed while the batches submitted before may be
+            // pending: a risky path of theirs, where the driver is not known to fail them
+            // (`RuntimeDriverDefect::FreedAddressMemoryFailsPendingWork`, `freed_memory.rs`).
+            if let (true, Some(watch)) = (self.device_address, &self.learning) {
+                watch.risked_in_flight(Risky::FreedAddressMemoryFailsPendingWork);
+            }
             // SAFETY: the caller's.
             unsafe { block.release(device) };
             return after;

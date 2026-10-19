@@ -2,8 +2,8 @@
 //! measured to follow and against Metal's own reads of our probes' surfaces.
 
 use super::{
-    srgb_step, typed_module, ycbcr_read, ycbcr_texel, YCbCrCodes, YCbCrConvertModule, YCbCrMatrix,
-    YCbCrOutput, YCbCrPlanes, YCbCrRange, BYTES, IMAGE, SHAPE, SRGB_KNOTS,
+    every_layout, srgb_step, typed_module, ycbcr_read, ycbcr_texel, YCbCrCodes, YCbCrConvertModule,
+    YCbCrMatrix, YCbCrOutput, YCbCrPlanes, YCbCrRange, BYTES, IMAGE, SHAPE, SRGB_KNOTS,
 };
 use crate::metal::format::{ycbcr_format, ChromaSubsampling};
 use crate::metal::PixelFormat;
@@ -13,12 +13,10 @@ use crate::spirv::testing::{assert_valid, committed_profiles, sharded_tests};
 #[test]
 fn the_ycbcr_conversion_kernels_are_valid_on_every_committed_profile() {
     for (_, p) in committed_profiles().expect("profiles") {
-        for output in [
-            YCbCrOutput::Converted,
-            YCbCrOutput::Codes,
-            YCbCrOutput::Srgb,
-        ] {
-            assert_valid(typed_module(output).expect("module"), &p);
+        for codes in every_layout() {
+            for range in [YCbCrRange::Video, YCbCrRange::Full] {
+                assert_valid(typed_module(codes, range).expect("module"), &p);
+            }
         }
     }
 }
@@ -289,7 +287,7 @@ impl Surface {
     /// one), or its code, both invocation orders alike; alpha checked to be 1.
     fn converted(&self) -> Vec<[u16; 3]> {
         let output = self.planes.codes.output;
-        let m = typed_module(output).expect("module");
+        let m = typed_module(self.planes.codes, self.planes.range).expect("module");
         let [w, h] = self.planes.size;
         let groups = [w, h].map(|n| n.div_ceil(YCbCrConvertModule::LOCAL_SIZE));
         let mut runs = Vec::new();

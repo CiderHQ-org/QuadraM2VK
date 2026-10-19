@@ -58,7 +58,8 @@
 //! copies both ways (`Unsupported`, naming the format); and, on a device without maintenance8 (`Unsupported`,
 //! `Feature::SeparateMultisampledDepthStencil`, naming the feature) or whose driver copies a
 //! multisampled depth/stencil image to or from a colour one wrong (the same feature, naming
-//! `RuntimeDriverDefect::MultisampledDepthStencilColourCopies`, `driver_defects.rs`), a
+//! `RuntimeDriverDefect::MultisampledDepthStencilColourCopies`, `driver_defects.rs` and the
+//! known-driver list), a
 //! multisampled depth that is loaded or may be stored where its draw is not measured (a driver
 //! the fragment-depth probe of the depth's format has not measured), and a multisampled
 //! aspect loaded from a texture that is not sampled. A device that lacks what the draws need
@@ -81,6 +82,7 @@ use super::texture_descriptor::TextureDescriptor;
 use super::tracker::{Access, Barrier, Use};
 use super::values::ResourceOptions;
 use super::Device;
+use crate::device_checks::learned::{Risks, Risky};
 use ash::vk;
 use metal2vulkan::bind::CopySource;
 use metal2vulkan::device::{DeviceProfile, FormatUsage, VkFeature};
@@ -243,6 +245,16 @@ pub(super) fn copies_defect(
     }
 }
 
+/// The risky path a multisampled copy of `aspects` through maintenance8's depth-stencil/colour
+/// copies takes where [`copies_defect`] finds none (`device_checks/learned.rs`): the stencil's,
+/// which loses the device on a driver with `RuntimeDriverDefect::MultisampledStencilColourCopies`.
+pub(super) fn copies_risk(aspects: ImageAspectFlags) -> Risks {
+    match aspects.contains(ImageAspectFlags::STENCIL) {
+        true => Risks::of(Risky::MultisampledStencilColourCopies),
+        false => Risks::NONE,
+    }
+}
+
 /// The tile, in pixels a side, through which Metal clears and stores a separate texture of
 /// `pixel_format` past the render area of a pass of `samples` (the module docs): measured at one
 /// sample for `Depth32Float`, the tile every other attachment's clear reaches in
@@ -376,6 +388,7 @@ pub(super) fn scratch(
             colour_copies_refused(device, Feature::SeparateMultisampledDepthStencil, aspect)
         else {
             usable_twin(device, target, aspect)?;
+            maker.took(copies_risk(aspect));
             continue;
         };
         let is_depth = aspect == ImageAspectFlags::DEPTH;

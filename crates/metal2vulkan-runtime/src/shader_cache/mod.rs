@@ -11,14 +11,21 @@
 //! - **What it holds.** The compile layer's artifacts in their self-checking envelope: translated
 //!   functions under their [`FunctionCompileKey`] and compute and render pipelines under their
 //!   [`PipelineKey`]; and the driver's `VkPipelineCache` data, one record per pipeline making,
-//!   named by what the making reads (`driver.rs`); and what render creations work out from their
-//!   descriptors before their compiles, under the descriptor's key (`creation.rs`).
-//! - **A new build never reads an older build's entries.** They live under `v1/<build>/`, where
-//!   `<build>` is the SHA-256 of the crate's version, both artifact versions, and the digest of
-//!   the crate's sources that `build.rs` computes (the product files).
-//! - **Records of content, every build's**. Beside the builds', one directory holds records named
-//!   by the content they describe, which hold no translation: the driver's data of each pipeline
-//!   making (above).
+//!   named by what the making reads (`driver.rs`); the keys of the `VkPipeline`s each compute
+//!   variant's dispatches made, named by the variant's content (`pipeline/region_record.rs`); and
+//!   what render creations work out from their descriptors before their compiles, under the
+//!   descriptor's key (`creation.rs`).
+//! - **A new build never reads anything an older build wrote**, entries and records alike: an
+//!   older build's compiled output may have been wrong. They live under `v1/<build>/`, where
+//!   `<build>` is the SHA-256 of the crate's version, both artifact versions, and the digests of
+//!   the translator's and this crate's sources that `build.rs` computes (the product files), and
+//!   every name holds the build too. So a new build makes every pipeline again once.
+//! - **Records not named by the profile.** The driver's data of each making and each compute
+//!   variant's region keys hold no translation: they are named by what the making reads, the
+//!   driver, the layer settings and what the device enabled, not by the compile profile, whose
+//!   part in a pipeline is in its content (`driver.rs`). So within one build a process whose
+//!   profile took answers its device checks found after an earlier process's making finds that
+//!   process's records.
 //! - **A wrong entry is never used.** An entry's name is the SHA-256 of its build, kind, key and
 //!   profile fingerprint, and a read is a hit only if the envelope's versions, kind, key and
 //!   profile equal the request's and its checksum holds (`from_bytes_for_key`). Anything else is
@@ -47,6 +54,7 @@ use ash::vk;
 use creation::CreationMemo;
 use driver::{Making, Records};
 use metal2vulkan::cache::{Hash256, PipelineArtifact, PipelineKey};
+use metal2vulkan::device::EnableSet;
 use metal2vulkan::library::{CompiledFunction, FunctionCompileKey};
 use metal2vulkan::pipeline::{ComputePipeline, RenderPipeline};
 use sha2::{Digest, Sha256};
@@ -196,7 +204,7 @@ pub(crate) enum EntryKind {
     RenderPipeline = 4,
     // 5 named a pipeline's kept graphics keys, removed. 6 named a variant's own pipeline cache,
     // retired.
-    /// A pipeline making's driver data (`driver.rs`), in the content directory.
+    /// A pipeline making's driver data (`driver.rs`).
     PipelineData = 7,
     /// A render descriptor's linked-use answers (`creation.rs`).
     LinkedAnswers = 8,
@@ -204,6 +212,9 @@ pub(crate) enum EntryKind {
     RenderReflection = 9,
     /// The pipeline key of a render descriptor under a variant key (`creation.rs`).
     VariantPipeline = 10,
+    /// The keys of the `VkPipeline`s a compute variant's dispatches made
+    /// (`pipeline/region_record.rs`).
+    RegionKeys = 11,
 }
 
 /// The build this crate is: the SHA-256 of its version, both artifact versions, the translator's
@@ -300,16 +311,16 @@ pub(super) struct ShaderCache {
 }
 
 impl ShaderCache {
-    /// The cache `setup` describes, of the device of `properties` and profile fingerprint
-    /// `profile`, with the cache thread started (which scans the directory). Its makings' records
-    /// are named with `settings` (the digest of its instance's layer settings), and its makings
+    /// The cache `setup` describes, of the device of `properties` that enabled `enables`, with the
+    /// cache thread started (which scans the directory). Its makings' records are named with the
+    /// build, `settings` (the digest of its instance's layer settings) and `enables`, and its makings
     /// report whether the driver found their pipelines where `feedback`
     /// (`VK_EXT_pipeline_creation_feedback`). (No driver cache is made or loaded here; each making
     /// makes its own.) Its warnings go to `sink` (the instance's message sink), else on stderr.
     pub(super) fn start(
         setup: CacheSetup,
         properties: &vk::PhysicalDeviceProperties,
-        profile: Hash256,
+        enables: &EnableSet,
         (settings, feedback): (Hash256, bool),
         sink: Option<MessageSink>,
     ) -> Result<ShaderCache, Error> {
@@ -317,6 +328,7 @@ impl ShaderCache {
             directory,
             memory_capacity,
         } = setup;
+        let build = *directory.build();
         let store = Arc::new(Store::new(directory, sink));
         let worker = Worker::start(Arc::clone(&store))?;
         Ok(ShaderCache {
@@ -325,9 +337,10 @@ impl ShaderCache {
             store,
             worker,
             records: Records {
+                build,
                 identity: driver::Identity::of(properties),
                 settings,
-                profile,
+                enables: driver::enables_digest(enables),
             },
             driver_reports: feedback,
         })
@@ -363,6 +376,45 @@ impl ShaderCache {
             self.worker.evict();
         }
         made
+    }
+
+    /// The name of the record of the region keys of the variant `making` describes (its content,
+    /// `VariantObjects::making`): named by the build, the driver's identity, the layer settings
+    /// and what the device enabled too, as a making's record is (`driver.rs`).
+    pub(crate) fn region_record_name(&self, making: Making) -> String {
+        self.records.named(EntryKind::RegionKeys, making)
+    }
+
+    /// The record named `name`, as `decode` accepts it (one it refuses is removed,
+    /// `Store::load_record`); `None` where there is none or it cannot be read, and once the
+    /// process is exiting.
+    pub(crate) fn load_record<T>(
+        &self,
+        name: &str,
+        decode: impl FnOnce(Vec<u8>) -> Option<T>,
+    ) -> Option<T> {
+        if crate::exit_guard::closed() {
+            return None;
+        }
+        match self.store.load_record(name, decode) {
+            Lookup::Hit(found) => Some(found),
+            Lookup::Absent | Lookup::Unreadable | Lookup::Rejected => None,
+        }
+    }
+
+    /// Write `bytes` as the record named `name`, a temporary file renamed over it
+    /// (`Store::write_record`): a failure counted and said once, as an entry's. Nothing
+    /// once the process is exiting.
+    pub(crate) fn write_record(&self, name: &str, bytes: &[u8]) {
+        if crate::exit_guard::closed() {
+            return;
+        }
+        if self.store.write_record(name, bytes).is_err() {
+            self.store.write_failed();
+        }
+        if self.store.over_capacity() {
+            self.worker.evict();
+        }
     }
 
     /// Whether a making chains a `VkPipelineCreationFeedbackCreateInfo`, its whole pipeline's

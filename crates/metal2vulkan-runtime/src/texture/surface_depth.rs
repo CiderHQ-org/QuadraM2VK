@@ -35,7 +35,7 @@ use super::super::tracker::UseRange;
 use super::super::values::ResourceOptions;
 use super::super::view_plan::ViewRecord;
 use super::heap::{heap_plane_layout, heap_planes};
-use super::heap_tiled::{Elements, HeapTiledCopies, TiledLayout};
+use super::heap_tiled::{Elements, HeapTiledCopies, TiledLayout, TiledStaging};
 use super::{image_error, IdUse, Image, Storage, Texture};
 use ash::vk;
 use metal2vulkan::metal::format::aspects;
@@ -104,7 +104,6 @@ impl Texture {
             if end > texels.buffer.length() {
                 return Err(Error::NotImplemented(RuntimeGap::TexelsPastBufferLength));
             }
-            let hazard = texels.options().hazard_tracking_mode()?;
             let (image, layout, descriptor) = self.pass_image(texels, |plan| {
                 let both = ImageUsageFlags::TRANSFER_SRC | ImageUsageFlags::TRANSFER_DST;
                 match plan.usage.contains(both) {
@@ -130,19 +129,21 @@ impl Texture {
                 return Err(gap());
             }
             let (raw, at) = texels.buffer.at(base);
-            let mut staging = HeapTiledCopies::staging(device, &tiled, at, hazard)?;
-            let start = staging.into.dst_offset;
-            staging.into.size = span;
-            staging.back = runs
+            let back = runs
                 .iter()
                 .map(|run| vk::BufferCopy {
-                    src_offset: start + run.start,
+                    src_offset: run.start,
                     dst_offset: at + run.start,
                     size: run.end - run.start,
                 })
                 .collect();
+            let staging = TiledStaging {
+                at,
+                size: span,
+                back,
+            };
             let shape = (&planes[..], tight_len);
-            let tiles = HeapTiledCopies::new(device, &staging, tiled, shape, &regions, hazard)?;
+            let tiles = HeapTiledCopies::new(device, tiled, shape, &regions)?;
             let (truth, tracked) = texels.buffer.tracked(base..end);
             let copies = ShadowCopies {
                 source: ShadowSource::Bytes {

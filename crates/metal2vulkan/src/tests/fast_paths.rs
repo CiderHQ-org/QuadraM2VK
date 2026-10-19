@@ -7,9 +7,9 @@
 //! classed, and so reaches the ledger.
 
 use crate::device::{
-    BatchOrderPolicy, CompletionPolicy, DecodedTexelsPolicy, DevicePolicy, FloatMathsPolicy,
-    HalfBlendPolicy, HalfRoundingPolicy, HeapCompressionPolicy, NanMinMaxPolicy, ResolvePolicy,
-    RoundingOrderPolicy, SamplingPolicy, TexelConversionPolicy, TileStorePolicy,
+    BatchOrderPolicy, CompletionPolicy, DecodedTexelsPolicy, DeviceChecksPolicy, DevicePolicy,
+    FloatMathsPolicy, HalfBlendPolicy, HalfRoundingPolicy, HeapCompressionPolicy, NanMinMaxPolicy,
+    ResolvePolicy, RoundingOrderPolicy, SamplingPolicy, TexelConversionPolicy, TileStorePolicy,
     Unorm8LinearFilterPolicy, YCbCrFilterPolicy,
 };
 use crate::pipeline::PrecisionNote;
@@ -79,6 +79,8 @@ fn choices() -> Vec<Choice> {
         tile_store: _,
         resolve: _,
         batch_order: _,
+        // Whether the device's checks decide the facts they check, below.
+        device_checks: _,
     } = p;
     vec![
         choice!(p.unorm8_linear_filter: Unorm8LinearFilterPolicy { Exact, DeviceWithinOneCode }),
@@ -96,6 +98,7 @@ fn choices() -> Vec<Choice> {
         choice!(p.tile_store: TileStorePolicy { Device, Exact }),
         choice!(p.resolve: ResolvePolicy { Device, Exact }),
         choice!(p.batch_order: BatchOrderPolicy { Ends, Exact }),
+        choice!(p.device_checks: DeviceChecksPolicy { Trusted, Distrusted }),
     ]
 }
 

@@ -10,15 +10,28 @@
 //! - **Named by what the making reads** ([`Making`]). A record is named by the SHA-256 of
 //!   [`VERSION`], the making's description, the driver's identity (vendor, device, driver
 //!   version, `pipelineCacheUUID`) and the digest of the layer settings the instance was created
-//!   with; and by the device's profile fingerprint (`store::entry_name`). A program's pipeline is
-//!   described by its variant's stages (SPIR-V words, entry points, stage flags, required subgroup
-//!   sizes, specialization), its layout (its immutable samplers among it), and the state its
-//!   making adds (a graphics key; a compute pipeline's specialization and flags); a helper of the
-//!   runtime's by its SPIR-V and its parameters. Records live in the content directory, which no
-//!   build owns (`store.rs`): a new build of the runtime or the translator that leaves a
-//!   pipeline's SPIR-V and state as they were finds its record. The driver keys each pipeline by
-//!   everything its creation reads, so a description that covers a making loosely costs a
-//!   compile, never a wrong pipeline.
+//!   with; and by the build and the digest of the features and extensions the device enabled
+//!   ([`enables_digest`], `store::entry_name`). A program's pipeline is described by everything
+//!   its `vkCreate*Pipelines` call takes: its variant's stages (SPIR-V words, entry points, stage
+//!   flags, required subgroup sizes, specialization layouts), its layout (its immutable samplers
+//!   among it), and the state its making adds (a graphics key; a compute pipeline's
+//!   specialization map and data, stage flags, required subgroup size and whether it is
+//!   indirect-bindable, `pipeline::objects::compute_making`); a helper of the runtime's by its
+//!   SPIR-V and its parameters.
+//! - **Exact where it is loose.** The driver keys each pipeline by everything its creation reads
+//!   and checks the data a cache starts from, so a description that covers a making loosely costs
+//!   a compile, never a wrong pipeline. A region record's keys are checked against the stage's
+//!   specialization constants before any is made (`pipeline/region_record.rs`).
+//! - **The build's own.** Records lie in the build's directory (`store.rs`) and their names hold
+//!   the build: a new build of the runtime or the translator reads no record an older one wrote,
+//!   whose compiled output may have been wrong, and makes every pipeline again once.
+//! - **Not by the profile.** What the device's compile profile decides of a pipeline is in its
+//!   description (its SPIR-V, layout and stages), so a record is not named by the profile: a
+//!   device whose profile differs only where a pipeline's description does not names that
+//!   pipeline's record as the other does. So within one build, a process after one whose device
+//!   checks settled on its checks thread (`device_checks`), whose profile takes their answers
+//!   where the earlier one's took the tables', finds the records of every pipeline those answers
+//!   do not change.
 //! - **No figure of the driver's to meet.** A record holds one making's data (an Xgc pipeline's
 //!   1.7 MB on an RTX 3090), so how much of a large cache's initial data a
 //!   driver keeps does not decide which pipelines are kept. The shader cache's cap and its scans,
@@ -53,19 +66,20 @@
 //! reason ([`Refusal`]): some drivers return data that ends inside the header it states, at
 //! `VK_SUCCESS`.
 
-use super::store::{self, count, entry_name, Lookup, Store};
+use super::store::{count, entry_name, Lookup, Store};
 use super::EntryKind;
 use crate::exit_guard::{self, Call};
 use crate::release;
 use ash::vk;
 use metal2vulkan::cache::Hash256;
+use metal2vulkan::device::EnableSet;
 use sha2::{Digest, Sha256};
 use std::ops::Range;
 
 const MAGIC: [u8; 8] = *b"M2VPPLC\0";
 /// The version of what a record's name covers and how a record is framed: a change to either
 /// bumps it, so no build opens a record another build names or frames otherwise.
-pub(crate) const VERSION: u32 = 1;
+pub(crate) const VERSION: u32 = 2;
 /// The identity's bytes.
 const IDENTITY: usize = 4 + 4 + 4 + 16;
 /// Bytes before the data.
@@ -227,27 +241,34 @@ impl Making {
     }
 }
 
-/// What names a device's records: its driver's identity, its instance's layer settings' digest,
-/// and its profile fingerprint.
+/// What names a device's records: the build, its driver's identity, its instance's layer
+/// settings' digest, and the digest of what it enabled ([`enables_digest`]).
 pub(crate) struct Records {
+    pub(crate) build: Hash256,
     pub(crate) identity: Identity,
     pub(crate) settings: Hash256,
-    pub(crate) profile: Hash256,
+    pub(crate) enables: Hash256,
+}
+
+/// The digest of the features and extensions a device enabled, `enables`, which names its records.
+pub(crate) fn enables_digest(enables: &EnableSet) -> Hash256 {
+    Making::new("enables").text(enables).finish()
 }
 
 impl Records {
     /// The name of `making`'s record.
     pub(crate) fn name(&self, making: Making) -> String {
+        self.named(EntryKind::PipelineData, making)
+    }
+
+    /// The name of the record of `kind` of what `making` describes: by the build, `making`, the
+    /// driver's identity and the layer settings, and what the device enabled.
+    pub(crate) fn named(&self, kind: EntryKind, making: Making) -> String {
         let key = making
             .digest(&Sha256::digest(self.identity.0).into())
             .digest(&self.settings)
             .finish();
-        entry_name(
-            &store::content(),
-            EntryKind::PipelineData,
-            &key,
-            &self.profile,
-        )
+        entry_name(&self.build, kind, &key, &self.enables)
     }
 }
 
@@ -283,7 +304,7 @@ pub(crate) fn make<T, E>(
     }
     let name = records.name(making);
     let identity = &records.identity;
-    let seed = match store.load_content(&name, |bytes| {
+    let seed = match store.load_record(&name, |bytes| {
         let data = open(identity, &bytes)?;
         Some(Seed { bytes, data })
     }) {

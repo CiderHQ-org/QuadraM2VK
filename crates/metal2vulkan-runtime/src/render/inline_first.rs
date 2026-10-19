@@ -56,7 +56,7 @@
 //!   given, cleared to it right after the instance (`Clears`), never copied
 //!   (`StandIn::copies`). So the first draw that records rules the instance out where it writes
 //!   a memoryless color (a pass color the texture renders in place, under a write mask that
-//!   keeps a channel: `RenderCommandEncoder::writes_memoryless`), and a later draw that writes
+//!   keeps a channel: `RenderEncoding::writes_memoryless`), and a later draw that writes
 //!   one splits the pass before it: the draw records into a new instance, from which on the
 //!   backing the split brings stands in. That instance records inline too where it can, its
 //!   backings cleared before it in place of after the first (`render/inline_splits.rs`).
@@ -75,12 +75,12 @@
 //! - **No secondary at the open.** Such a pass begins no secondary for its first instance as it
 //!   opens: one begins where a command records into that instance's secondary (a draw that does
 //!   not record inline, a visibility query, an execution of render commands) or a split keeps the
-//!   instance before the next ([`RenderCommandEncoder::begin_current_draws`]). An instance a new
+//!   instance before the next ([`RenderEncoding::begin_current_draws`]). An instance a new
 //!   one replaces, or that the pass ends with nothing recorded, never begins one, and its render
 //!   pass instance runs its loads and stores alone. A secondary begun and ended unused cost every
 //!   such pass a begin, which on ANV resets the command buffer's whole command state.
 //! - **At the first draw that records: the instance allows it**
-//!   ([`RenderCommandEncoder::inline_begin`]). Its pipeline is made; the instance is the pass's
+//!   ([`RenderEncoding::inline_begin`]). Its pipeline is made; the instance is the pass's
 //!   first, of no fetched (storage) attachment, view of another format, multiview or
 //!   shader-side test, and the draw writes no memoryless color; nothing the pass's end records
 //!   inside it is pending: no draw whose
@@ -129,7 +129,7 @@
 
 use super::extended_shadow::ExtendedShadows;
 use super::inline_splits::Later;
-use super::{Instance, Next, RenderCommandEncoder, ViewSetup};
+use super::{Instance, Next, RenderEncoding, ViewSetup};
 use crate::clear_reach;
 use crate::device::Device;
 use crate::error::Error;
@@ -184,7 +184,7 @@ impl Begun {
 }
 
 /// What the first draw that records an inline instance made for it before recording starts
-/// ([`RenderCommandEncoder::inline_begin`]): its render pass and framebuffer, the command
+/// ([`RenderEncoding::inline_begin`]): its render pass and framebuffer, the command
 /// buffer the encoder holds for it, and the instance's shape and the layout's `splits`
 /// ([`Begun`]).
 pub(super) struct InlineBegin {
@@ -298,7 +298,7 @@ fn inline_area(layout: &PassLayout) -> [u32; 2] {
     }
 }
 
-impl RenderCommandEncoder {
+impl RenderEncoding {
     /// Begin the current instance's secondary where the pass left it unbegun (`Instance::draws`):
     /// a pass that may record its first instance inline begins none at its opening, and one only
     /// where a command records into that instance's secondary or a split keeps the instance. An

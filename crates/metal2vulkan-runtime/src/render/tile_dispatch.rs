@@ -97,7 +97,8 @@
 use super::pending_tile::{TileCall, TilePipelines};
 use super::replay::Samplers;
 use super::shadows::InstanceShadows;
-use super::{draw_problem, DrawProblem, RenderCommandEncoder};
+use super::RenderCommandEncoder;
+use super::{draw_problem, DrawProblem, RenderEncoding};
 use super::{RenderCall, Table};
 use crate::address_map;
 use crate::attachment_stand_in;
@@ -578,19 +579,125 @@ fn scratch(
 }
 
 impl RenderCommandEncoder {
+    /// `setTileBuffer:offset:atIndex:` (`None` unbinds the index). Refused as
+    /// [`RenderCommandEncoder::set_vertex_buffer`] is.
+    pub fn set_tile_buffer(
+        &mut self,
+        buffer: Option<&Buffer>,
+        offset: u64,
+        index: u32,
+    ) -> Result<(), Error> {
+        self.on(|encoding| encoding.set_tile_buffer(buffer, offset, index))
+    }
+
+    /// `setTileBuffers:offsets:withRange:`. Refused as
+    /// [`RenderCommandEncoder::set_vertex_buffers`] is.
+    pub fn set_tile_buffers(
+        &mut self,
+        buffers: &[Option<&Buffer>],
+        offsets: &[u64],
+        first: u32,
+    ) -> Result<(), Error> {
+        self.on(|encoding| encoding.set_tile_buffers(buffers, offsets, first))
+    }
+
+    /// `setTileBufferOffset:atIndex:`. Refused as
+    /// [`RenderCommandEncoder::set_vertex_buffer_offset`] is.
+    pub fn set_tile_buffer_offset(&mut self, offset: u64, index: u32) -> Result<(), Error> {
+        self.on(|encoding| encoding.set_tile_buffer_offset(offset, index))
+    }
+
+    /// `setTileBytes:length:atIndex:`: as
+    /// [`RenderCommandEncoder::set_vertex_bytes`], in the tile stage's table, which the pass's
+    /// later tile dispatches read. Refused as that is.
+    pub fn set_tile_bytes(&mut self, bytes: &[u8], index: u32) -> Result<(), Error> {
+        self.on(|encoding| encoding.set_tile_bytes(bytes, index))
+    }
+
+    /// `setTileTexture:atIndex:` (`None` unbinds the index). Refused as
+    /// [`RenderCommandEncoder::set_vertex_texture`] is.
+    pub fn set_tile_texture(&mut self, texture: Option<&Texture>, index: u32) -> Result<(), Error> {
+        self.on(|encoding| encoding.set_tile_texture(texture, index))
+    }
+
+    /// `setTileTextures:withRange:`. Refused as
+    /// [`RenderCommandEncoder::set_vertex_textures`] is.
+    pub fn set_tile_textures(
+        &mut self,
+        textures: &[Option<&Texture>],
+        first: u32,
+    ) -> Result<(), Error> {
+        self.on(|encoding| encoding.set_tile_textures(textures, first))
+    }
+
+    /// `setTileSamplerState:atIndex:` (`None` unbinds the index). Refused as
+    /// [`RenderCommandEncoder::set_vertex_sampler_state`] is.
+    pub fn set_tile_sampler_state(
+        &mut self,
+        sampler: Option<&SamplerState>,
+        index: u32,
+    ) -> Result<(), Error> {
+        self.on(|encoding| encoding.set_tile_sampler_state(sampler, index))
+    }
+
+    /// `setTileSamplerStates:withRange:`, or with `clamps`
+    /// `setTileSamplerStates:lodMinClamps:lodMaxClamps:withRange:`. Refused as
+    /// [`RenderCommandEncoder::set_vertex_sampler_states`] is.
+    pub fn set_tile_sampler_states(
+        &mut self,
+        samplers: &[Option<&SamplerState>],
+        clamps: Option<(&[f32], &[f32])>,
+        first: u32,
+    ) -> Result<(), Error> {
+        self.on(|encoding| encoding.set_tile_sampler_states(samplers, clamps, first))
+    }
+
+    /// `dispatchThreadsPerTile:`: run the tile pipeline's state set on every tile of the pass
+    /// (the module docs). Threads per tile of a depth other than 1 run as 1, and threads per tile
+    /// past Metal's limit for the state run nothing, as plain Metal runs them. Refused
+    /// (`Invalid`), as Metal's validation refuses it: no state set, a drawing state
+    /// (`DrawProblem::NotTileState`), threads per tile that are empty or wider or taller than
+    /// the pass's tile (`DrawProblem::ThreadsPerTilePastTile`). What the binder refuses is
+    /// refused (`Bind`, `Unsupported`), threads per tile within Metal's limit but past the
+    /// state's `max_total_threads_per_threadgroup` (this device's lower limit) among them. A
+    /// refused dispatch records nothing and changes nothing.
+    pub fn dispatch_threads_per_tile(&mut self, threads: Size) -> Result<(), Error> {
+        self.on(|encoding| encoding.dispatch_threads_per_tile(threads))
+    }
+
+    /// `dispatchThreadsPerTile:inRegion:`, or with `render_target_array_index`
+    /// `dispatchThreadsPerTile:inRegion:withRenderTargetArrayIndex:` (SPI): run the tile
+    /// pipeline's state set on the tiles of the pass that `region`'s pixels touch, each as
+    /// [`RenderCommandEncoder::dispatch_threads_per_tile`] runs it (the module docs). Refused as
+    /// that is; a region that touches no tile runs nothing.
+    pub fn dispatch_threads_per_tile_in_region(
+        &mut self,
+        threads: Size,
+        region: Region,
+        render_target_array_index: Option<u32>,
+    ) -> Result<(), Error> {
+        self.on(|encoding| {
+            encoding.dispatch_threads_per_tile_in_region(threads, region, render_target_array_index)
+        })
+    }
+}
+
+impl RenderCommandEncoder {
     /// `tileWidth`: the pass's tile width, or the default for its samples (32; `tile_pass.rs`).
     /// Not measured (`NotImplemented(TileAtSampleCount)`) in a pass of a sample count Apple's
     /// GPUs lack.
     pub fn tile_width(&self) -> Result<u64, Error> {
-        self.tile_size().map(|[width, _]| width.into())
+        self.follow_tile().map(|[width, _]| width.into())
     }
 
     /// `tileHeight`: the pass's tile height, or the default for its samples (32, and 16 at 4
     /// samples; `tile_pass.rs`). Not measured as [`RenderCommandEncoder::tile_width`] is not.
     pub fn tile_height(&self) -> Result<u64, Error> {
-        self.tile_size().map(|[_, height]| height.into())
+        self.follow_tile().map(|[_, height]| height.into())
     }
+}
 
+impl RenderEncoding {
     /// The encoder's tile size, where Metal's is measured.
     pub(super) fn tile_size(&self) -> Result<[u32; 2], Error> {
         self.layout
@@ -610,9 +717,8 @@ impl RenderCommandEncoder {
         ]
     }
 
-    /// `setTileBuffer:offset:atIndex:` (`None` unbinds the index). Refused as
-    /// [`RenderCommandEncoder::set_vertex_buffer`] is.
-    pub fn set_tile_buffer(
+    /// [`RenderCommandEncoder::set_tile_buffer`]'s encoding.
+    pub(crate) fn set_tile_buffer(
         &mut self,
         buffer: Option<&Buffer>,
         offset: u64,
@@ -626,9 +732,8 @@ impl RenderCommandEncoder {
             .set_buffer(&mut self.core, "set_tile_buffer", buffer, offset, index)
     }
 
-    /// `setTileBuffers:offsets:withRange:`. Refused as
-    /// [`RenderCommandEncoder::set_vertex_buffers`] is.
-    pub fn set_tile_buffers(
+    /// [`RenderCommandEncoder::set_tile_buffers`]'s encoding.
+    pub(crate) fn set_tile_buffers(
         &mut self,
         buffers: &[Option<&Buffer>],
         offsets: &[u64],
@@ -646,26 +751,26 @@ impl RenderCommandEncoder {
             .set_buffers(&mut self.core, "set_tile_buffers", buffers, offsets, first)
     }
 
-    /// `setTileBufferOffset:atIndex:`. Refused as
-    /// [`RenderCommandEncoder::set_vertex_buffer_offset`] is.
-    pub fn set_tile_buffer_offset(&mut self, offset: u64, index: u32) -> Result<(), Error> {
+    /// [`RenderCommandEncoder::set_tile_buffer_offset`]'s encoding.
+    pub(crate) fn set_tile_buffer_offset(&mut self, offset: u64, index: u32) -> Result<(), Error> {
         self.log(|_| RenderCall::BufferOffset(Table::Tile, offset, index));
         self.tile
             .set_buffer_offset(&mut self.core, "set_tile_buffer_offset", offset, index)
     }
 
-    /// `setTileBytes:length:atIndex:`: as
-    /// [`RenderCommandEncoder::set_vertex_bytes`], in the tile stage's table, which the pass's
-    /// later tile dispatches read. Refused as that is.
-    pub fn set_tile_bytes(&mut self, bytes: &[u8], index: u32) -> Result<(), Error> {
+    /// [`RenderCommandEncoder::set_tile_bytes`]'s encoding.
+    pub(crate) fn set_tile_bytes(&mut self, bytes: &[u8], index: u32) -> Result<(), Error> {
         self.log(|log| RenderCall::Bytes(Table::Tile, log.byte_span(bytes), index));
         self.tile
             .set_bytes(&mut self.core, "set_tile_bytes", bytes, None, index)
     }
 
-    /// `setTileTexture:atIndex:` (`None` unbinds the index). Refused as
-    /// [`RenderCommandEncoder::set_vertex_texture`] is.
-    pub fn set_tile_texture(&mut self, texture: Option<&Texture>, index: u32) -> Result<(), Error> {
+    /// [`RenderCommandEncoder::set_tile_texture`]'s encoding.
+    pub(crate) fn set_tile_texture(
+        &mut self,
+        texture: Option<&Texture>,
+        index: u32,
+    ) -> Result<(), Error> {
         self.log(|log| {
             let texture = texture.map(|texture| log.hold_texture(texture));
             RenderCall::Texture(Table::Tile, texture, index)
@@ -674,9 +779,8 @@ impl RenderCommandEncoder {
             .set_textures(&mut self.core, "set_tile_texture", &[texture], index)
     }
 
-    /// `setTileTextures:withRange:`. Refused as
-    /// [`RenderCommandEncoder::set_vertex_textures`] is.
-    pub fn set_tile_textures(
+    /// [`RenderCommandEncoder::set_tile_textures`]'s encoding.
+    pub(crate) fn set_tile_textures(
         &mut self,
         textures: &[Option<&Texture>],
         first: u32,
@@ -686,9 +790,8 @@ impl RenderCommandEncoder {
             .set_textures(&mut self.core, "set_tile_textures", textures, first)
     }
 
-    /// `setTileSamplerState:atIndex:` (`None` unbinds the index). Refused as
-    /// [`RenderCommandEncoder::set_vertex_sampler_state`] is.
-    pub fn set_tile_sampler_state(
+    /// [`RenderCommandEncoder::set_tile_sampler_state`]'s encoding.
+    pub(crate) fn set_tile_sampler_state(
         &mut self,
         sampler: Option<&SamplerState>,
         index: u32,
@@ -706,10 +809,8 @@ impl RenderCommandEncoder {
         )
     }
 
-    /// `setTileSamplerStates:withRange:`, or with `clamps`
-    /// `setTileSamplerStates:lodMinClamps:lodMaxClamps:withRange:`. Refused as
-    /// [`RenderCommandEncoder::set_vertex_sampler_states`] is.
-    pub fn set_tile_sampler_states(
+    /// [`RenderCommandEncoder::set_tile_sampler_states`]'s encoding.
+    pub(crate) fn set_tile_sampler_states(
         &mut self,
         samplers: &[Option<&SamplerState>],
         clamps: Option<(&[f32], &[f32])>,
@@ -725,26 +826,14 @@ impl RenderCommandEncoder {
         )
     }
 
-    /// `dispatchThreadsPerTile:`: run the tile pipeline's state set on every tile of the pass
-    /// (the module docs). Threads per tile of a depth other than 1 run as 1, and threads per tile
-    /// past Metal's limit for the state run nothing, as plain Metal runs them. Refused
-    /// (`Invalid`), as Metal's validation refuses it: no state set, a drawing state
-    /// (`DrawProblem::NotTileState`), threads per tile that are empty or wider or taller than
-    /// the pass's tile (`DrawProblem::ThreadsPerTilePastTile`). What the binder refuses is
-    /// refused (`Bind`, `Unsupported`), threads per tile within Metal's limit but past the
-    /// state's `max_total_threads_per_threadgroup` (this device's lower limit) among them. A
-    /// refused dispatch records nothing and changes nothing.
-    pub fn dispatch_threads_per_tile(&mut self, threads: Size) -> Result<(), Error> {
+    /// [`RenderCommandEncoder::dispatch_threads_per_tile`]'s encoding.
+    pub(crate) fn dispatch_threads_per_tile(&mut self, threads: Size) -> Result<(), Error> {
         self.log(|_| RenderCall::ThreadsPerTile(Box::new(threads)));
         self.dispatch_tiles("dispatch_threads_per_tile", threads, None)
     }
 
-    /// `dispatchThreadsPerTile:inRegion:`, or with `render_target_array_index`
-    /// `dispatchThreadsPerTile:inRegion:withRenderTargetArrayIndex:` (SPI): run the tile
-    /// pipeline's state set on the tiles of the pass that `region`'s pixels touch, each as
-    /// [`RenderCommandEncoder::dispatch_threads_per_tile`] runs it (the module docs). Refused as
-    /// that is; a region that touches no tile runs nothing.
-    pub fn dispatch_threads_per_tile_in_region(
+    /// [`RenderCommandEncoder::dispatch_threads_per_tile_in_region`]'s encoding.
+    pub(crate) fn dispatch_threads_per_tile_in_region(
         &mut self,
         threads: Size,
         region: Region,
@@ -1124,6 +1213,8 @@ impl RenderCommandEncoder {
                 .objects()
                 .tested_formats(&|slot| tables.bound_format(slot))
         });
+        // A risky path of its command buffer's, as a draw's (`device_checks/learned.rs`).
+        (self.core.command_buffer()).took(variant.objects().risks());
         device.degrade_half_texel_writes(
             &variant.pipeline().dependencies,
             Some(&|slot| tables.bound_format(slot)),

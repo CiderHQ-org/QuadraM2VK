@@ -30,9 +30,10 @@
 //!   faces, and the `y` faces' are a near-equivalent (`CubeGradientFootprint`) the test prints.
 //!   MoltenVK's graphics route is measured on the M3 Max under macOS 26.7 and under macOS 27.0.1
 //!   (MoltenVK's device ID is the macOS release and the GPU family, which the M4 under macOS 27
-//!   shares); under any other, the fragment's pipeline is refused, naming the unmeasured deviation
-//!   `GraphicsCubeGradientRoute`. Elsewhere the sample is a near-equivalent
-//!   (`CubeGradientFootprint`) or refused; the test prints which.
+//!   shares); under any other the route is unmeasured, and the fragment takes Metal's level and taps
+//!   in the shader (`AnisotropicFilter`): its pipeline is made, and the test prints its samples.
+//!   Elsewhere the sample is a near-equivalent (`CubeGradientFootprint`); the test prints it, or
+//!   why its pipeline was not made.
 //! - **The `half` fused multiply-add** (`MetalHalfFma`): the committed cases of a probe
 //!   (`fmx_fma_precise`, `fmx_fma_fast`), whose half word is a `half` `fma` and a `half` `a * b +
 //!   c` that Metal fuses, over 300 triples whose `float` sum lands on a `half` midpoint, 200 where

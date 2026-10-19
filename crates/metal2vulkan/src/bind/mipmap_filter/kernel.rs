@@ -1002,7 +1002,7 @@ fn recovered(
 /// subnormal half's value and sign, an infinity, and a NaN as a quiet NaN with the top ten bits
 /// of its mantissa (`fetch.rs`). `b` holds a half's value: a smaller one reads as the zero of
 /// its sign, a larger one as no value.
-fn half_bits(f: &mut FunctionBuilder<'_>, b: Value) -> BResult<Value> {
+pub(crate) fn half_bits(f: &mut FunctionBuilder<'_>, b: Value) -> BResult<Value> {
     let sign = bink(f, BinOp::ShiftRightLogical, b, 16)?;
     let sign = bink(f, BinOp::BitwiseAnd, sign, 0x8000)?;
     let e = bink(f, BinOp::ShiftRightLogical, b, 23)?;

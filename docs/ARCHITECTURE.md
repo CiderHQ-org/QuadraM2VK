@@ -67,7 +67,7 @@ rest is `crates/metal2vulkan/src/`.
 | `graph` | The shared RPO, dominator tree, loop forest and SCC |
 | `budget` | `Budget`, `CancelToken`, and the per-attempt `Meter`: deadline, cancellation, work units, the byte ledger and every structural cap |
 | `memory/` | Pointer provenance, the `MemoryPlan`, leaf access emitters, arenas, root and handle lookups, word composition, atomics |
-| `lower/` | `select` (routing every instruction, intrinsic and parameter into the `Plan`), `strategy`, `push` (push-constant placement), `estimate` (output size), `specialized` (bound-texture values read as push data), and one module per family: `arith`, `access`, `texture`, `sampler`, `simd`, `sync`, `fragment`, `stage_io`, `dispatch`, `tessellation`, `mesh`, `raytracing` |
+| `lower/` | `select` (routing every instruction, intrinsic and parameter into the `Plan`), `strategy`, `push` (push-constant placement), `estimate` (output size), `specialized` (the bound-texture and pass-extent values read as push data), and one module per family: `arith`, `access`, `texture`, `sampler`, `simd`, `sync`, `fragment`, `stage_io`, `dispatch`, `tessellation`, `mesh`, `raytracing` |
 | `structurize/` | The structurizer over the AIR CFG, the emit walk that drives the families, and single-store promotion |
 | `spirv/` | The typed SPIR-V IR and interners, the module and function builders, dead-value removal, the roll pass, the verifier, requirement derivation and the serializer. `spirv::interp` is a CPU interpreter used only by tests |
 | `spv.rs` | The SPIR-V grammar's opcodes and enumerants the translator names, generated from Khronos's grammar (`scripts/regen-spirv-grammar/`) |

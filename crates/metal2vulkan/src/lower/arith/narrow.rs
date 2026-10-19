@@ -18,8 +18,8 @@
 //! for 16 bits, and the modes the device's independence ties to them), it is that conversion and
 //! its widening, each decorated `NoContraction`, in an entry declaring those modes
 //! ([`QuantizeForm::Controlled`], [`controlled_modes`]): exact on every such device whose driver
-//! keeps the pair (not NVIDIA's, `DriverWorkaround::HalfConversionPairFolded`), under either
-//! policy, with no fact and no note. Elsewhere, under native half rounding
+//! keeps the pair and gives a NaN Metal's bits through it (not NVIDIA's,
+//! `DriverWorkaround::HalfConversionPairFolded`), under either policy, with no fact and no note. Elsewhere, under native half rounding
 //! (`HalfRoundingPolicy::Native`, the default), the module takes the same forms though neither is
 //! measured to be Metal's: the conversion where the profile has `shaderFloat16`, else the quantize,
 //! recording `PrecisionNote::NativeHalfConversion` or `NativeHalfQuantize` instead of requiring a
@@ -52,7 +52,7 @@
 //! ([`bf16_fma`]), so the final rounding is the only one that counts.
 
 use crate::budget::Meter;
-use crate::device::profile::{DriverWorkaround, HalfRoundingRoute, Independence};
+use crate::device::profile::{DriverWorkaround, FloatControls, HalfRoundingRoute, Independence};
 use crate::device::DeviceProfile;
 use crate::error::{DriverDeviation, Error};
 use crate::lower::arith::legal::{FloatFmt, Form, Held};
@@ -309,7 +309,8 @@ fn converted(fb: &mut FunctionBuilder<'_>, wide: Form, x: Value) -> BResult<Valu
 /// `x` (`f32` lanes of form `wide`) rounded to `half` by the device's conversion to 16 bits and
 /// its widening, each an `OpFConvert` decorated `NoContraction` ([`QuantizeForm::Controlled`]),
 /// in an entry that declares [`controlled_modes`]: Metal's `half(float)` on every `f32` by the
-/// Vulkan spec. `NoContraction` keeps the pair: on a float operation without it Vulkan assumes
+/// Vulkan spec but for a NaN's bits, which the spec leaves to the device and a profile without
+/// `DriverWorkaround::HalfConversionPairFolded` has as Metal's. `NoContraction` keeps the pair: on a float operation without it Vulkan assumes
 /// `AllowTransform`, under which Mesa's compiler folds the widening of a narrowing into nothing and
 /// hands `x` on unrounded. Two instructions where the device's quantize with its denormal arm takes
 /// five, which ANV's compiler lowers to eleven a lane.
@@ -325,7 +326,7 @@ fn controlled(fb: &mut FunctionBuilder<'_>, wide: Form, x: Value) -> BResult<Val
 }
 
 /// The execution modes an entry that rounds to `half` in [`QuantizeForm::Controlled`] declares on
-/// profile `p`, or `None` where the profile lacks one or its driver folds the pair
+/// profile `p`, or `None` where the profile lacks one or its driver's pair is not Metal's
 /// (`DriverWorkaround::HalfConversionPairFolded`): `RoundingModeRTE`, `DenormPreserve` and
 /// `SignedZeroInfNanPreserve` for 16 bits, which make an `OpFConvert` from 32 to 16 bits Metal's
 /// `half(float)`. The Vulkan spec ("Precision and Operation of SPIR-V Instructions"): conversions
@@ -346,7 +347,14 @@ pub fn controlled_modes(p: &DeviceProfile) -> Option<Vec<ExecMode>> {
     {
         return None;
     }
-    let fc = p.fields().float_controls;
+    controlled_modes_of(&p.fields().float_controls)
+}
+
+/// The execution modes of [`controlled_modes`] that the float controls `fc` allow, whatever the
+/// driver's workarounds: the modes the device's check of `DriverWorkaround::HalfConversionPairFolded`
+/// declares (`bind::device_checks`), or `None` where `fc` lacks one.
+pub fn controlled_modes_of(fc: &FloatControls) -> Option<Vec<ExecMode>> {
+    let fc = *fc;
     let half = fc.f16;
     if !(half.rounding_rte && half.denorm_preserve && half.signed_zero_inf_nan_preserve) {
         return None;

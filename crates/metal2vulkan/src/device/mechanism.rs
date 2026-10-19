@@ -102,8 +102,8 @@ pub fn mechanism(fact: &RuntimeFact, profile: &DeviceProfile) -> Mechanism {
         RuntimeFact::UniformViewAliasing { .. } => Mechanism::PlanTimeCheck,
         // The pass's imageblock storage image, bound to every draw of the pass.
         RuntimeFact::FragmentImageblock { .. } => Mechanism::RenderPassContract,
-        // The render area is specialized; the planner refuses a layered pass.
-        RuntimeFact::TileFunction => Mechanism::Specialization,
+        // The binder pushes the render area; the planner refuses a layered pass.
+        RuntimeFact::TileFunction => Mechanism::PushConstant,
         // Compiled in under the function's key; the tile pipeline checks its descriptor.
         RuntimeFact::TileAttachmentFormat { .. } => Mechanism::KeyProjection,
         // The binder specializes the alpha from the bound texture's pixel format.
@@ -161,7 +161,8 @@ pub fn mechanism(fact: &RuntimeFact, profile: &DeviceProfile) -> Mechanism {
         // at a slot updated atomically the planner refuses one.
         RuntimeFact::SparseTextureWrites { atomic: false, .. } => Mechanism::Specialization,
         RuntimeFact::SparseTextureWrites { atomic: true, .. } => Mechanism::PlanTimeCheck,
-        // The offsets and the tile memory are specialized; the pass binds its tile memory.
+        // The offsets and the tile memory's length are specialized and the tiles across the pass
+        // pushed; the pass binds its tile memory.
         RuntimeFact::TileThreadgroupMemory { .. } => Mechanism::Specialization,
         // The binder checks the object function's arena with the encoder's lengths, which it
         // specializes, against the object stage's workgroup memory limit.

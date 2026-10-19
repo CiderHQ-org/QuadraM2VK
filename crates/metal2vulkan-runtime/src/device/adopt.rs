@@ -4,10 +4,12 @@
 //! function pointers through the consumer's `vkGetInstanceProcAddr`, reads the physical device
 //! into a description, restricts it to the [`EnableSet`] the consumer enabled, and builds its
 //! compile device from that. Dropping the runtime device destroys only what the runtime made
-//! from the device (its pools, memory and objects); the instance and the `VkDevice` stay the
-//! consumer's.
+//! from the device (its pools, memory and objects), all of it before the drop of its last handle
+//! returns, a check its checks thread is running included; the instance and the `VkDevice` stay
+//! the consumer's.
 
 use super::{device_error, Device, InstanceShared, Parts};
+use crate::device_checks::DeviceChecksOptions;
 use crate::error::Error;
 use crate::gpu_time;
 use crate::image_barrier::MemoryReads;
@@ -57,6 +59,13 @@ pub struct RawDevice {
     /// Where the device keeps translated shaders: by default, the platform's per-user cache
     /// directory.
     pub shader_cache: ShaderCacheOptions,
+    /// Where the device keeps what its checks of its driver found, as
+    /// [`DeviceOptions::device_checks`](crate::DeviceOptions::device_checks) says: by default the
+    /// platform's per-user cache directory's `metal2vulkan-device-checks`. Where none of its setup
+    /// are kept, the checks run on its queue: those of `Settle::AtCreation` as the device is
+    /// adopted, the rest on its checks thread after (under the queue's lock, as every use of it
+    /// by the runtime), unless `wait` asks for all at adoption.
+    pub device_checks: DeviceChecksOptions,
     /// The sparse members of the core features the consumer enabled (`sparseBinding`,
     /// `sparseResidencyImage2D`, `sparseResidencyImage3D`, `sparseResidency2Samples` to
     /// `16Samples`; every other member is ignored), outside the compile layer's vocabulary: the
@@ -97,6 +106,10 @@ pub struct RawDevice {
     /// [`DeviceOptions::metal_level`](crate::DeviceOptions::metal_level) says: `None` by default,
     /// the host's.
     pub metal_level: Option<crate::MetalLevel>,
+    /// Encode every render encoder at the program's call, with no resolver thread, as
+    /// [`DeviceOptions::encode_at_the_call`](crate::DeviceOptions::encode_at_the_call) says:
+    /// false by default.
+    pub encode_at_the_call: bool,
 }
 
 impl RawDevice {
@@ -121,12 +134,14 @@ impl RawDevice {
             enabled,
             device_extensions: Vec::new(),
             shader_cache: ShaderCacheOptions::default(),
+            device_checks: DeviceChecksOptions::default(),
             sparse_features: SparseFeatures::default(),
             view_format_reinterpretation: false,
             host_image_copy: false,
             gpu_times_from_host: false,
             announce_each: BTreeSet::new(),
             metal_level: None,
+            encode_at_the_call: false,
         }
     }
 }
@@ -164,7 +179,7 @@ impl Device {
     /// - The device's first word is still the one the loader wrote (no driver has overwritten
     ///   it).
     /// - The consumer does not use the queue, or any object the runtime makes, concurrently
-    ///   with the runtime.
+    ///   with the runtime, nor the queue while this runs (the device's checks submit to it).
     pub unsafe fn from_raw(raw: RawDevice, policy: DevicePolicy) -> Result<Device, Error> {
         let cache = CacheSetup::of(&raw.shader_cache, "from_raw")?;
         let metal_level = choose(raw.metal_level, Host::this(), "from_raw")?;
@@ -199,6 +214,27 @@ impl Device {
             loader_word.restore();
             ash::Device::load(instance.fp_v1_0(), raw.device)
         };
+        // The device's own checks of its driver, on its queue, before any object the runtime
+        // makes (`device_checks`): their answers go to the description, and the compile device is
+        // made again from it.
+        let settled = {
+            let making = crate::device_checks::Making {
+                instance: &instance,
+                device: &device,
+                loader_word: &loader_word,
+                queue: (raw.queue_family, raw.queue_index),
+            };
+            let target = crate::device_checks::Target {
+                physical: raw.physical_device,
+                description: &enabled,
+                enabled: &raw.enabled,
+                compile: &compile,
+            };
+            // SAFETY: the caller's contract: the device was made on the physical device with
+            // `raw.enabled` and the queue, which the consumer does not use meanwhile.
+            unsafe { crate::device_checks::settle(&making, &target, &raw.device_checks, policy) }
+        };
+        let (compile, enabled) = super::create::checked(compile, enabled, settled.checks, policy)?;
         // The vocabulary does not say whether a portability subset's
         // `imageViewFormatReinterpretation` was enabled: the consumer says so beside it, and a
         // device with the subset whose consumer does not reinterprets nothing.
@@ -276,6 +312,8 @@ impl Device {
             gpu_times_from_host: raw.gpu_times_from_host,
             // An adopted device keeps no execution record: validation makes its own devices.
             record_executions: false,
+            answer_untaught: false,
+            encode_at_the_call: raw.encode_at_the_call,
             announce_each: raw.announce_each,
             view_reinterpretation,
             generated_commands: false,
@@ -287,6 +325,9 @@ impl Device {
             owned: false,
             cache,
             metal_level,
+            checks: settled.run,
+            learned: settled.learned,
+            pending_checks: settled.pending,
         };
         // SAFETY: the caller's contract.
         unsafe { Device::assemble(parts) }
