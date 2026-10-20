@@ -34,19 +34,27 @@
 //!   completed (they hold it), so no GPU work reaches it. Not an image of a shareable texture, one
 //!   that took its storage form, one presenting a stand-in, or one whose memory is not its
 //!   placement alone; not a heap's buffer, nor a buffer of the caller's or over host pages.
+//! - **Which.** A take hands out the latest parked object of its making, found through a map of
+//!   each making's parked objects (a hash of the making, not a search of every parked one).
 //! - **Bounded.** At most [`IMAGES`]' and [`BUFFERS`]' count and bytes parked, and none parked
-//!   longer than their time: past them the one parked earliest goes, as it went before (destroyed,
-//!   its memory freed). The memory a parked image or buffer holds is the runtime's, never a
-//!   program object's: no deallocator, range or use count waits on it. Counted:
-//!   `WorkCounts::object_churn` (`images_recycled`, `buffers_parked`, ...). A build of
-//!   `--cfg m2v_no_recycle` parks nothing, the control that measures what recycling changes.
+//!   longer than their time: one parked longer goes, as it went before (destroyed, its memory
+//!   freed). Past the count or bytes, the one parked earliest goes of those no take has handed out
+//!   before; one a take has handed out (its making came again while it was parked, as a frame's
+//!   textures of the same shapes do every frame) goes first only where such hold more than three
+//!   quarters of the count or bytes, or no other is parked. So a run of makings that never come
+//!   again (a window resized frame by frame) evicts its own, not the objects each frame takes,
+//!   and those still leave a quarter of the bounds to makings new to them. The memory a parked
+//!   image or buffer holds is the runtime's, never a program object's: no deallocator, range or
+//!   use count waits on it. Counted: `WorkCounts::object_churn` (`images_recycled`,
+//!   `buffers_parked`, `images_evicted`, ...). A build of `--cfg m2v_no_recycle` parks nothing,
+//!   the control that measures what recycling changes.
 
 use super::memory::{Memory, MemoryClass, Placement};
 use crate::image_plan::ImagePlan;
 use crate::key_hash::KeyMap;
 use crate::release::{self, Released};
 use metal2vulkan::metal::TextureType;
-use std::collections::VecDeque;
+use std::collections::BTreeMap;
 use std::hash::Hash;
 use std::time::{Duration, Instant};
 
@@ -85,7 +93,7 @@ pub(crate) const BUFFERS: Bounds = Bounds {
 
 /// What fixes an image's making ([`Device::placed_image`](crate::Device)): its parameters and its
 /// placement's memory.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct ImageMaking {
     pub(crate) plan: ImagePlan,
     pub(crate) texture_type: TextureType,
@@ -96,7 +104,7 @@ pub(crate) struct ImageMaking {
 
 /// What fixes a buffer's making (`Device::placed_new_buffer`): its size (padded) and the memory
 /// class it lies in.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct BufferMaking {
     pub(crate) size: u64,
     pub(crate) class: MemoryClass,
@@ -110,51 +118,127 @@ struct Parked<R, M> {
     since: Instant,
 }
 
+/// A live object's making, and whether a take handed it out (its making came again while it was
+/// parked).
+struct Live<M> {
+    making: M,
+    taken: bool,
+}
+
+/// Parked objects of one standing, keyed by the order they were parked in, and their memory.
+struct Segment<R, M> {
+    parked: BTreeMap<u64, Parked<R, M>>,
+    bytes: u64,
+}
+
+impl<R, M> Segment<R, M> {
+    fn new() -> Self {
+        Segment {
+            parked: BTreeMap::new(),
+            bytes: 0,
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.parked.len()
+    }
+
+    fn put(&mut self, order: u64, parked: Parked<R, M>) {
+        self.bytes += parked.placement.size();
+        self.parked.insert(order, parked);
+    }
+
+    fn remove(&mut self, order: u64) -> Option<Parked<R, M>> {
+        let parked = self.parked.remove(&order)?;
+        self.bytes -= parked.placement.size();
+        Some(parked)
+    }
+
+    /// The one parked earliest, out of the segment, where it was parked at least `parked_for`
+    /// before `now` (`None` for no such limit).
+    fn pop_first(&mut self, stale: Option<(Instant, Duration)>) -> Option<(u64, Parked<R, M>)> {
+        let (_, first) = self.parked.first_key_value()?;
+        let kept = stale.is_some_and(|(now, parked_for)| {
+            now.saturating_duration_since(first.since) < parked_for
+        });
+        if kept {
+            return None;
+        }
+        let (order, parked) = self.parked.pop_first()?;
+        self.bytes -= parked.placement.size();
+        Some((order, parked))
+    }
+}
+
 /// A device's parked objects of one kind (`R`, made as `M` says), and the makings of its live
 /// recyclable ones.
 pub(crate) struct Recycler<R, M> {
     bounds: Bounds,
     /// Each live object made or handed out, by its handle.
-    live: KeyMap<R, M>,
-    /// Parked objects, the earliest first.
-    parked: VecDeque<Parked<R, M>>,
-    /// Their memory.
-    bytes: u64,
+    live: KeyMap<R, Live<M>>,
+    /// Parked objects no take handed out before.
+    trial: Segment<R, M>,
+    /// Parked objects a take handed out before.
+    proven: Segment<R, M>,
+    /// The orders of each making's parked objects, the earliest first.
+    index: KeyMap<M, Vec<u64>>,
+    /// The order the next parked object takes.
+    order: u64,
 }
 
 /// What a recycler hands back for destruction: objects it no longer keeps.
 pub(crate) type Gone<R> = Vec<(R, Placement)>;
 
-impl<R: Copy + Eq + Hash, M: PartialEq> Recycler<R, M> {
+impl<R: Copy + Eq + Hash, M: Clone + Eq + Hash> Recycler<R, M> {
     /// A recycler that parks within `bounds`.
     pub(crate) fn new(bounds: Bounds) -> Self {
         Recycler {
             bounds,
             live: KeyMap::default(),
-            parked: VecDeque::new(),
-            bytes: 0,
+            trial: Segment::new(),
+            proven: Segment::new(),
+            index: KeyMap::default(),
+            order: 0,
         }
     }
 
     /// A parked object of `making`, the latest parked such, now live; and the objects that stayed
     /// parked past the bounds' time at `now`, to destroy.
     pub(crate) fn take(&mut self, making: &M, now: Instant) -> (Option<(R, Placement)>, Gone<R>) {
-        let taken = self
-            .parked
-            .iter()
-            .rposition(|parked| parked.making == *making)
-            .and_then(|at| self.parked.remove(at))
-            .map(|parked| {
-                self.bytes -= parked.placement.size();
-                self.live.insert(parked.raw, parked.making);
-                (parked.raw, parked.placement)
-            });
+        let taken = self.latest(making).map(|parked| {
+            self.live.insert(
+                parked.raw,
+                Live {
+                    making: parked.making,
+                    taken: true,
+                },
+            );
+            (parked.raw, parked.placement)
+        });
         (taken, self.stale(now))
+    }
+
+    /// The latest parked object of `making`, out of the recycler.
+    fn latest(&mut self, making: &M) -> Option<Parked<R, M>> {
+        let orders = self.index.get_mut(making)?;
+        let order = orders.pop()?;
+        if orders.is_empty() {
+            self.index.remove(making);
+        }
+        self.trial
+            .remove(order)
+            .or_else(|| self.proven.remove(order))
     }
 
     /// `raw`, made for `making`, is live.
     pub(crate) fn made(&mut self, raw: R, making: M) {
-        self.live.insert(raw, making);
+        self.live.insert(
+            raw,
+            Live {
+                making,
+                taken: false,
+            },
+        );
     }
 
     /// Whether `raw` is a live object this recycler may park.
@@ -170,23 +254,35 @@ impl<R: Copy + Eq + Hash, M: PartialEq> Recycler<R, M> {
         placement: Placement,
         now: Instant,
     ) -> Result<Gone<R>, (R, Placement)> {
-        let Some(making) = self.live.remove(&raw) else {
+        let Some(Live { making, taken }) = self.live.remove(&raw) else {
             return Err((raw, placement));
         };
-        self.bytes += placement.size();
-        self.parked.push_back(Parked {
+        let order = self.order;
+        self.order += 1;
+        match self.index.get_mut(&making) {
+            Some(orders) => orders.push(order),
+            None => {
+                self.index.insert(making.clone(), vec![order]);
+            }
+        }
+        let parked = Parked {
             making,
             raw,
             placement,
             since: now,
-        });
+        };
+        match taken {
+            true => self.proven.put(order, parked),
+            false => self.trial.put(order, parked),
+        }
         let mut gone = self.stale(now);
-        while self.parked.len() > self.bounds.most || self.bytes > self.bounds.most_bytes {
-            let Some(oldest) = self.parked.pop_front() else {
+        while self.trial.len() + self.proven.len() > self.bounds.most
+            || self.trial.bytes + self.proven.bytes > self.bounds.most_bytes
+        {
+            let Some(evicted) = self.evict() else {
                 break;
             };
-            self.bytes -= oldest.placement.size();
-            gone.push((oldest.raw, oldest.placement));
+            gone.push(evicted);
         }
         Ok(gone)
     }
@@ -196,32 +292,54 @@ impl<R: Copy + Eq + Hash, M: PartialEq> Recycler<R, M> {
         self.live.remove(&raw);
     }
 
+    /// The object that goes to keep the bounds, out of the recycler: the earliest parked trial
+    /// one, or the earliest parked proven one where the proven hold more than three quarters of
+    /// the bounds' count or bytes, or no trial one is parked.
+    fn evict(&mut self) -> Option<(R, Placement)> {
+        let over_share = self.proven.len() * 4 > self.bounds.most * 3
+            || self.proven.bytes * 4 > self.bounds.most_bytes * 3;
+        let segment = match over_share || self.trial.parked.is_empty() {
+            true => &mut self.proven,
+            false => &mut self.trial,
+        };
+        let (order, parked) = segment.pop_first(None)?;
+        Some(self.unindexed(order, parked))
+    }
+
     /// The objects parked longer than the bounds' time at `now`, out of the recycler.
     fn stale(&mut self, now: Instant) -> Gone<R> {
+        let stale = Some((now, self.bounds.parked_for));
         let mut gone = Gone::new();
-        while let Some(oldest) = self.parked.front() {
-            if now.saturating_duration_since(oldest.since) < self.bounds.parked_for {
-                break;
-            }
-            let Some(oldest) = self.parked.pop_front() else {
-                break;
-            };
-            self.bytes -= oldest.placement.size();
-            gone.push((oldest.raw, oldest.placement));
+        while let Some((order, parked)) = self.trial.pop_first(stale) {
+            gone.push(self.unindexed(order, parked));
+        }
+        while let Some((order, parked)) = self.proven.pop_first(stale) {
+            gone.push(self.unindexed(order, parked));
         }
         gone
     }
+
+    /// `parked`, out of a segment at `order`, out of the index too.
+    fn unindexed(&mut self, order: u64, parked: Parked<R, M>) -> (R, Placement) {
+        if let Some(orders) = self.index.get_mut(&parked.making) {
+            orders.retain(|&kept| kept != order);
+            if orders.is_empty() {
+                self.index.remove(&parked.making);
+            }
+        }
+        (parked.raw, parked.placement)
+    }
 }
 
-impl<R: Copy + Eq + Hash + Released, M: PartialEq> Recycler<R, M> {
+impl<R: Released, M> Recycler<R, M> {
     /// Every parked object, destroyed and its memory freed, as the device goes.
     pub(crate) fn destroy(&mut self, device: &ash::Device, memory: &mut Memory) {
-        self.bytes = 0;
-        destroy(
-            device,
-            memory,
-            self.parked.drain(..).map(|p| (p.raw, p.placement)),
-        );
+        self.index.clear();
+        for segment in [&mut self.trial, &mut self.proven] {
+            segment.bytes = 0;
+            let parked = std::iter::from_fn(|| segment.parked.pop_first());
+            destroy(device, memory, parked.map(|(_, p)| (p.raw, p.placement)));
+        }
     }
 }
 

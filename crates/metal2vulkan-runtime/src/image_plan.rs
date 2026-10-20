@@ -270,7 +270,7 @@ impl ImageRefusal {
 }
 
 /// A texture's Vulkan image on one device.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(super) struct ImagePlan {
     /// The texture's pixel format.
     pub(super) pixel_format: PixelFormat,

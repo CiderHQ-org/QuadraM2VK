@@ -79,7 +79,7 @@ pub(super) const KEPT_EMPTY_FOR: Duration = Duration::from_secs(1);
 const LOGGED_PLACEMENT_BYTES: u64 = 4 << 20;
 
 /// What memory a resource needs.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(super) enum MemoryClass {
     /// Host-visible and coherent memory the host reads as well as writes (`Shared` storage of
     /// the default CPU cache mode, staging for the host's reads and writes): host-cached where the

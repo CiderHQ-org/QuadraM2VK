@@ -10,6 +10,12 @@
 //! - **Each frame's textures, recycled.** Eight such textures made, cleared and released each of
 //!   sixty frames take parked images from the second frame on: no image made after the first
 //!   frame's, and none parked past the bounds.
+//! - **A burst of one-off makings keeps the proven image.** A texture of the descriptor made,
+//!   cleared and released, made again from the parked image (its making came again), cleared and
+//!   released; then more textures of one-off widths than the bounds keep, each made and released,
+//!   which evicts some; then a texture of the descriptor: it takes the proven making's image (the
+//!   same `VkImage`), which none of the one-offs evicted, and reads what a new texture reads
+//!   (handed over from `UNDEFINED`, its first move written), never the colour.
 //! - **A recycled buffer reads zero.** A `Private` and a `Shared` buffer, filled with a byte and
 //!   released, then a buffer of the same length and options: it takes the parked buffer
 //!   (`buffers_recycled`) and reads zero, as every new Metal buffer does (native Metal on the M3
@@ -175,6 +181,62 @@ fn each_frames_textures_take_parked_images() {
         recycled,
         (FRAMES - 1) * TEXTURES,
         "every frame after the first recycles"
+    );
+}
+
+#[test]
+fn a_burst_of_one_off_makings_keeps_the_proven_image() {
+    let scratch = Scratch::new("recycle-burst");
+    let device = device(&scratch.0);
+    let queue = device.new_command_queue().unwrap();
+    const ONE_OFF: u64 = 64;
+    let first = device.new_texture(&descriptor()).unwrap();
+    let fresh = read(&device, &queue, &first);
+    clear(&queue, &first);
+    let start = device.work_counts().object_churn;
+    drop(first);
+    parked_at_least(&device, start.images_parked + 1);
+    // The making comes again: the image a take hands out is a proven one as it goes back.
+    let second = device.new_texture(&descriptor()).unwrap();
+    let proven = second.raw_image().unwrap();
+    clear(&queue, &second);
+    drop(second);
+    parked_at_least(&device, start.images_parked + 2);
+    let before = device.work_counts().object_churn;
+    assert_eq!(before.images_recycled - start.images_recycled, 1);
+    // One-off widths, each made and released: more than the recycler keeps.
+    for width in 1..=ONE_OFF {
+        let mut one_off = descriptor();
+        one_off.width = SIDE + width;
+        drop(device.new_texture(&one_off).unwrap());
+    }
+    parked_at_least(&device, before.images_parked + ONE_OFF);
+    let burst = device.work_counts().object_churn;
+    assert_eq!(burst.images_recycled, before.images_recycled);
+    assert!(
+        burst.images_evicted > before.images_evicted,
+        "the one-offs went past the recycler's bounds"
+    );
+    let third = device.new_texture(&descriptor()).unwrap();
+    let after = device.work_counts().object_churn;
+    assert_eq!(
+        after.images_recycled - burst.images_recycled,
+        1,
+        "the texture took a parked image"
+    );
+    assert_eq!(
+        third.raw_image().unwrap(),
+        proven,
+        "the proven making's parked image outlasted the burst"
+    );
+    assert_eq!(
+        read(&device, &queue, &third),
+        fresh,
+        "the recycled texture reads what a new one reads, not the old texels"
+    );
+    eprintln!(
+        "RECYCLE: a burst of {ONE_OFF} one-off makings: {} evicted, the proven image kept",
+        burst.images_evicted - before.images_evicted
     );
 }
 
