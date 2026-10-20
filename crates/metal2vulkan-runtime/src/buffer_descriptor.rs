@@ -457,6 +457,9 @@ impl Device {
         let shares = (!of_heap)
             .then(|| shared.aliases.import(made_over, class))
             .flatten();
+        if shares.is_none() && !of_heap && shared.aliases.inside_live(made_over, class) {
+            shared.counts.churn.import_inside_live();
+        }
         if let Some(import) = shares {
             let address = self.place_window(placement, &window, length)?;
             let buffer =

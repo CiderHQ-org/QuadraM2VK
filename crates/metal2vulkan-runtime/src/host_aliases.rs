@@ -186,6 +186,29 @@ impl<I> HostAliases<I> {
             .find_map(|(_, import)| import.upgrade())
     }
 
+    /// Whether a live import of `class` was made over memory that holds all of `memory` and more
+    /// (`WorkCounts::object_churn.imports_inside_live`): a buffer over part of a live no-copy
+    /// buffer's bytes, which imports its own.
+    pub(super) fn inside_live(&self, memory: (u64, u64), class: MemoryClass) -> bool {
+        let inner = lock(&self.inner);
+        let end = memory.0.saturating_add(memory.1);
+        let found = inner
+            .memories
+            .overlapping(memory.0, end)
+            .filter(|&(start, length)| {
+                (start, length) != memory
+                    && start <= memory.0
+                    && end <= start.saturating_add(length)
+            })
+            .any(|at| {
+                inner.memories.get(at).is_some_and(|noted| {
+                    (noted.imports.iter())
+                        .any(|(made, import)| *made == class && import.strong_count() > 0)
+                })
+            });
+        found
+    }
+
     /// Note the buffer of `key`, made over `memory` (its first byte's host address and its
     /// length) and lying in `import`, of memory class `class`: it joins the memory a live buffer
     /// was made over, or its key becomes the memory's; later buffers of `class` over the memory
