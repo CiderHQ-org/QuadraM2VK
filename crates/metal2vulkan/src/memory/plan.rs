@@ -266,8 +266,8 @@ pub struct AllocaPlan {
 pub struct SharedPlan {
     pub global: GlobalId,
     pub ty: TypeId,
-    /// The variable's bytes of workgroup memory, an upper bound ([`super::alloca::TypedTy::held_bytes`]
-    /// rounded up to 16).
+    /// The variable's bytes of workgroup memory, an upper bound
+    /// ([`super::alloca::TypedTy::held_bytes`] rounded up to 16).
     pub bytes: u64,
 }
 
@@ -1375,10 +1375,10 @@ impl Planner<'_> {
     /// of its own type, each leaf in its held form (`memory::alloca`: a `half` in an `f32` that is
     /// always a `half` value), where every access of it is a plain load or store of exactly the
     /// subobject at its offset shape, its pointers merge with no other root, escape, are stored
-    /// or compared with another root's, and no atomic reaches it ([`RootUse`]). Its loads and stores
-    /// are then those of the held value, with no conversion to and from the `half` bits and no
-    /// sub-word merge of a word's other bytes, which the arena's two word atomics do: the value a
-    /// load returns is the one the last store stored, as in Metal's memory, NaN bits included.
+    /// or compared with another root's, and no atomic reaches it ([`RootUse`]). Its loads and
+    /// stores are then those of the held value, with no conversion to and from the `half` bits and
+    /// no sub-word merge of a word's other bytes, which the arena's two word atomics do: the value
+    /// a load returns is the one the last store stored, as in Metal's memory, NaN bits included.
     ///
     /// Only a kernel's static objects, without `[[threadgroup(n)]]` regions or an imageblock: Metal
     /// reports its static length (`tg_metal_static`), and the encoder's lengths must fit beside
@@ -1469,9 +1469,10 @@ impl Planner<'_> {
         Ok((arena, typed))
     }
 
-    /// Whether the entry's static threadgroup globals may be typed ([`Planner::typed_threadgroup`]):
-    /// a kernel without `[[threadgroup(n)]]` regions or an imageblock, none of whose threadgroup
-    /// pointers (values or constants) may have the dynamic root.
+    /// Whether the entry's static threadgroup globals may be typed
+    /// ([`Planner::typed_threadgroup`]): a kernel without `[[threadgroup(n)]]` regions or an
+    /// imageblock, none of whose threadgroup pointers (values or constants) may have the dynamic
+    /// root.
     fn threadgroup_typable(&self, m: &mut Meter) -> Result<bool, Error> {
         if !matches!(self.e.ep.stage, crate::air::abi::Stage::Kernel { .. }) {
             return Ok(false);
