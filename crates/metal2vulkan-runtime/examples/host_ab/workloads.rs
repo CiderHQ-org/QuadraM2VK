@@ -3,6 +3,7 @@
 //! and the sample count, tab-separated.
 
 use crate::gpu::{Format, Gpu};
+use std::path::Path;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -85,6 +86,8 @@ const FEATURES: [&str; 9] = [
     "k_threadgroup_half",
 ];
 const HEAVY_THREADS: usize = 256;
+/// The heavy and feature kernels' output: one `float4` per thread.
+const HEAVY_OUT_BYTES: usize = HEAVY_GROUPS * HEAVY_THREADS * 16;
 
 /// What the workloads draw and dispatch with, made once per process.
 pub struct Scene<G: Gpu> {
@@ -228,8 +231,8 @@ impl<G: Gpu> Scene<G> {
             kernel_params: g.buffer_with(&params_bytes(sizes.heavy_iterations * 16)),
             tiny_out: g.buffer(RECTS * RECT_STRIDE),
             tiny_values: g.buffer_with(&vec![1u8; RECTS * RECT_STRIDE]),
-            heavy_out: g.buffer(HEAVY_GROUPS * HEAVY_THREADS * 16),
-            heavy_in: g.buffer_with(&vec![0x3c; HEAVY_GROUPS * HEAVY_THREADS * 16]),
+            heavy_out: g.buffer(HEAVY_OUT_BYTES),
+            heavy_in: g.buffer_with(&vec![0x3c; HEAVY_OUT_BYTES]),
             fill: g.buffer(4096),
         }
     }
@@ -579,8 +582,8 @@ pub fn latency<G: Gpu>(g: &G, s: &Scene<G>, sizes: &Sizes) {
 
 /// GPU time of the heavy shaders and the feature kernels, one command buffer in flight: from the
 /// commit until the wait returned, and `GPUEndTime - GPUStartTime` where the side measures it on
-/// the GPU.
-pub fn gpu<G: Gpu>(g: &G, s: &Scene<G>, sizes: &Sizes) {
+/// the GPU. With `outputs`, each kernel's output after its last run goes to `<outputs>/<name>.bin`.
+pub fn gpu<G: Gpu>(g: &G, s: &Scene<G>, sizes: &Sizes, outputs: Option<&Path>) {
     let run = |name: &str, encode: &dyn Fn(&G::CommandBuffer)| {
         let (mut wall, mut times) = (vec![], vec![]);
         for run in 0..sizes.heavy_runs + 3 {
@@ -604,6 +607,13 @@ pub fn gpu<G: Gpu>(g: &G, s: &Scene<G>, sizes: &Sizes) {
             emit("gpu", &format!("{name}_gpu_time"), "ms", &mut times);
         }
     };
+    let keep = |name: &str| {
+        if let Some(dir) = outputs {
+            let mut bytes = vec![0u8; HEAVY_OUT_BYTES];
+            g.read_buffer(&s.heavy_out, &mut bytes);
+            std::fs::write(dir.join(format!("{name}.bin")), bytes).expect("write an output");
+        }
+    };
     run("heavy_fragment", &|command_buffer| {
         let mut encoder = g.render_encoder(command_buffer, &s.heavy_target, true);
         g.set_render_pipeline(&mut encoder, &s.heavy_fragment);
@@ -623,6 +633,7 @@ pub fn gpu<G: Gpu>(g: &G, s: &Scene<G>, sizes: &Sizes) {
         g.dispatch(&mut encoder, HEAVY_GROUPS, HEAVY_THREADS);
         g.end_compute(encoder);
     });
+    keep("heavy_kernel");
     for (name, state) in &s.features {
         run(name, &|command_buffer| {
             let mut encoder = g.compute_encoder(command_buffer);
@@ -634,6 +645,7 @@ pub fn gpu<G: Gpu>(g: &G, s: &Scene<G>, sizes: &Sizes) {
             g.dispatch(&mut encoder, HEAVY_GROUPS, HEAVY_THREADS);
             g.end_compute(encoder);
         });
+        keep(name);
     }
 }
 

@@ -108,6 +108,8 @@ pub trait Gpu {
         bytes: &mut [u8],
         row: usize,
     );
+    /// The first `bytes.len()` bytes of a `Shared` buffer's `contents`, no GPU work writing them.
+    fn read_buffer(&self, buffer: &Self::Buffer, bytes: &mut [u8]);
     /// `newSamplerStateWithDescriptor:`, nearest or linear.
     fn sampler(&self, linear: bool) -> Self::Sampler;
 

@@ -33,7 +33,8 @@
 //!   the fragment's loop, and 16 times it the kernel's. Then each feature kernel (`k_*`, one
 //!   feature of the heavy kernel each: fma, sin, half, constant buffer, device buffer, texture
 //!   read as `half` and as `float`, threadgroup float, threadgroup half) on the kernel's grid
-//!   and loop.
+//!   and loop. With both sides, each round also compares every kernel's output buffer after its
+//!   last run between the sides, and the last table counts the 32-bit words that differ.
 //! - `latency_split` (with `latency`): the same command buffers' host-clock timeline, commit to
 //!   `kernelStartTime` to `kernelEndTime` to `GPUStartTime` to `GPUEndTime` to the wait's return.
 //!   The runtime's GPU times on MoltenVK are the host's (its docs): its GPU start is its kernel
@@ -108,6 +109,8 @@ struct Options {
     scratch: Option<PathBuf>,
     metallib: Option<PathBuf>,
     cache: Option<PathBuf>,
+    /// Where a side writes the gpu workload's kernel outputs (`--outputs`).
+    outputs: Option<PathBuf>,
     /// The encode workload's variants to run (`--variants`); all when empty.
     variants: Vec<String>,
     /// Arguments passed on to each child.
@@ -130,6 +133,7 @@ fn options() -> Options {
         scratch: None,
         metallib: None,
         cache: None,
+        outputs: None,
         variants: vec![],
         passed: vec![],
     };
@@ -160,6 +164,7 @@ fn options() -> Options {
             "--scratch" => options.scratch = Some(PathBuf::from(value())),
             "--metallib" => options.metallib = Some(PathBuf::from(value())),
             "--cache" => options.cache = Some(PathBuf::from(value())),
+            "--outputs" => options.outputs = Some(PathBuf::from(value())),
             "--variants" => {
                 let v = value();
                 options.variants = v.split(',').map(str::to_owned).collect();
@@ -277,7 +282,7 @@ fn run<G: Gpu>(g: &G, opened: Instant, metallib: &Path, options: &Options) {
             "encode" => workloads::encode(g, &scene, sizes, &options.variants),
             "fixed" => workloads::fixed(g, &scene, sizes),
             "latency" => workloads::latency(g, &scene, sizes),
-            "gpu" => workloads::gpu(g, &scene, sizes),
+            "gpu" => workloads::gpu(g, &scene, sizes, options.outputs.as_deref()),
             "memory" => workloads::memory(g, sizes),
             "frame" => workloads::frame(g, &scene, sizes),
             "many_draws" => workloads::many_draws(g, &library, sizes),
@@ -317,14 +322,26 @@ fn compile(scratch: &Path, nonce: u64) -> PathBuf {
 /// One side's results: (workload, metric) to (unit, median).
 type Results = BTreeMap<(String, String), (String, f64)>;
 
-/// Run this binary as one side and collect its result lines.
-fn spawn(side: &str, metallib: &Path, cache: &Path, only: &[&str], options: &Options) -> Results {
-    let output = Command::new(std::env::current_exe().expect("this executable"))
+/// Run this binary as one side and collect its result lines; with `outputs`, the side writes its
+/// kernel outputs there.
+fn spawn(
+    side: &str,
+    metallib: &Path,
+    (cache, outputs): (&Path, Option<&Path>),
+    only: &[&str],
+    options: &Options,
+) -> Results {
+    let mut command = Command::new(std::env::current_exe().expect("this executable"));
+    command
         .args(["--side", side, "--only", &only.join(",")])
         .arg("--metallib")
         .arg(metallib)
         .arg("--cache")
-        .arg(cache)
+        .arg(cache);
+    if let Some(outputs) = outputs {
+        command.arg("--outputs").arg(outputs);
+    }
+    let output = command
         .args(&options.passed)
         .stderr(Stdio::inherit())
         .output()
@@ -352,6 +369,29 @@ fn spawn(side: &str, metallib: &Path, cache: &Path, only: &[&str], options: &Opt
 /// medians]).
 type Table = BTreeMap<(String, String), (String, Vec<f64>, Vec<f64>)>;
 
+/// Each kernel output's 32-bit words, and per round how many differ between the sides.
+type Compared = BTreeMap<String, (usize, Vec<usize>)>;
+
+/// Compare the outputs both sides wrote (`<name>.bin` in each directory), then remove them.
+fn compare(dirs: &[PathBuf], compared: &mut Compared) {
+    let mut names: Vec<_> = std::fs::read_dir(&dirs[0])
+        .expect("read the outputs")
+        .map(|entry| entry.expect("an output").file_name())
+        .collect();
+    names.sort();
+    for name in names {
+        let [a, b] = [0, 1].map(|s| std::fs::read(dirs[s].join(&name)).expect("read an output"));
+        assert_eq!(a.len(), b.len(), "{name:?}: the sides' lengths");
+        let differ = a.chunks(4).zip(b.chunks(4)).filter(|(x, y)| x != y).count();
+        let key = name.to_string_lossy().trim_end_matches(".bin").to_owned();
+        let entry = compared.entry(key).or_insert((a.len() / 4, vec![]));
+        entry.1.push(differ);
+    }
+    for dir in dirs {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
 fn add(table: &mut Table, side: usize, results: Results, prefix: &str) {
     for ((workload, metric), (unit, median)) in results {
         let key = (workload, format!("{prefix}{metric}"));
@@ -376,6 +416,16 @@ fn parent(options: &Options) {
         .filter(|w| *w != "pipeline")
         .collect();
     let mut table = Table::new();
+    let mut compared = Compared::new();
+    // Both sides' kernel outputs, compared each round.
+    let outputs: Vec<PathBuf> = if sides.len() == 2 && rest.contains(&"gpu") {
+        sides
+            .iter()
+            .map(|side| scratch.join(format!("outputs-{side}")))
+            .collect()
+    } else {
+        vec![]
+    };
     let metallib = match &options.metallib {
         Some(path) => path.clone(),
         None => compile(&scratch, 0),
@@ -390,8 +440,16 @@ fn parent(options: &Options) {
         eprintln!("round {} of {}", round + 1, options.rounds);
         if !rest.is_empty() {
             for (s, side) in sides.iter().enumerate() {
-                let results = spawn(side, &metallib, &scratch.join("cache-main"), &rest, options);
+                let out = outputs.get(s).map(PathBuf::as_path);
+                if let Some(dir) = out {
+                    std::fs::create_dir_all(dir).expect("make an outputs directory");
+                }
+                let cache = scratch.join("cache-main");
+                let results = spawn(side, &metallib, (&cache, out), &rest, options);
                 add(&mut table, s, results, "");
+            }
+            if !outputs.is_empty() {
+                compare(&outputs, &mut compared);
             }
         }
         if options.only.iter().any(|w| w == "pipeline") {
@@ -399,9 +457,9 @@ fn parent(options: &Options) {
                 let nonce = nonce_base * 100 + (round * 2 + s) as u64 + 1;
                 let fresh = compile(&scratch, nonce);
                 let cache = scratch.join(format!("cache-{nonce}"));
-                let cold = spawn(side, &fresh, &cache, &["pipeline"], options);
+                let cold = spawn(side, &fresh, (&cache, None), &["pipeline"], options);
                 add(&mut table, s, cold, "cold_");
-                let warm = spawn(side, &fresh, &cache, &["pipeline"], options);
+                let warm = spawn(side, &fresh, (&cache, None), &["pipeline"], options);
                 add(&mut table, s, warm, "warm_");
                 let _ = std::fs::remove_dir_all(&cache);
                 let _ = std::fs::remove_file(&fresh);
@@ -409,6 +467,7 @@ fn parent(options: &Options) {
         }
     }
     print_table(&table, options.rounds);
+    print_compared(&compared);
     if removes {
         let _ = std::fs::remove_dir_all(&scratch);
     }
@@ -448,4 +507,16 @@ fn print_table(table: &Table, rounds: usize) {
         );
     }
     println!("\n{rounds} rounds; each cell is the median of the rounds' medians.");
+}
+
+fn print_compared(compared: &Compared) {
+    if compared.is_empty() {
+        return;
+    }
+    println!("\n| kernel output | 32-bit words | words differing (native vs runtime), per round |");
+    println!("|---|---:|---|");
+    for (name, (words, differ)) in compared {
+        let rounds: Vec<String> = differ.iter().map(usize::to_string).collect();
+        println!("| {name} | {words} | {} |", rounds.join(", "));
+    }
 }

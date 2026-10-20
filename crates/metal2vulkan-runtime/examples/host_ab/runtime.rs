@@ -260,6 +260,19 @@ impl Gpu for Runtime {
             .expect("get_bytes");
     }
 
+    fn read_buffer(&self, buffer: &rt::Buffer, bytes: &mut [u8]) {
+        assert!(
+            bytes.len() as u64 <= buffer.length(),
+            "a read within the buffer"
+        );
+        let contents = buffer.contents().expect("a Shared buffer's contents");
+        // SAFETY: `contents` holds the buffer's `length` bytes, which no GPU work writes now (the
+        // caller's contract), and `bytes` is as long as the copy.
+        unsafe {
+            std::ptr::copy_nonoverlapping(contents.as_ptr(), bytes.as_mut_ptr(), bytes.len())
+        };
+    }
+
     fn sampler(&self, linear: bool) -> rt::SamplerState {
         let mut descriptor = SamplerDescriptor::new();
         if linear {

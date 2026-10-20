@@ -276,6 +276,19 @@ impl Gpu for Native {
         };
     }
 
+    fn read_buffer(&self, buffer: &Self::Buffer, bytes: &mut [u8]) {
+        assert!(bytes.len() <= buffer.length(), "a read within the buffer");
+        // SAFETY: a `Shared` buffer's `contents` holds its `length` bytes, which no GPU work
+        // writes now (the caller's contract), and `bytes` is as long as the copy.
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                buffer.contents().as_ptr() as *const u8,
+                bytes.as_mut_ptr(),
+                bytes.len(),
+            )
+        };
+    }
+
     fn sampler(&self, linear: bool) -> Self::Sampler {
         let descriptor = MTLSamplerDescriptor::new();
         if linear {
