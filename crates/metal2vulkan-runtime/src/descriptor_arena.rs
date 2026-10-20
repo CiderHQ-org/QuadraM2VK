@@ -238,13 +238,15 @@ impl DescriptorArena {
         Ok(set)
     }
 
-    /// Every pool, taken out, for the caller to give back or release where it holds no lock.
+    /// Every pool, taken out, for the caller to give back or release where it holds no lock: to
+    /// the spares' list the arena takes from (fitted or not).
     pub(crate) fn take(&mut self) -> DescriptorArena {
         self.book.rooms.clear();
         DescriptorArena {
             book: Book::default(),
             pools: std::mem::take(&mut self.pools),
             device: self.device.clone(),
+            fitted: self.fitted,
         }
     }
 
