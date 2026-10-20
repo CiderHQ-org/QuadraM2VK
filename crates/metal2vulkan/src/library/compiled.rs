@@ -222,8 +222,10 @@ pub struct KernelFacts {
     pub max_total_threads: Option<u32>,
     /// The Direct or Cluster32 tier flattened the local size.
     pub flat_local_size: bool,
-    /// Bytes of the threadgroup arena's static part: the static objects, and with
-    /// `[[threadgroup(n)]]` regions the 16-byte-aligned start of the first region.
+    /// Bytes of the static part of Metal's threadgroup layout: the static objects, and with
+    /// `[[threadgroup(n)]]` regions the 16-byte-aligned start of the first region. A static object
+    /// held as a typed `Workgroup` variable (a kernel without regions) counts at its place there,
+    /// whatever the variable's own bytes.
     pub static_threadgroup_bytes: u64,
     /// The kernel does not observe its threadgroup partition: it computes the same in every
     /// partition of its grid into threadgroups, so a dispatch may run in threadgroups the runtime

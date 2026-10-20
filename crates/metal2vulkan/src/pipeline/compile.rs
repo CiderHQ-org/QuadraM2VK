@@ -2132,10 +2132,15 @@ fn plan_one(r: &Request<'_>, p: &DeviceProfile, m: &mut Meter) -> Result<Planned
             .as_ref()
             .is_some_and(|d| d.local_size == LocalSizeForm::Flat),
         // The static part: the objects, and with `[[threadgroup(n)]]` regions the 16-byte-aligned
-        // offset where the first region starts.
-        static_threadgroup_bytes: crate::memory::arena::TgShape::of(&memory.tg_arena)
-            .static_bytes()
-            .unwrap_or(u64::MAX),
+        // offset where the first region starts. With typed threadgroup objects (no regions), the
+        // static part of Metal's own layout, which holds them too.
+        static_threadgroup_bytes: if memory.typed_shared.is_empty() {
+            crate::memory::arena::TgShape::of(&memory.tg_arena)
+                .static_bytes()
+                .unwrap_or(u64::MAX)
+        } else {
+            memory.tg_metal_static
+        },
         partition_oblivious,
     };
     Ok(Planned {

@@ -395,11 +395,9 @@ pub fn check(
         return Ok(());
     }
     let per_simdgroup = bytes_per_simdgroup(words);
-    // The arena the module declares (`access::local::use_arena` checked its static part).
-    let arena =
-        cx.families.access.local.tg.as_ref().map(|shape| {
-            u32::try_from(shape.static_bytes().unwrap_or(u64::MAX)).unwrap_or(u32::MAX)
-        });
+    // The arena the module declares (`access::local::use_arena` checked its static part) and its
+    // typed threadgroup objects.
+    let arena = crate::lower::access::local::static_workgroup_bytes(cx);
     let required = arena_bytes(arena, 0).saturating_add(per_simdgroup);
     crate::lower::mesh::workgroup_limit(cx).check(required)?;
     cx.facts.insert(RuntimeFact::SimdgroupEmulation {

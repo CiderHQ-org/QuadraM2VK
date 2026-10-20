@@ -285,10 +285,9 @@ pub fn barriers(
         return Ok(());
     };
     if p.vote_word {
-        // The arena the module declares (`access::local::use_arena` checked its static part).
-        let arena = cx.families.access.local.tg.as_ref().map(|shape| {
-            u32::try_from(shape.static_bytes().unwrap_or(u64::MAX)).unwrap_or(u32::MAX)
-        });
+        // The arena the module declares (`access::local::use_arena` checked its static part) and
+        // its typed threadgroup objects.
+        let arena = crate::lower::access::local::static_workgroup_bytes(cx);
         let required =
             super::workgroup::arena_bytes(arena, 0).saturating_add(u64::from(VOTE_BYTES));
         crate::lower::mesh::workgroup_limit(cx).check(required)?;

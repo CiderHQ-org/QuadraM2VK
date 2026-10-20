@@ -39,7 +39,7 @@ use crate::error::{Error, Feature, LowerFamily, Unsupported};
 use crate::lower::arith::{self, LoweredConst};
 use crate::spirv::builder::ModuleBuilder;
 use crate::spirv::error::{BResult, BuildError, Dangling};
-use crate::spirv::ids::{ConstId, DemoteTy, TypeId};
+use crate::spirv::ids::{ConstId, DemoteTy, ScalarTy, TypeId};
 use crate::spirv::ir::{ConstBits, Constant, Type as SType};
 
 fn not_lowered() -> Error {
@@ -119,6 +119,69 @@ impl TypedTy {
     /// The index of the type itself.
     fn root(&self) -> Option<u32> {
         u32::try_from(self.nodes.len().checked_sub(1)?).ok()
+    }
+
+    /// An upper bound on the bytes one object of this shape takes, its leaves in their held forms
+    /// (saturating): a scalar its width, at least 4 bytes (a `bool` too), a vector its scalar times
+    /// its lanes rounded up to a power of two, an array its length times its element, and a struct
+    /// its members each at the next multiple of its alignment, the whole rounded up to the largest;
+    /// a leaf is aligned to its size, up to 16, as MSL lays such values out. One pass over the
+    /// nodes, each after its members, its record charged to the ledger while it lives.
+    pub fn held_bytes(&self, m: &mut Meter) -> Result<u64, Error> {
+        fn leaf(d: &DemoteTy) -> u64 {
+            let scalar = |s: &ScalarTy| match s {
+                ScalarTy::Bool => 4,
+                ScalarTy::Int { bits } | ScalarTy::Float { bits } => {
+                    u64::from(bits.div_ceil(8)).max(4)
+                }
+            };
+            match d {
+                DemoteTy::Scalar(s) => scalar(s),
+                DemoteTy::Vector { elem, len } => {
+                    scalar(elem).saturating_mul(u64::from(len.next_power_of_two()))
+                }
+                DemoteTy::Composite(parts) => parts.iter().fold(0u64, |sum, p| {
+                    let size = leaf(p);
+                    round_to(sum, size.next_power_of_two().min(16)).saturating_add(size)
+                }),
+                DemoteTy::FatPtr { .. } => 16,
+                DemoteTy::ArenaOffset | DemoteTy::HandleIndex => 4,
+            }
+        }
+        fn round_to(v: u64, align: u64) -> u64 {
+            v.checked_next_multiple_of(align.max(1)).unwrap_or(u64::MAX)
+        }
+        // (size, alignment) of each node.
+        let mut sized: Vec<(u64, u64)> = Vec::new();
+        m.reserve_exact(&mut sized, self.nodes.len())?;
+        let at =
+            |sized: &[(u64, u64)], i: u32| sized.get(i as usize).copied().unwrap_or((u64::MAX, 16));
+        for n in &self.nodes {
+            let s = match n {
+                TypedNode::Leaf(d) | TypedNode::Fragment(d) => {
+                    let size = leaf(d);
+                    (size, size.next_power_of_two().min(16))
+                }
+                TypedNode::Array { elem, len } => {
+                    let (size, align) = at(&sized, *elem);
+                    (round_to(size, align).saturating_mul(u64::from(*len)), align)
+                }
+                TypedNode::Struct(members) => {
+                    let mut end = 0u64;
+                    let mut align = 1u64;
+                    for m in members.iter() {
+                        let (size, a) = at(&sized, *m);
+                        end = round_to(end, a).saturating_add(size);
+                        align = align.max(a);
+                    }
+                    (round_to(end, align), align)
+                }
+            };
+            sized.push(s);
+        }
+        let bytes = sized.last().map_or(0, |(size, _)| *size);
+        m.release(crate::budget::vec_bytes(&sized));
+        Ok(bytes)
     }
 }
 

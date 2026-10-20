@@ -928,7 +928,7 @@ pub fn finish(cx: &mut SelectCx<'_>) -> Result<(), Error> {
     if !is_tile(cx) {
         return Ok(());
     }
-    if !cx.memory.tg_arena.entries.is_empty() {
+    if cx.memory.has_static_threadgroup_objects() {
         return Err(threadgroup_variable());
     }
     cx.facts.insert(RuntimeFact::TileFunction);

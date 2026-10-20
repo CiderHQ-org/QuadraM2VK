@@ -399,6 +399,9 @@ pub enum Repr {
     },
     /// A `u32` byte offset into the threadgroup arena.
     TgPtr,
+    /// A `u32` byte offset into one typed threadgroup object (`MemoryPlan::typed_shared[index]`),
+    /// a `Workgroup` variable accessed through typed access chains.
+    TgTyped(u32),
     PrivPtr(PrivForm),
     ConstPtr(ConstForm),
     /// A `u32` byte offset into a handle-array parameter (`array<texture2d<T>, N>`): each load

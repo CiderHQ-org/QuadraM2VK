@@ -19,6 +19,12 @@
 //! - **Threadgroup arena**: static threadgroup globals first, each at its own alignment, then the
 //!   `[[threadgroup(n)]]` parameter regions, whose lengths are specialization inputs. The static
 //!   size is exactly the sum of the allocations plus alignment padding: no sink word.
+//! - **Typed threadgroup objects**: a kernel's static threadgroup global of `half`, `bfloat` or
+//!   16-bit integer leaves whose every access is a plain load or store of exactly the subobject at
+//!   its offset shape, and whose pointers merge with no other root, escape or are stored, is a
+//!   `Workgroup` variable of its own type out of the arena, its leaves in their held forms, where
+//!   the kernel has no regions or imageblock, no threadgroup pointer of unknown root, and the
+//!   held objects fit the device's limit (`Planner::typed_threadgroup`).
 //! - **Private arena and typed allocas**: an alloca whose every access is a plain load or store of
 //!   exactly the subobject at its offset shape, whose pointers never merge with another root or
 //!   escape, and whose type holds no pointer, is typed, while the function's typed objects stay
@@ -254,6 +260,17 @@ pub struct AllocaPlan {
     pub fragments: bool,
 }
 
+/// A typed threadgroup object: a static threadgroup global held as a `Workgroup` variable of its
+/// own type (`memory::alloca`'s typed shape, each leaf in its held form), out of the arena.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct SharedPlan {
+    pub global: GlobalId,
+    pub ty: TypeId,
+    /// The variable's bytes of workgroup memory, an upper bound ([`super::alloca::TypedTy::held_bytes`]
+    /// rounded up to 16).
+    pub bytes: u64,
+}
+
 /// Where a program-scope constant lives.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ConstGlobalForm {
@@ -313,6 +330,13 @@ pub struct MemoryPlan {
     /// ([`MemoryPlan::slot_of_root`]).
     pub slot_roots: Vec<(Root, u32)>,
     pub tg_arena: ArenaLayout,
+    /// The static threadgroup globals held as typed `Workgroup` objects, in global order, out of
+    /// `tg_arena` ([`Planner::typed_threadgroup`]).
+    pub typed_shared: Vec<SharedPlan>,
+    /// The static part of Metal's own threadgroup layout, every static object at its place
+    /// (Metal's `staticThreadgroupMemoryLength`): `tg_arena`'s own static part, or with typed
+    /// objects the layout's that holds them too.
+    pub tg_metal_static: u64,
     pub priv_arena: ArenaLayout,
     pub typed_allocas: Vec<AllocaPlan>,
     /// The bytes of private memory a thread holds where a driver backs it with scratch memory,
@@ -410,6 +434,18 @@ impl MemoryPlan {
         self.const_globals.get(*i as usize)
     }
 
+    /// Whether the entry declares static threadgroup objects, in the arena or typed.
+    pub fn has_static_threadgroup_objects(&self) -> bool {
+        !self.tg_arena.entries.is_empty() || !self.typed_shared.is_empty()
+    }
+
+    /// The bytes of workgroup memory the typed threadgroup objects take ([`SharedPlan::bytes`]).
+    pub fn typed_shared_bytes(&self) -> u64 {
+        self.typed_shared
+            .iter()
+            .fold(0u64, |sum, s| sum.saturating_add(s.bytes))
+    }
+
     /// The bytes the plan's tables hold, as the ledger charges them.
     pub fn retained_bytes(&self) -> usize {
         self.repr.capacity() * std::mem::size_of::<Option<Repr>>()
@@ -424,6 +460,7 @@ impl MemoryPlan {
                 * std::mem::size_of::<ArenaEntry>()
             + self.tg_arena.dynamic.capacity() * std::mem::size_of::<DynamicRegion>()
             + self.typed_allocas.capacity() * std::mem::size_of::<AllocaPlan>()
+            + self.typed_shared.capacity() * std::mem::size_of::<SharedPlan>()
             + self.const_globals.capacity() * std::mem::size_of::<ConstGlobalPlan>()
             + self.blob.as_ref().map_or(0, |b| b.bytes.len())
             + self.layouts.retained_bytes()
@@ -647,8 +684,10 @@ impl Planner<'_> {
         // The unshared type size the function's typed objects may still declare.
         let mut room = super::alloca::MAX_UNSHARED;
         let (const_globals, blob) = self.const_globals(&mut room, m)?;
-        let tg_arena = self.threadgroup_arena(m)?;
+        let tg_arena = self.threadgroup_arena(&[], m)?;
         let (priv_arena, typed_allocas, fragment_values) = self.allocas(&mut room, m)?;
+        let tg_metal_static = tg_arena.static_size;
+        let (tg_arena, typed_shared) = self.typed_threadgroup(tg_arena, &mut room, m)?;
         let private_bytes = self.private_bytes(&priv_arena, &typed_allocas, &const_globals, m)?;
         let Reprs {
             repr,
@@ -656,7 +695,7 @@ impl Planner<'_> {
             strided,
             root_sets,
             handle_table,
-        } = self.reprs(&const_globals, &typed_allocas, dynamic, m)?;
+        } = self.reprs(&const_globals, &typed_allocas, &typed_shared, dynamic, m)?;
         let slot_roots = slot_roots(&slots, m)?;
         let const_index = const_index(&const_globals, m)?;
         let Planner { prov, layouts, .. } = self;
@@ -671,6 +710,8 @@ impl Planner<'_> {
             slots,
             slot_roots,
             tg_arena,
+            typed_shared,
+            tg_metal_static,
             priv_arena,
             typed_allocas,
             private_bytes,
@@ -1284,12 +1325,16 @@ impl Planner<'_> {
     /// last references in the function, each at the next offset aligned to its alignment and to
     /// at least 4 bytes, from 0 ([`Planner::metal_order`]; measured on an M3 Max and an M4). The
     /// layout is otherwise unobservable, but an integer threadgroup address names a byte of it
-    /// (`lower::access::local`), so the arena is that layout.
-    fn threadgroup_arena(&self, m: &mut Meter) -> Result<ArenaLayout, Error> {
+    /// (`lower::access::local`), so the arena is that layout. The globals of `typed` (in global
+    /// order) are held out of it ([`Planner::typed_threadgroup`]): the rest keep Metal's order.
+    fn threadgroup_arena(&self, typed: &[SharedPlan], m: &mut Meter) -> Result<ArenaLayout, Error> {
         let (order, metal_layout) = self.metal_order(m)?;
         let mut objects = Vec::new();
         grow(&mut objects, order.len(), m)?;
         for g in order {
+            if typed.binary_search_by_key(&g, |s| s.global).is_ok() {
+                continue;
+            }
             let global = self
                 .e
                 .module
@@ -1321,6 +1366,213 @@ impl Planner<'_> {
         }
         arena.imageblock = self.imageblock();
         Ok(arena)
+    }
+
+    /// The static threadgroup globals held as typed objects, and the arena of the rest (`full`
+    /// when none is typed).
+    ///
+    /// A global of a type with a `half`, `bfloat` or 16-bit integer leaf is a `Workgroup` variable
+    /// of its own type, each leaf in its held form (`memory::alloca`: a `half` in an `f32` that is
+    /// always a `half` value), where every access of it is a plain load or store of exactly the
+    /// subobject at its offset shape, its pointers merge with no other root, escape, are stored
+    /// or compared with another root's, and no atomic reaches it ([`RootUse`]). Its loads and stores
+    /// are then those of the held value, with no conversion to and from the `half` bits and no
+    /// sub-word merge of a word's other bytes, which the arena's two word atomics do: the value a
+    /// load returns is the one the last store stored, as in Metal's memory, NaN bits included.
+    ///
+    /// Only a kernel's static objects, without `[[threadgroup(n)]]` regions or an imageblock: Metal
+    /// reports its static length (`tg_metal_static`), and the encoder's lengths must fit beside
+    /// it, which the binder checks against the reported length. A held object may take more bytes
+    /// than Metal's (a `half`'s four), so an object is typed only while the function's workgroup
+    /// memory stays within the device's limit with the whole arena counted, and only where the
+    /// held object takes at most twice its own bytes (no 8-bit leaf held in four times them).
+    /// Without a threadgroup pointer of no known object (`Root::Dynamic`: loaded, or an integer
+    /// address), as such a pointer could address any byte of Metal's layout. The objects take
+    /// their unshared type size from `room`, as typed allocas do.
+    fn typed_threadgroup(
+        &self,
+        full: ArenaLayout,
+        room: &mut u64,
+        m: &mut Meter,
+    ) -> Result<(ArenaLayout, Vec<SharedPlan>), Error> {
+        if full.entries.is_empty() || !self.threadgroup_typable(m)? {
+            return Ok((full, Vec::new()));
+        }
+        let limit = super::arena::workgroup_limit(
+            crate::pipeline::sym::Stage::Kernel,
+            &self.p.fields().limits,
+        );
+        let available = limit.available.saturating_sub(limit.wrapper);
+        let mut total = full.static_size;
+        let mut typed: Vec<SharedPlan> = Vec::new();
+        let mut narrow = BTreeMap::new();
+        let mut charged = 0usize;
+        let chosen = (|| -> Result<(), Error> {
+            for e in &full.entries {
+                m.tick(1)?;
+                let ArenaObject::Global(g) = e.object else {
+                    continue;
+                };
+                let ty = self
+                    .e
+                    .module
+                    .global(g)
+                    .ok_or_else(|| invariant("a global out of range"))?
+                    .value_ty;
+                let u = self.uses(Root::Global(g));
+                let plain = u.dereferenced
+                    && u.typed
+                    && !(u.atomic || u.merged || u.escapes || u.stored || u.cross_compare);
+                if !plain
+                    || self.e.module.types().holds_pointer(ty)
+                    || !self.holds_narrow(ty, &mut narrow, &mut charged, m)?
+                {
+                    continue;
+                }
+                let Some(shape) = super::alloca::typed_ty(self.e, self.p, ty, false, m)?.ok()
+                else {
+                    continue;
+                };
+                let unshared = shape.unshared();
+                let held = shape.held_bytes(m);
+                shape.release(m);
+                let bytes = held?.checked_next_multiple_of(16).unwrap_or(u64::MAX);
+                let twice = e.size.saturating_mul(2).checked_next_multiple_of(16);
+                if twice.is_none_or(|t| bytes > t) {
+                    continue;
+                }
+                let Some(grown) = total.checked_add(bytes).filter(|t| *t <= available) else {
+                    continue;
+                };
+                let Some(left) = room.checked_sub(unshared) else {
+                    continue;
+                };
+                *room = left;
+                total = grown;
+                grow(&mut typed, 1, m)?;
+                typed.push(SharedPlan {
+                    global: g,
+                    ty,
+                    bytes,
+                });
+            }
+            Ok(())
+        })();
+        m.release(charged);
+        chosen?;
+        if typed.is_empty() {
+            return Ok((full, typed));
+        }
+        // The objects are in global order (the arena's entries are), as the lookups search them.
+        let mut arena = self.threadgroup_arena(&typed, m)?;
+        arena.metal_layout = false;
+        Ok((arena, typed))
+    }
+
+    /// Whether the entry's static threadgroup globals may be typed ([`Planner::typed_threadgroup`]):
+    /// a kernel without `[[threadgroup(n)]]` regions or an imageblock, none of whose threadgroup
+    /// pointers (values or constants) may have the dynamic root.
+    fn threadgroup_typable(&self, m: &mut Meter) -> Result<bool, Error> {
+        if !matches!(self.e.ep.stage, crate::air::abi::Stage::Kernel { .. }) {
+            return Ok(false);
+        }
+        let regions = self
+            .e
+            .ep
+            .params
+            .iter()
+            .any(|b| matches!(b.role, ParamRole::Threadgroup(_) | ParamRole::Imageblock(_)));
+        if regions {
+            return Ok(false);
+        }
+        let types = self.e.module.types();
+        let values = self.prov.values;
+        let threadgroup = |v: Value| {
+            self.e
+                .module
+                .value_ty(self.e.func, v)
+                .and_then(|t| types.get(t))
+                .is_some_and(|t| {
+                    matches!(
+                        t,
+                        Type::Ptr {
+                            space: AddrSpace::Threadgroup | AddrSpace::ThreadgroupImageblock
+                        }
+                    )
+                })
+        };
+        let facts = self
+            .prov
+            .facts
+            .iter()
+            .filter_map(|(v, f)| Some((values.value(*v)?, f)))
+            .chain(
+                self.prov
+                    .const_facts
+                    .iter()
+                    .map(|(c, f)| (Value::Const(*c), f)),
+            );
+        for (v, f) in facts {
+            m.tick(1)?;
+            if threadgroup(v) && has_dynamic(self.prov.sets.get(f.roots)) {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    /// Whether AIR type `ty` holds a `half`, `bfloat` or 16-bit integer scalar: a walk that looks
+    /// at each distinct type it reaches once, however often the types share members (its record
+    /// charged while it lives). The answer for `ty` is kept in `seen` (its entries charged to
+    /// `charged`).
+    fn holds_narrow(
+        &self,
+        ty: TypeId,
+        seen: &mut BTreeMap<TypeId, bool>,
+        charged: &mut usize,
+        m: &mut Meter,
+    ) -> Result<bool, Error> {
+        if let Some(&known) = seen.get(&ty) {
+            return Ok(known);
+        }
+        let types = self.e.module.types();
+        let entry = provenance::map_entry_bytes::<TypeId, ()>();
+        let mut walk: Vec<TypeId> = Vec::new();
+        let mut visited: BTreeSet<TypeId> = BTreeSet::new();
+        let mut working = 0usize;
+        let found = (|| -> Result<bool, Error> {
+            provenance::grow_working(&mut walk, 1, &mut working, m)?;
+            walk.push(ty);
+            while let Some(t) = walk.pop() {
+                m.tick(1)?;
+                if visited.contains(&t) {
+                    continue;
+                }
+                m.charge(entry)?;
+                working = working.saturating_add(entry);
+                visited.insert(t);
+                match types.get(t) {
+                    Some(Type::Half | Type::BFloat | Type::Int(16)) => return Ok(true),
+                    Some(Type::Vector { elem, .. } | Type::Array { elem, .. }) => {
+                        provenance::grow_working(&mut walk, 1, &mut working, m)?;
+                        walk.push(*elem);
+                    }
+                    Some(Type::Struct { fields, .. }) => {
+                        provenance::grow_working(&mut walk, fields.len(), &mut working, m)?;
+                        walk.extend(fields.iter().copied());
+                    }
+                    _ => {}
+                }
+            }
+            Ok(false)
+        })();
+        m.release(working);
+        let found = found?;
+        let kept = provenance::map_entry_bytes::<TypeId, bool>();
+        m.charge(kept)?;
+        *charged = charged.saturating_add(kept);
+        seen.insert(ty, found);
+        Ok(found)
     }
 
     /// The entry's static threadgroup objects in the order Metal places them, and whether that
@@ -1702,6 +1954,7 @@ impl Planner<'_> {
         &self,
         const_globals: &[ConstGlobalPlan],
         typed_allocas: &[AllocaPlan],
+        typed_shared: &[SharedPlan],
         dynamic: bool,
         m: &mut Meter,
     ) -> Result<Reprs, Error> {
@@ -1833,7 +2086,17 @@ impl Planner<'_> {
                     }
                     Repr::TgPtr
                 }
-                (_, AddrSpace::Threadgroup) => Repr::TgPtr,
+                // A pointer into a typed threadgroup object has it as its one root: the object's
+                // pointers merge with no other's (`Planner::typed_threadgroup`).
+                (_, AddrSpace::Threadgroup) => match roots {
+                    [Root::Global(g)] => match typed_shared.binary_search_by_key(g, |s| s.global) {
+                        Ok(i) => Repr::TgTyped(
+                            u32::try_from(i).map_err(|_| invariant("a typed object past u32"))?,
+                        ),
+                        Err(_) => Repr::TgPtr,
+                    },
+                    _ => Repr::TgPtr,
+                },
                 // An object or mesh function's payload: an offset into its payload arena, for a
                 // pointer whose one root is the payload parameter; any other is not implemented. In
                 // any other function, and as a mesh output that is no handle, the address space

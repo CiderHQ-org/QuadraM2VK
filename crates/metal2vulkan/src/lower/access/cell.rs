@@ -197,9 +197,10 @@ fn encoding(cx: &SelectCx<'_>, v: Value) -> Result<Option<Encoding>, Error> {
         // A pointer stored into a cell takes its object out of the typed form, and a loaded
         // pointer's roots are stored pointers' roots. A payload pointer in a cell is not
         // implemented.
-        Repr::PrivPtr(PrivForm::Typed(_)) | Repr::ConstPtr(_) | Repr::PayloadPtr => {
-            return Err(refuse())
-        }
+        Repr::PrivPtr(PrivForm::Typed(_))
+        | Repr::TgTyped(_)
+        | Repr::ConstPtr(_)
+        | Repr::PayloadPtr => return Err(refuse()),
     }))
 }
 

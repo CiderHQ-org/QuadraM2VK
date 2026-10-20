@@ -2,11 +2,13 @@
 //!
 //! A threadgroup pointer (`Repr::TgPtr`), a pointer into the private arena
 //! (`Repr::PrivPtr(PrivForm::Arena)`), and a pointer into a typed object (a typed alloca,
-//! `PrivForm::Typed`, or a closed constant global, `ConstForm::Private`; `memory::alloca`) are
-//! `u32` byte offsets from their [`Home`]'s start, demoted as `DemoteTy::ArenaOffset`:
+//! `PrivForm::Typed`, a closed constant global, `ConstForm::Private`, or a typed threadgroup
+//! object, `Repr::TgTyped`, a `Workgroup` variable; `memory::alloca`, `memory::plan::SharedPlan`)
+//! are `u32` byte offsets from their [`Home`]'s start, demoted as `DemoteTy::ArenaOffset`:
 //!
-//! - an alloca placed in the private arena is its plan offset; a typed alloca and a constant
-//!   global's address are 0; a static threadgroup global's address is its plan offset (a
+//! - an alloca placed in the private arena is its plan offset; a typed alloca's, a constant
+//!   global's and a typed threadgroup object's address are 0; a static threadgroup global's
+//!   address is its plan offset (a
 //!   constant `getelementptr` of one adds the plan's exact displacement); a `[[threadgroup(n)]]`
 //!   parameter is its region's offset, an `OpSpecConstantOp` of the specialized lengths before it;
 //! - a GEP adds its datalayout offsets in wrapping `u32` arithmetic, with the buffer family's
@@ -21,8 +23,9 @@
 //! - a non-atomic load or store of a scalar or 2–4-lane vector is one word-composed leaf
 //!   (`memory::leaf`) in the arena's word memory (`memory::arena::ArenaMem`), or, in a typed
 //!   object, an `OpLoad`/`OpStore` of the held form through an access chain whose dynamic indices
-//!   come from the offset (`memory::alloca::TypedPath`); a volatile one's words carry
-//!   `Volatile`, except a load of a read-only typed constant object.
+//!   come from the offset (`memory::alloca::TypedPath`), a typed threadgroup object's with the
+//!   memory model's operands the arena's words take; a volatile one's words carry `Volatile`,
+//!   except a load of a read-only typed constant object.
 //!
 //! **Containment** of an arena access is on unless the profile's containment is `UnsafeOff` (no
 //! robustness feature covers arenas): with `inb` the normative check against the arena's exact byte
@@ -95,12 +98,14 @@ use super::tile::{KeptCells, KeptMem};
 use super::{is_ptr_ty, not_lowered, operand, refuse, GepTerms};
 
 /// Where a pointer points: an arena, or a typed object (by its index in the memory plan's
-/// `typed_allocas` or `const_globals`).
+/// `typed_allocas`, `const_globals` or `typed_shared`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Home {
     Arena(Arena),
     Alloca(u32),
     Constant(u32),
+    /// A typed threadgroup object: a `Workgroup` variable (`memory::plan::SharedPlan`).
+    Shared(u32),
 }
 
 /// A pointer operand: a value, or a constant offset (a global's address).
@@ -220,12 +225,12 @@ pub enum LocalStrategy {
     TypedStore(TypedAccess),
 }
 
-/// The census name of an operation by home kind: threadgroup, private arena, typed alloca,
-/// constant global, payload.
+/// The census name of an operation by home kind: threadgroup arena or typed threadgroup object,
+/// private arena, typed alloca, constant global, payload.
 fn by_home(home: Home, names: [&'static str; 5]) -> &'static str {
     let [tg, private, typed, constant, payload] = names;
     match home {
-        Home::Arena(Arena::Threadgroup) => tg,
+        Home::Arena(Arena::Threadgroup) | Home::Shared(_) => tg,
         Home::Arena(Arena::Private) => private,
         Home::Alloca(_) => typed,
         Home::Constant(_) => constant,
@@ -348,16 +353,17 @@ impl LocalStrategy {
             L::TypedLoad(a) => match (a.home, a.clamped) {
                 (Home::Constant(_), true) => "access.constant.load.clamped",
                 (Home::Constant(_), false) => "access.constant.load",
+                (Home::Shared(_), true) => "access.threadgroup.typed_load.clamped",
+                (Home::Shared(_), false) => "access.threadgroup.typed_load",
                 (_, true) => "access.typed.load.clamped",
                 (_, false) => "access.typed.load",
             },
-            L::TypedStore(a) => {
-                if a.clamped {
-                    "access.typed.store.clamped"
-                } else {
-                    "access.typed.store"
-                }
-            }
+            L::TypedStore(a) => match (a.home, a.clamped) {
+                (Home::Shared(_), true) => "access.threadgroup.typed_store.clamped",
+                (Home::Shared(_), false) => "access.threadgroup.typed_store",
+                (_, true) => "access.typed.store.clamped",
+                (_, false) => "access.typed.store",
+            },
         }
     }
 
@@ -417,7 +423,7 @@ pub struct LocalDecl {
     pub private: Option<ArenaDecl>,
     /// The payload arena.
     pub payload: Option<ArenaDecl>,
-    /// Each typed object's `Private` variable.
+    /// Each typed object's variable: `Private`, or a typed threadgroup object's `Workgroup`.
     pub typed: Vec<(Home, GlobalId)>,
 }
 
@@ -425,6 +431,7 @@ pub struct LocalDecl {
 pub(super) fn home_of(cx: &SelectCx<'_>, v: Value) -> Option<Home> {
     match cx.memory.repr(v)? {
         Repr::TgPtr => Some(Home::Arena(Arena::Threadgroup)),
+        Repr::TgTyped(i) => Some(Home::Shared(i)),
         Repr::PayloadPtr => Some(Home::Arena(Arena::Payload)),
         Repr::PrivPtr(PrivForm::Arena) => Some(Home::Arena(Arena::Private)),
         Repr::PrivPtr(PrivForm::Typed(i)) => Some(Home::Alloca(i)),
@@ -454,8 +461,37 @@ fn object(cx: &SelectCx<'_>, home: Home) -> Result<(TypeId, u64), Error> {
             Ok((a.ty, a.count))
         }
         Home::Constant(i) => Ok((const_global(cx, i)?.value_ty, 1)),
+        Home::Shared(i) => Ok((shared_global(cx, i)?.value_ty, 1)),
         Home::Arena(_) => Err(cx.invariant("an arena is not a typed object")),
     }
+}
+
+/// The AIR global of typed threadgroup object `i`.
+fn shared_global<'a>(cx: &'a SelectCx<'_>, i: u32) -> Result<&'a crate::air::ir::Global, Error> {
+    cx.memory
+        .typed_shared
+        .get(i as usize)
+        .and_then(|s| cx.entry.module.global(s.global))
+        .ok_or_else(|| cx.invariant("a typed threadgroup object out of range"))
+}
+
+/// The bytes of workgroup memory the function's static threadgroup objects take: the arena's
+/// static part where the function declares the arena, and each typed threadgroup object's
+/// (`memory::plan::SharedPlan::bytes`). `None` when it takes none.
+pub fn static_workgroup_bytes(cx: &SelectCx<'_>) -> Option<u32> {
+    let arena = cx
+        .families
+        .access
+        .local
+        .tg
+        .as_ref()
+        .map(|shape| shape.static_bytes().unwrap_or(u64::MAX));
+    let typed = cx.memory.typed_shared_bytes();
+    let total = match (arena, typed) {
+        (None, 0) => return None,
+        (arena, typed) => arena.unwrap_or(0).saturating_add(typed),
+    };
+    Some(u32::try_from(total).unwrap_or(u32::MAX))
 }
 
 /// Whether typed home `home` holds its simdgroup matrices as fragments.
@@ -466,7 +502,7 @@ fn fragments(cx: &SelectCx<'_>, home: Home) -> bool {
             .typed_allocas
             .get(i as usize)
             .is_some_and(|a| a.fragments),
-        Home::Constant(_) | Home::Arena(_) => false,
+        Home::Constant(_) | Home::Shared(_) | Home::Arena(_) => false,
     }
 }
 
@@ -558,7 +594,8 @@ pub(super) fn use_arena(cx: &mut SelectCx<'_>, arena: Arena) -> Result<(), Error
             };
             // A tile function declares no threadgroup variables, as Metal refuses its pipeline
             // whatever their size; Metal's compiler refuses a fragment function's.
-            if (fragment || super::tile::is_tile(cx)) && !cx.memory.tg_arena.entries.is_empty() {
+            if (fragment || super::tile::is_tile(cx)) && cx.memory.has_static_threadgroup_objects()
+            {
                 return Err(super::tile::threadgroup_variable());
             }
             let mut shape = TgShape::of(&cx.memory.tg_arena);
@@ -790,6 +827,33 @@ pub(super) fn local_ptr(cx: &SelectCx<'_>, v: Value, home: Home) -> Result<Local
                 u64::try_from(displacement).map_err(|_| refuse())?,
             )?))
         }
+        (Const::GlobalAddr(g), Home::Shared(i))
+            if cx
+                .memory
+                .typed_shared
+                .get(i as usize)
+                .is_some_and(|s| s.global == *g) =>
+        {
+            Ok(LocalPtr::Offset(0))
+        }
+        // A constant `getelementptr` or cast of the object: its exact displacement.
+        (Const::Expr(_), Home::Shared(i))
+            if addressed_global(cx, c).is_some_and(|g| {
+                cx.memory
+                    .typed_shared
+                    .get(i as usize)
+                    .is_some_and(|s| s.global == g)
+            }) =>
+        {
+            let displacement = cx
+                .memory
+                .offset(v)
+                .and_then(OffsetRange::exact)
+                .ok_or_else(refuse)?;
+            Ok(LocalPtr::Offset(offset32(
+                u64::try_from(displacement).map_err(|_| refuse())?,
+            )?))
+        }
         (Const::GlobalAddr(_) | Const::Expr(_), Home::Arena(Arena::Threadgroup)) => {
             let g = addressed_global(cx, c).ok_or_else(|| threadgroup_constant_refusal(cx, c))?;
             let displacement = cx
@@ -868,8 +932,8 @@ pub fn param_value(
     }
 }
 
-/// Declare a typed object's `Private` variable: an array of `count` elements, with a constant
-/// global's initializer.
+/// Declare a typed object's variable: an array of `count` elements, `Private` with a constant
+/// global's initializer, or a typed threadgroup object's `Workgroup` one.
 fn declare_typed(mb: &mut ModuleBuilder, o: &TypedObject) -> BResult<GlobalId> {
     let (elem, types) = alloca::spirv_types(mb, &o.ty)?;
     let u32_ = mb.ty(SType::Int {
@@ -896,7 +960,11 @@ fn declare_typed(mb: &mut ModuleBuilder, o: &TypedObject) -> BResult<GlobalId> {
         }
         None => None,
     };
-    mb.plain_global(StorageClass::Private, ty, init)
+    let class = match o.home {
+        Home::Shared(_) => StorageClass::Workgroup,
+        _ => StorageClass::Private,
+    };
+    mb.plain_global(class, ty, init)
 }
 
 /// Declare the arenas and typed objects the plan uses.
@@ -1326,7 +1394,7 @@ pub fn intrinsic_store(
         Some(home @ Home::Alloca(_)) => Ok(IntrinsicStore::Typed(typed_access(
             cx, home, ptr, None, ty, m,
         )?)),
-        Some(Home::Constant(_)) | None => Err(refuse()),
+        Some(Home::Constant(_) | Home::Shared(_)) | None => Err(refuse()),
     }
 }
 
@@ -1474,7 +1542,7 @@ pub fn select(
                 }
                 // A constant global in `Private` form is never written.
                 Home::Constant(_) => return Err(refuse()),
-                Home::Alloca(_) => {
+                Home::Alloca(_) | Home::Shared(_) => {
                     LocalStrategy::TypedStore(typed_access(cx, home, *ptr, Some(*val), ty, m)?)
                 }
             }
@@ -1793,9 +1861,24 @@ fn emit_typed(
         idx.push(k32(fb, i)?);
     }
     let base = fb.module().global_value(g)?;
-    let access = MemAccess {
+    let plain = MemAccess {
         volatile: a.volatile,
         ..MemAccess::default()
+    };
+    // A typed threadgroup object's loads and stores take the memory model's operands, as the
+    // threadgroup arena's words do (`memory::arena::ArenaMem`).
+    let (load_access, store_access) = match a.home {
+        Home::Shared(_) => {
+            let ops = WordOps {
+                coherence: crate::lower::sync::memory_model::coherence(cx.plan),
+                volatile: a.volatile,
+            };
+            (
+                ops.access(fb, MemAccess::default(), false)?,
+                ops.access(fb, MemAccess::default(), true)?,
+            )
+        }
+        _ => (plain, plain),
     };
     // A matrix held as its fragment stores elements 0 and 1.
     let stored = match (stored, &a.fragment) {
@@ -1808,7 +1891,7 @@ fn emit_typed(
     match (stored, ok) {
         (None, ok) => {
             let p = fb.access_chain(base, &idx)?;
-            let v = fb.load(p, access)?;
+            let v = fb.load(p, load_access)?;
             let v = match ok {
                 None => v,
                 Some(ok) => {
@@ -1825,13 +1908,13 @@ fn emit_typed(
         }
         (Some(v), None) => {
             let p = fb.access_chain(base, &idx)?;
-            fb.store(p, v, access)?;
+            fb.store(p, v, store_access)?;
             Ok(None)
         }
         (Some(v), Some(ok)) => {
             let then: ArmFn<'_, ()> = Box::new(move |fb, _| {
                 let p = fb.access_chain(base, &idx)?;
-                fb.store(p, v, access)?;
+                fb.store(p, v, store_access)?;
                 Ok(ArmEnd::FallThrough(Vec::new()))
             });
             fb.if_(&mut (), ok, then, None)?;
