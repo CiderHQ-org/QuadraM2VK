@@ -753,7 +753,8 @@ impl Placement {
     /// The same placement, for another owner to free from now on: an image's first memory, which
     /// goes with its first `VkImage` once the image takes its storage form
     /// (`texture/storage_form.rs`). The image frees its storage form's memory instead, never
-    /// this one.
+    /// this one. Or a parked image's memory, which the image recycler frees as it lets the image
+    /// go, in place of the image (`texture/recycle.rs`).
     pub(super) fn handed_over(&self) -> Placement {
         Placement {
             type_index: self.type_index,

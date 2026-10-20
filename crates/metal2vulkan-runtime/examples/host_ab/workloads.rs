@@ -1119,3 +1119,43 @@ pub fn many_draws<G: Gpu>(g: &G, library: &G::Library, sizes: &Sizes) {
         emit("many_draws", "gpu", "ms", gpu);
     }
 }
+
+/// The textures each frame of the `churn` workload makes.
+const CHURNED: usize = 8;
+
+/// Churn: each frame makes eight 1280x800 `BGRA8Unorm` `Private` render targets, clears each in a
+/// render pass of one command buffer, waits for it and releases them, as a window server's frame
+/// makes and releases its textures. `same`: every frame's textures are of the same size; `varied`:
+/// each frame's are a pixel wider than the frame before's, over 64 widths, so no texture's making
+/// meets one of its shape released within the last 64 frames. Per frame: the time from the first
+/// making to the wait's return, and the process's CPU time.
+pub fn churn<G: Gpu>(g: &G, sizes: &Sizes) {
+    let frames = sizes.timed.max(60);
+    for (name, varied) in [("same", false), ("varied", true)] {
+        let (mut frame, mut cpu) = (vec![], vec![]);
+        for i in 0..frames + 5 {
+            let width = 1280 + if varied { i % 64 } else { 0 };
+            g.pool(|| {
+                let (t, c) = (Instant::now(), process_cpu());
+                let textures: Vec<G::Texture> = (0..CHURNED)
+                    .map(|_| g.texture(Format::Bgra8, width, 800, true))
+                    .collect();
+                let command_buffer = g.command_buffer();
+                for texture in &textures {
+                    let encoder = g.render_encoder(&command_buffer, texture, true);
+                    g.end_render(encoder);
+                }
+                g.commit(&command_buffer);
+                g.wait(&command_buffer);
+                drop(command_buffer);
+                drop(textures);
+                if i >= 5 {
+                    frame.push(ms(t.elapsed()));
+                    cpu.push(ms(process_cpu() - c));
+                }
+            });
+        }
+        emit("churn", &format!("{name}_frame"), "ms", &mut frame);
+        emit("churn", &format!("{name}_cpu"), "ms", &mut cpu);
+    }
+}

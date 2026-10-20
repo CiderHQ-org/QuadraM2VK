@@ -132,6 +132,8 @@ mod queue;
 mod range;
 mod rate_map;
 mod reader_sizes;
+#[cfg(any(m2v_gpu, m2v_cpu_icd))]
+mod recycle;
 mod render;
 mod replays;
 mod resource;

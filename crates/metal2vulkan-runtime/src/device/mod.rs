@@ -637,6 +637,7 @@ impl Drop for DeviceShared {
             staging.destroy(self.vk());
         }
         lock(&self.textures.neutrals).destroy(self.vk(), &mut lock(&self.memory));
+        lock(&self.textures.recycled).destroy(self.vk(), &mut lock(&self.memory));
         // No framebuffer is left to hold a placeholder (`storage_placeholder.rs`).
         lock(&self.textures.storage_placeholders).destroy(self.vk(), &mut lock(&self.memory));
         // The zeros new resources' first work copied from (`texture/first_move.rs`).

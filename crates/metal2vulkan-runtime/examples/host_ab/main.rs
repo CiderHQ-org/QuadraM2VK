@@ -65,6 +65,9 @@
 //! - `memory`: `newBufferWithLength:` and `newBufferWithBytes:` of 4 KiB, 1 MiB and 64 MiB,
 //!   `newBufferWithBytesNoCopy:` of 1 MiB and 64 MiB, and a 1024x1024 `RGBA8Unorm` `Shared`
 //!   texture's `replaceRegion` and `getBytes`.
+//! - `churn`: each frame makes eight 1280x800 `Private` render targets, clears and releases them,
+//!   the same size each frame (`same`) or one of 64 widths in turn (`varied`)
+//!   (`workloads::churn`).
 //!
 //! Options: `--rounds N` (3), `--draws N` (2000), `--timed N` (30), `--latency N` (200),
 //! `--heavy-iterations N` (64), `--heavy-runs N` (15), `--many-draws N` (6000), `--scratch DIR`
@@ -90,7 +93,7 @@ use std::process::{Command, Stdio};
 use std::time::Instant;
 use workloads::Sizes;
 
-const WORKLOADS: [&str; 8] = [
+const WORKLOADS: [&str; 9] = [
     "encode",
     "fixed",
     "latency",
@@ -99,6 +102,7 @@ const WORKLOADS: [&str; 8] = [
     "memory",
     "frame",
     "many_draws",
+    "churn",
 ];
 
 struct Options {
@@ -286,6 +290,7 @@ fn run<G: Gpu>(g: &G, opened: Instant, metallib: &Path, options: &Options) {
             "memory" => workloads::memory(g, sizes),
             "frame" => workloads::frame(g, &scene, sizes),
             "many_draws" => workloads::many_draws(g, &library, sizes),
+            "churn" => workloads::churn(g, sizes),
             _ => unreachable!(),
         }
     }

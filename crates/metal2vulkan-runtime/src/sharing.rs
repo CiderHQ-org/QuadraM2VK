@@ -22,6 +22,11 @@ impl<'a> Sharing<'a> {
         Sharing { families }
     }
 
+    /// The queue families it shares among.
+    pub(crate) fn families(self) -> &'a [u32] {
+        self.families
+    }
+
     /// Whether resources are concurrent: the device submits to more than one family.
     fn concurrent(self) -> bool {
         self.families.len() > 1

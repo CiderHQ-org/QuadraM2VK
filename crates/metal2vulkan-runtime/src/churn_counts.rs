@@ -68,6 +68,11 @@ pub(crate) enum KeepBy {
 #[derive(Default)]
 pub(crate) struct ChurnCounters {
     owned: [AtomicU64; 9],
+    /// Images a making took from the recycler, parked there, and let go of past its bounds
+    /// (`texture/recycle.rs`).
+    recycled: [AtomicU64; 3],
+    /// No-copy buffers that imported their pages where a live import holds them all.
+    imports_inside_live: AtomicU64,
     /// By [`KeepBy`], then cut or whole: the keeps, then their texels.
     keeps: [[AtomicU64; 4]; 3],
 }
@@ -76,6 +81,26 @@ impl ChurnCounters {
     /// An image or texture `owned` so went.
     pub(crate) fn released(&self, owned: Owned) {
         self.owned[owned as usize].fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A no-copy buffer imported its pages where a live import holds them all.
+    pub(crate) fn import_inside_live(&self) {
+        self.imports_inside_live.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A making took a parked image.
+    pub(crate) fn image_recycled(&self) {
+        self.recycled[0].fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// An image went to the recycler.
+    pub(crate) fn image_parked(&self) {
+        self.recycled[1].fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// `count` parked images went, past the recycler's bounds.
+    pub(crate) fn images_evicted(&self, count: usize) {
+        self.recycled[2].fetch_add(count as u64, Ordering::Relaxed);
     }
 
     /// A keep planned `by`, cut to a rectangle or not, of `texels`.
@@ -106,6 +131,10 @@ impl ChurnCounters {
                 textures_shadow: owned(Owned::TextureShadow),
                 textures_alias: owned(Owned::TextureAlias),
                 textures_texels: owned(Owned::TextureTexels),
+                images_recycled: self.recycled[0].load(Ordering::Relaxed),
+                images_parked: self.recycled[1].load(Ordering::Relaxed),
+                images_evicted: self.recycled[2].load(Ordering::Relaxed),
+                imports_inside_live: self.imports_inside_live.load(Ordering::Relaxed),
             },
             ShadowKeeps {
                 render_cut: keep(KeepBy::Render, 0),
@@ -156,6 +185,15 @@ pub struct ObjectChurn {
     pub textures_alias: u64,
     /// Textures over buffers' bytes as texels.
     pub textures_texels: u64,
+    /// Images a making took from the recycler, rather than making one (`texture/recycle.rs`).
+    pub images_recycled: u64,
+    /// Images that went to the recycler as their textures went, rather than being destroyed.
+    pub images_parked: u64,
+    /// Parked images destroyed past the recycler's bounds.
+    pub images_evicted: u64,
+    /// No-copy buffers that imported their pages where a live import of another no-copy buffer
+    /// held all of them (`host_aliases.rs`): imports a buffer could have lain in, at an offset.
+    pub imports_inside_live: u64,
 }
 
 /// The keeps of merged-back shadows by who planned them, cut to a rectangle or of every texel
