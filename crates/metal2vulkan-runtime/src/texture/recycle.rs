@@ -38,8 +38,9 @@ use metal2vulkan::metal::TextureType;
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
-/// The most images parked at once.
-pub(super) const MOST_PARKED: usize = 32;
+/// The most images parked at once: none in a build of `--cfg m2v_no_recycle`, the control that
+/// measures what recycling changes (each image then goes as it is parked, as before).
+pub(super) const MOST_PARKED: usize = if cfg!(m2v_no_recycle) { 0 } else { 32 };
 /// The most memory parked images hold.
 pub(super) const MOST_PARKED_BYTES: u64 = 128 << 20;
 /// How long an image stays parked before it goes.
