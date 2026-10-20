@@ -978,13 +978,14 @@ const DRAG_SURFACE_ROW: usize = FRAME_SIDE * 4 + 256;
 
 /// One frame of the `drag` workload: [`DRAG_COMMAND_BUFFERS`] command buffers, pass `p` in
 /// command buffer `p` and a dispatch in each of the first [`DRAG_DISPATCHES`], each committed;
-/// the last waited for. A pass's draws sample the scene's textures, or, where `composites`, the
-/// other surfaces, as a compositor's do. Its times into `times` (`[encode, frame, thread CPU,
-/// process CPU]`).
+/// the last waited for. A pass's draws sample the scene's textures, or, where the frame
+/// composites (`uploads` holds the windows' contents), the other surfaces, as a compositor's do,
+/// the first command buffer uploading `uploads` into half the surfaces in one blit encoder before
+/// its pass. Its times into `times` (`[encode, frame, thread CPU, process CPU]`).
 fn drag_once<G: Gpu>(
     g: &G,
     s: &Scene<G>,
-    (surfaces, composites): (&[G::Texture], bool),
+    (surfaces, uploads): (&[G::Texture], Option<&G::Buffer>),
     times: &mut [Vec<f64>; 4],
 ) {
     g.pool(|| {
@@ -994,6 +995,11 @@ fn drag_once<G: Gpu>(
         let mut last = None;
         for at in 0..DRAG_COMMAND_BUFFERS {
             let command_buffer = g.command_buffer();
+            if let Some(contents) = uploads.filter(|_| at == 0) {
+                let windows: Vec<&G::Texture> = surfaces.iter().step_by(2).collect();
+                let side = (FRAME_SIDE, FRAME_SIDE);
+                g.upload(&command_buffer, contents, &windows, side, FRAME_SIDE * 4);
+            }
             if at < DRAG_PASSES {
                 let target = &surfaces[at % DRAG_SURFACES];
                 let mut encoder = g.render_encoder(&command_buffer, target, at % 4 != 0);
@@ -1002,9 +1008,9 @@ fn drag_once<G: Gpu>(
                 for draw in 0..DRAG_PASS_DRAWS {
                     let rect = (at * DRAG_PASS_DRAWS + draw) % RECTS;
                     g.set_vertex_buffer(&mut encoder, &s.rects[0], rect * RECT_STRIDE, 0);
-                    let texture = match composites {
-                        true => &surfaces[(at + draw + 1) % DRAG_SURFACES],
-                        false => &s.textures[(at + draw) % TEXTURES],
+                    let texture = match uploads {
+                        Some(_) => &surfaces[(at + draw + 1) % DRAG_SURFACES],
+                        None => &s.textures[(at + draw) % TEXTURES],
                     };
                     g.set_fragment_texture(&mut encoder, texture, 0);
                     g.draw_strip(&mut encoder, 4);
@@ -1036,11 +1042,13 @@ fn drag_once<G: Gpu>(
 /// textures over host pages, one buffer each, the draws sampling the other surfaces.
 pub fn drag<G: Gpu>(g: &G, s: &Scene<G>, sizes: &Sizes) {
     let size = DRAG_SURFACES * FRAME_STRIDE;
+    let contents = g.buffer(FRAME_SIDE * FRAME_SIDE * 4);
     let run = |name: &str, surfaces: &[G::Texture], composites: bool| {
+        let uploads = composites.then_some(&contents);
         let mut times: [Vec<f64>; 4] = Default::default();
         for frame in 0..sizes.timed + 3 {
             let mut taken: [Vec<f64>; 4] = Default::default();
-            drag_once(g, s, (surfaces, composites), &mut taken);
+            drag_once(g, s, (surfaces, uploads), &mut taken);
             if frame >= 3 {
                 for (all, one) in times.iter_mut().zip(taken) {
                     all.extend(one);

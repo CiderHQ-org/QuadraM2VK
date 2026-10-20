@@ -220,6 +220,17 @@ pub trait Gpu {
 
     /// A blit encoder of one `fillBuffer:range:value:` over the buffer's first `length` bytes.
     fn fill(&self, command_buffer: &Self::CommandBuffer, buffer: &Self::Buffer, length: usize);
+    /// A blit encoder of `copyFromBuffer:...toTexture:...` into each of `textures`, a
+    /// `width` x `height` region from the start of `source`, its rows `bytes_per_row` apart, as a
+    /// compositor uploads its windows' contents.
+    fn upload(
+        &self,
+        command_buffer: &Self::CommandBuffer,
+        source: &Self::Buffer,
+        textures: &[&Self::Texture],
+        size: (usize, usize),
+        bytes_per_row: usize,
+    );
 
     fn commit(&self, command_buffer: &Self::CommandBuffer);
     /// `waitUntilCompleted`, then a check that it completed without error.

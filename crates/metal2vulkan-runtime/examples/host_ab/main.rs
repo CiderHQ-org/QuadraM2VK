@@ -71,9 +71,10 @@
 //!   encoding thread's CPU time and the process's. The runtime's alone (`drag_no_copy_*`): the
 //!   same over a heap of host pages, as a guest's heap is, and (`drag_heap_surfaces_*`) again
 //!   with textures Metal may optimize, each pass's draws sampling three other surfaces, as a
-//!   compositor's do. Then (`drag_surfaces_*`) the surfaces as textures over host pages, a
-//!   no-copy buffer each, their rows padded, as a guest's window surfaces are, the draws
-//!   sampling the other surfaces too.
+//!   compositor's do, the frame's first command buffer uploading a window's contents into every
+//!   other surface in one blit encoder first. Then (`drag_surfaces_*`) the surfaces as textures
+//!   over host pages, a no-copy buffer each, their rows padded, as a guest's window surfaces
+//!   are, composited and uploaded into alike.
 //! - `memory`: `newBufferWithLength:` and `newBufferWithBytes:` of 4 KiB, 1 MiB and 64 MiB,
 //!   `newBufferWithBytesNoCopy:` of 1 MiB and 64 MiB, and a 1024x1024 `RGBA8Unorm` `Shared`
 //!   texture's `replaceRegion` and `getBytes`.

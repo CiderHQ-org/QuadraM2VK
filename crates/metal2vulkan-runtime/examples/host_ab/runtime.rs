@@ -555,6 +555,35 @@ impl Gpu for Runtime {
         blit.end_encoding().expect("end_encoding");
     }
 
+    fn upload(
+        &self,
+        command_buffer: &rt::CommandBuffer,
+        source: &rt::Buffer,
+        textures: &[&rt::Texture],
+        (width, height): (usize, usize),
+        bytes_per_row: usize,
+    ) {
+        let mut blit = command_buffer
+            .blit_command_encoder()
+            .expect("blit_command_encoder");
+        for texture in textures {
+            blit.copy_from_buffer_to_texture(
+                source,
+                0,
+                bytes_per_row as u64,
+                (bytes_per_row * height) as u64,
+                rt::Size::new(width as u64, height as u64, 1),
+                texture,
+                0,
+                0,
+                rt::Origin::new(0, 0, 0),
+                rt::BlitOption::None,
+            )
+            .expect("copy_from_buffer_to_texture");
+        }
+        blit.end_encoding().expect("end_encoding");
+    }
+
     fn commit(&self, command_buffer: &rt::CommandBuffer) {
         command_buffer.commit().expect("commit");
     }

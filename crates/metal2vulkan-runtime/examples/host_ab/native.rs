@@ -581,6 +581,36 @@ impl Gpu for Native {
         blit.endEncoding();
     }
 
+    fn upload(
+        &self,
+        command_buffer: &Self::CommandBuffer,
+        source: &Self::Buffer,
+        textures: &[&Self::Texture],
+        (width, height): (usize, usize),
+        bytes_per_row: usize,
+    ) {
+        let blit = command_buffer
+            .blitCommandEncoder()
+            .expect("blitCommandEncoder");
+        for texture in textures {
+            // SAFETY: the region lies in the buffer and in the texture (the workload's).
+            unsafe {
+                blit.copyFromBuffer_sourceOffset_sourceBytesPerRow_sourceBytesPerImage_sourceSize_toTexture_destinationSlice_destinationLevel_destinationOrigin(
+                    source,
+                    0,
+                    bytes_per_row,
+                    bytes_per_row * height,
+                    MTLSize { width, height, depth: 1 },
+                    texture,
+                    0,
+                    0,
+                    MTLOrigin { x: 0, y: 0, z: 0 },
+                )
+            };
+        }
+        blit.endEncoding();
+    }
+
     fn commit(&self, command_buffer: &Self::CommandBuffer) {
         command_buffer.commit();
     }
