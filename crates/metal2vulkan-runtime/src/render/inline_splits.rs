@@ -580,6 +580,8 @@ fn record_kept(
             step.record_in(raw, held);
         }
         raw.cmd_begin_render_pass(held, &info, vk::SubpassContents::INLINE);
+        let begun = crate::work_counts::PassBegun::InlineSplit;
+        shared.counts.render_pass_begun(begun);
         let mut draws = kept.room.recordings[..kept.draws].iter();
         for command in &kept.room.commands {
             match command {

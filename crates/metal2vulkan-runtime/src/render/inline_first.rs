@@ -140,7 +140,7 @@ use crate::render_target::{
     self, Feedback, FramebufferObject, PassShape, Position, RenderPassObject,
 };
 use crate::render_values::{LoadAction, StoreAction};
-use crate::work_counts::{ActionsRefused, NotInline};
+use crate::work_counts::{ActionsRefused, NotInline, PassBegun};
 use ash::vk;
 use metal2vulkan::metal::format::ExtendedRange;
 use std::sync::Arc;
@@ -498,6 +498,7 @@ impl RenderCommandEncoder {
         // to its end, which retains them), the render area is the framebuffer's extent, and
         // every image rests in `GENERAL`.
         unsafe { raw.cmd_begin_render_pass(held, &info, vk::SubpassContents::INLINE) };
+        device.shared().counts.render_pass_begun(PassBegun::Inline);
         self.current.draws = held;
         self.current.inline = true;
         self.current.rerecord = None;

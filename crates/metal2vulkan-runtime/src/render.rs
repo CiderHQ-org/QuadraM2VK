@@ -337,6 +337,7 @@ use super::visibility::{self, Continuation, Visibility, VisibilityResultMode};
 use crate::device::functions::Vk;
 use crate::work_counts::Begun;
 use crate::work_counts::NotInline;
+use crate::work_counts::Split;
 use ash::vk;
 pub(super) use executions::DeferredPass;
 use executions::{PassInstance, PassStorage, RenderExecution, RunPasses};
@@ -3418,7 +3419,7 @@ impl RenderCommandEncoder {
                 &[],
             )?;
             self.begin_new_draws(&mut next)?;
-            self.install(next, stood, None);
+            self.install(next, stood, None, Split::Visibility);
         }
         let active = self.visibility.active();
         self.visibility.set_mode(
@@ -3450,6 +3451,7 @@ impl RenderCommandEncoder {
     /// is consumed either way, so a refusal leaves its command buffer abandoned, as Metal stops
     /// there.
     pub fn end_encoding(self) -> Result<(), Error> {
+        self.core.device().shared().counts.render_encoder_ended();
         // And the pass's later color groups, where it draws in groups (`render/color_groups.rs`).
         let (core, residency, log) = self.end_pass()?.with_later_groups()?;
         core.end_with_replay(
@@ -5866,12 +5868,14 @@ impl RenderCommandEncoder {
 
     /// Make `next` the instance the encoder records into (the module docs), with `stood`, the
     /// pass's layout from it on, and `continuation`, the query that continues the active one in
-    /// a new instance past a split.
+    /// a new instance past a split; a split counted for `cause`, or for the program's barrier or
+    /// a tile dispatch since the current instance recorded where one came.
     fn install(
         &mut self,
         next: Next,
         stood: Option<Box<PassLayout>>,
         continuation: Option<Continuation>,
+        cause: Split,
     ) {
         if let Some(layout) = stood {
             self.layout = *layout;
@@ -5894,6 +5898,12 @@ impl RenderCommandEncoder {
                 instance.rerecord = None;
             }
             if split {
+                let cause = match (self.barrier, self.dispatched) {
+                    (true, _) => Split::Barrier,
+                    (false, true) => Split::TileDispatch,
+                    (false, false) => cause,
+                };
+                self.core.device().shared().counts.instance_split(cause);
                 let previous = std::mem::replace(&mut self.current, *instance);
                 self.earlier.push(previous);
                 self.barrier_splits += usize::from(self.barrier);
@@ -6165,7 +6175,7 @@ impl RenderCommandEncoder {
             Next::New { .. } | Next::Current => None,
         };
         self.begin_new_draws(&mut next)?;
-        self.install(next, stood, continuation);
+        self.install(next, stood, continuation, Split::TileDispatch);
         Ok(())
     }
 
@@ -8703,6 +8713,8 @@ impl RenderCommandEncoder {
         // A draw whose pipeline is being made records between its instance's own draws, which
         // an instance recorded inline cannot run: it records into a new instance after it
         // (`render/inline_first.rs`).
+        let pending_split =
+            pending.is_some() && self.current.inline && matches!(next, Next::Current);
         let (mut next, stood, continuation) = match (pending.is_some() && self.current.inline, next)
         {
             (true, Next::Current) => {
@@ -8777,7 +8789,23 @@ impl RenderCommandEncoder {
         if let (Some(held), Some(used)) = (self.imageblock.as_mut(), &imageblock_use) {
             held.adopt(used.alignment);
         }
-        self.install(next, stood, continuation);
+        // Why the draw splits the pass where it does: the first that holds.
+        let cause = if ordered {
+            Split::TileMemory
+        } else if after_barrier {
+            Split::AttachedRead
+        } else if apart {
+            Split::Feedback
+        } else if first_write {
+            Split::MemorylessWrite
+        } else if pending_split {
+            Split::PendingPipeline
+        } else if self.replaying {
+            Split::Execution
+        } else {
+            Split::Shape
+        };
+        self.install(next, stood, continuation, cause);
         self.current.feedback.0 |= feedback.0;
         self.current.storage_colors |= storage_colors;
         if let Some(begin) = inline {

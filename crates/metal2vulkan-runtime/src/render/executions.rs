@@ -632,7 +632,12 @@ impl RenderCommandEncoder {
             Next::New { .. } | Next::Current => None,
         };
         self.begin_new_draws(&mut next)?;
-        self.install(next, stood, continuation);
+        self.install(
+            next,
+            stood,
+            continuation,
+            crate::work_counts::Split::Execution,
+        );
         let draws = self
             .core
             .command_buffer()

@@ -48,6 +48,7 @@ use crate::sample_planes::PlanesCommands;
 use crate::shadow::ShadowCopy;
 use crate::shadow_stencil::ShadowCopies;
 use crate::tracker::Barrier;
+use crate::work_counts::PassBegun;
 use crate::Device;
 use ash::vk;
 use std::sync::{Arc, Mutex};
@@ -202,6 +203,8 @@ impl PassSteps {
     ) {
         let positioned = self.instances.get(index).and_then(|i| i.positioned);
         let moved = self.instances.get(index).map_or(&[][..], |i| &i.moved[..]);
+        let counts = &self.staged_rows.device.shared().counts;
+        counts.render_pass_begun(PassBegun::Instance);
         // SAFETY: the caller's contract; the moved attachments rest in `GENERAL` until here.
         unsafe {
             render_target::moved_barriers(raw, command_buffer, moved, true, self.family);
@@ -362,6 +365,8 @@ impl PassSteps {
             }
             let resolves = self.resolve_instance.iter().chain(&self.later_resolves);
             for (pass, framebuffer) in resolves {
+                let counts = &self.staged_rows.device.shared().counts;
+                counts.render_pass_begun(PassBegun::Resolve);
                 Barrier::everything().record(raw, command_buffer);
                 let begin = vk::RenderPassBeginInfo::default()
                     .render_pass(pass.raw)

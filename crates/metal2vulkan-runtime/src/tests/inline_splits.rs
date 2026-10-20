@@ -191,6 +191,34 @@ fn instances_after_splits_record_inline_and_read_the_copies_from_before_them() {
         after.inline_split_instances - counted.inline_split_instances,
         2
     );
+    // One render encoder, its render pass instances by where they began, and its splits by cause
+    // (`WorkCounts::render_passes_begun_inline` and kin): each barrier over the render targets
+    // orders the draws in their instance, and the draw after it that reads the attachment splits
+    // the pass, twice, and nothing else does.
+    let splits = |c: &crate::WorkCounts| {
+        c.instance_splits_barrier
+            + c.instance_splits_tile_dispatch
+            + c.instance_splits_tile_memory
+            + c.instance_splits_feedback
+            + c.instance_splits_memoryless_write
+            + c.instance_splits_pending_pipeline
+            + c.instance_splits_execution
+            + c.instance_splits_visibility
+            + c.instance_splits_shape
+    };
+    assert_eq!(
+        (
+            after.render_encoders_ended - counted.render_encoders_ended,
+            after.render_passes_begun_inline - counted.render_passes_begun_inline,
+            after.render_passes_begun_inline_splits - counted.render_passes_begun_inline_splits,
+            after.render_passes_begun_instances - counted.render_passes_begun_instances,
+            after.render_passes_begun_resolves - counted.render_passes_begun_resolves,
+            after.instance_splits_attached_read - counted.instance_splits_attached_read,
+            splits(&after) - splits(&counted),
+        ),
+        (1, 1, 2, 0, 0, 2, 0),
+        "the encoders, the instances by where they began, and the splits by cause"
+    );
     let contents = back.contents().unwrap();
     // SAFETY: the buffer's bytes, which no command uses now.
     let bytes = unsafe { std::slice::from_raw_parts(contents.as_ptr(), back.length() as usize) };

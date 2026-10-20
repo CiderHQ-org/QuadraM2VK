@@ -588,6 +588,30 @@ impl Gpu for Runtime {
             ("barrier_buffers", c.command_buffers_begun_batch_barriers),
             ("finales_apart", c.finales_apart),
             ("render_passes_begun", replayed.cmd_begin_render_pass),
+            ("render_encoders_ended", c.render_encoders_ended),
+            ("passes_begun_instances", c.render_passes_begun_instances),
+            ("passes_begun_inline", c.render_passes_begun_inline),
+            (
+                "passes_begun_inline_splits",
+                c.render_passes_begun_inline_splits,
+            ),
+            ("passes_begun_resolves", c.render_passes_begun_resolves),
+            ("splits_barrier", c.instance_splits_barrier),
+            ("splits_tile_dispatch", c.instance_splits_tile_dispatch),
+            ("splits_tile_memory", c.instance_splits_tile_memory),
+            ("splits_attached_read", c.instance_splits_attached_read),
+            ("splits_feedback", c.instance_splits_feedback),
+            (
+                "splits_memoryless_write",
+                c.instance_splits_memoryless_write,
+            ),
+            (
+                "splits_pending_pipeline",
+                c.instance_splits_pending_pipeline,
+            ),
+            ("splits_execution", c.instance_splits_execution),
+            ("splits_visibility", c.instance_splits_visibility),
+            ("splits_shape", c.instance_splits_shape),
             ("pipeline_barriers", replayed.cmd_pipeline_barrier),
         ]
         .into_iter()

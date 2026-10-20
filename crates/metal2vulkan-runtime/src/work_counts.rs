@@ -111,6 +111,9 @@ pub(crate) struct Counters {
     command_buffers_begun: AtomicU64,
     encoder_command_buffers_begun: AtomicU64,
     command_buffers_begun_by: [AtomicU64; Begun::COUNT],
+    render_encoders_ended: AtomicU64,
+    render_passes_begun_by: [AtomicU64; PassBegun::COUNT],
+    instance_splits_by: [AtomicU64; Split::COUNT],
     encoder_primaries_begun_ahead: AtomicU64,
     primaries_begun_ahead: AtomicU64,
     barrier_buffers_kept: AtomicU64,
@@ -347,6 +350,70 @@ pub(crate) enum Begun {
 impl Begun {
     /// How many there are.
     pub(crate) const COUNT: usize = 8;
+}
+
+/// Where the runtime began a render pass instance of a render encoder's pass
+/// (`WorkCounts::render_passes_begun_instances` and kin); every other `vkCmdBeginRenderPass` it
+/// records (clears, resolves and copies of its own) is among `commands_replayed`'s alone.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PassBegun {
+    /// An instance whose draws a secondary holds, begun where the pass is recorded
+    /// (`render/pass_steps.rs`): an encoder's, or a run of an execution's commands.
+    Instance,
+    /// A pass's first instance, begun at its first draw to record its draws inline
+    /// (`render/inline_first.rs`).
+    Inline,
+    /// An instance after a split, its draws kept and recorded inline (`render/inline_splits.rs`).
+    InlineSplit,
+    /// An instance of no draws that resolves the pass, after its last
+    /// (`render/pass_steps.rs`).
+    Resolve,
+}
+
+impl PassBegun {
+    /// How many there are.
+    pub(crate) const COUNT: usize = 4;
+}
+
+/// Why a render encoder's pass went on in a new render pass instance after one that recorded,
+/// splitting the pass (`render.rs`, **Instances**; `WorkCounts::instance_splits_barrier` and
+/// kin): the first that holds, in this order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Split {
+    /// A memory barrier of the program's since the instance recorded (`fence.rs`).
+    Barrier,
+    /// A tile dispatch since the instance recorded (`render/tile_dispatch.rs`), or the instance
+    /// of no draws after the pass's last one, for its store actions.
+    TileDispatch,
+    /// A draw ordered after draws of the instance that reached the tile threadgroup memory
+    /// (`render/tile_memory.rs`).
+    TileMemory,
+    /// A draw that samples a color attachment's texture after a barrier inside the instance
+    /// (`texture/attached_reads.rs`).
+    AttachedRead,
+    /// A draw that reads through snapshots apart from the instance, or binds a color the instance
+    /// holds in the feedback loop layout (`render/snapshot.rs`).
+    Feedback,
+    /// A draw that writes a memoryless color after an instance recorded inline
+    /// (`render/inline_first.rs`).
+    MemorylessWrite,
+    /// A draw whose pipeline is being made after an instance recorded inline
+    /// (`render/inline_first.rs`).
+    PendingPipeline,
+    /// The commands of an indirect command buffer's execution, or a run of them
+    /// (`render/executions.rs`).
+    Execution,
+    /// A visibility result mode set in a pass of several views (`visibility.rs`).
+    Visibility,
+    /// A draw the instance's shape does not take: the attachments it fetches as storage, the
+    /// views it renders, stand-ins or sample planes arriving, its shader-side stencil or depth
+    /// test, its colors' places or formats.
+    Shape,
+}
+
+impl Split {
+    /// How many there are.
+    pub(crate) const COUNT: usize = 10;
 }
 
 /// What kept a render pass's first instance from recording inline (`render/inline_first.rs`): the
@@ -843,6 +910,22 @@ impl Counters {
     /// nanoseconds in the driver (`device/relay.rs`).
     pub(crate) fn batch_submitted_in(&self, nanos: u64) {
         self.batch_submit_nanos.fetch_add(nanos, Ordering::Relaxed);
+    }
+
+    /// A render encoder ended (`RenderCommandEncoder::end_encoding`).
+    pub(crate) fn render_encoder_ended(&self) {
+        self.render_encoders_ended.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A render pass instance of a render encoder's pass was begun at `site`.
+    pub(crate) fn render_pass_begun(&self, site: PassBegun) {
+        self.render_passes_begun_by[site as usize].fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A render encoder's pass split for `cause`: its next draw records into a new instance after
+    /// one that recorded.
+    pub(crate) fn instance_split(&self, cause: Split) {
+        self.instance_splits_by[cause as usize].fetch_add(1, Ordering::Relaxed);
     }
 
     /// A `VkCommandBuffer` was begun (`vkBeginCommandBuffer`) for `what`.
@@ -2620,6 +2703,46 @@ pub struct WorkCounts {
     /// memoryless color attachment, which no instance recorded inline writes: the draw records
     /// in a secondary, after them (`render/inline_first.rs`).
     pub inline_memoryless_write_splits: u64,
+    /// Render encoders ended (`RenderCommandEncoder::end_encoding`): each a Metal pass.
+    pub render_encoders_ended: u64,
+    /// Render pass instances of render encoders' passes begun where the pass is recorded, each
+    /// running a secondary of its draws (`render/pass_steps.rs`): an encoder's instances not
+    /// recorded inline, and the runs of executions' commands. With the three fields after this
+    /// one, every render pass instance of a render encoder's pass; the rest of
+    /// `commands_replayed.cmd_begin_render_pass` are the runtime's own clears, resolves and
+    /// copies.
+    pub render_passes_begun_instances: u64,
+    /// Passes' first instances begun at their first draw, recording their draws inline
+    /// (`render/inline_first.rs`).
+    pub render_passes_begun_inline: u64,
+    /// Instances after a split recorded inline, their draws kept (`render/inline_splits.rs`).
+    pub render_passes_begun_inline_splits: u64,
+    /// Instances of no draws that resolve a pass after its last (`render/pass_steps.rs`).
+    pub render_passes_begun_resolves: u64,
+    /// Splits of render encoders' passes, each a new render pass instance after one that
+    /// recorded (`render.rs`, **Instances**), at a memory barrier of the program's (`fence.rs`).
+    /// With the nine fields after this one, every split, by its first cause in this order.
+    pub instance_splits_barrier: u64,
+    /// At a tile dispatch, or for the store actions after the pass's last one.
+    pub instance_splits_tile_dispatch: u64,
+    /// At a draw ordered after draws that reached the tile threadgroup memory.
+    pub instance_splits_tile_memory: u64,
+    /// At a draw that samples a color attachment's texture after a barrier inside the instance.
+    pub instance_splits_attached_read: u64,
+    /// At a draw that reads through snapshots apart, or binds a color held in the feedback loop
+    /// layout.
+    pub instance_splits_feedback: u64,
+    /// At a draw that writes a memoryless color after an instance recorded inline.
+    pub instance_splits_memoryless_write: u64,
+    /// At a draw whose pipeline is being made after an instance recorded inline.
+    pub instance_splits_pending_pipeline: u64,
+    /// At an indirect command buffer's execution, or a run of its commands.
+    pub instance_splits_execution: u64,
+    /// At a visibility result mode set in a pass of several views.
+    pub instance_splits_visibility: u64,
+    /// At a draw the instance's shape does not take: fetched attachments, views, stand-ins or
+    /// sample planes arriving, a shader-side stencil or depth test, its colors' places or formats.
+    pub instance_splits_shape: u64,
     /// Render passes whose first instance did not record inline, its draws in a secondary command
     /// buffer, by the first check that ruled it out (`render/inline_first.rs`), counted as the pass
     /// opens or at its first draw that records: here, the encoder encodes an ended encoder's calls
@@ -3368,6 +3491,10 @@ impl Device {
         };
         let begun =
             |what: Begun| counters.command_buffers_begun_by[what as usize].load(Ordering::Relaxed);
+        let pass_begun =
+            |at: PassBegun| counters.render_passes_begun_by[at as usize].load(Ordering::Relaxed);
+        let split =
+            |cause: Split| counters.instance_splits_by[cause as usize].load(Ordering::Relaxed);
         let (sleeps, [by_commit, by_completion, by_host, by_slice], scheduler_spared, gpu_waits) =
             self.shared().scheduler.sleeps_and_wakings();
         let (completion_wakes, completion_spared) = self.shared().completion.wakes();
@@ -3577,6 +3704,21 @@ impl Device {
             inline_split_instances: counters.inline_split_instances.load(Ordering::Relaxed),
             inline_memoryless_write_splits: (counters.inline_memoryless_write_splits)
                 .load(Ordering::Relaxed),
+            render_encoders_ended: counters.render_encoders_ended.load(Ordering::Relaxed),
+            render_passes_begun_instances: pass_begun(PassBegun::Instance),
+            render_passes_begun_inline: pass_begun(PassBegun::Inline),
+            render_passes_begun_inline_splits: pass_begun(PassBegun::InlineSplit),
+            render_passes_begun_resolves: pass_begun(PassBegun::Resolve),
+            instance_splits_barrier: split(Split::Barrier),
+            instance_splits_tile_dispatch: split(Split::TileDispatch),
+            instance_splits_tile_memory: split(Split::TileMemory),
+            instance_splits_attached_read: split(Split::AttachedRead),
+            instance_splits_feedback: split(Split::Feedback),
+            instance_splits_memoryless_write: split(Split::MemorylessWrite),
+            instance_splits_pending_pipeline: split(Split::PendingPipeline),
+            instance_splits_execution: split(Split::Execution),
+            instance_splits_visibility: split(Split::Visibility),
+            instance_splits_shape: split(Split::Shape),
             passes_not_inline_encoders: not_inline(NotInline::Encoders),
             passes_not_inline_layouts: not_inline(NotInline::Layouts),
             passes_not_inline_memoryless: not_inline(NotInline::Memoryless),
