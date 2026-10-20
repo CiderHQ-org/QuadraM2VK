@@ -943,7 +943,8 @@ impl VariantObjects {
             raw,
             created_in,
             keep: None,
-            unannounced: AtomicBool::new(false),
+            // Its notices wait for its first dispatch where its state's creation made it.
+            unannounced: AtomicBool::new(matches!(c.notices, Notices::FirstDraw)),
             linked: None,
         };
         if let Notices::Now(formats) = c.notices {

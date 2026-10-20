@@ -13,9 +13,25 @@
 //!   alike, its pass recorded later (`render/pending_tile.rs`). Its specialized notices are announced
 //!   at the dispatch that hands the making over, on the program's thread, naming what it binds: the
 //!   pool decides nothing the program sees.
-//! - **Nothing at the creation.** A compute state's creation starts no making: one that ran
-//!   past the state's release, which never waits, would hold the variant and the device past
-//!   the program's last drop, which Metal's never does.
+//! - **The predicted region, made at the creation.** Metal compiles a compute state inside
+//!   `newComputePipelineState`, and its first dispatch compiles nothing. The creation makes the
+//!   `VkPipeline` of the region a first dispatch is predicted to take
+//!   ([`Variant::make_at_creation`]): a `dispatchThreadgroups:` on the base variant, planned for
+//!   nothing bound but Metal's default sampler at each runtime sampler slot that does not compare
+//!   (as a render state's prediction, `predicted.rs`), at the descriptor's
+//!   `requiredThreadsPerThreadgroup` where it states one, else at the size Apple's guide to
+//!   threadgroup sizes ("Calculating Threadgroup and Grid Sizes") computes from the state
+//!   ([`predicted_threads`]). A dispatch whose region has that key takes the pipeline made; one
+//!   whose key differs from it only where it reads a uniform view at its bind offset alone takes
+//!   it too, at once, while its own key is made on the pool, nothing waiting for it, as a draw
+//!   takes its key's residual form (`render/residual.rs`); any other hands its own making to the
+//!   pool, as before (on MoltenVK the kernel's MSL library is then compiled already, so that
+//!   making is its specialization and Metal's pipeline compile).
+//!   The making runs on the creating thread and ends before the creation returns: none runs past
+//!   the state's release, which would hold the variant and the device past the program's last
+//!   drop, which Metal's never does. Its specialized notices wait for the first dispatch that
+//!   takes it, which announces them naming what it binds. A creation inside a host step, a tile
+//!   function's state and a stand-in compile make nothing here.
 //! - **Kept by the state** (`piece_holds.rs`). What a piece needs (its variant and its making's
 //!   ticket) is kept by the state, never by the pool's thread; the state's release stops a piece
 //!   not started, its making failing, and a dispatch that took it (of another state of the variant)
@@ -30,7 +46,9 @@ use super::pool::Place;
 use super::{ComputePipelineState, RegionKey, Variant};
 use crate::degradation::{BoundFormats, Occurrence};
 use crate::error::Error;
-use metal2vulkan::bind::DispatchRegion;
+use crate::Device;
+use metal2vulkan::bind::{BindState, BoundSampler, Dispatch, DispatchRegion, SamplerDescriptor};
+use metal2vulkan::pipeline::{ComputePipeline, ComputePipelineDescriptor, SlotInterface};
 use std::sync::Arc;
 
 /// A region's `VkPipeline` for a dispatch that records it later
@@ -84,9 +102,16 @@ impl Variant {
     ) -> RegionPipeline {
         let key = RegionKey::of(region);
         match self.pipelines.begin(&key) {
-            Begun::Made(made) => RegionPipeline::Made(made),
-            // The command that began it announces its kinds.
-            Begun::Pending(pending) => RegionPipeline::Making(pending),
+            Begun::Made(made) => {
+                self.first_use(&made, &key, formats);
+                RegionPipeline::Made(made)
+            }
+            // The command that began it announces its kinds. Meanwhile the dispatch takes the
+            // key's residual form where it is made (`render/residual.rs`).
+            Begun::Pending(pending) => match self.residual_made(&key, formats) {
+                Some(made) => RegionPipeline::Made(made),
+                None => RegionPipeline::Making(pending),
+            },
             Begun::Yours(ticket) => {
                 let counts = &self.objects.device.shared().counts;
                 match tile {
@@ -94,11 +119,38 @@ impl Variant {
                     false => counts.dispatch_pipeline_pooled(),
                 }
                 self.announce(&key, formats);
+                let residual = self.residual_made(&key, formats);
                 let pending = ticket.pending();
                 pending.queued_at(self.pooled(holds, key, ticket));
-                RegionPipeline::Making(pending)
+                match residual {
+                    // Handed to the pool: nothing waits for the making.
+                    Some(made) => {
+                        counts.residual_form_making();
+                        RegionPipeline::Made(made)
+                    }
+                    None => RegionPipeline::Making(pending),
+                }
             }
         }
+    }
+
+    /// The made `VkPipeline` of `key`'s residual form, each of its uniform views read at its
+    /// residual, where `key` is not its own residual form (`render/residual.rs`), for a dispatch
+    /// that binds `formats` and takes it at once, which counts it as a residual-form command.
+    fn residual_made(
+        &self,
+        key: &RegionKey,
+        formats: BoundFormats<'_>,
+    ) -> Option<Arc<RawPipeline>> {
+        let constants = &self.pipeline.stage.specialization.constants;
+        let residual = RegionKey {
+            specialization: super::residual_form(constants.iter(), &key.specialization)?,
+            ..key.clone()
+        };
+        let made = self.pipelines.made(&residual)?;
+        self.first_use(&made, &residual, formats);
+        self.objects.device.shared().counts.residual_form_drawn();
+        Some(made)
     }
 
     /// The `VkPipeline` of `key`, from the memo, the making in flight for it, or made now on
@@ -109,6 +161,73 @@ impl Variant {
             let made = self.objects.pipeline(key, Notices::Announced)?;
             Ok(made.kept_at(&self.objects, kept::Place::Region(key.clone())))
         })
+    }
+
+    /// A dispatch that binds `formats` takes `made`, its `VkPipeline` of `key`: where `made` was
+    /// made at its state's creation and this is its first dispatch, the notices its making would
+    /// have announced are announced now, naming what the dispatch binds (the module docs).
+    pub(super) fn first_use(&self, made: &RawPipeline, key: &RegionKey, formats: BoundFormats<'_>) {
+        if made.first_drawn() {
+            self.objects
+                .device
+                .shared()
+                .counts
+                .creation_pipeline_drawn();
+            self.announce(key, formats);
+        }
+    }
+
+    /// Make, on this thread, the `VkPipeline` of the region a first dispatch of a state of
+    /// `descriptor` on this variant, its base, is predicted to take (the module docs), where no
+    /// caller made or began it: its notices wait for the first dispatch that takes it. A
+    /// prediction the plan refuses, or that runs on another variant, makes nothing; a failed
+    /// making is not kept and refuses nothing, its dispatch meeting it as before.
+    pub(super) fn make_at_creation(&self, device: &Device, descriptor: &ComputePipelineDescriptor) {
+        if crate::exit_guard::in_host_step() {
+            return;
+        }
+        let Some(key) = self.predicted_region(device, descriptor) else {
+            return;
+        };
+        let Begun::Yours(ticket) = self.pipelines.begin(&key) else {
+            return;
+        };
+        let made = self
+            .objects
+            .pipeline(&key, Notices::FirstDraw)
+            .map(|made| made.kept_at(&self.objects, kept::Place::Region(key.clone())));
+        if made.is_ok() {
+            device.shared().counts.creation_pipeline_made();
+        }
+        drop(ticket.settle(made));
+    }
+
+    /// The key of the region of the predicted first dispatch of `descriptor` on this variant
+    /// (the module docs): one `dispatchThreadgroups:` threadgroup of [`predicted_threads`],
+    /// planned for [`predicted_bindings`]. `None` where it plans or instantiates no region, or
+    /// runs on another variant (a threadgroup the kernel's simd tier cannot run whole).
+    fn predicted_region(
+        &self,
+        device: &Device,
+        descriptor: &ComputePipelineDescriptor,
+    ) -> Option<RegionKey> {
+        let state = predicted_bindings(&self.pipeline);
+        let plan = self.plan(device, &state.shape()).ok()?;
+        let info = &self.pipeline.metal_info;
+        let dispatch = Dispatch::Threadgroups {
+            groups: [1, 1, 1],
+            threads_per_group: predicted_threads(
+                descriptor.required_threads_per_threadgroup,
+                info.thread_execution_width,
+                info.max_total_threads_per_threadgroup,
+            ),
+        };
+        if plan.dispatch_variant(&dispatch).ok()? != self.key {
+            return None;
+        }
+        let mut commands = plan.instantiate_dispatch(&state, &dispatch).ok()?;
+        self.keyed_regions(device, &mut commands);
+        commands.regions.first().map(RegionKey::of)
     }
 
     /// Hand the making of `key`, `ticket`'s, to the device's pool, kept by `holds`: a
@@ -160,5 +279,58 @@ impl ComputePipelineState {
     ) -> RegionPipeline {
         let holds = &self.0.program.pieces;
         variant.begin_region_pipeline(holds, (region, self.is_tile()), formats)
+    }
+}
+
+/// The threads per threadgroup a first dispatch of a state is predicted to take (the module
+/// docs): its descriptor's `requiredThreadsPerThreadgroup` (`required`) where it states one,
+/// which every dispatch takes; else the size Apple's guide to threadgroup sizes computes from the
+/// state's `threadExecutionWidth` (`width`) and `maxTotalThreadsPerThreadgroup` (`total`),
+/// `width` threads across by `total / width` down (one row of `total` where that is narrower
+/// than `width`).
+fn predicted_threads(required: Option<[u32; 3]>, width: u32, total: u32) -> [u32; 3] {
+    if let Some(required) = required.filter(|size| size.iter().all(|&axis| axis > 0)) {
+        return required;
+    }
+    let (width, total) = (width.max(1), total.max(1));
+    match total < width {
+        true => [total, 1, 1],
+        false => [width, total / width, 1],
+    }
+}
+
+/// What the predicted first dispatch of `pipeline`'s kernel binds (the module docs): Metal's
+/// default sampler (`MTLSamplerDescriptor`'s defaults) at each runtime sampler slot that does not
+/// compare, and nothing else.
+fn predicted_bindings(pipeline: &ComputePipeline) -> BindState {
+    let mut state = BindState::default();
+    for (slot, used) in &pipeline.interface.slots {
+        if let SlotInterface::Sampler(sampler) = used {
+            if !sampler.compare {
+                let table = state.stages.entry(slot.stage).or_default();
+                table
+                    .samplers
+                    .insert(slot.index, BoundSampler::new(SamplerDescriptor::new()));
+            }
+        }
+    }
+    state
+}
+
+#[cfg(test)]
+mod tests {
+    use super::predicted_threads;
+
+    /// The predicted threadgroup: a required size as it stands; else Apple's guide's
+    /// `threadExecutionWidth` by `maxTotalThreadsPerThreadgroup / threadExecutionWidth`, or one
+    /// row of the total where that is narrower than the width.
+    #[test]
+    fn the_predicted_threadgroup_is_the_required_one_or_apple_s_guide_s() {
+        assert_eq!(predicted_threads(Some([8, 8, 1]), 32, 1024), [8, 8, 1]);
+        assert_eq!(predicted_threads(None, 32, 1024), [32, 32, 1]);
+        assert_eq!(predicted_threads(None, 32, 896), [32, 28, 1]);
+        assert_eq!(predicted_threads(None, 32, 16), [16, 1, 1]);
+        // Metal's zero size requires nothing.
+        assert_eq!(predicted_threads(Some([0, 0, 0]), 32, 256), [32, 8, 1]);
     }
 }

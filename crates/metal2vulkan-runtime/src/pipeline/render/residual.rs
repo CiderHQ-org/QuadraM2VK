@@ -21,21 +21,33 @@
 //!   range widened down into it, the residual then not 0, and there either form reads only bytes
 //!   outside the bound buffer.
 //! - **Made at creation.** A state's creation makes its predicted key's residual form
-//!   (`predicted.rs`), which a draw at any bind offset can take.
+//!   (`predicted.rs`), which a draw at any bind offset can take; a compute state's creation, its
+//!   predicted region's (`dispatch_making.rs`), which a dispatch at any bind offset can take.
 //! - **Drawn while the key's own is made.** A draw whose key's `VkPipeline` is neither made nor
 //!   linked at once, and whose residual form's is made ([`residual_made`]), draws with the residual
 //!   form's at once ([`RenderVariant::begin_graphics_pipeline`], and [`residual_drawn`] for the
 //!   draws that make their pipelines at once). The key's own making goes to the device's pool,
 //!   where no caller began it, at the rank of a making nothing waits for (`budget::Urgency::Ahead`),
 //!   and a later draw of the key takes it once made. Only that direction: a draw whose key has 0
-//!   where a made pipeline has 1 waits for its own making, as any draw does.
+//!   where a made pipeline has 1 waits for its own making, as any draw does. A dispatch or a tile
+//!   dispatch whose region's `VkPipeline` is not made takes its residual form's alike
+//!   (`Variant::begin_region_pipeline`).
+//! - **One form where the bind offset buys nothing** ([`reads_views_at_bind`]). On MoltenVK every
+//!   key is its residual form: a uniform view is a Metal constant buffer reached through an
+//!   argument buffer there, the two forms measured alike, and the other form cost each state a
+//!   second `VkPipeline` at its first draw. The plans' specializations and the dispatches'
+//!   regions take the residual form before any key is looked up (`RenderVariant::plan`,
+//!   `Variant::keyed_regions`), and no bind offset splits a shape (`argument_table::AtBindViews`):
+//!   a state's creation makes the one pipeline its draws at every bind offset take.
 //! - **Only GPU time moves.** Until the key's making lands, its draws' uniform reads take the
 //!   residual: on ANV, loads where the key's form has pushed constants. `WorkCounts` counts the
-//!   draws drawn so (`residual_form_draws`) and the makings begun so (`residual_form_makings`).
+//!   draws and dispatches recorded so (`residual_form_draws`) and the makings begun so
+//!   (`residual_form_makings`).
 //!   Such a making may outlast its draw's command buffer, which does not wait for it
 //!   (`WorkCounts::pipeline_pool_busy` says when the pool holds none).
 //!
 //! [`residual_form`]: RenderVariant::residual_form
+//! [`reads_views_at_bind`]: reads_views_at_bind
 //! [`residual_made`]: RenderVariant::residual_made
 //! [`residual_drawn`]: RenderVariant::residual_drawn
 
@@ -46,7 +58,7 @@ use crate::pipeline::making::Begun;
 use crate::pipeline::objects::RawPipeline;
 use crate::render_target::RenderPassObject;
 use metal2vulkan::cache::SpecializationKey;
-use metal2vulkan::pipeline::SpecKey;
+use metal2vulkan::pipeline::{SpecConstant, SpecKey};
 use std::sync::Arc;
 
 impl RenderVariant {
@@ -57,29 +69,12 @@ impl RenderVariant {
         &self,
         specialization: &SpecializationKey,
     ) -> Option<SpecializationKey> {
-        let at_bind = |id: u32| {
-            self.pipeline
-                .stages
-                .iter()
-                .flat_map(|module| &module.specialization.constants)
-                .any(|constant| {
-                    constant.id == id && matches!(constant.key, SpecKey::RangeAtBindOffset(_))
-                })
-        };
-        let mut residual: Option<SpecializationKey> = None;
-        for entry in &specialization.entries {
-            let at = entry.offset as usize;
-            let range = at..at + entry.size as usize;
-            let set = specialization
-                .data
-                .get(range.clone())
-                .is_some_and(|bytes| bytes.iter().any(|&byte| byte != 0));
-            if set && at_bind(entry.constant_id) {
-                let residual = residual.get_or_insert_with(|| specialization.clone());
-                residual.data[range].fill(0);
-            }
-        }
-        residual
+        let constants = self
+            .pipeline
+            .stages
+            .iter()
+            .flat_map(|module| &module.specialization.constants);
+        residual_form(constants, specialization)
     }
 
     /// The made `VkPipeline` of `key`'s residual form (the module docs), where `key` is not its
@@ -126,4 +121,47 @@ impl RenderVariant {
         device.shared().counts.residual_form_drawn();
         Some(drawn)
     }
+}
+
+/// `specialization` with each `SpecKey::RangeAtBindOffset` constant of `constants` (a pipeline's
+/// stages') at 0, its residual form (the module docs); `None` where every one of them is 0 there
+/// already. A constant `specialization` gives no entry takes the module's default, 0.
+pub(crate) fn residual_form<'a>(
+    constants: impl Iterator<Item = &'a SpecConstant> + Clone,
+    specialization: &SpecializationKey,
+) -> Option<SpecializationKey> {
+    let at_bind = |id: u32| {
+        constants.clone().any(|constant| {
+            constant.id == id && matches!(constant.key, SpecKey::RangeAtBindOffset(_))
+        })
+    };
+    let mut residual: Option<SpecializationKey> = None;
+    for entry in &specialization.entries {
+        let at = entry.offset as usize;
+        let range = at..at + entry.size as usize;
+        let set = specialization
+            .data
+            .get(range.clone())
+            .is_some_and(|bytes| bytes.iter().any(|&byte| byte != 0));
+        if set && at_bind(entry.constant_id) {
+            let residual = residual.get_or_insert_with(|| specialization.clone());
+            residual.data[range].fill(0);
+        }
+    }
+    residual
+}
+
+/// Whether `device` reads a uniform view at its bind offset alone where the view's range starts
+/// there (`SpecKey::RangeAtBindOffset` 1), a `VkPipeline` of its own beside the residual form's
+/// (the module docs); where not, every key is its residual form, and a state's pipelines are the
+/// residual form's alone. Not on MoltenVK: there each uniform view is a Metal constant buffer
+/// reached through an argument buffer, its address loaded in the shader either way, and the two
+/// forms measured alike on an Apple M3 Max (MoltenVK 1.4.1, the host benchmark's GPU workload, two
+/// runs of each form: a heavy fragment 20.74 against 20.73 ms, a heavy kernel 19.18 against
+/// 19.47, a constant-buffer kernel 8.42 against 7.69), while each first draw of a key with a 1
+/// made a second `VkPipeline` (Metal's specialization and pipeline compile, 5.6 to 24.5 ms).
+/// Every other driver keeps both: Mesa's ANV loads a uniform read at a constant offset ahead of
+/// the shader.
+pub(crate) fn reads_views_at_bind(device: &crate::Device) -> bool {
+    device.properties().description.driver_id != Some(metal2vulkan::vk::DriverId::MOLTENVK)
 }

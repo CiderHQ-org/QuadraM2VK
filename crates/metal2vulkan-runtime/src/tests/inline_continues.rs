@@ -178,9 +178,13 @@ fn a_draw_after_an_inline_first_instance_reads_the_copy_from_before_the_pass() {
     command_buffer.wait_until_completed_for(WAIT).unwrap();
     assert_eq!(command_buffer.error(), None);
     let after = device.work_counts();
-    // The path ran: the first instance inline, the line's draw after it, its making held.
+    // The path ran: the first instance inline, the line's draw after it, its making held. The
+    // fill reads its bytes at their bind offset on a device that reads views so, which makes that
+    // key apart from the creation's residual form, nothing waiting for it
+    // (`pipeline/render/residual.rs`).
     assert_eq!(
-        residual, 1,
+        residual,
+        u64::from(crate::pipeline::reads_views_at_bind(&device)),
         "the fill's own key's making, which nothing waits for"
     );
     assert_eq!(pooled - residual, 1, "the line's making waits in the pool");

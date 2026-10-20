@@ -7402,6 +7402,14 @@ impl RenderCommandEncoder {
         // Over the last draw's commands, in their storage (`LiveBind::commands`).
         plan.instantiate_draw_into(&live.state, &draw, &mut live.commands)
             .map_err(Error::Bind)?;
+        // A mesh draw's own key, its residual form where the plan's is (`RenderVariant::plan`).
+        if let Some(own) = live.commands.specialization.as_mut() {
+            if !super::pipeline::reads_views_at_bind(self.core.device()) {
+                if let Some(residual) = variant.residual_form(own) {
+                    *own = residual;
+                }
+            }
+        }
         let commands = &live.commands;
         // The phase of a draw read through snapshots, which its two draws set
         // (`render/snapshot.rs`).

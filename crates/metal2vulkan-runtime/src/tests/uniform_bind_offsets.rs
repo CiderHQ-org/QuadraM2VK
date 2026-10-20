@@ -7,7 +7,9 @@
 //! such an offset, `argument_table::AtBindViews`). A slot bound at offsets that move keeps one
 //! shape and one pipeline. A state's creation makes its predicted key's residual form, every slot
 //! read at its residual, and a draw whose own key is not made draws with it at once while its own
-//! is made on the device's pool (`pipeline/render/residual.rs`).
+//! is made on the device's pool (`pipeline/render/residual.rs`); a compute state's creation makes
+//! its predicted region's, which a dispatch takes alike (`pipeline/dispatch_making.rs`). A device
+//! that reads every view at its residual (MoltenVK) makes no other form.
 //!
 //! A device test: compiled only under the validation crate's GPU safety cfgs (`m2v_gpu`,
 //! `m2v_cpu_icd`), on the kind of device the cfg selects. The functions are those of the owned
@@ -179,8 +181,9 @@ fn draw(device: &Device, queue: &CommandQueue, state: &RenderPipelineState, case
 /// whose ranges start at their bind offsets share one pipeline; each other combination of the two
 /// slots' forms, on a state of its own (a state's slot found at such an offset once is read in
 /// the other form from then on), makes one of its own (the path ran), but for both slots read at
-/// their residuals, the creation's residual form. Each making a draw began is made on the device's
-/// pool, which is waited for before the pipelines made are counted.
+/// their residuals, the creation's residual form. A device that reads every view at its residual
+/// makes none of them: every draw takes the creation's. Each making a draw began is made on the
+/// device's pool, which is waited for before the pipelines made are counted.
 #[test]
 fn vertex_and_fragment_constants_read_at_every_bind_offset() {
     let scratch = Scratch::new("uniform-bind-offsets");
@@ -188,6 +191,9 @@ fn vertex_and_fragment_constants_read_at_every_bind_offset() {
     let queue = device.new_command_queue().unwrap();
     let [state, fragment, vertex, both] = [(); 4].map(|()| self::state(&device));
     let made = || idle(&device).variant_pipelines_made;
+    // The pipelines each other form of a key makes: none where every view is read at its
+    // residual (`pipeline::reads_views_at_bind`).
+    let forms = u64::from(crate::pipeline::reads_views_at_bind(&device));
     let start = made();
     // Offsets every device's alignment divides, and inline bytes: one pipeline, which the state's
     // creation did not make (it made the residual form).
@@ -203,7 +209,7 @@ fn vertex_and_fragment_constants_read_at_every_bind_offset() {
         ],
     );
     let aligned = made();
-    assert_eq!(aligned - start, 1, "pipelines made");
+    assert_eq!(aligned - start, forms, "pipelines made");
     // Offsets no device's alignment divides, on one slot, the other, and both, each on a state of
     // its own: a pipeline for each of the first two, and none for both, the creation's residual
     // form, and the states keep them.
@@ -220,7 +226,11 @@ fn vertex_and_fragment_constants_read_at_every_bind_offset() {
         ],
     );
     let other = made();
-    assert_eq!(other - aligned, 2, "one pipeline per other combination");
+    assert_eq!(
+        other - aligned,
+        2 * forms,
+        "one pipeline per other combination"
+    );
     // Offsets some devices' alignments divide, and offsets every device's divides, on slots
     // found at another before: read in the other form, in the pipelines made.
     let moved = [
@@ -347,11 +357,17 @@ fn constants_bound_at_moving_offsets_keep_one_shape() {
 /// alignment divides, and a draw binding the fragment slot at 4, which none divides, both draw at
 /// once with the creation's pipeline and read their bytes: their own keys' makings wait in the
 /// pool, nothing waiting for them. Once the pool runs they are made, and a later draw of the
-/// second key (the state reads the fragment slot at its residual from then on) takes its own.
+/// second key (the state reads the fragment slot at its residual from then on) takes its own. A
+/// device that reads every view at its residual makes no such key
+/// (`first_draws_make_no_second_pipeline_where_views_are_read_at_their_residual`).
 #[test]
 fn draws_take_the_residual_form_while_their_own_keys_are_made() {
     let scratch = Scratch::new("uniform-residual-form");
     let device = device(&scratch.0);
+    if !crate::pipeline::reads_views_at_bind(&device) {
+        eprintln!("SKIPPED: the device reads every uniform view at its residual");
+        return;
+    }
     let queue = device.new_command_queue().unwrap();
     let before = device.work_counts();
     let state = state(&device);
@@ -405,6 +421,169 @@ fn draws_take_the_residual_form_while_their_own_keys_are_made() {
         later.variant_pipelines_made, made.variant_pipelines_made,
         "pipelines made for a later draw of a key made"
     );
+}
+
+/// Where the device reads every uniform view at its residual (`pipeline::reads_views_at_bind`:
+/// MoltenVK), a state's draws at every bind offset take the one `VkPipeline` its creation made,
+/// as Metal's first draw compiles nothing (`pipeline/render/residual.rs`). With the device's pool
+/// held, draws binding both slots at offset 0, the fragment slot at 4, and both as inline bytes
+/// take the creation's pipeline: none takes a residual form or makes, begins or hands over a
+/// pipeline, and their command buffer completes while the pool is still held; once it runs,
+/// nothing more is made. Elsewhere the draws take the residual form while their own keys are
+/// made (`draws_take_the_residual_form_while_their_own_keys_are_made`).
+#[test]
+fn first_draws_make_no_second_pipeline_where_views_are_read_at_their_residual() {
+    let scratch = Scratch::new("uniform-one-form");
+    let device = device(&scratch.0);
+    if crate::pipeline::reads_views_at_bind(&device) {
+        eprintln!("SKIPPED: the device reads uniform views at their bind offsets");
+        return;
+    }
+    let queue = device.new_command_queue().unwrap();
+    let before = idle(&device);
+    let state = state(&device);
+    let created = idle(&device);
+    assert_eq!(
+        (
+            created.creation_pipelines_made - before.creation_pipelines_made,
+            created.variant_pipelines_made - before.variant_pipelines_made,
+        ),
+        (1, 1),
+        "pipelines the creation made"
+    );
+    let hold = crate::pipeline::pool::held::hold();
+    draw(
+        &device,
+        &queue,
+        &state,
+        &[
+            Bound::Buffer(0, 0),
+            Bound::Buffer(4, 0),
+            Bound::Bytes(0, 16),
+        ],
+    );
+    let drawn = device.work_counts();
+    drop(hold);
+    assert_eq!(
+        (
+            drawn.creation_pipelines_drawn - created.creation_pipelines_drawn,
+            drawn.residual_form_draws - created.residual_form_draws,
+            drawn.residual_form_makings - created.residual_form_makings,
+            drawn.pipelines_pooled - created.pipelines_pooled,
+            drawn.variant_pipelines_made - created.variant_pipelines_made,
+        ),
+        (1, 0, 0, 0, 0),
+        "the creation's pipeline drawn; residual-form draws, their makings, pieces pooled and \
+         pipelines made"
+    );
+    let after = idle(&device);
+    assert_eq!(
+        after.variant_pipelines_made, created.variant_pipelines_made,
+        "pipelines made once the pool ran"
+    );
+}
+
+/// A compute state's creation makes the `VkPipeline` of its predicted region, a threadgroup of
+/// Apple's guide's size (`pipeline/dispatch_making.rs`), as Metal compiles at creation and its
+/// first dispatch compiles nothing. With the device's pool held, a dispatch of that size reading
+/// its constants at offset 0 and one reading them as inline bytes are recorded at once, and their
+/// command buffer completes while the pool is still held: where the device reads every uniform
+/// view at its residual their key is the creation's, and nothing is made, begun or handed over;
+/// elsewhere their key reads the view at its bind offset alone, and they take the creation's
+/// pipeline, its residual form, while their own key, handed to the pool once, is made there. The
+/// kernel reads its constants either way.
+#[test]
+fn a_compute_state_s_creation_makes_its_first_dispatch_s_pipeline() {
+    let scratch = Scratch::new("uniform-kernel-creation");
+    let device = device(&scratch.0);
+    let queue = device.new_command_queue().unwrap();
+    let function = library(&device)
+        .new_function_with_name("ubo_offsets_kernel")
+        .unwrap();
+    let before = idle(&device);
+    let state = device
+        .new_compute_pipeline_state_with_function(&function, &PipelineOptions::default())
+        .unwrap();
+    let created = idle(&device);
+    assert_eq!(
+        (
+            created.creation_pipelines_made - before.creation_pipelines_made,
+            created.variant_pipelines_made - before.variant_pipelines_made,
+        ),
+        (1, 1),
+        "pipelines the creation made"
+    );
+    let width = state.thread_execution_width();
+    let threads = Size::new(
+        u64::from(width),
+        u64::from(state.max_total_threads_per_threadgroup() / width),
+        1,
+    );
+    let data = constants();
+    let constants = device
+        .new_buffer_with_bytes(&data, ResourceOptions::shared())
+        .unwrap();
+    let outputs: Vec<Buffer> = (0..2)
+        .map(|_| device.new_buffer(16, ResourceOptions::shared()).unwrap())
+        .collect();
+    let hold = crate::pipeline::pool::held::hold();
+    let command_buffer = queue.command_buffer().unwrap();
+    let mut encoder = command_buffer.compute_command_encoder().unwrap();
+    encoder.set_compute_pipeline_state(&state).unwrap();
+    encoder.set_buffer(Some(&constants), 0, 0).unwrap();
+    encoder.set_buffer(Some(&outputs[0]), 0, 1).unwrap();
+    encoder
+        .dispatch_threadgroups(Size::new(1, 1, 1), threads)
+        .unwrap();
+    encoder.set_bytes(&data[8..24], 0).unwrap();
+    encoder.set_buffer(Some(&outputs[1]), 0, 1).unwrap();
+    encoder
+        .dispatch_threadgroups(Size::new(1, 1, 1), threads)
+        .unwrap();
+    encoder.end_encoding().unwrap();
+    let dispatched = device.work_counts();
+    command_buffer.commit().unwrap();
+    command_buffer
+        .wait_until_completed_for(WAIT)
+        .expect("the dispatches' command buffer waits for no making");
+    assert_eq!(command_buffer.error(), None);
+    drop(hold);
+    let at_bind = crate::pipeline::reads_views_at_bind(&device);
+    // Where the views are read at the bind offset: the first dispatch hands its key's making to
+    // the pool and takes the residual form, and the second finds that making in flight and takes
+    // the residual form too.
+    let (residual, makings, pooled) = match at_bind {
+        true => (2, 1, 1),
+        false => (0, 0, 0),
+    };
+    assert_eq!(
+        (
+            dispatched.creation_pipelines_drawn - created.creation_pipelines_drawn,
+            dispatched.residual_form_draws - created.residual_form_draws,
+            dispatched.residual_form_makings - created.residual_form_makings,
+            dispatched.dispatch_pipelines_pooled - created.dispatch_pipelines_pooled,
+            dispatched.variant_pipelines_made - created.variant_pipelines_made,
+        ),
+        (1, residual, makings, pooled, 0),
+        "the creation's pipeline dispatched; residual-form dispatches, their makings, regions \
+         pooled and pipelines made"
+    );
+    let after = idle(&device);
+    assert_eq!(
+        after.variant_pipelines_made - created.variant_pipelines_made,
+        u64::from(at_bind),
+        "pipelines made once the pool ran"
+    );
+    for (at, output) in [0, 8].into_iter().zip(&outputs) {
+        let words = bytes_of(output);
+        let read = |w: usize| f32::from_le_bytes(words[w * 4..w * 4 + 4].try_into().unwrap());
+        let want = |i: usize| i as f32 / 255.0;
+        assert_eq!(
+            [read(0), read(1)],
+            [want(at / 4), want(at / 4 + 2)],
+            "constants from byte {at}"
+        );
+    }
 }
 
 /// A slot bound to nothing is read at its residual, its residual 0 (`RangeAtBindOffset` 0, as

@@ -91,8 +91,15 @@ pub(crate) struct AtBindViews {
 
 impl AtBindViews {
     /// The slots `interface`'s functions read through a uniform view, under the view base
-    /// alignment of `device`.
+    /// alignment of `device`; none, and no alignment, where the device reads every uniform view
+    /// at its residual (`pipeline::reads_views_at_bind`): no bind offset then splits a shape.
     pub(crate) fn new(device: &Device, interface: &PipelineInterface) -> AtBindViews {
+        if !crate::pipeline::reads_views_at_bind(device) {
+            return AtBindViews {
+                slots: VIEW_STAGES.map(|_| AtomicU64::new(0)),
+                alignment: 0,
+            };
+        }
         let limits = device.compile_device().profile().limits();
         AtBindViews {
             slots: VIEW_STAGES.map(|stage| AtomicU64::new(interface.uniform_view_buffers(stage))),

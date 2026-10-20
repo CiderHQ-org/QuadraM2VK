@@ -80,6 +80,8 @@ use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 mod residual;
 
+pub(crate) use residual::{reads_views_at_bind, residual_form};
+
 /// A Metal render pipeline state (`MTLRenderPipelineState`): one that draws, or a tile pipeline's
 /// ([`Device::new_tile_render_pipeline_state`]), which dispatches per tile. Cheap to clone (a
 /// retain); `Send + Sync`.
@@ -2411,6 +2413,14 @@ impl RenderVariant {
             .color_group
             .as_ref()
             .map_or(0, |g| g.group);
+        // Where the device makes no key that reads a uniform view at its bind offset, every key
+        // is its residual form, which reads the same bytes at every bind offset
+        // (`render/residual.rs`).
+        if !reads_views_at_bind(device) {
+            if let Some(residual) = self.residual_form(&plan.specialization) {
+                plan.specialization = residual;
+            }
+        }
         let plan = Arc::new(plan);
         lock(&self.plans).insert(shape.clone(), Arc::clone(&plan), 1);
         Ok(plan)

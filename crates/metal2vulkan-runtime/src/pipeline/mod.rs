@@ -87,6 +87,7 @@ pub(super) use render::RenderProgram;
 pub(super) use render::RenderVariant;
 pub(super) use render::Settled;
 pub(super) use render::WeakRenderPipelineState;
+pub(super) use render::{reads_views_at_bind, residual_form};
 pub(super) use render::{GraphicsState, Kind as RenderStateKind, StateShared as RenderShared};
 pub(super) use tile::TileState;
 
@@ -107,7 +108,9 @@ use crate::resource_ids::{
 };
 use crate::unique_identifier::UniqueIdentifier;
 use memo::{Lru, Remembered};
-use metal2vulkan::bind::{BindShape, BindingPlan, Dispatch, DispatchRegion, IndirectRef};
+use metal2vulkan::bind::{
+    BindShape, BindingPlan, Dispatch, DispatchCommands, DispatchRegion, IndirectRef,
+};
 use metal2vulkan::cache::{SpecializationKey, VariantKey};
 use metal2vulkan::error::{Feature, Needs, RuntimeInput};
 use metal2vulkan::metal::RenderStages;
@@ -621,6 +624,11 @@ impl ComputePipelineState {
                 let _ = crate::binding::make_neutrals(device, &plan);
             }
             device.keep_room();
+        }
+        // Its first dispatch's predicted `VkPipeline`, made where Metal compiles
+        // (`dispatch_making.rs`). A stand-in compile is never dispatched.
+        if let (Kernel::Compute(descriptor), false) = (&kernel, stand_in) {
+            base.make_at_creation(device, descriptor);
         }
         device.degrade_absent_reads(&base.shared_pipeline().dependencies, |_| {
             function.function.info().name.to_string()
@@ -1364,6 +1372,21 @@ impl Variant {
         &self.objects
     }
 
+    /// `commands`' regions, each specialization its residual form where `device` reads no uniform
+    /// view at its bind offset alone (`render/residual.rs`): what every region of a dispatch or a
+    /// tile dispatch of the variant takes before its key is looked up.
+    pub(crate) fn keyed_regions(&self, device: &Device, commands: &mut DispatchCommands) {
+        if reads_views_at_bind(device) {
+            return;
+        }
+        let constants = &self.pipeline.stage.specialization.constants;
+        for region in &mut commands.regions {
+            if let Some(residual) = residual_form(constants.iter(), &region.specialization) {
+                region.specialization = residual;
+            }
+        }
+    }
+
     /// Whether the variant is the kernel's emulated-simdgroups one.
     pub(super) fn emulates_simdgroups(&self) -> bool {
         self.key.emulated_simdgroups
@@ -1397,12 +1420,14 @@ impl Variant {
         formats: crate::degradation::BoundFormats<'_>,
     ) -> Result<Arc<RawPipeline>, Error> {
         let key = RegionKey::of(region);
-        self.pipelines.get_or_make(&key, || {
+        let made = self.pipelines.get_or_make(&key, || {
             let made = self
                 .objects
                 .pipeline(&key, graphics::Notices::Now(Some(formats)))?;
             Ok(made.kept_at(&self.objects, kept::Place::Region(key.clone())))
-        })
+        })?;
+        self.first_use(&made, &key, formats);
+        Ok(made)
     }
 
     /// The value of each of the kernel's specialization constants where `key` specializes it

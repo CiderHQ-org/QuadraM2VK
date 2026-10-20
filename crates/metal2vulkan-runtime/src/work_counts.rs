@@ -580,14 +580,14 @@ impl Counters {
         self.pipelines_pooled.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// A draw whose key's `VkPipeline` was not made took its residual form's
+    /// A draw or dispatch whose key's `VkPipeline` was not made took its residual form's
     /// (`pipeline/render/residual.rs`).
     pub(crate) fn residual_form_drawn(&self) {
         self.residual_form_draws.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// A draw that began its key's making took its residual form's `VkPipeline` meanwhile
-    /// (`pipeline/render/residual.rs`).
+    /// A draw or dispatch that began its key's making took its residual form's `VkPipeline`
+    /// meanwhile (`pipeline/render/residual.rs`).
     pub(crate) fn residual_form_making(&self) {
         self.residual_form_makings.fetch_add(1, Ordering::Relaxed);
     }
@@ -692,12 +692,13 @@ impl Counters {
             .fetch_add(1, Ordering::Relaxed);
     }
 
-    /// A state's creation made a `VkPipeline` (`pipeline/predicted.rs`).
+    /// A state's creation made a `VkPipeline` (`pipeline/predicted.rs`,
+    /// `pipeline/dispatch_making.rs`).
     pub(crate) fn creation_pipeline_made(&self) {
         self.creation_pipelines_made.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// A draw took a `VkPipeline` a state's creation made, its first draw.
+    /// A draw or dispatch took a `VkPipeline` a state's creation made, its first use.
     pub(crate) fn creation_pipeline_drawn(&self) {
         self.creation_pipelines_drawn
             .fetch_add(1, Ordering::Relaxed);
@@ -2079,12 +2080,13 @@ pub struct WorkCounts {
     /// Draws that handed the making of their `VkPipeline` to the device's pool and went on,
     /// rather than make it at the draw.
     pub pipelines_pooled: u64,
-    /// Draws whose key's `VkPipeline` was not made, which drew at once with the made one of its
-    /// residual form, each of the key's uniform-view slots read at its residual (which reads the
-    /// same bytes at every bind offset): none waited for its key's making.
+    /// Draws and dispatches whose key's `VkPipeline` was not made, which were recorded at once
+    /// with the made one of its residual form, each of the key's uniform-view slots read at its
+    /// residual (which reads the same bytes at every bind offset): none waited for its key's
+    /// making.
     pub residual_form_draws: u64,
-    /// Of the makings draws began, those whose draw took its key's residual form meanwhile:
-    /// makings on the device's pool that nothing waits for.
+    /// Of the makings draws and dispatches began, those whose command took its key's residual
+    /// form meanwhile: makings on the device's pool that nothing waits for.
     pub residual_form_makings: u64,
     /// The pieces the device's pipeline pool holds as the counts are read, waiting or running:
     /// not a count of events, but the pool's state then. A making a draw that took its key's
@@ -2125,10 +2127,12 @@ pub struct WorkCounts {
     /// for the encoder's sRGB or YCbCr textures, that bakes samplers no variant of the program's
     /// made).
     pub host_step_sampler_sets_made: u64,
-    /// `VkPipeline`s states' creations made: each one's predicted key (`pipeline/predicted.rs`).
+    /// `VkPipeline`s states' creations made: each render state's predicted key
+    /// (`pipeline/predicted.rs`), and each compute state's predicted region
+    /// (`pipeline/dispatch_making.rs`).
     pub creation_pipelines_made: u64,
-    /// Of those, the ones a draw took so far: the rest are makings no draw has used yet, the
-    /// speculative part of making at creation.
+    /// Of those, the ones a draw or a dispatch took so far: the rest are makings no command has
+    /// used yet, the speculative part of making at creation.
     pub creation_pipelines_drawn: u64,
     /// Immutable sampler sets variants made (the device's map's, and a host step's or a pool
     /// piece's own): none for a variant without immutable samplers.

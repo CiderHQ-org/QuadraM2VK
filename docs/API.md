@@ -2620,12 +2620,19 @@ each item named states the rule in full.
   that one at once; its own is made on the pool behind the makings something waits for, and later
   draws take it. Only GPU time moves for the draws before it lands: on ANV the residual form's reads
   are loads where the other form's are pushed constants (`WorkCounts::residual_form_draws`,
-  `residual_form_makings`).
+  `residual_form_makings`). On MoltenVK every key is its residual form (the two forms measured
+  alike there), so a state's draws at every bind offset take the one pipeline its creation made.
 - **A dispatch's `VkPipeline` is made while the dispatch goes on**, the same way: one pipeline per
-  threadgroup size and edge region, made on the pool. So is a tile dispatch's, its pass recorded
-  once it is made, the making ranked from the dispatch as one a committed command buffer waits for
-  (`WorkCounts::tile_pipelines_pooled`); a failed making fails the command buffer, as a draw's
-  does, `FailedPipeline` naming the dispatch by its order among the encoder's tile dispatch calls.
+  threadgroup size and edge region, made on the pool. A compute state's creation makes one first:
+  its predicted region's, a threadgroup of the descriptor's `requiredThreadsPerThreadgroup`, else
+  of `threadExecutionWidth` by `maxTotalThreadsPerThreadgroup / threadExecutionWidth` (Apple's
+  guide's size), each uniform view read at its residual; a dispatch of that region takes it, as
+  does one whose key differs only in reading a view at its bind offset alone while its own is made
+  (`WorkCounts::creation_pipelines_made`, `creation_pipelines_drawn`). A tile dispatch's pipeline
+  is made on the pool too, its pass recorded once it is made, the making ranked from the dispatch
+  as one a committed command buffer waits for (`WorkCounts::tile_pipelines_pooled`); a failed
+  making fails the command buffer, as a draw's does, `FailedPipeline` naming the dispatch by its
+  order among the encoder's tile dispatch calls.
 
 **Binary archives and dynamic libraries**
 

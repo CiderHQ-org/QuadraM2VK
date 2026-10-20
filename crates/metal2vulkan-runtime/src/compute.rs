@@ -1539,9 +1539,10 @@ fn record(
         .check_function_tables(call, Stage::Kernel, interface)?;
     tables.table.check_offsets(call, Stage::Kernel, interface)?;
     let kernel = pipeline.function_name().to_owned();
-    let commands = plan
+    let mut commands = plan
         .instantiate_dispatch(&state, &dispatch)
         .map_err(Error::Bind)?;
+    variant.keyed_regions(core.device(), &mut commands);
     // A `[[stage_in]]` attribute's 32-bit displacement past 4 GiB of its buffer
     // (`fetch_reach.rs`): the grid of a direct dispatch, any where GPU memory states it.
     fetch_reach::check_stage_in_reach(

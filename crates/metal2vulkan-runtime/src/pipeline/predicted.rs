@@ -15,6 +15,7 @@
 //!   unbound one is. A draw that leaves those slots unbound takes this key itself; the draws that
 //!   bind them do so at offsets the creation cannot know, and the residual form reads the same
 //!   bytes at every one: a draw whose own key is not made takes it at once while its own is made.
+//!   On a device that reads every view at its residual (MoltenVK) it is their own key.
 //! - **The tests**: for a fragment function that stores a color through the interlocked storage
 //!   form before its depth and stencil tests (`RuntimeFact::TestedStorageWrites`) in a pipeline
 //!   with a depth or stencil attachment, tests that drop fragments but write neither attachment and

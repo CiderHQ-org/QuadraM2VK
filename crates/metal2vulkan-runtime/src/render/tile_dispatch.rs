@@ -967,9 +967,10 @@ impl RenderCommandEncoder {
                 return Err(Error::NotImplemented(RuntimeGap::ImageblockMasters));
             }
         }
-        let commands = plan
+        let mut commands = plan
             .instantiate_dispatch(&bind, &dispatch)
             .map_err(Error::Bind)?;
+        variant.keyed_regions(self.core.device(), &mut commands);
         self.reaches_unnamed |= commands.root_table.is_some() || super::reads_handles(&plan);
         if commands.indirect_clamp.is_some()
             || commands
