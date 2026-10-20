@@ -937,7 +937,12 @@ address, a dma-buf import), its handle, memory type, bytes and device address ra
 device gives addresses. On NVIDIA that range is the GPU virtual address a fault report names. It
 also logs each placement of 4 MiB or more in a pooled block as it is placed and returned: an image
 or a buffer, its memory class where placed, its bytes, its offset and its block's handle and type.
-That text is for people, not a contract.
+Whatever the variables, a placement heap's `newTextureWithDescriptor:offset:` that makes no texture
+(`Nil` or `OutOfMemory`) at an offset inside the heap says so (id name
+`metal2vulkan-heap-texture-refused`, `Info` severity): the descriptor, the offset, the heap's size,
+options and memory, the size and alignment the size query answers the descriptor, what the making
+planned (the size and alignment it places the texture by, its image's route, tiling and memory
+requirements) and the refusal. That text is for people, not a contract.
 
 Each entry below gives the code, its category, the `Degradation` kind (or the `PrecisionNote`) and
 what triggers it; a runtime kind's cost follows. The kind's rustdoc states the trigger, cost and

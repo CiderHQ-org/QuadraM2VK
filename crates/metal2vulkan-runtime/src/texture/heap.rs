@@ -984,6 +984,111 @@ pub(crate) fn check_heap_base(align: u64) -> Result<(), Error> {
     Ok(())
 }
 
+/// The id name of the informational message of a placement heap's texture the heap does not make
+/// at an offset inside it ([`Device::new_heap_texture`]).
+pub(crate) const HEAP_TEXTURE_REFUSED: &str = "metal2vulkan-heap-texture-refused";
+
+/// What a heap texture's making planned before it was refused: the size and alignment it places
+/// the texture by, and its image's route, tiling and memory requirements (`None` for a texture
+/// buffer, which has no image).
+#[derive(Clone, Copy)]
+struct Planned {
+    size_and_align: SizeAndAlign,
+    image: Option<(AliasRoute, vk::ImageTiling, vk::MemoryRequirements)>,
+}
+
+impl Planned {
+    /// What `p` plans.
+    fn of(p: &HeapPlan) -> Planned {
+        let image = &p.image;
+        Planned {
+            size_and_align: p.size_and_align,
+            image: Some((image.route, image.tiling, image.requirements)),
+        }
+    }
+}
+
+/// The text of the informational message [`HEAP_TEXTURE_REFUSED`]: the texture of `descriptor` that
+/// placement heap `heap` does not make at `offset` (inside it), refused with `e` after its making
+/// planned `planned`: the descriptor, the offset, the heap's size, options and memory, the size and
+/// alignment `device` answers the descriptor, and what the making planned.
+fn refused_text(
+    device: &Device,
+    heap: &Heap,
+    descriptor: &TextureDescriptor,
+    offset: u64,
+    planned: Option<Planned>,
+    e: &Error,
+) -> String {
+    let d = descriptor;
+    let memory = match heap.bytes().and_then(Buffer::caller_memory) {
+        Some(m) => format!("over the caller's memory ({m:?})"),
+        None => "of the device's memory".to_owned(),
+    };
+    // Where `offset` lies against an answer of `size` bytes at `align`.
+    let against = |SizeAndAlign { size, align }: SizeAndAlign| {
+        let aligned = offset.is_multiple_of(align.max(1));
+        let inside = offset
+            .checked_add(size)
+            .is_some_and(|end| end <= heap.size());
+        format!(
+            "{size:#x} bytes at an alignment of {align:#x} (the offset {}a multiple of it, the \
+             bytes {}inside the heap)",
+            if aligned { "" } else { "not " },
+            if inside { "" } else { "not " }
+        )
+    };
+    let answer = match device.heap_texture_size_and_align(d) {
+        Ok(answer) => against(answer),
+        Err(e) => format!("no size: {e}"),
+    };
+    let made = match planned {
+        Some(Planned {
+            size_and_align,
+            image,
+        }) => {
+            let image = match image {
+                Some((route, tiling, r)) => {
+                    let tiling = match tiling {
+                        vk::ImageTiling::OPTIMAL => "optimal",
+                        vk::ImageTiling::LINEAR => "linear",
+                        vk::ImageTiling::DRM_FORMAT_MODIFIER_EXT => "DRM format modifier",
+                        _ => "other",
+                    };
+                    format!(
+                        ", its image of the {route:?} route, {tiling} tiling, asking {:#x} bytes \
+                         at {:#x} of memory types {:#x}",
+                        r.size, r.alignment, r.memory_type_bits
+                    )
+                }
+                None => ", a texture buffer".to_owned(),
+            };
+            format!("planned {}{image}", against(size_and_align))
+        }
+        None => "planned no image".to_owned(),
+    };
+    format!(
+        "metal2vulkan: newTextureWithDescriptor:offset: made no texture: a {:?} {:?} texture of \
+         {}x{}x{}, {} levels, {} slices, {} samples, usage {:?}, options {:#x}, GPU-optimized \
+         contents {}, at offset {offset:#x} of a placement heap of {:#x} bytes, options {:#x}, \
+         {memory}; the size query answers it {answer}; the making {made}; refused: {e} \
+         [{HEAP_TEXTURE_REFUSED}]",
+        d.texture_type,
+        d.pixel_format,
+        d.width,
+        d.height,
+        d.depth,
+        d.mipmap_level_count,
+        d.array_length,
+        d.sample_count,
+        d.usage,
+        d.resource_options.raw(),
+        d.allow_gpu_optimized_contents,
+        heap.size(),
+        heap.resource_options().raw(),
+    )
+}
+
 /// Where a resource of `size` bytes at a multiple of `align` lies in `heap` for `call`: at
 /// `offset` of a placement heap, refused off the alignment or past the heap's end (`Nil`, as plain
 /// Metal answers nil, its validation stopping it), or at the lowest offset with room of an
@@ -1655,12 +1760,32 @@ impl Device {
     }
 
     /// A texture of `descriptor` in `heap`: at `offset` of a placement heap, or where an
-    /// automatic heap has room when `None`.
+    /// automatic heap has room when `None`. Where a placement heap makes none (`Nil` or
+    /// `OutOfMemory`) at an offset inside it, the device says so ([`HEAP_TEXTURE_REFUSED`]).
     pub(crate) fn new_heap_texture(
         &self,
         heap: &Heap,
         descriptor: &TextureDescriptor,
         offset: Option<u64>,
+    ) -> Result<Texture, Error> {
+        let mut planned = None;
+        let made = self.planned_heap_texture(heap, descriptor, offset, &mut planned);
+        if let (Err(e @ (Error::Nil(_) | Error::OutOfMemory(_))), Some(offset)) = (&made, offset) {
+            if offset < heap.size() {
+                let text = refused_text(self, heap, descriptor, offset, planned, e);
+                self.inform(HEAP_TEXTURE_REFUSED, text);
+            }
+        }
+        made
+    }
+
+    /// [`Device::new_heap_texture`], noting in `planned` what the making planned as it plans it.
+    fn planned_heap_texture(
+        &self,
+        heap: &Heap,
+        descriptor: &TextureDescriptor,
+        offset: Option<u64>,
+        planned: &mut Option<Planned>,
     ) -> Result<Texture, Error> {
         let (call, heap_type) = match offset {
             Some(_) => ("new_texture_at_offset", HeapType::Placement),
@@ -1698,6 +1823,10 @@ impl Device {
         }
         if layout.texture_type == TextureType::TextureBuffer {
             let size_and_align = texture_buffer_size_and_align(&layout)?;
+            *planned = Some(Planned {
+                size_and_align,
+                image: None,
+            });
             self.check_texture_placement(
                 call,
                 descriptor.placement,
@@ -1714,6 +1843,7 @@ impl Device {
             return Ok(texture);
         }
         let p = self.heap_plan(call, descriptor, layout)?;
+        *planned = Some(Planned::of(&p));
         self.check_texture_placement(
             call,
             descriptor.placement,
@@ -1722,6 +1852,7 @@ impl Device {
         )?;
         if bytes.caller_memory() == Some(CallerMemory::HostPages) {
             let p = self.host_heap_plan(call, p, descriptor, &bytes)?;
+            *planned = Some(Planned::of(&p));
             let offset = heap_offset(heap, call, p.size_and_align, offset)?;
             let place = HeapPlace::new(heap, offset, p.size_and_align.size, false);
             return self.heap_texture_at(heap, &bytes, p, place, options, descriptor);

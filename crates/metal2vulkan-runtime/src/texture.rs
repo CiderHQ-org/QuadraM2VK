@@ -3359,6 +3359,12 @@ impl Heap {
     /// automatic heap's texture. A descriptor plain Metal answers nil for answers `Nil` before
     /// the heap's own rules (its storage mode, `framebuffer_only`, the offset), and one Metal
     /// stops `Invalid` before them.
+    ///
+    /// Where it answers `Nil` or `OutOfMemory` for an offset inside the heap, the device also says
+    /// so in an informational message (id name `metal2vulkan-heap-texture-refused`, `Info`
+    /// severity) naming the descriptor, the offset, the heap, the size and alignment
+    /// [`Device::heap_texture_size_and_align`] answers, what the making planned and the refusal: a
+    /// diagnostic, as Metal says nothing.
     pub fn new_texture_at_offset(
         &self,
         descriptor: &TextureDescriptor,

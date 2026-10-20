@@ -68,6 +68,8 @@ mod function_table;
 mod gate;
 mod gpu_time;
 mod heap;
+#[cfg(any(m2v_gpu, m2v_cpu_icd))]
+mod heap_refused_notice;
 mod heap_sets;
 mod heap_tiled;
 mod heap_tiled_blocks;
