@@ -7,7 +7,11 @@
 use crate::gpu::{Format, Gpu};
 use metal2vulkan::bind::SamplerDescriptor;
 use metal2vulkan::device::{CompletionPolicy, HeapCompressionPolicy};
-use metal2vulkan::metal::{PixelFormat, PrimitiveType, SamplerMinMagFilter, TextureUsage};
+use metal2vulkan::metal::state::DepthStencilDescriptor;
+use metal2vulkan::metal::{
+    BlendFactor, CompareFunction, CullMode, IndexType, PixelFormat, PrimitiveType,
+    SamplerMinMagFilter, TextureUsage, Winding,
+};
 use metal2vulkan::pipeline::{ColorAttachmentDescriptor, RenderPipelineDescriptor, StageSource};
 use metal2vulkan_runtime as rt;
 use std::path::Path;
@@ -41,6 +45,7 @@ fn pixel_format(format: Format) -> PixelFormat {
         Format::Bgra8 => PixelFormat::BGRA8Unorm,
         Format::Rgba8 => PixelFormat::RGBA8Unorm,
         Format::Rgba16Float => PixelFormat::RGBA16Float,
+        Format::Depth32Float => PixelFormat::Depth32Float,
     }
 }
 
@@ -55,6 +60,7 @@ impl Gpu for Runtime {
     type RenderEncoder = rt::RenderCommandEncoder;
     type ComputeEncoder = rt::ComputeCommandEncoder;
     type Heap = rt::Heap;
+    type DepthStencil = rt::DepthStencilState;
 
     fn label(&self) -> String {
         format!("runtime on {}", self.device.name())
@@ -89,6 +95,49 @@ impl Gpu for Runtime {
         self.device
             .new_render_pipeline_state(&descriptor, &rt::PipelineOptions::default())
             .expect("new_render_pipeline_state")
+    }
+
+    fn depth_pipeline(
+        &self,
+        library: &rt::Library,
+        vertex: &str,
+        fragment: &str,
+        blend: bool,
+    ) -> rt::RenderPipelineState {
+        let function = |name: &str| {
+            let function = library
+                .new_function_with_name(name)
+                .expect("new_function_with_name");
+            StageSource::Function(function.function_descriptor())
+        };
+        let mut descriptor = RenderPipelineDescriptor::new(function(vertex));
+        descriptor.fragment = Some(function(fragment));
+        let mut color = ColorAttachmentDescriptor::new(PixelFormat::BGRA8Unorm);
+        if blend {
+            color.blending_enabled = true;
+            color.source_rgb_blend_factor = BlendFactor::SourceAlpha;
+            color.source_alpha_blend_factor = BlendFactor::One;
+            color.destination_rgb_blend_factor = BlendFactor::OneMinusSourceAlpha;
+            color.destination_alpha_blend_factor = BlendFactor::OneMinusSourceAlpha;
+        }
+        descriptor.color_attachments[0] = Some(color);
+        descriptor.depth_format = Some(PixelFormat::Depth32Float);
+        self.device
+            .new_render_pipeline_state(&descriptor, &rt::PipelineOptions::default())
+            .expect("new_render_pipeline_state")
+    }
+
+    fn depth_stencil(&self, writes: bool) -> rt::DepthStencilState {
+        let mut descriptor = DepthStencilDescriptor::default();
+        descriptor.depth_compare_function = if writes {
+            CompareFunction::Less
+        } else {
+            CompareFunction::LessEqual
+        };
+        descriptor.depth_write_enabled = writes;
+        self.device
+            .new_depth_stencil_state(&descriptor)
+            .expect("new_depth_stencil_state")
     }
 
     fn compute_pipeline(&self, library: &rt::Library, kernel: &str) -> rt::ComputePipelineState {
@@ -246,6 +295,33 @@ impl Gpu for Runtime {
             .expect("render_command_encoder")
     }
 
+    fn depth_render_encoder(
+        &self,
+        command_buffer: &rt::CommandBuffer,
+        target: &rt::Texture,
+        depth: &rt::Texture,
+    ) -> rt::RenderCommandEncoder {
+        let mut pass = rt::RenderPassDescriptor::new();
+        let color = &mut pass.color_attachments[0];
+        color.texture = Some(target.clone());
+        color.load_action = rt::LoadAction::Clear;
+        color.store_action = rt::StoreAction::Store;
+        color.clear_color = rt::ClearColor {
+            red: 0.1,
+            green: 0.1,
+            blue: 0.12,
+            alpha: 1.0,
+        };
+        let attachment = &mut pass.depth_attachment;
+        attachment.texture = Some(depth.clone());
+        attachment.load_action = rt::LoadAction::Clear;
+        attachment.store_action = rt::StoreAction::DontCare;
+        attachment.clear_depth = 1.0;
+        command_buffer
+            .render_command_encoder(&pass)
+            .expect("render_command_encoder")
+    }
+
     fn set_render_pipeline(
         &self,
         encoder: &mut rt::RenderCommandEncoder,
@@ -254,6 +330,30 @@ impl Gpu for Runtime {
         encoder
             .set_render_pipeline_state(state)
             .expect("set_render_pipeline_state");
+    }
+
+    fn set_depth_stencil(
+        &self,
+        encoder: &mut rt::RenderCommandEncoder,
+        state: &rt::DepthStencilState,
+    ) {
+        encoder
+            .set_depth_stencil_state(state)
+            .expect("set_depth_stencil_state");
+    }
+
+    fn set_cull_back(&self, encoder: &mut rt::RenderCommandEncoder, back: bool) {
+        encoder.set_cull_mode(if back { CullMode::Back } else { CullMode::None });
+    }
+
+    fn set_counter_clockwise(&self, encoder: &mut rt::RenderCommandEncoder) {
+        encoder.set_front_facing_winding(Winding::CounterClockwise);
+    }
+
+    fn set_vertex_bytes(&self, encoder: &mut rt::RenderCommandEncoder, bytes: &[u8], index: usize) {
+        encoder
+            .set_vertex_bytes(bytes, index as u32)
+            .expect("set_vertex_bytes");
     }
 
     fn set_vertex_buffer(
@@ -306,6 +406,26 @@ impl Gpu for Runtime {
         encoder
             .draw_primitives(PrimitiveType::TriangleStrip, 0, vertices as u32, 1, 0)
             .expect("draw_primitives");
+    }
+
+    fn draw_indexed(
+        &self,
+        encoder: &mut rt::RenderCommandEncoder,
+        count: usize,
+        indices: &rt::Buffer,
+    ) {
+        encoder
+            .draw_indexed_primitives(
+                PrimitiveType::Triangle,
+                count as u32,
+                IndexType::UInt16,
+                indices,
+                0,
+                1,
+                0,
+                0,
+            )
+            .expect("draw_indexed_primitives");
     }
 
     fn end_render(&self, encoder: rt::RenderCommandEncoder) {

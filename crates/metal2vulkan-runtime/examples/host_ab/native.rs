@@ -6,13 +6,15 @@ use objc2::rc::{autoreleasepool, Retained};
 use objc2::runtime::ProtocolObject;
 use objc2_foundation::{NSString, NSURL};
 use objc2_metal::{
-    MTLBlitCommandEncoder, MTLBuffer, MTLClearColor, MTLCommandBuffer, MTLCommandBufferStatus,
-    MTLCommandEncoder, MTLCommandQueue, MTLComputeCommandEncoder, MTLComputePipelineState,
-    MTLCreateSystemDefaultDevice, MTLDevice, MTLHeap, MTLHeapDescriptor, MTLHeapType, MTLLibrary,
-    MTLLoadAction, MTLOrigin, MTLPixelFormat, MTLPrimitiveType, MTLRegion, MTLRenderCommandEncoder,
-    MTLRenderPassDescriptor, MTLRenderPipelineDescriptor, MTLRenderPipelineState,
-    MTLResourceOptions, MTLSamplerDescriptor, MTLSamplerMinMagFilter, MTLSamplerState, MTLSize,
-    MTLStorageMode, MTLStoreAction, MTLTexture, MTLTextureDescriptor, MTLTextureUsage,
+    MTLBlendFactor, MTLBlitCommandEncoder, MTLBuffer, MTLClearColor, MTLCommandBuffer,
+    MTLCommandBufferStatus, MTLCommandEncoder, MTLCommandQueue, MTLCompareFunction,
+    MTLComputeCommandEncoder, MTLComputePipelineState, MTLCreateSystemDefaultDevice, MTLCullMode,
+    MTLDepthStencilDescriptor, MTLDepthStencilState, MTLDevice, MTLHeap, MTLHeapDescriptor,
+    MTLHeapType, MTLIndexType, MTLLibrary, MTLLoadAction, MTLOrigin, MTLPixelFormat,
+    MTLPrimitiveType, MTLRegion, MTLRenderCommandEncoder, MTLRenderPassDescriptor,
+    MTLRenderPipelineDescriptor, MTLRenderPipelineState, MTLResourceOptions, MTLSamplerDescriptor,
+    MTLSamplerMinMagFilter, MTLSamplerState, MTLSize, MTLStorageMode, MTLStoreAction, MTLTexture,
+    MTLTextureDescriptor, MTLTextureUsage, MTLWinding,
 };
 use std::ffi::c_void;
 use std::path::Path;
@@ -39,6 +41,7 @@ fn pixel_format(format: Format) -> MTLPixelFormat {
         Format::Bgra8 => MTLPixelFormat::BGRA8Unorm,
         Format::Rgba8 => MTLPixelFormat::RGBA8Unorm,
         Format::Rgba16Float => MTLPixelFormat::RGBA16Float,
+        Format::Depth32Float => MTLPixelFormat::Depth32Float,
     }
 }
 
@@ -73,6 +76,7 @@ impl Gpu for Native {
     type RenderEncoder = Object<dyn MTLRenderCommandEncoder>;
     type ComputeEncoder = Object<dyn MTLComputeCommandEncoder>;
     type Heap = Object<dyn MTLHeap>;
+    type DepthStencil = Object<dyn MTLDepthStencilState>;
 
     fn label(&self) -> String {
         format!("native Metal on {}", self.device.name())
@@ -103,6 +107,45 @@ impl Gpu for Native {
         self.device
             .newRenderPipelineStateWithDescriptor_error(&descriptor)
             .expect("newRenderPipelineStateWithDescriptor")
+    }
+
+    fn depth_pipeline(
+        &self,
+        library: &Self::Library,
+        vertex: &str,
+        fragment: &str,
+        blend: bool,
+    ) -> Self::RenderPipeline {
+        let descriptor = MTLRenderPipelineDescriptor::new();
+        descriptor.setVertexFunction(Some(&function(library, vertex)));
+        descriptor.setFragmentFunction(Some(&function(library, fragment)));
+        // SAFETY: attachment 0 exists.
+        let color = unsafe { descriptor.colorAttachments().objectAtIndexedSubscript(0) };
+        color.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
+        if blend {
+            color.setBlendingEnabled(true);
+            color.setSourceRGBBlendFactor(MTLBlendFactor::SourceAlpha);
+            color.setSourceAlphaBlendFactor(MTLBlendFactor::One);
+            color.setDestinationRGBBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
+            color.setDestinationAlphaBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
+        }
+        descriptor.setDepthAttachmentPixelFormat(MTLPixelFormat::Depth32Float);
+        self.device
+            .newRenderPipelineStateWithDescriptor_error(&descriptor)
+            .expect("newRenderPipelineStateWithDescriptor")
+    }
+
+    fn depth_stencil(&self, writes: bool) -> Self::DepthStencil {
+        let descriptor = MTLDepthStencilDescriptor::new();
+        descriptor.setDepthCompareFunction(if writes {
+            MTLCompareFunction::Less
+        } else {
+            MTLCompareFunction::LessEqual
+        });
+        descriptor.setDepthWriteEnabled(writes);
+        self.device
+            .newDepthStencilStateWithDescriptor(&descriptor)
+            .expect("newDepthStencilStateWithDescriptor")
     }
 
     fn compute_pipeline(&self, library: &Self::Library, kernel: &str) -> Self::ComputePipeline {
@@ -275,8 +318,59 @@ impl Gpu for Native {
             .expect("renderCommandEncoderWithDescriptor")
     }
 
+    fn depth_render_encoder(
+        &self,
+        command_buffer: &Self::CommandBuffer,
+        target: &Self::Texture,
+        depth: &Self::Texture,
+    ) -> Self::RenderEncoder {
+        let pass = MTLRenderPassDescriptor::renderPassDescriptor();
+        // SAFETY: attachment 0 exists.
+        let color = unsafe { pass.colorAttachments().objectAtIndexedSubscript(0) };
+        color.setTexture(Some(target));
+        color.setLoadAction(MTLLoadAction::Clear);
+        color.setStoreAction(MTLStoreAction::Store);
+        color.setClearColor(MTLClearColor {
+            red: 0.1,
+            green: 0.1,
+            blue: 0.12,
+            alpha: 1.0,
+        });
+        let attachment = pass.depthAttachment();
+        attachment.setTexture(Some(depth));
+        attachment.setLoadAction(MTLLoadAction::Clear);
+        attachment.setStoreAction(MTLStoreAction::DontCare);
+        attachment.setClearDepth(1.0);
+        command_buffer
+            .renderCommandEncoderWithDescriptor(&pass)
+            .expect("renderCommandEncoderWithDescriptor")
+    }
+
     fn set_render_pipeline(&self, encoder: &mut Self::RenderEncoder, state: &Self::RenderPipeline) {
         encoder.setRenderPipelineState(state);
+    }
+
+    fn set_depth_stencil(&self, encoder: &mut Self::RenderEncoder, state: &Self::DepthStencil) {
+        encoder.setDepthStencilState(Some(state));
+    }
+
+    fn set_cull_back(&self, encoder: &mut Self::RenderEncoder, back: bool) {
+        encoder.setCullMode(if back {
+            MTLCullMode::Back
+        } else {
+            MTLCullMode::None
+        });
+    }
+
+    fn set_counter_clockwise(&self, encoder: &mut Self::RenderEncoder) {
+        encoder.setFrontFacingWinding(MTLWinding::CounterClockwise);
+    }
+
+    fn set_vertex_bytes(&self, encoder: &mut Self::RenderEncoder, bytes: &[u8], index: usize) {
+        let pointer = NonNull::new(bytes.as_ptr() as *mut c_void).expect("bytes");
+        // SAFETY: `bytes` holds `bytes.len()` bytes, which Metal copies; the index is in Metal's
+        // range.
+        unsafe { encoder.setVertexBytes_length_atIndex(pointer, bytes.len(), index) };
     }
 
     fn set_vertex_buffer(
@@ -328,6 +422,24 @@ impl Gpu for Native {
                 MTLPrimitiveType::TriangleStrip,
                 0,
                 vertices,
+            )
+        };
+    }
+
+    fn draw_indexed(
+        &self,
+        encoder: &mut Self::RenderEncoder,
+        count: usize,
+        indices: &Self::Buffer,
+    ) {
+        // SAFETY: the indices lie in the buffer, and the bound state reads only its bound buffers.
+        unsafe {
+            encoder.drawIndexedPrimitives_indexCount_indexType_indexBuffer_indexBufferOffset(
+                MTLPrimitiveType::Triangle,
+                count,
+                MTLIndexType::UInt16,
+                indices,
+                0,
             )
         };
     }

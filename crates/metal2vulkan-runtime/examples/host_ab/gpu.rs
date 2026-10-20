@@ -10,6 +10,8 @@ pub enum Format {
     Bgra8,
     Rgba8,
     Rgba16Float,
+    /// A depth attachment's (`texture` with `target`).
+    Depth32Float,
 }
 
 /// One side of the A/B: a device, its queue, and Metal's calls on them.
@@ -24,6 +26,7 @@ pub trait Gpu {
     type RenderEncoder;
     type ComputeEncoder;
     type Heap;
+    type DepthStencil;
 
     /// The side and the device's name.
     fn label(&self) -> String;
@@ -39,6 +42,18 @@ pub trait Gpu {
         format: Format,
         blend: bool,
     ) -> Self::RenderPipeline;
+    /// As `render_pipeline` into `BGRA8Unorm`, with a `Depth32Float` depth attachment, blending
+    /// source over destination by the source's alpha where `blend`.
+    fn depth_pipeline(
+        &self,
+        library: &Self::Library,
+        vertex: &str,
+        fragment: &str,
+        blend: bool,
+    ) -> Self::RenderPipeline;
+    /// `newDepthStencilStateWithDescriptor:`: a depth compare of `Less` with writes, or of
+    /// `LessEqual` without.
+    fn depth_stencil(&self, writes: bool) -> Self::DepthStencil;
     /// `newComputePipelineStateWithFunction:error:`.
     fn compute_pipeline(&self, library: &Self::Library, kernel: &str) -> Self::ComputePipeline;
 
@@ -105,7 +120,22 @@ pub trait Gpu {
         target: &Self::Texture,
         clear: bool,
     ) -> Self::RenderEncoder;
+    /// `renderCommandEncoderWithDescriptor:` of one color attachment and a depth attachment,
+    /// both cleared, the color stored and the depth not.
+    fn depth_render_encoder(
+        &self,
+        command_buffer: &Self::CommandBuffer,
+        target: &Self::Texture,
+        depth: &Self::Texture,
+    ) -> Self::RenderEncoder;
     fn set_render_pipeline(&self, encoder: &mut Self::RenderEncoder, state: &Self::RenderPipeline);
+    fn set_depth_stencil(&self, encoder: &mut Self::RenderEncoder, state: &Self::DepthStencil);
+    /// `setCullMode:` of `Back`, or of `None`.
+    fn set_cull_back(&self, encoder: &mut Self::RenderEncoder, back: bool);
+    /// `setFrontFacingWinding:` of `CounterClockwise`.
+    fn set_counter_clockwise(&self, encoder: &mut Self::RenderEncoder);
+    /// `setVertexBytes:length:atIndex:`.
+    fn set_vertex_bytes(&self, encoder: &mut Self::RenderEncoder, bytes: &[u8], index: usize);
     fn set_vertex_buffer(
         &self,
         encoder: &mut Self::RenderEncoder,
@@ -134,6 +164,9 @@ pub trait Gpu {
     );
     /// `drawPrimitives:vertexStart:vertexCount:` of a triangle strip.
     fn draw_strip(&self, encoder: &mut Self::RenderEncoder, vertices: usize);
+    /// `drawIndexedPrimitives:indexCount:indexType:indexBuffer:indexBufferOffset:` of triangles
+    /// and 16-bit indices from the buffer's start.
+    fn draw_indexed(&self, encoder: &mut Self::RenderEncoder, count: usize, indices: &Self::Buffer);
     fn end_render(&self, encoder: Self::RenderEncoder);
 
     /// `computeCommandEncoder`.

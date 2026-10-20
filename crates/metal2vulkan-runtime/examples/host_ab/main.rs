@@ -52,17 +52,26 @@
 //!   creation alone, their drop, and the process's CPU time until the drop returned. The
 //!   runtime's alone (`frame_no_copy_*`): the same over a heap of host pages
 //!   (`new_heap_with_bytes_no_copy`), as a guest's heap is.
+//! - `many_draws`: a frame of `--many-draws` small draws, shaped as m2vbench's draws mode: one
+//!   render pass into a 1920x1080 `BGRA8Unorm` target with a cleared `Depth32Float` attachment,
+//!   each draw a textured rectangle of its own uniforms (a vertex and a fragment buffer at the
+//!   draw's offset of one of four buffers), two fragment textures of sixteen, 16 bytes of
+//!   `setVertexBytes`, alternately indexed and not; the pipeline state (four) every 8 draws, the
+//!   depth-stencil state (two) every 16, the fragment sampler (two) every 32 and the cull mode
+//!   every 64. Per frame: the encoding thread's wall time from the command buffer's creation
+//!   through `endEncoding`, the commit call's, from its return to the wait's, the whole frame's,
+//!   the process's CPU time, and native's GPU time.
 //! - `memory`: `newBufferWithLength:` and `newBufferWithBytes:` of 4 KiB, 1 MiB and 64 MiB,
 //!   `newBufferWithBytesNoCopy:` of 1 MiB and 64 MiB, and a 1024x1024 `RGBA8Unorm` `Shared`
 //!   texture's `replaceRegion` and `getBytes`.
 //!
 //! Options: `--rounds N` (3), `--draws N` (2000), `--timed N` (30), `--latency N` (200),
-//! `--heavy-iterations N` (64), `--heavy-runs N` (15), `--scratch DIR` (metallibs and the
-//! runtime's shader caches; a directory under the OS's temporary directory by default, removed at
-//! the end), `--metallib PATH` (skip the compile; not with `pipeline`), `--cache DIR` (the
-//! runtime's shader cache, with `--side`), `--variants a,b,...` (the encode workload's variants
-//! alone: `draw_static`, `draw_bind`, `draw_pipeline`, `draw_passes`, `dispatch_static`,
-//! `dispatch_churn`; for a profile of one).
+//! `--heavy-iterations N` (64), `--heavy-runs N` (15), `--many-draws N` (6000), `--scratch DIR`
+//! (metallibs and the runtime's shader caches; a directory under the OS's temporary directory by
+//! default, removed at the end), `--metallib PATH` (skip the compile; not with `pipeline`),
+//! `--cache DIR` (the runtime's shader cache, with `--side`), `--variants a,b,...` (the encode
+//! workload's variants alone: `draw_static`, `draw_bind`, `draw_pipeline`, `draw_passes`,
+//! `dispatch_static`, `dispatch_churn`; for a profile of one).
 //!
 //! On a Mac, the runtime's device opens the Vulkan loader (`/opt/homebrew/lib` among the places
 //! it looks) and MoltenVK's `MVK_CONFIG_*` variables apply. Run timings on an otherwise idle GPU.
@@ -80,8 +89,15 @@ use std::process::{Command, Stdio};
 use std::time::Instant;
 use workloads::Sizes;
 
-const WORKLOADS: [&str; 7] = [
-    "encode", "fixed", "latency", "gpu", "pipeline", "memory", "frame",
+const WORKLOADS: [&str; 8] = [
+    "encode",
+    "fixed",
+    "latency",
+    "gpu",
+    "pipeline",
+    "memory",
+    "frame",
+    "many_draws",
 ];
 
 struct Options {
@@ -109,6 +125,7 @@ fn options() -> Options {
             latency: 200,
             heavy_iterations: 64,
             heavy_runs: 15,
+            many_draws: 6000,
         },
         scratch: None,
         metallib: None,
@@ -139,6 +156,7 @@ fn options() -> Options {
                 options.sizes.heavy_iterations = number(&mut options.passed) as u32
             }
             "--heavy-runs" => options.sizes.heavy_runs = number(&mut options.passed),
+            "--many-draws" => options.sizes.many_draws = number(&mut options.passed),
             "--scratch" => options.scratch = Some(PathBuf::from(value())),
             "--metallib" => options.metallib = Some(PathBuf::from(value())),
             "--cache" => options.cache = Some(PathBuf::from(value())),
@@ -193,7 +211,10 @@ fn child(side: &str, options: &Options) {
                 "runtime work counts: queue_submissions {} command_buffers_submitted {} \
                  pipeline_barriers {} draws {} dispatches {} variant_pipelines_made {} \
                  device_memory_allocated {} host_pointer_imports_made {} \
-                 requirement_images_made {} arena_pools_made {} owned_descriptor_pools {}",
+                 requirement_images_made {} arena_pools_made {} owned_descriptor_pools {} \
+                 draws_settled {} stage_tables_read {} graphics_pipelines_looked_up {} \
+                 draws_pushing_set_zero {} set_zero_writes_pushed {} set_zero_sets_reused {} \
+                 signed_depth_switch_ons {} sign_strips {} magnitude_stand_in_passes {}",
                 c.queue_submissions,
                 c.command_buffers_submitted,
                 c.commands_replayed.cmd_pipeline_barrier,
@@ -205,7 +226,17 @@ fn child(side: &str, options: &Options) {
                 c.requirement_images_made,
                 c.arena_pools_made,
                 c.owned_descriptor_pools,
+                c.draws_settled,
+                c.stage_tables_read,
+                c.graphics_pipelines_looked_up,
+                c.draws_pushing_set_zero,
+                c.set_zero_writes_pushed,
+                c.set_zero_sets_reused,
+                c.signed_depth_switch_ons,
+                c.sign_strips,
+                c.magnitude_stand_in_passes,
             );
+            eprintln!("runtime commands replayed: {:?}", c.commands_replayed);
         }
         other => panic!("--side native|runtime, not {other}"),
     }
@@ -249,6 +280,7 @@ fn run<G: Gpu>(g: &G, opened: Instant, metallib: &Path, options: &Options) {
             "gpu" => workloads::gpu(g, &scene, sizes),
             "memory" => workloads::memory(g, sizes),
             "frame" => workloads::frame(g, &scene, sizes),
+            "many_draws" => workloads::many_draws(g, &library, sizes),
             _ => unreachable!(),
         }
     }

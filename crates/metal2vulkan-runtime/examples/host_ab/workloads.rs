@@ -19,6 +19,8 @@ pub struct Sizes {
     pub heavy_iterations: u32,
     /// Timed command buffers of each heavy shader.
     pub heavy_runs: usize,
+    /// Draws in the many-draws workload's frame.
+    pub many_draws: usize,
 }
 
 /// One result line (module docs) of `values`, which it sorts.
@@ -931,5 +933,177 @@ pub fn frame<G: Gpu>(g: &G, s: &Scene<G>, sizes: &Sizes) {
     // SAFETY: page-aligned read-write memory of `size` bytes that outlives the heap.
     if let Some(heap) = unsafe { g.heap_no_copy(pointer as *mut u8, size) } {
         run("frame_no_copy", &heap);
+    }
+}
+
+/// The many-draws workload's target (1080p `BGRA8Unorm`, with a `Depth32Float` attachment), its
+/// textures (16 `RGBA8Unorm` of 128x128) and its uniforms' stride.
+const MANY_TARGET: (usize, usize) = (1920, 1080);
+const MANY_TEXTURES: usize = 16;
+const MANY_TEXTURE_SIDE: usize = 128;
+const MANY_STRIDE: usize = 256;
+
+/// What the many-draws workload draws with (module docs of `main.rs`).
+struct ManyDraws<G: Gpu> {
+    /// `draws_vertex` with each of `draws_fragment0` to `3`, the third blending.
+    pipelines: [G::RenderPipeline; 4],
+    /// `Less` with depth writes, `LessEqual` without.
+    depth_states: [G::DepthStencil; 2],
+    /// Linear and nearest.
+    samplers: [G::Sampler; 2],
+    textures: Vec<G::Texture>,
+    /// The rectangle's corners, and its two triangles' indices.
+    quad: G::Buffer,
+    indices: G::Buffer,
+    /// Four uniform buffers: draw `i` reads buffer `i % 4` at `(i / 4) * MANY_STRIDE`.
+    uniforms: [G::Buffer; 4],
+    target: G::Texture,
+    depth: G::Texture,
+}
+
+impl<G: Gpu> ManyDraws<G> {
+    fn new(g: &G, library: &G::Library, count: usize) -> ManyDraws<G> {
+        let pipeline = |i: usize| {
+            g.depth_pipeline(
+                library,
+                "draws_vertex",
+                &format!("draws_fragment{i}"),
+                i == 2,
+            )
+        };
+        let textures = (0..MANY_TEXTURES)
+            .map(|n| {
+                let side = MANY_TEXTURE_SIDE;
+                let texture = g.texture(Format::Rgba8, side, side, false);
+                g.replace_region(
+                    &texture,
+                    (side, side),
+                    &texels(side, n as u8 * 13 + 1),
+                    side * 4,
+                );
+                texture
+            })
+            .collect();
+        // A grid of rectangles over the target, each half again a cell's side, as m2vbench lays
+        // them.
+        let grid = (count as f64).sqrt().ceil() as usize;
+        let cell = 2.0 / grid as f32;
+        let per = count.div_ceil(4) * MANY_STRIDE;
+        let mut bytes = [(); 4].map(|_| vec![0u8; per]);
+        for i in 0..count {
+            let (x, y) = ((i % grid) as f32, (i / grid) as f32);
+            let at = (i / 4) * MANY_STRIDE;
+            let uniforms = floats(&[
+                -1.0 + x * cell,
+                -1.0 + y * cell,
+                cell * 1.5,
+                cell * 1.5,
+                0.5 + 0.5 * (i as f32 * 0.1).sin(),
+                0.5 + 0.5 * (i as f32 * 0.07).cos(),
+                (i % 7) as f32 / 7.0,
+                1.0,
+                i as f32 / count as f32,
+                i as f32 * 0.001,
+                0.0,
+                0.0,
+            ]);
+            bytes[i % 4][at..at + uniforms.len()].copy_from_slice(&uniforms);
+        }
+        let indices: Vec<u8> = [0u16, 1, 2, 2, 1, 3]
+            .iter()
+            .flat_map(|i| i.to_le_bytes())
+            .collect();
+        ManyDraws {
+            pipelines: [pipeline(0), pipeline(1), pipeline(2), pipeline(3)],
+            depth_states: [g.depth_stencil(true), g.depth_stencil(false)],
+            samplers: [g.sampler(true), g.sampler(false)],
+            textures,
+            quad: g.buffer_with(&floats(&[0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0])),
+            indices: g.buffer_with(&indices),
+            uniforms: bytes.map(|bytes| g.buffer_with(&bytes)),
+            target: g.texture(Format::Bgra8, MANY_TARGET.0, MANY_TARGET.1, true),
+            depth: g.texture(Format::Depth32Float, MANY_TARGET.0, MANY_TARGET.1, true),
+        }
+    }
+
+    /// Encode one frame's render pass of `count` draws into `command_buffer`, as m2vbench's draws
+    /// mode does.
+    fn encode(&self, g: &G, command_buffer: &G::CommandBuffer, count: usize) {
+        let mut encoder = g.depth_render_encoder(command_buffer, &self.target, &self.depth);
+        g.set_vertex_buffer(&mut encoder, &self.quad, 0, 0);
+        g.set_counter_clockwise(&mut encoder);
+        for i in 0..count {
+            if i % 8 == 0 {
+                g.set_render_pipeline(&mut encoder, &self.pipelines[(i / 8) % 4]);
+            }
+            if i % 16 == 0 {
+                g.set_depth_stencil(&mut encoder, &self.depth_states[(i / 16) % 2]);
+            }
+            if i % 32 == 0 {
+                g.set_fragment_sampler(&mut encoder, &self.samplers[(i / 32) % 2], 0);
+            }
+            if i % 64 == 0 {
+                g.set_cull_back(&mut encoder, (i / 64) % 2 == 0);
+            }
+            let uniforms = &self.uniforms[i % 4];
+            let at = (i / 4) * MANY_STRIDE;
+            g.set_vertex_buffer(&mut encoder, uniforms, at, 1);
+            g.set_fragment_buffer(&mut encoder, uniforms, at, 0);
+            g.set_fragment_texture(&mut encoder, &self.textures[i % MANY_TEXTURES], 0);
+            g.set_fragment_texture(&mut encoder, &self.textures[(i * 7 + 3) % MANY_TEXTURES], 1);
+            let mut jitter = [0u8; 16];
+            jitter[..4].copy_from_slice(&(0.002 * (i % 3) as f32).to_le_bytes());
+            g.set_vertex_bytes(&mut encoder, &jitter, 2);
+            if i % 2 == 1 {
+                g.draw_indexed(&mut encoder, 6, &self.indices);
+            } else {
+                g.draw_strip(&mut encoder, 4);
+            }
+        }
+        g.end_render(encoder);
+    }
+}
+
+/// The many-draws workload (module docs of `main.rs`): per frame, the encoding thread's wall
+/// time from the command buffer's creation through `endEncoding`, the commit call's, the commit's
+/// return to the wait's, the whole frame's, the process's CPU time, and the GPU time where the
+/// side measures it.
+pub fn many_draws<G: Gpu>(g: &G, library: &G::Library, sizes: &Sizes) {
+    let count = sizes.many_draws;
+    let scene = ManyDraws::new(g, library, count);
+    let mut times: [Vec<f64>; 6] = Default::default();
+    for frame in 0..sizes.timed + 3 {
+        g.pool(|| {
+            let cpu = process_cpu();
+            let start = Instant::now();
+            let command_buffer = g.command_buffer();
+            scene.encode(g, &command_buffer, count);
+            let encoded = Instant::now();
+            g.commit(&command_buffer);
+            let committed = Instant::now();
+            g.wait(&command_buffer);
+            let done = Instant::now();
+            let cpu = process_cpu() - cpu;
+            if frame < 3 {
+                return;
+            }
+            times[0].push(ms(encoded - start));
+            times[1].push(ms(committed - encoded));
+            times[2].push(ms(done - committed));
+            times[3].push(ms(done - start));
+            times[4].push(ms(cpu));
+            if let Some(gpu) = g.gpu_seconds(&command_buffer) {
+                times[5].push(gpu * 1e3);
+            }
+        });
+    }
+    let [encode, commit, wait, frame, cpu, gpu] = &mut times;
+    emit("many_draws", "encode", "ms", encode);
+    emit("many_draws", "commit", "ms", commit);
+    emit("many_draws", "commit_to_done", "ms", wait);
+    emit("many_draws", "frame", "ms", frame);
+    emit("many_draws", "cpu", "ms", cpu);
+    if !gpu.is_empty() {
+        emit("many_draws", "gpu", "ms", gpu);
     }
 }

@@ -199,3 +199,62 @@ kernel void tiny_kernel_b(device uint *out [[buffer(0)]],
                           uint tid [[thread_position_in_grid]]) {
     out[tid] = value * 3u + tid + uint(NONCE);
 }
+
+// The many-draws workload's functions: a small rectangle per draw, of its own uniforms, and four
+// fragment functions over two textures and one sampler.
+struct DrawUniforms {
+    float4 rect;   // x, y, width, height in NDC
+    float4 color;
+    float4 misc;   // x: depth, y: phase
+};
+
+struct DrawOut {
+    float4 position [[position]];
+    float2 uv;
+    float4 color;
+};
+
+vertex DrawOut draws_vertex(uint vid [[vertex_id]],
+                            const device float2 *quad [[buffer(0)]],
+                            constant DrawUniforms &u [[buffer(1)]],
+                            constant float4 &jitter [[buffer(2)]]) {
+    float2 p = quad[vid];
+    DrawOut out;
+    out.position = float4(u.rect.xy + p * u.rect.zw + jitter.xy, u.misc.x, 1.0);
+    out.uv = p;
+    out.color = u.color + float4(float(NONCE) * 1.0e-12);
+    return out;
+}
+
+fragment float4 draws_fragment0(DrawOut in [[stage_in]],
+                                texture2d<float> t0 [[texture(0)]],
+                                texture2d<float> t1 [[texture(1)]],
+                                sampler s [[sampler(0)]],
+                                constant DrawUniforms &u [[buffer(0)]]) {
+    return t0.sample(s, in.uv) * in.color;
+}
+
+fragment float4 draws_fragment1(DrawOut in [[stage_in]],
+                                texture2d<float> t0 [[texture(0)]],
+                                texture2d<float> t1 [[texture(1)]],
+                                sampler s [[sampler(0)]],
+                                constant DrawUniforms &u [[buffer(0)]]) {
+    return mix(t0.sample(s, in.uv), t1.sample(s, in.uv * 2.0), 0.5) * in.color;
+}
+
+fragment float4 draws_fragment2(DrawOut in [[stage_in]],
+                                texture2d<float> t0 [[texture(0)]],
+                                texture2d<float> t1 [[texture(1)]],
+                                sampler s [[sampler(0)]],
+                                constant DrawUniforms &u [[buffer(0)]]) {
+    float r = length(in.uv - 0.5);
+    return float4(in.color.rgb * (1.0 - r), 0.8) * t1.sample(s, in.uv);
+}
+
+fragment float4 draws_fragment3(DrawOut in [[stage_in]],
+                                texture2d<float> t0 [[texture(0)]],
+                                texture2d<float> t1 [[texture(1)]],
+                                sampler s [[sampler(0)]],
+                                constant DrawUniforms &u [[buffer(0)]]) {
+    return float4(in.uv, fract(u.misc.y), 1.0) * t0.sample(s, in.uv.yx);
+}
