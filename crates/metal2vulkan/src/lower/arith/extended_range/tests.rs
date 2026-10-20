@@ -1315,10 +1315,12 @@ fn gap(
 }
 
 /// What the model does not hold is refused by name: a factor of the second source, the color
-/// channels' blend color difference (but alpha's, and the sum), a mask of one color channel, an
-/// `_sRGB` form's blend other than the or under a mask, a `float4` output other than under the
-/// blends whose color lanes take one term alone, and another output; a placeholder factor or
-/// operation is the descriptor's error.
+/// channels' blend color difference (but alpha's, and the sum), a mask of one color channel,
+/// `BGRA10_XR_sRGB`'s blend other than the narrow ones or under a mask (the other `_sRGB` forms
+/// take the linear forms' models: source alpha over, masked or not, into
+/// `RGB10A8_2P_XR10_sRGB` and `BGR10_XR_sRGB`), a `float4` output other than under the blends whose
+/// color lanes take one term alone, and another output; a placeholder factor or operation is the
+/// descriptor's error.
 #[test]
 fn blends_outside_the_model_are_refused_by_name() {
     use BlendFactor as F;
@@ -1380,9 +1382,19 @@ fn blends_outside_the_model_are_refused_by_name() {
         source_rgb: F::SourceAlpha,
         ..premul
     };
-    assert_eq!(gap(&over, srgb, ALL), Some(ExtendedRangeBlend::SrgbForm));
+    let bgra = ExtendedRange::Bgra10 { srgb: true };
+    let bgr = ExtendedRange::Bgr10 { srgb: true };
+    assert_eq!(gap(&over, bgra, ALL), Some(ExtendedRangeBlend::SrgbForm));
+    assert_eq!(gap(&over, srgb, ALL), None);
+    assert_eq!(gap(&over, bgr, ALL), None);
     let rgb = ColorWriteMask::ALL.difference(ColorWriteMask::ALPHA);
-    assert_eq!(gap(&premul, srgb, rgb), Some(ExtendedRangeBlend::SrgbForm));
+    assert_eq!(gap(&premul, bgra, rgb), Some(ExtendedRangeBlend::SrgbForm));
+    assert_eq!(gap(&premul, srgb, rgb), None);
+    // A `float4` output into them takes its own model, as a linear form's.
+    let float = |form| Blend::for_output(&over, form, ALL, (Some(FloatFmt::F32), BlendMath::Fast));
+    assert!(float(srgb).is_ok_and(|b| b.float));
+    assert!(float(bgr).is_ok_and(|b| b.float));
+    assert!(float(bgra).is_err());
     // A `float4` output: the blends whose color lanes take one term alone, unmasked.
     let takes = |eq: &BlendEquation, mask: ColorWriteMask, fmt: Option<FloatFmt>| match Blend::of(
         eq,
@@ -1446,11 +1458,15 @@ fn blends_outside_the_model_are_refused_by_name() {
         float(&dual_alpha, linear, ALL),
         Err(ExtendedRangeBlend::DualSource)
     );
-    assert_eq!(float(&mask_blend, srgb, ALL), Ok(false));
+    // Into `BGRA10_XR_sRGB` the narrow blends' rounded form alone; into the other `_sRGB` forms
+    // the `float4` output's own model, as a linear form's.
+    assert_eq!(float(&mask_blend, bgra, ALL), Ok(false));
     assert_eq!(
-        float(&premul, srgb, ALL),
+        float(&premul, bgra, ALL),
         Err(ExtendedRangeBlend::FloatOutput)
     );
+    assert_eq!(float(&mask_blend, srgb, ALL), Ok(true));
+    assert_eq!(float(&premul, srgb, ALL), Ok(true));
     // Without fast math a `float4` output is taken as a `half4` one (rounded to `half` first),
     // into an `_sRGB` form too; the second source's factors, a mask of one color channel, the blend
     // color difference, and an `_sRGB` form's every blend, masked too, are made.

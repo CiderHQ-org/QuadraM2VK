@@ -512,12 +512,13 @@ fn unmodelled_extended_range_targets_are_refused() {
             // Blended: the lowering refuses the function's `float4` output. Where the device
             // orders fetch only through the interlock, or through rasterization-order input
             // attachments, the shader blends a `half4` output, and a `float4` one under the blends
-            // whose color lanes take one term alone, and into a linear form under its own model:
-            // the `float4` one under one and one into an `_sRGB` form is refused by the blend's
-            // gap.
+            // whose color lanes take one term alone, and into a linear form, `BGR10_XR_sRGB` or
+            // `RGB10A8_2P_XR10_sRGB` under its own model: the `float4` one under one and one into
+            // `BGRA10_XR_sRGB` is refused by the blend's gap.
             let r = pipeline_of(pf, ColorWriteMask::ALL, true);
             let blended = compile_with(&bc, "rt6_fill_rgba32float", &p, &blended_inputs(&r, &p));
-            match (blends_in_shader(&p), form.srgb()) {
+            let narrow_only = form == ExtendedRange::Bgra10 { srgb: true };
+            match (blends_in_shader(&p), narrow_only) {
                 (true, false) => {
                     blended.unwrap_or_else(|e| panic!("{what} blended: {e}"));
                 }

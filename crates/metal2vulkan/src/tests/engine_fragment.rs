@@ -2083,6 +2083,81 @@ fn a_replacing_blend_or_a_write_that_stores_nothing_takes_the_storage_form() {
 /// (G345: color source factor zero over one minus the source's alpha) is computed in the shader
 /// too, for the `half4` output and for the `float4` fill (rounded to `half` first), and makes the
 /// whole pipeline on both MoltenVK profiles.
+/// A fast-math function's source-alpha-over blend (source alpha and one minus it, added, for
+/// color and alpha, every channel written) into color 0 of `BGR10_XR_sRGB` or
+/// `RGB10A8_2P_XR10_sRGB`, beside an `R8Unorm` color 1 under the same blend (a consumer's
+/// pipeline): on every committed profile that orders fetch through the interlock, the shader
+/// blends color 0, a `half4` output's and a `float4` one's, and the module passes L3. Into
+/// `BGRA10_XR_sRGB`, whose fast blends beyond the narrow ones Metal computes otherwise, the same
+/// blend stays refused by name (`ExtendedRangeBlend::SrgbForm`).
+#[test]
+fn a_fast_source_alpha_over_blend_into_an_srgb_extended_range_attachment_is_made() {
+    use crate::metal::BlendFactor;
+    let Some(fills) = fixture("rt6_samples") else {
+        return;
+    };
+    let colors = |pf: PixelFormat| {
+        let over = |pf| {
+            let mut c = ColorAttachmentDescriptor::new(pf);
+            c.blending_enabled = true;
+            c.source_rgb_blend_factor = BlendFactor::SourceAlpha;
+            c.destination_rgb_blend_factor = BlendFactor::OneMinusSourceAlpha;
+            c.source_alpha_blend_factor = BlendFactor::SourceAlpha;
+            c.destination_alpha_blend_factor = BlendFactor::OneMinusSourceAlpha;
+            c
+        };
+        vec![Some(over(pf)), Some(over(PixelFormat::R8Unorm))]
+    };
+    let state = |colors: &[Option<ColorAttachmentDescriptor>], p: &DeviceProfile| {
+        let mut inputs = LoweringInputs::new();
+        inputs.color_writes = crate::pipeline::color_writes::color_writes(
+            0..colors.len() as u32,
+            colors,
+            (false, Default::default()),
+            p,
+        );
+        inputs.extended_range_colors =
+            crate::pipeline::color_writes::extended_range_colors(colors, Default::default());
+        inputs.framebuffer_fetch = Some(FramebufferFetchInputs::of([0], colors, true, false, 1));
+        inputs
+    };
+    let mut checked = 0;
+    for (stem, p) in committed_profiles().expect("profiles") {
+        if !crate::lower::fragment::interlock_orders(&p) {
+            continue;
+        }
+        for pf in [PixelFormat::BGR10XRSRGB, PixelFormat::RGB10A82PXR10SRGB] {
+            let inputs = state(&colors(pf), &p);
+            for entry in ["rt6_fill_rgba16float", "rt6_fill_rgba32float"] {
+                let a = match compile_with(&fills, entry, &p, &inputs) {
+                    Ok(a) => a,
+                    // A device without the raw formats' storage refuses the form whatever the
+                    // blend.
+                    Err(Error::Unsupported(u)) if u.needs != Needs::NotImplemented => continue,
+                    Err(e) => panic!("{stem}: {pf:?} {entry}: {e}"),
+                };
+                link_and_validate(&a, &p)
+                    .unwrap_or_else(|e| panic!("{stem}: {pf:?} {entry}: L3: {e}"));
+                checked += 1;
+            }
+        }
+        let inputs = state(&colors(PixelFormat::BGRA10XRSRGB), &p);
+        match compile_with(&fills, "rt6_fill_rgba16float", &p, &inputs) {
+            Err(Error::Unsupported(u)) if u.needs != Needs::NotImplemented => {}
+            Err(Error::Unsupported(u)) => assert_eq!(
+                u.feature,
+                Feature::ExtendedRangeBlend(crate::error::ExtendedRangeBlend::SrgbForm),
+                "{stem}"
+            ),
+            other => panic!("{stem}: BGRA10_XR_sRGB: {:?}", other.map(|_| ())),
+        }
+    }
+    assert!(
+        checked > 0,
+        "no profile blends an extended-range attachment in the shader"
+    );
+}
+
 #[test]
 fn a_premultiplied_blend_into_an_extended_range_attachment_is_computed_in_the_shader() {
     use crate::metal::format::ExtendedRange;

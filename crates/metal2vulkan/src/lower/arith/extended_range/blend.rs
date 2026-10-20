@@ -85,13 +85,21 @@
 //! second source's 20, our probes' sweep), while a color class reading the one minus alone reads it
 //! of the clamped color beside an alpha class reading `BlendColor` too.
 //!
+//! **The `_sRGB` forms under fast math.** A blend into `BGR10_XR_sRGB` or
+//! `RGB10A8_2P_XR10_sRGB` takes the linear forms' models, a `half4` output's and a `float4`
+//! one's: the lane table's every row of the two forms (each configuration, mask and output type)
+//! is Metal's bytes under them. `BGRA10_XR_sRGB` takes them for the narrow blends alone
+//! ([`Blend::narrow`]: a `float4` output among them only unmasked, where its color lanes take one
+//! term alone, rounded to `half` first): beyond them the table's rows differ, 7 of its `half4`
+//! rows (each reading `OneMinusBlendColor`) and 76 of its `float4` ones ([`fast_narrow_only`]).
+//!
 //! **Not built** ([`ExtendedRangeBlend`]) under fast math: a factor of the second source (under a `float4`
 //! output's model, in any of the four factors); the color channels' `BlendColor` with
 //! `OneMinusBlendColor` under `Subtract` or `ReverseSubtract` (Metal's result there follows
 //! neither form for every blend color the sweeps drew); a write mask of exactly one color channel
-//! (Metal blends that channel otherwise than the vector form); a `float4` output into an `_sRGB`
-//! form beyond the blends, and an `_sRGB` form's blend beyond them (both measured only), which keep
-//! the model; and any other output.
+//! (Metal blends that channel otherwise than the vector form); a `BGRA10_XR_sRGB` blend beyond the
+//! narrow ones (`SrgbForm`), and a `float4` output into it beyond them (`FloatOutput`), both
+//! measured only; and any other output.
 
 use super::blend_color::SRGB_DIRECT_TOP;
 use super::{floats, per_lane_f, source_range, SRGB_SOURCE_RANGE};
@@ -837,16 +845,27 @@ fn planned(
     (float, math): (bool, BlendMath),
 ) -> Result<Blend, Error> {
     let has_alpha = !matches!(form, ExtendedRange::Bgr10 { .. });
-    let family = Family::Extended { srgb: form.srgb() };
+    let family = Family::Extended {
+        narrow_only: fast_narrow_only(form),
+    };
     planned_for(eq, (has_alpha, family), written, (float, math))
 }
 
+/// Whether Metal's fast-math blends into `form` follow the models for the narrow blends alone
+/// ([`Blend::narrow`], unmasked): `BGRA10_XR_sRGB`, the one `_sRGB` form the lane table measures
+/// otherwise beyond them (the module docs). The other two `_sRGB` forms take the linear forms'
+/// models for every blend, as the linear forms do.
+fn fast_narrow_only(form: ExtendedRange) -> bool {
+    form == ExtendedRange::Bgra10 { srgb: true }
+}
+
 /// The attachment whose blend Metal's compiler builds, whose forms differ: an extended-range
-/// form's (an `_sRGB` one's where `srgb`), a 16-bit float attachment's ([`Blend::half_float`]), or
+/// form's (one whose fast-math blends the models hold for the narrow blends alone where
+/// `narrow_only`, [`fast_narrow_only`]), a 16-bit float attachment's ([`Blend::half_float`]), or
 /// an 8-bit unorm one's in the arithmetic of the output's type ([`Blend::unorm8`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Family {
-    Extended { srgb: bool },
+    Extended { narrow_only: bool },
     HalfFloat,
     Unorm8(BlendArith),
 }
@@ -861,7 +880,7 @@ fn planned_for(
     written: ColorWriteMask,
     (float, math): (bool, BlendMath),
 ) -> Result<Blend, Error> {
-    let srgb = family == Family::Extended { srgb: true };
+    let narrow_only = family == Family::Extended { narrow_only: true };
     let sixteen = !matches!(family, Family::Extended { .. });
     let unorm8 = matches!(family, Family::Unorm8(_));
     // A zero factor keeps its product without fast math in a 16-bit float attachment's blend.
@@ -878,9 +897,10 @@ fn planned_for(
     let masked = colors < 3 || (has_alpha && !alpha_written);
     let narrow = narrow(eq);
     // The rounded model holds for any blend into an `_sRGB` form, a mask of one color channel,
-    // and the color channels' blend color difference.
+    // and the color channels' blend color difference; the fast models for `BGRA10_XR_sRGB`'s
+    // narrow blends alone.
     let fast = math == BlendMath::Fast;
-    if fast && srgb && (!narrow || masked) {
+    if fast && narrow_only && (!narrow || masked) {
         return Err(refused(ExtendedRangeBlend::SrgbForm));
     }
     let opaque_ = !has_alpha;
@@ -1020,9 +1040,10 @@ impl Blend {
     }
 
     /// [`Blend::of`] for an output of four lanes of `output` (`None` for another output) of a
-    /// function of math `math`: a `float4` one into a linear form takes its own model (the module
-    /// docs), which refuses a factor of the second source in any of the four factors; into an
-    /// `_sRGB` form, the blends that take it ([`Blend::takes`]). Without fast math
+    /// function of math `math`: a `float4` one into a linear form, `BGR10_XR_sRGB` or
+    /// `RGB10A8_2P_XR10_sRGB` takes its own model (the module docs), which refuses a factor of the
+    /// second source in any of the four factors; into `BGRA10_XR_sRGB`, the blends that take it
+    /// ([`Blend::takes`]). Without fast math
     /// ([`BlendMath::Rounded`]) a blend takes a `half4` output or a `float4` one rounded to `half`
     /// first alike.
     pub fn for_output(
@@ -1039,7 +1060,7 @@ impl Blend {
                 _ => Err(refused(ExtendedRangeBlend::Output)),
             };
         }
-        if output != Some(FloatFmt::F32) || form.srgb() {
+        if output != Some(FloatFmt::F32) || fast_narrow_only(form) {
             let b = Blend::of(eq, form, written, BlendMath::Fast)?;
             b.takes(output)?;
             return Ok(b);

@@ -1389,12 +1389,14 @@ pub enum ExtendedRangeBlend {
     /// otherwise than the two or three it blends as one vector, by a rule not known. (Without
     /// fast math it is built.)
     OneColorChannel,
-    /// Under fast math, a `float4` output into an `_sRGB` form under a blend other than the whose
-    /// color channels take one term alone, or under a write mask: not measured. (Into a linear form
-    /// it takes its own model; without fast math it is rounded to `half` first.)
+    /// Under fast math, a `float4` output into `BGRA10_XR_sRGB` under a blend other than those
+    /// whose color channels take one term alone, or under a write mask: measured to differ from
+    /// the models. (Into a linear form, `BGR10_XR_sRGB` or `RGB10A8_2P_XR10_sRGB` it takes its own
+    /// model; without fast math it is rounded to `half` first.)
     FloatOutput,
-    /// Under fast math, an `_sRGB` form's blend other than the measured one, or under a write mask:
-    /// not measured. Without fast math every one is built.
+    /// Under fast math, a `BGRA10_XR_sRGB` blend other than the narrow ones, or under a write mask:
+    /// measured to differ from the models (the other `_sRGB` forms take the linear forms' models).
+    /// Without fast math every one is built.
     SrgbForm,
     /// An output other than four `half` or `float` lanes, or a second output other than those the
     /// blend reads: not measured.
