@@ -881,6 +881,12 @@ pub enum RuntimeDriverDefect {
     /// buffer's deallocator waiting with it, announced (`host-deallocator-delayed`). The
     /// program's own submissions to the runtime's queues are not waited for.
     FreedAddressMemoryFailsPendingWork,
+    /// Destroying a buffer of `SHADER_DEVICE_ADDRESS` usage while another thread is inside a
+    /// `vkQueueSubmit` whose pipelines read device addresses fails that submission, though none of
+    /// its commands refers to the buffer. Nothing is refused: the runtime destroys such a buffer
+    /// with no submission of its own inside its `vkQueueSubmit`. The program's own submissions to
+    /// the runtime's queues are not waited for.
+    DestroyedAddressBufferFailsSubmission,
     /// `vkCmdPushDescriptorSet` writes the descriptors it pushes but not the sizes of their
     /// buffers that a shader reads back (a storage buffer's runtime array length,
     /// `OpArrayLength`), which the driver takes from `vkCmdBindDescriptorSets` alone: a pushed

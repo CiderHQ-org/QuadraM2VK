@@ -54,7 +54,8 @@ pub const REGISTRY: &[EnvVar] = &[
         effect: "metal2vulkan-runtime's diagnostics: one line per VkDeviceMemory a device \
                  allocates, imports or frees, through the device's message sink or on stderr: \
                  its kind, handle, memory type, bytes, host address (an import's) and device \
-                 address range, to place a GPU fault's address; and one line per placement of \
+                 address range (a block of buffers that take device addresses), to place a GPU \
+                 fault's address; and one line per placement of \
                  4 MiB or more in a pooled block as it is placed and returned: image or buffer, \
                  its memory class (placed), bytes, offset and block, to show what makes and \
                  frees blocks; set to anything but empty or 0",

@@ -243,6 +243,127 @@ fn a_release_waits_for_the_batch_in_flight_where_the_device_parks_freed_memory()
     }
 }
 
+/// The bytes of a private buffer that takes a block of its own, with a buffer of addresses (past
+/// half a pooled block, `memory.rs`), and that the recycler parks for no later buffer (past its
+/// bytes, `recycle.rs`): its release frees its block.
+const OWN_BLOCK: u64 = 128 << 20;
+
+/// The `vkDestroyBuffer` calls the memory's own code made so far (`memory.rs`): its blocks'
+/// buffers of addresses (`WorkCounts::object_churn`'s release sites). Read from the counters
+/// alone: a release waiting for the gate holds the memory's lock, which `Device::work_counts`
+/// takes.
+fn addresses_destroyed(device: &Device) -> u64 {
+    let (churn, _) = device.shared().counts.churn.snapshot();
+    (churn.release_sites.iter())
+        .filter(|site| site.command == "vkDestroyBuffer" && site.file.ends_with("memory.rs"))
+        .map(|site| site.calls)
+        .sum()
+}
+
+/// Where the device parks freed memory, a block's buffer of addresses goes with no submission
+/// inside its `vkQueueSubmit` (`RuntimeDriverDefect::DestroyedAddressBufferFailsSubmission`):
+/// while another thread holds the parking's gate for reading, as a batch's and an own submission's
+/// `vkQueueSubmit` do, the release of a buffer whose block then goes destroys no buffer of
+/// addresses and waits; once that thread lets go, the release goes on, and the block's buffer of
+/// addresses goes. Before, the release destroyed it at once and only then waited for the gate, to
+/// note the batches: on MoltenVK, a `vkQueueSubmit` encoding meanwhile had listed it, and failed.
+#[test]
+fn a_block_s_buffer_of_addresses_goes_with_no_submission_inside_its_vk_queue_submit() {
+    let scratch = Scratch::new("gated");
+    let device = device(&scratch.0);
+    device.park_freed_memory();
+    let parking = Arc::clone(device.shared().parking.get().expect("the device parks"));
+    let buffer = device
+        .new_buffer(OWN_BLOCK, ResourceOptions::private())
+        .unwrap();
+    let before = addresses_destroyed(&device);
+    let submitting = parking.submitting();
+    let (released, done) = mpsc::channel();
+    let releaser = std::thread::spawn(move || {
+        drop(buffer);
+        released.send(()).unwrap();
+    });
+    assert!(
+        done.recv_timeout(Duration::from_millis(500)).is_err(),
+        "the release went on while a submission was inside the gate"
+    );
+    assert_eq!(
+        addresses_destroyed(&device),
+        before,
+        "a buffer of addresses went while a submission was inside its vkQueueSubmit"
+    );
+    drop(submitting);
+    done.recv_timeout(WAIT)
+        .expect("the release went on once the submission left the gate");
+    releaser.join().unwrap();
+    assert_eq!(
+        addresses_destroyed(&device),
+        before + 1,
+        "the block's buffer of addresses went once the submission left"
+    );
+}
+
+/// The rounds of [`blocks_go_while_submissions_that_make_buffers_run`].
+const ROUNDS: usize = 24;
+
+/// Where the device parks freed memory, blocks that go while another thread makes buffers and
+/// submits work on them end, as does that work, without error: a release takes the memory's lock
+/// and then the gate's write lock, and a submission takes the memory's lock (its buffer's making)
+/// outside the gate and the gate's read lock inside its queue's lock alone (the lock order in
+/// `freed_memory.rs`'s docs). A submission that took the memory's lock inside the gate would
+/// wait for a release waiting for it, and neither would end.
+#[test]
+fn blocks_go_while_submissions_that_make_buffers_run() {
+    let scratch = Scratch::new("orders");
+    let device = device(&scratch.0);
+    device.park_freed_memory();
+    let (done, ended) = mpsc::channel();
+    let submitter = {
+        let device = device.clone();
+        let done = done.clone();
+        std::thread::spawn(move || {
+            let queue = device.new_command_queue().unwrap();
+            for round in 0..ROUNDS * 4 {
+                let target = device
+                    .new_buffer(1 << 20, ResourceOptions::private())
+                    .unwrap();
+                let command_buffer = queue.command_buffer().unwrap();
+                let mut blit = command_buffer.blit_command_encoder().unwrap();
+                blit.fill_buffer(&target, 0..1 << 20, round as u8).unwrap();
+                blit.end_encoding().unwrap();
+                command_buffer.commit().unwrap();
+                command_buffer.wait_until_completed_for(WAIT).unwrap();
+                assert_eq!(command_buffer.error(), None, "round {round}");
+            }
+            done.send("submissions").unwrap();
+        })
+    };
+    let releaser = {
+        let device = device.clone();
+        std::thread::spawn(move || {
+            for _ in 0..ROUNDS {
+                let own = device
+                    .new_buffer(OWN_BLOCK, ResourceOptions::private())
+                    .unwrap();
+                drop(own);
+            }
+            done.send("releases").unwrap();
+        })
+    };
+    for _ in 0..2 {
+        let what = ended
+            .recv_timeout(WAIT)
+            .expect("the submissions and releases end");
+        eprintln!("FREED-MEMORY: the {what} ended");
+    }
+    submitter.join().unwrap();
+    releaser.join().unwrap();
+    assert!(
+        addresses_destroyed(&device) >= ROUNDS as u64,
+        "each release destroyed its block's buffer of addresses"
+    );
+}
+
 /// Where the device parks no freed memory, the same release goes at once, on the releasing
 /// thread, and nothing waits.
 #[test]
@@ -301,10 +422,10 @@ fn a_note_holds_a_block_for_the_work_submitted_before_it_alone() {
     let scratch = Scratch::new("noted");
     let device = device(&scratch.0);
     let parking = Parking::new(2);
-    let empty = parking.note();
+    let empty = parking.note_destroying(|| ()).1;
     assert!(parking.reached(&empty), "nothing was submitted");
     parking.submitted(1, 7);
-    let batch = parking.note();
+    let batch = parking.note_destroying(|| ()).1;
     parking.submitted(1, 8);
     assert!(parking.reached(&empty), "a batch after the note");
     assert!(!parking.reached(&batch), "the batch in flight");
@@ -312,7 +433,7 @@ fn a_note_holds_a_block_for_the_work_submitted_before_it_alone() {
     assert!(parking.reached(&batch), "the batch completed");
     parking.completed(1, 8);
     let own = parking.own_submission(&device);
-    let during = parking.note();
+    let during = parking.note_destroying(|| ()).1;
     assert!(parking.reached(&batch), "an own submission after the note");
     assert!(!parking.reached(&during), "the own submission in flight");
     let later = parking.own_submission(&device);
@@ -325,7 +446,7 @@ fn a_note_holds_a_block_for_the_work_submitted_before_it_alone() {
         parking.reached(&during),
         "the own submission completed; the later one is after"
     );
-    let last = parking.note();
+    let last = parking.note_destroying(|| ()).1;
     assert!(
         !parking.reached(&last),
         "the later own submission in flight"
@@ -335,7 +456,7 @@ fn a_note_holds_a_block_for_the_work_submitted_before_it_alone() {
     // The program's uses of a queue, marked on a timeline of their own.
     let raw = device.shared().vk();
     let (_, first) = parking.program_use(1, raw).expect("the timeline of marks");
-    let using = parking.note();
+    let using = parking.note_destroying(|| ()).1;
     assert!(
         parking.reached(&last),
         "a use of the program's after the note"
@@ -347,7 +468,7 @@ fn a_note_holds_a_block_for_the_work_submitted_before_it_alone() {
         parking.reached(&using),
         "the program's use completed; the later one is after"
     );
-    let after = parking.note();
+    let after = parking.note_destroying(|| ()).1;
     assert!(!parking.reached(&after), "the later use in flight");
     parking.program_completed(1, second);
     assert!(

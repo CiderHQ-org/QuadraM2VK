@@ -237,6 +237,26 @@ pub(super) struct Affected {
 ///   `CommandQueue::with_vk_queue` among them (a mark after each use signals a timeline of its
 ///   own).
 ///
+/// `DestroyedAddressBufferFailsSubmission`:
+/// - MoltenVK (`MOLTENVK`): on an Apple GPU, device memory of private or shared storage is a Metal
+///   placement heap (`MVKDeviceMemory::ensureMTLHeap`), so each `VkBuffer` bound to it is a Metal
+///   buffer of its own (`MVKBuffer::getMTLBuffer`), which `vkDestroyBuffer` releases at once
+///   (`MVKBuffer::detachMemory`). A `vkQueueSubmit` encodes its Metal command buffer on the calling
+///   thread, and an encoder whose pipeline reads device addresses lists every buffer of
+///   `SHADER_DEVICE_ADDRESS` usage (`MVKDevice::encodeGPUAddressableBuffers`): a buffer destroyed
+///   on another thread after that listing and before the commit fails the submission, its device
+///   then lost, though no command of it refers to the buffer, which Vulkan allows
+///   (VUID-vkDestroyBuffer-buffer-00922 asks only that the commands that refer to it completed).
+///   Read in 1.4.1's source, and measured on 1.4.1 (driverVersion 10401) on an M3 Max with macOS
+///   27.0.1: a bare-Vulkan program destroying such a buffer on another thread while a dispatch
+///   through a device address is inside its `vkQueueSubmit` behind fills, 2000 other such buffers
+///   alive, lost the device in the second round of 200, where the same destroy after the
+///   `vkQueueSubmit` returned failed none of 10 rounds: known broken through 1.4.1. Nothing is
+///   refused: the runtime destroys a block's buffer of addresses under the write lock of the gate
+///   its batches' and its own submissions' `vkQueueSubmit` hold for reading (`freed_memory.rs`),
+///   so none is inside one. The program's own submissions through `CommandQueue::with_vk_queue`
+///   are not waited for.
+///
 /// `PushedBufferSizesUnset`:
 /// - MoltenVK (`MOLTENVK`): a shader's runtime array length of a buffer (`OpArrayLength`) reads
 ///   the buffer's size from the stage's implicit buffer of sizes, which
@@ -360,6 +380,11 @@ pub(super) const AFFECTED: &[Affected] = &[
     },
     Affected {
         defect: RuntimeDriverDefect::FreedAddressMemoryFailsPendingWork,
+        driver: DriverId::MOLTENVK,
+        clean: &[],
+    },
+    Affected {
+        defect: RuntimeDriverDefect::DestroyedAddressBufferFailsSubmission,
         driver: DriverId::MOLTENVK,
         clean: &[],
     },

@@ -851,24 +851,12 @@ impl Memory {
     }
 
     /// Say `what` happened to `block`, where the log is on: its device address from its buffer of
-    /// addresses, else asked of its memory where blocks are allocated with the device-address
-    /// flag (`memory_log::address_of`).
-    fn say_block(&self, device: &ash::Device, what: &str, block: &Block) {
+    /// addresses, else none (`memory_log.rs`).
+    fn say_block(&self, what: &str, block: &Block) {
         let Some(log) = &self.log else {
             return;
         };
-        let imported = block
-            .imported
-            .then_some(vk::ExternalMemoryHandleTypeFlags::HOST_ALLOCATION_EXT);
-        let address = match (&block.addresses, self.device_address) {
-            (Some(addresses), _) => Some(addresses.address),
-            // SAFETY: the block's memory is the device's, live, allocated with the device-address
-            // flag (`device_address`), and never a dedicated allocation.
-            (None, true) => unsafe {
-                memory_log::address_of(device, block.memory, block.size, block.type_index, imported)
-            },
-            (None, false) => None,
-        };
+        let address = block.addresses.as_ref().map(|addresses| addresses.address);
         log.say(what, block.memory, block.type_index, block.size, address);
     }
 
@@ -1014,7 +1002,6 @@ impl Memory {
     /// that holds `holds`, dedicated or pooled, with `used` bytes at its start placed: its index.
     fn add_block(
         &mut self,
-        device: &ash::Device,
         (holds, type_index): (Holds, u32),
         block: Block,
         size: u64,
@@ -1028,7 +1015,7 @@ impl Memory {
                 (true, Holds::Buffers) => "made a dedicated block of a buffer",
                 (true, Holds::Images) => "made a dedicated block of an image",
             };
-            self.say_block(device, what, &block);
+            self.say_block(what, &block);
         }
         self.allocated += size;
         self.pool(holds, type_index)
@@ -1220,20 +1207,20 @@ impl Memory {
         after: Option<Box<dyn Send>>,
     ) -> Option<Box<dyn Send>> {
         let Some(parking) = &self.parking else {
-            self.say_block(device, "freed a block", &block);
+            self.say_block("freed a block", &block);
             // SAFETY: the caller's.
             unsafe { block.release(device) };
             return after;
         };
         self.say_block(
-            device,
             "a block goes, freed once the batches in flight complete",
             &block,
         );
-        // Out of the driver's list first, then the batches that may list it noted.
+        // Out of the driver's list first, with no submission inside its `vkQueueSubmit`, whose
+        // encoding may list it (`freed_memory.rs`), then the batches that may list it noted.
         // SAFETY: the caller's.
-        let memory = unsafe { block.release_addresses(device) };
-        let noted = parking.note();
+        let (memory, noted) =
+            parking.note_destroying(|| unsafe { block.release_addresses(device) });
         if !parking.reached(&noted) {
             parking.waits();
             // Checked again once counted: a waiter that published a value before the count did
@@ -1314,7 +1301,7 @@ impl Memory {
                         type_index,
                     };
                     let host = pointer.as_ptr() as usize;
-                    self.say_block(device, &format!("imported host memory 0x{host:x}"), &block);
+                    self.say_block(&format!("imported host memory 0x{host:x}"), &block);
                     let index = self
                         .pool(Holds::Buffers, type_index)
                         .add(size, true, block, size);
@@ -1371,23 +1358,11 @@ impl Memory {
                     // A successful import owns the descriptor: Vulkan closes it with the memory.
                     let _ = fd.into_raw_fd();
                     if let Some(log) = &self.log {
-                        let handle = vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT;
-                        let (what, address) = match image {
-                            Some(_) => ("imported a dma-buf for an image", None),
-                            // SAFETY: the memory was just imported, with the device-address
-                            // flag, and is bound to nothing.
-                            None if self.device_address => ("imported a dma-buf", unsafe {
-                                memory_log::address_of(
-                                    device,
-                                    memory,
-                                    size,
-                                    type_index,
-                                    Some(handle),
-                                )
-                            }),
-                            None => ("imported a dma-buf", None),
+                        let what = match image {
+                            Some(_) => "imported a dma-buf for an image",
+                            None => "imported a dma-buf",
                         };
-                        log.say(what, memory, type_index, size, address);
+                        log.say(what, memory, type_index, size, None);
                     }
                     return Ok((memory, type_index));
                 }
@@ -1446,7 +1421,7 @@ impl Memory {
             .flat_map(|pool| pool.drain())
             .collect();
         for block in blocks {
-            self.say_block(device, "freed a block as the device is destroyed", &block);
+            self.say_block("freed a block as the device is destroyed", &block);
             // SAFETY: no resource is left, and the device is idle.
             unsafe { block.release(device) };
         }
@@ -1756,7 +1731,7 @@ fn place(
         match made {
             Ok(block) => {
                 let mut memory = lock(memory);
-                let index = memory.add_block(device, pool, block, block_size, dedicated, size);
+                let index = memory.add_block(pool, block, block_size, dedicated, size);
                 let placement = memory.placement(pool, index, 0, size, addressed.is_some());
                 memory.say_placement("placed", &placement, Some(class));
                 return Ok(placement);
@@ -1798,12 +1773,12 @@ pub(super) fn keep_room(memory: &Mutex<Memory>, device: &ash::Device, counts: &C
             .has_room(maker.block_bytes / 2)
         {
             let what = "made a pooled block and freed it at once, its pool having room";
-            memory.say_block(device, what, &block);
+            memory.say_block(what, &block);
             drop(memory);
             // SAFETY: nothing is placed in the block, which no command reads.
             unsafe { block.release(device) };
             continue;
         }
-        memory.add_block(device, pool, block, maker.block_bytes, false, 0);
+        memory.add_block(pool, block, maker.block_bytes, false, 0);
     }
 }

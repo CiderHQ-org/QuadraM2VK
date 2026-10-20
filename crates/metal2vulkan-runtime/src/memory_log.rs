@@ -16,17 +16,16 @@
 //!   handle and memory type, which the block's own lines name. A few such placements fill a block,
 //!   so their comings and goings show what makes and frees blocks.
 //! - **The device address.** A block with a buffer of addresses (`memory.rs`) gives that buffer's.
-//!   Any other memory allocated with the device-address flag is asked through a buffer of
-//!   `SHADER_DEVICE_ADDRESS` usage over its bytes, made, bound at its start, asked and destroyed
-//!   ([`address_of`]), where the memory's type and size take one. The line says the address is
-//!   unknown where none does: a device without `bufferDeviceAddress`, and an image's dedicated
-//!   dma-buf import, to which no other resource may be bound. On NVIDIA's drivers a buffer's
+//!   Any other memory's line says the address is unknown: the log makes and binds no Vulkan object
+//!   to learn one, as a diagnostic changes no GPU work. A buffer of `SHADER_DEVICE_ADDRESS` usage
+//!   made over the memory to ask would be, on MoltenVK, a Metal buffer of the whole block, made
+//!   resident as it is asked (about 25 ms a GiB on an M3 Max), whose destroy fails a submission
+//!   encoding meanwhile (`DestroyedAddressBufferFailsSubmission`). On NVIDIA's drivers a buffer's
 //!   device address is the GPU virtual address the driver's fault reports name.
-//! - **Off, it costs nothing.** The switch is read once; no buffer is made and no line formatted.
+//! - **Off, it costs nothing.** The switch is read once; no line is formatted.
 
 use super::driver_facts::inform_through;
 use super::memory::MemoryClass;
-use super::release;
 use super::MessageSink;
 use ash::vk;
 use std::sync::OnceLock;
@@ -107,49 +106,4 @@ pub(super) fn placement_line(
          0x{:x} of type {type_index}",
         memory.as_raw()
     )
-}
-
-/// The device address of the first byte of `memory`, `bytes` bytes of memory type `type_index`
-/// allocated with the device-address flag, imported by `imported` where it was: asked through a
-/// buffer of `SHADER_DEVICE_ADDRESS` usage over those bytes, made, bound at the memory's start
-/// and destroyed (the module docs). `None` where the buffer is not made or does not take the
-/// memory.
-///
-/// # Safety
-///
-/// `memory` is `device`'s, live, allocated with the device-address flag, and bound to nothing
-/// made with a dedicated allocation.
-pub(super) unsafe fn address_of(
-    device: &ash::Device,
-    memory: vk::DeviceMemory,
-    bytes: u64,
-    type_index: u32,
-    imported: Option<vk::ExternalMemoryHandleTypeFlags>,
-) -> Option<u64> {
-    let mut external = vk::ExternalMemoryBufferCreateInfo::default();
-    let mut info = vk::BufferCreateInfo::default()
-        .size(bytes.max(1))
-        .usage(vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS);
-    if let Some(handle_types) = imported {
-        external = external.handle_types(handle_types);
-        info = info.push_next(&mut external);
-    }
-    // SAFETY: the device is live and `info` valid.
-    let raw = unsafe { device.create_buffer(&info, None) }.ok()?;
-    // SAFETY: `raw` is a live buffer of this device.
-    let required = unsafe { device.get_buffer_memory_requirements(raw) };
-    let takes = required.memory_type_bits & 1 << type_index != 0 && required.size <= bytes;
-    // SAFETY: the memory is of a type the buffer takes, as long as it requires, and allocated
-    // with the device-address flag (the caller's contract); the buffer has the device-address
-    // usage and is bound whole.
-    let address = takes
-        .then(|| unsafe { device.bind_buffer_memory(raw, memory, 0) }.ok())
-        .flatten()
-        .map(|()| {
-            let info = vk::BufferDeviceAddressInfo::default().buffer(raw);
-            unsafe { device.get_buffer_device_address(&info) }
-        });
-    // SAFETY: the buffer is used by no command.
-    unsafe { release::object(device, raw) };
-    address
 }

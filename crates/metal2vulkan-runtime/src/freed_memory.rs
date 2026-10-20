@@ -1,6 +1,9 @@
-//! Freed memory that waits for the batches in flight, on a device whose driver fails pending work
-//! when memory a device-address buffer lay in is freed
-//! (`RuntimeDriverDefect::FreedAddressMemoryFailsPendingWork`: MoltenVK).
+//! Freed memory that waits for the batches in flight, and buffers of addresses that go with no
+//! submission inside its `vkQueueSubmit`, on a device whose driver fails pending work when memory
+//! a device-address buffer lay in is freed
+//! (`RuntimeDriverDefect::FreedAddressMemoryFailsPendingWork`), or a submission when such a
+//! buffer is destroyed as it encodes (`RuntimeDriverDefect::DestroyedAddressBufferFailsSubmission`):
+//! MoltenVK, which has both. Where the driver has either, both hold.
 //!
 //! - **The defect.** MoltenVK makes every `VkBuffer` of `SHADER_DEVICE_ADDRESS` usage resident
 //!   (`useResource:`) in every encoder whose pipeline reads device addresses
@@ -8,10 +11,19 @@
 //!   and lets go of the buffer's Metal memory as its `VkDeviceMemory` is freed: a Metal command
 //!   buffer encoded before the free and not yet run fails (`Invalid Resource`, Metal's code 9).
 //!   Vulkan allows the free, as no submitted command refers to the memory
-//!   (VUID-vkFreeMemory-memory-00677). Destroying the buffer alone, its memory kept, fails
-//!   nothing, and takes it out of the driver's list.
+//!   (VUID-vkFreeMemory-memory-00677). Destroying the buffer alone, its memory kept, takes it out
+//!   of the driver's list. The runtime destroys a block's buffer of addresses only once every
+//!   command buffer that may reach an address in the block completed, as
+//!   VUID-vkDestroyBuffer-buffer-00922 asks: each holds what it may reach there until then (a
+//!   buffer's pages, `buffer.rs`'s `FixedPages`, by its commands or its table of live buffers; a
+//!   pool's block, `gpu_pools.rs`'s `PoolLease`), and a block goes only once nothing lies in it.
+//!   But the destroy fails a submission whose `vkQueueSubmit` encodes on another thread meanwhile
+//!   (`DestroyedAddressBufferFailsSubmission`, `driver_defects.rs`): on an Apple GPU each such
+//!   `VkBuffer` is a Metal buffer of its own, which the destroy releases after the encoder listed
+//!   it.
 //! - **The wait.** There a block of the runtime's memory that goes (`memory.rs`) has its buffer of
-//!   addresses destroyed at once, and its memory waits, parked, until each `VkQueue`'s timeline
+//!   addresses destroyed at once, under the gate's write lock (below), and its memory waits,
+//!   parked, until each `VkQueue`'s timeline
 //!   reaches the value of the last batch submitted there as the block went. Vulkan's semaphore
 //!   signal operations "defined by vkQueueSubmit or vkQueueSubmit2 additionally include all
 //!   commands that occur earlier in submission order" in their first synchronization scope, so
@@ -19,15 +31,23 @@
 //!   keep-alive, which go after its memory is freed (`buffer.rs`), wait with it, the deallocator's
 //!   wait announced (`host-deallocator-delayed`).
 //! - **Each batch noted.** A batch's `vkQueueSubmit` and the store of its value run under the
-//!   gate's read lock, inside the queue's lock (`relay.rs`); a block's noting of the values, after
-//!   its buffers were destroyed, under the write lock. So a batch whose encoding listed such a
-//!   buffer, submitted before the buffer was destroyed, is noted, and a batch submitted after the
-//!   noting lists none.
+//!   gate's read lock, inside the queue's lock (`relay.rs`); a block's buffer of addresses is
+//!   destroyed, and the values noted, under the write lock ([`Parking::note_destroying`]). So no
+//!   batch is encoding as the buffer goes, a batch whose encoding listed it was submitted before
+//!   and is noted, and a batch submitted after lists none.
+//! - **Lock order.** The gate comes after the memory's lock, never before it: a block goes under
+//!   the memory's lock (`Memory::let_go`) and then takes the write lock; a batch's or an own
+//!   submission's gated section takes the read lock inside its queue's lock and runs only the
+//!   `vkQueueSubmit`, the log of its fence (`relay.rs`'s `submit_logged`), the counts and the
+//!   stores of its value (`device/submit.rs`), none of which takes the memory's lock. So no thread
+//!   inside the gate waits for the memory's lock, and a block that goes waits only for the
+//!   submissions already inside.
 //! - **And the device's own submissions.** Those that run command buffers outside the batches
 //!   (`device/submit.rs`) signal no queue's timeline: each takes a number before its
 //!   `vkQueueSubmit` and gives it back once its submitter saw it complete ([`OwnSubmission`]),
-//!   and a block waits too for every one numbered before it went. Its sparse binds and the
-//!   staging queue's copies run no pipeline, so no encoder of theirs lists a buffer.
+//!   and a block waits too for every one numbered before it went. Their `vkQueueSubmit` runs under
+//!   the gate's read lock too, inside the queue's lock, as a batch's does. Its sparse binds and
+//!   the staging queue's copies run no pipeline, so no encoder of theirs lists a buffer.
 //! - **And the program's.** The runtime sees neither what the program's own submissions list
 //!   (`CommandQueue::with_vk_queue`) nor when they complete, so each use of a queue is marked
 //!   ([`ProgramUses`]): under the queue's lock, before the program's code runs, the use takes the
@@ -37,7 +57,9 @@
 //!   program made before the block's buffers were destroyed lies in a use that took its value
 //!   before. While marks are pending a handler thread waits for them ([`Watch`]), and posts the
 //!   release of the blocks whose values were reached as each completes. A mark whose submission
-//!   fails is reached once the queue is idle.
+//!   fails is reached once the queue is idle. The program's code runs outside the gate, which a
+//!   release inside it would wait for on its own thread: a buffer of addresses that goes while
+//!   the program's own `vkQueueSubmit` encodes on another thread can fail that submission.
 //! - **Freed off the runtime's completion threads.** A queue's waiter that publishes a value while
 //!   blocks wait posts their release to a handler thread ([`Unpark`]), which frees the blocks it
 //!   reached and then lets go of what waited for them; a block whose values were reached as it
@@ -160,7 +182,8 @@ impl Parking {
     }
 
     /// The gate's read lock, held around a batch's `vkQueueSubmit` and the store of its value
-    /// ([`submitted`](Self::submitted)), inside the queue's lock.
+    /// ([`submitted`](Self::submitted)), and around an own submission's `vkQueueSubmit`, inside
+    /// the queue's lock.
     pub(crate) fn submitting(&self) -> RwLockReadGuard<'_, ()> {
         self.gate
             .read()
@@ -178,23 +201,27 @@ impl Parking {
         self.completed[queue].fetch_max(value, Ordering::SeqCst);
     }
 
-    /// The value of each `VkQueue`'s last batch submitted, under the gate's write lock, and the
-    /// device's next own submission's number: called once the block's buffers were destroyed.
-    pub(crate) fn note(&self) -> Noted {
+    /// Under the gate's write lock, so no batch and no own submission is inside its
+    /// `vkQueueSubmit`: `destroy` (a block's buffer of addresses going, the module docs), then the
+    /// value of each `VkQueue`'s last batch submitted, the device's next own submission's number
+    /// and each queue's last value taken by the program's uses.
+    pub(crate) fn note_destroying<T>(&self, destroy: impl FnOnce() -> T) -> (T, Noted) {
         let _gate = self
             .gate
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let destroyed = destroy();
         let values = (self.submitted.iter())
             .map(|value| value.load(Ordering::SeqCst))
             .collect();
-        Noted {
+        let noted = Noted {
             values,
             own: lock(&self.own).next,
             program: (self.program.iter())
                 .map(|uses| uses.taken.load(Ordering::SeqCst))
                 .collect(),
-        }
+        };
+        (destroyed, noted)
     }
 
     /// Whether every `VkQueue`'s timeline reached the value `noted` holds for it, every own

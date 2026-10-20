@@ -1333,11 +1333,17 @@ impl Device {
         // SAFETY: as above.
         let memory_properties =
             unsafe { instance.raw.get_physical_device_memory_properties(physical) };
-        // Freed memory waits for the batches in flight where the driver fails pending work as
-        // memory a device-address buffer lay in is freed (`freed_memory.rs`).
-        let parking = (properties.driver_defects)
-            .contains(&RuntimeDriverDefect::FreedAddressMemoryFailsPendingWork)
-            .then(|| Arc::new(Parking::new(queues.len())));
+        // Freed memory waits for the batches in flight, and a buffer of addresses goes with no
+        // submission inside its `vkQueueSubmit`, where the driver fails pending work as memory a
+        // device-address buffer lay in is freed, or a submission as such a buffer is destroyed
+        // meanwhile (`freed_memory.rs`).
+        let parking = [
+            RuntimeDriverDefect::FreedAddressMemoryFailsPendingWork,
+            RuntimeDriverDefect::DestroyedAddressBufferFailsSubmission,
+        ]
+        .iter()
+        .any(|defect| properties.driver_defects.contains(defect))
+        .then(|| Arc::new(Parking::new(queues.len())));
         let mut memory = Memory::new(
             &memory_properties,
             max_allocation,

@@ -938,7 +938,9 @@ weighed, by their scissors' share of the target, texel bytes and side of the rul
 logs one line per `VkDeviceMemory` it allocates, imports or frees (id name `metal2vulkan-memory`,
 `Info` severity): what it holds (a block of buffers or images, a host-memory import with its host
 address, a dma-buf import), its handle, memory type, bytes and device address range, where the
-device gives addresses. On NVIDIA that range is the GPU virtual address a fault report names. It
+block holds buffers that take device addresses (its own buffer of addresses gives the range; the
+log makes no Vulkan object to ask one). On NVIDIA that range is the GPU virtual address a fault
+report names. It
 also logs each placement of 4 MiB or more in a pooled block as it is placed and returned: an image
 or a buffer, its memory class where placed, its bytes, its offset and its block's handle and type.
 Whatever the variables, a placement heap's `newTextureWithDescriptor:offset:` that makes no texture

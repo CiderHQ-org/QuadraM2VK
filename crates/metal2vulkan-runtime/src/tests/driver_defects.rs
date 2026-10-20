@@ -21,6 +21,7 @@ const PREPROCESS: RuntimeDriverDefect = RuntimeDriverDefect::ImplicitPreprocessA
 const PAST_HEIGHT: RuntimeDriverDefect = RuntimeDriverDefect::ExplicitPlaneRowsPastHeight;
 const COUNTS: RuntimeDriverDefect = RuntimeDriverDefect::OcclusionCountPerColorOutput;
 const FREES: RuntimeDriverDefect = RuntimeDriverDefect::FreedAddressMemoryFailsPendingWork;
+const DESTROYS: RuntimeDriverDefect = RuntimeDriverDefect::DestroyedAddressBufferFailsSubmission;
 const PUSHES: RuntimeDriverDefect = RuntimeDriverDefect::PushedBufferSizesUnset;
 const STALE_PUSHES: RuntimeDriverDefect =
     RuntimeDriverDefect::PushedDescriptorsStaleAfterPipelineBinds;
@@ -30,8 +31,8 @@ const BAKED_SAMPLERS: RuntimeDriverDefect = RuntimeDriverDefect::ImmutableSample
 /// found clean: MoltenVK the multisampled depth/stencil colour copies, the inexact depths past
 /// `[0, 1]`, the crashing 2D views of a 3D image in lazily allocated memory, the pipeline cache
 /// compiled at load, the copies of compressed images that rewrite texels, the reads of command
-/// buffers after their signal, the frees that fail pending work and the pushed sets' unset buffer
-/// sizes; lavapipe the colour copies, the depth/stencil resolve of the
+/// buffers after their signal, the frees that fail pending work, the destroys that fail a
+/// submission encoding meanwhile and the pushed sets' unset buffer sizes; lavapipe the colour copies, the depth/stencil resolve of the
 /// first layer and level, the explicit plane's rows past its height and the baked samplers lost
 /// after a copy;
 /// RADV the multisampled copies that convert float NaNs, and the implicit
@@ -63,6 +64,7 @@ fn the_committed_profiles_drivers_have_their_defects() {
                     COPY_REWRITES,
                     LATE_READS,
                     FREES,
+                    DESTROYS,
                     PUSHES,
                 ]
             }

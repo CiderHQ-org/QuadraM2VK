@@ -245,6 +245,8 @@ impl Device {
         // signal of the timeline is above its value. Where the queue's failures are relayed, a
         // failure of this submission loses the device (`relay.rs`).
         let made = shared.use_queue(0, By::Runtime, |queue| unsafe {
+            // No buffer of addresses goes while it encodes (`freed_memory.rs`).
+            let _gate = (shared.parking.get()).map(|parking| parking.submitting());
             let buffers = submits
                 .iter()
                 .map(|info| info.command_buffer_count as usize);

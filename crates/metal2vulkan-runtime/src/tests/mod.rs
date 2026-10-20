@@ -103,8 +103,6 @@ mod making;
 mod managed;
 mod memo;
 mod memory;
-#[cfg(any(m2v_gpu, m2v_cpu_icd))]
-mod memory_log;
 mod memory_reads;
 mod metal_level;
 mod mipmap;
