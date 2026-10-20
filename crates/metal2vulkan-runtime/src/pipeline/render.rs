@@ -2430,8 +2430,23 @@ impl RenderVariant {
     /// `key.pass`; made once, outside the memo's lock (`making.rs`), for a draw of `state` that
     /// binds `formats`, whose part of the pipeline creation log logs it. Where it is not made and
     /// its residual form's is, the draw takes that one, and `key`'s is made on the device's pool
-    /// (`render/residual.rs`).
+    /// (`render/residual.rs`). A lookup by key (`WorkCounts::graphics_pipelines_looked_up`).
     pub(crate) fn graphics_pipeline(
+        self: &Arc<Self>,
+        key: &GraphicsKey,
+        render_pass: &Arc<RenderPassObject>,
+        (state, formats): (&GraphicsState, crate::degradation::BoundFormats<'_>),
+    ) -> Result<Arc<RawPipeline>, Error> {
+        self.objects
+            .device
+            .shared()
+            .counts
+            .graphics_pipeline_looked_up();
+        self.made_or_make(key, render_pass, (state, formats))
+    }
+
+    /// [`graphics_pipeline`](Self::graphics_pipeline)'s finding or making, uncounted.
+    fn made_or_make(
         self: &Arc<Self>,
         key: &GraphicsKey,
         render_pass: &Arc<RenderPassObject>,
@@ -2593,34 +2608,15 @@ impl RenderVariant {
         compatible: &Arc<RenderPassObject>,
         (state, formats): (&GraphicsState, crate::degradation::BoundFormats<'_>),
     ) -> DrawPipeline {
-        // A draw of this variant and a key equal to one the state's last draws found made finds
-        // that entry again, made, where it stays, and uses it as a lookup of the key would: the
-        // key is compared, not hashed, nor made. An entry that went is forgotten here too.
-        let ours = |last: &LastPipeline| std::ptr::eq(last.variant.as_ptr(), Arc::as_ptr(self));
-        let last = lock(&state.0.last_pipelines)
-            .iter()
-            .find(|last| ours(last) && key.is(&last.key))
-            .map(|last| last.at);
-        if let Some(at) = last {
-            match self.pipelines.made_at(at) {
-                Some(made) => return DrawPipeline::Made(made),
-                None => lock(&state.0.last_pipelines).retain(|last| !(ours(last) && last.at == at)),
-            }
+        if let Some(made) = self.last_made(state, key) {
+            return DrawPipeline::Made(made);
         }
         device.shared().counts.graphics_pipeline_looked_up();
         let key = &key.key();
         match self.pipelines.begin_at(key) {
             (Begun::Made(made), at) => {
                 if let Some(at) = at {
-                    let mut kept = lock(&state.0.last_pipelines);
-                    if kept.len() == LAST_PIPELINES {
-                        kept.pop_back();
-                    }
-                    kept.push_front(LastPipeline {
-                        variant: Arc::downgrade(self),
-                        key: key.clone(),
-                        at,
-                    });
+                    self.keep_last(state, key, at);
                 }
                 DrawPipeline::Made(made)
             }
@@ -2649,6 +2645,64 @@ impl RenderVariant {
                 }
             }
         }
+    }
+
+    /// The `VkPipeline` of a draw of this variant and `key` that records now
+    /// ([`graphics_pipeline`](Self::graphics_pipeline)'s: a draw of an execution's replay, or of
+    /// a pass of custom sample positions), finding first, as
+    /// [`begin_graphics_pipeline`](Self::begin_graphics_pipeline) does, an entry `state`'s last
+    /// draws found made ([`last_made`](Self::last_made)), and keeping where one it looks up lies.
+    pub(crate) fn graphics_pipeline_now(
+        self: &Arc<Self>,
+        device: &Device,
+        key: &DrawKey<'_>,
+        render_pass: &Arc<RenderPassObject>,
+        (state, formats): (&GraphicsState, crate::degradation::BoundFormats<'_>),
+    ) -> Result<Arc<RawPipeline>, Error> {
+        if let Some(made) = self.last_made(state, key) {
+            return Ok(made);
+        }
+        device.shared().counts.graphics_pipeline_looked_up();
+        let key = &key.key();
+        if let Some((made, at)) = self.pipelines.made_with_at(key) {
+            self.keep_last(state, key, at);
+            return Ok(made);
+        }
+        self.made_or_make(key, render_pass, (state, formats))
+    }
+
+    /// The `VkPipeline` of a draw of this variant and `key` where `state`'s last draws found it
+    /// made, and its entry stays: the draw uses it as a lookup of the key would, the key compared,
+    /// not hashed, nor made. An entry that went is forgotten here.
+    fn last_made(
+        self: &Arc<Self>,
+        state: &GraphicsState,
+        key: &DrawKey<'_>,
+    ) -> Option<Arc<RawPipeline>> {
+        let ours = |last: &LastPipeline| std::ptr::eq(last.variant.as_ptr(), Arc::as_ptr(self));
+        let at = lock(&state.0.last_pipelines)
+            .iter()
+            .find(|last| ours(last) && key.is(&last.key))
+            .map(|last| last.at)?;
+        let made = self.pipelines.made_at(at);
+        if made.is_none() {
+            lock(&state.0.last_pipelines).retain(|last| !(ours(last) && last.at == at));
+        }
+        made
+    }
+
+    /// Keep that a draw of `state` found `key`'s `VkPipeline` made at `at` of this variant's memo,
+    /// the latest first, at most [`LAST_PIPELINES`].
+    fn keep_last(self: &Arc<Self>, state: &GraphicsState, key: &GraphicsKey, at: At) {
+        let mut kept = lock(&state.0.last_pipelines);
+        if kept.len() == LAST_PIPELINES {
+            kept.pop_back();
+        }
+        kept.push_front(LastPipeline {
+            variant: Arc::downgrade(self),
+            key: key.clone(),
+            at,
+        });
     }
 
     /// The making of `key`, this caller's (`ticket`), for a draw of `state` that binds `formats`

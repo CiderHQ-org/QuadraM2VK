@@ -43,7 +43,7 @@ use super::render_arguments::{output, Members, SAMPLED};
 use super::render_state::texture;
 use super::renders::public_render;
 use super::resource_ids::{distinct_sampler_states, UNLISTED};
-use super::{buffer_with, read_buffer, WAIT};
+use super::{buffer_with, pipelines_settled, read_buffer, WAIT};
 use crate::candidate::engine::graphics::Assembly;
 use crate::candidate::engine::resources::pixel_format;
 use crate::candidate::runtime_case::render_pipeline_descriptor;
@@ -649,47 +649,58 @@ fn a_draw_into_a_buffer_whose_records_hold_it_draws_as_on_its_own() {
 
 /// Commands a kernel writes (`icb_render_replay_encode_draw_only`: thread `tid` sets command
 /// `tid`'s draw, 4 points from `4 * tid`, onto the state and buffers the CPU set) are drawn once
-/// the kernel completed, by a host step the device announces once.
+/// the kernel completed, by a host step the device announces once. Once the pipelines the first
+/// run began making settled, a run of twice the draws looks the draws' `VkPipeline` up by key no
+/// more often (`WorkCounts::graphics_pipelines_looked_up`, the commit's settle of each primitive
+/// type included): a step's draws of one state and key past the first find the entry the state's
+/// last draws found made.
 #[test]
 fn commands_a_kernel_writes_are_drawn_by_a_host_step() {
     on_device(|device, messages| {
         let setup = Setup::new(device);
         let writer =
             indirect_host_steps::state(device, "icb_render_replay_encode_draw_only", false);
-        let commands = 4;
+        let commands = 8;
         let icb = icb(device, &descriptor(), commands);
         for index in 0..commands {
             setup.command(&icb, index, 0);
         }
         let arguments = buffer_with(device, &icb.gpu_resource_id().0.to_le_bytes()).unwrap();
         let queue = device.new_command_queue().unwrap();
-        let command_buffer = queue.command_buffer().unwrap();
-        let mut writing = command_buffer.compute_command_encoder().unwrap();
-        writing.set_compute_pipeline_state(&writer).unwrap();
-        writing.set_buffer(Some(&arguments), 0, 0).unwrap();
-        writing.set_buffer(Some(&setup.params), 0, 1).unwrap();
-        writing.set_buffer(Some(&setup.out), 0, 2).unwrap();
-        writing
-            .use_resource(icb.as_resource(), ResourceUsage::WRITE)
-            .unwrap();
-        let threads = Size::new(commands, 1, 1);
-        writing.dispatch_threads(threads, threads).unwrap();
-        writing.end_encoding().unwrap();
-        let mut encoder = command_buffer.render_command_encoder(&pass()).unwrap();
-        setup.resident(&mut encoder);
-        encoder
-            .execute_commands_in_buffer(&icb, 0..commands)
-            .unwrap();
-        encoder.end_encoding().unwrap();
-        complete(&command_buffer);
-        let drawn = Drawn {
-            window: 0,
-            start: 0,
-            count: 4 * commands as usize,
-            instances: 1,
-            base: 0,
-        };
-        assert_eq!(setup.output(), expected(&[drawn]));
+        let mut looked_up = Vec::new();
+        for executed in [commands / 2, commands / 2, commands] {
+            pipelines_settled(device);
+            let command_buffer = queue.command_buffer().unwrap();
+            let mut writing = command_buffer.compute_command_encoder().unwrap();
+            writing.set_compute_pipeline_state(&writer).unwrap();
+            writing.set_buffer(Some(&arguments), 0, 0).unwrap();
+            writing.set_buffer(Some(&setup.params), 0, 1).unwrap();
+            writing.set_buffer(Some(&setup.out), 0, 2).unwrap();
+            writing
+                .use_resource(icb.as_resource(), ResourceUsage::WRITE)
+                .unwrap();
+            let threads = Size::new(commands, 1, 1);
+            writing.dispatch_threads(threads, threads).unwrap();
+            writing.end_encoding().unwrap();
+            let mut encoder = command_buffer.render_command_encoder(&pass()).unwrap();
+            setup.resident(&mut encoder);
+            encoder
+                .execute_commands_in_buffer(&icb, 0..executed)
+                .unwrap();
+            encoder.end_encoding().unwrap();
+            let before = device.work_counts().graphics_pipelines_looked_up;
+            complete(&command_buffer);
+            looked_up.push(device.work_counts().graphics_pipelines_looked_up - before);
+            let drawn = Drawn {
+                window: 0,
+                start: 0,
+                count: 4 * executed as usize,
+                instances: 1,
+                base: 0,
+            };
+            assert_eq!(setup.output(), expected(&[drawn]), "{executed} commands");
+        }
+        assert!(looked_up[2] <= looked_up[1], "{looked_up:?}");
         assert_made_once(messages, &HOST_STEPS, &forced_with(device, &[]));
     });
 }

@@ -236,6 +236,16 @@ impl<K: Clone + Eq + Hash, V> Making<K, V> {
         }
     }
 
+    /// The object of `key` where it is made, and where its entry lies, as
+    /// [`begin_at`](Self::begin_at) finds it and with the same use of the entry, beginning nothing
+    /// where it is not.
+    pub(crate) fn made_with_at(&self, key: &K) -> Option<(Arc<V>, At)> {
+        match lock(&self.memo).get_with_at(key)? {
+            (at, Entry::Made(made)) => Some((Arc::clone(made), at)),
+            (_, Entry::Making(_)) => None,
+        }
+    }
+
     /// The object made at `at` ([`begin_at`](Self::begin_at)), as [`begin`](Self::begin) of its
     /// key finds it and with the same use of the entry, while the entry stays: an entry stays
     /// what it was kept as, so one found made is made.

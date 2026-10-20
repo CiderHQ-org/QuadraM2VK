@@ -8276,8 +8276,9 @@ impl RenderCommandEncoder {
             true => {
                 variant.begin_graphics_pipeline(&device, &key, &compatible, (&pipeline, &formats))
             }
-            false => DrawPipeline::Made(variant.graphics_pipeline(
-                &key.key(),
+            false => DrawPipeline::Made(variant.graphics_pipeline_now(
+                &device,
+                &key,
                 &compatible,
                 (&pipeline, &formats),
             )?),

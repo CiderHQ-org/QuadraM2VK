@@ -1163,7 +1163,7 @@ impl Counters {
     }
 
     /// A draw looked its `VkPipeline` up in its variant's memo by key
-    /// (`RenderVariant::begin_graphics_pipeline`).
+    /// (`RenderVariant::begin_graphics_pipeline`, `graphics_pipeline_now`, `graphics_pipeline`).
     pub(crate) fn graphics_pipeline_looked_up(&self) {
         self.graphics_pipelines_looked_up
             .fetch_add(1, Ordering::Relaxed);
