@@ -406,6 +406,7 @@ impl Made {
             pooled: counts.dispatch_pipelines_pooled,
             makings: cache.driver_saves
                 + cache.driver_data_unchanged
+                + cache.driver_data_found
                 + cache.driver_data_truncated
                 + cache.driver_data_mismatched,
             misses: cache.misses,

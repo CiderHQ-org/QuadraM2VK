@@ -10,9 +10,13 @@
 //!   loaded, both the driver's cache hits where it reports them
 //!   (`VK_EXT_pipeline_creation_feedback`: the whole pipeline's hit, or every stage's, as the
 //!   runtime counts them; MoltenVK 1.4.1 says it for each stage alone), and each draw's target
-//!   byte for byte the first device's. A making from a record writes it again exactly where the driver's data after the
-//!   making is no longer the record's bytes (RADV's after its first hit from a compile's record is
-//!   not, and settles), and counts every other read unchanged (`driver_data_unchanged`).
+//!   byte for byte the first device's. A making from a record that the driver reports found
+//!   there reads no data back and writes nothing (`driver_data_found`: MoltenVK's data after such
+//!   a making is the record's entries in the other order, which a byte comparison took for a
+//!   change at every making). One the driver does not report found writes it again exactly where
+//!   the driver's data after the making is no longer the record's bytes (RADV's after its first
+//!   hit from a compile's record is not, and settles), and counts every other read unchanged
+//!   (`driver_data_unchanged`).
 //! - **Lines from the triangles' record.** A state's line pipeline, made at its first line draw,
 //!   is made from the record of its triangle sibling, which the state's creation made: a line
 //!   topology names its record as the triangle topology of its shape (`record_topology`). Its
@@ -293,10 +297,11 @@ fn dispatch(device: &Device, library: &Library) {
 /// The driver cache counts of `statistics`, printed for `which`.
 fn report(which: &str, s: &ShaderCacheStatistics) {
     println!(
-        "PIPELINE-RECORDS {which}: loads={} saves={} pipeline_hits={} pipeline_misses={} \
-         truncated={} mismatched={} rejected={} write_failures={}",
+        "PIPELINE-RECORDS {which}: loads={} saves={} found={} pipeline_hits={} \
+         pipeline_misses={} truncated={} mismatched={} rejected={} write_failures={}",
         s.driver_loads,
         s.driver_saves,
+        s.driver_data_found,
         s.driver_pipeline_hits,
         s.driver_pipeline_misses,
         s.driver_data_truncated,
@@ -570,7 +575,8 @@ fn changed(before: &BTreeMap<PathBuf, Vec<u8>>, now: &BTreeMap<PathBuf, Vec<u8>>
         .count() as u64
 }
 
-/// Of `statistics` since `since`, the makings that loaded a record: each wrote it again exactly
+/// Of `statistics` since `since`, the makings that loaded a record: each the driver reports
+/// found there read no data back (as many as its hits), and each other one wrote it again exactly
 /// where the driver's data was no longer the record's, so `changed` records are written, and
 /// every other one read its data unchanged.
 fn assert_loaded(
@@ -581,14 +587,20 @@ fn assert_loaded(
 ) {
     let saves = statistics.driver_saves - since.driver_saves;
     let unchanged = statistics.driver_data_unchanged - since.driver_data_unchanged;
+    let found = statistics.driver_data_found - since.driver_data_found;
     assert_eq!(
         (
             statistics.driver_loads - since.driver_loads,
             saves,
-            unchanged
+            unchanged + found
         ),
         (loads, changed, loads - changed),
         "{which}: the makings from records, written again exactly where a record changed"
+    );
+    assert_eq!(
+        found,
+        statistics.driver_pipeline_hits - since.driver_pipeline_hits,
+        "{which}: every making the driver reports found in its record read no data back"
     );
 }
 
@@ -728,7 +740,8 @@ fn a_later_device_makes_every_pipeline_an_earlier_one_made_from_its_records() {
 /// triangle pipeline, is made from that sibling's record (`record_topology` in the runtime's
 /// `pipeline/graphics.rs`): it loads it, and no record of its own appears. On MoltenVK, which
 /// keys a converted stage by its SPIR-V and a conversion configuration the line class leaves as
-/// the triangle class's, the driver reports every stage found: nothing converted again. Where the
+/// the triangle class's, the driver reports every stage found: nothing converted again, and the
+/// making reads no data back and writes no record (`driver_data_found`). Where the
 /// device links pipelines from libraries the line draw makes a pre-rasterization library of its
 /// own instead, which this does not cover.
 #[test]
@@ -774,6 +787,14 @@ fn a_line_pipeline_is_made_from_its_triangle_sibling_s_record() {
                     ),
                     (1, 0),
                     "MoltenVK found every stage of the line pipeline converted in the record"
+                );
+                assert_eq!(
+                    (
+                        drawn.driver_data_found - created.driver_data_found,
+                        drawn.driver_saves - created.driver_saves
+                    ),
+                    (1, 0),
+                    "a making MoltenVK found in its record read nothing back and wrote nothing"
                 );
             }
         }

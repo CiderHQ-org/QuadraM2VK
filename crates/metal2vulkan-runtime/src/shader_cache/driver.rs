@@ -7,6 +7,16 @@
 //!   added to the data (no record, or its pipeline not in it), the data is written as the record;
 //!   where the data is the record's, byte for byte, nothing is written. A boot reads the records
 //!   of the pipelines it makes, and nothing else.
+//! - **Found, not read back.** A making seeded from its record whose driver reports the pipeline
+//!   found in that cache (`VK_EXT_pipeline_creation_feedback`'s
+//!   `APPLICATION_PIPELINE_CACHE_HIT`, for the whole pipeline or every stage: `found_in_cache`)
+//!   reads no data back and writes nothing: the record held what the making needed. MoltenVK
+//!   1.4.1's data after such a making is the record's entries in the other order (its shader
+//!   library map iterates its modules' keys opposite to their insertion), so the byte comparison
+//!   alone wrote every record of two modules again at each warm making. The data's format is
+//!   MoltenVK's own, undocumented beyond Vulkan's header, so no comparison here reads its
+//!   entries. A making whose driver reports nothing, or reports a compile, reads the data and
+//!   compares it as above.
 //! - **Named by what the making reads** ([`Making`]). A record is named by the SHA-256 of
 //!   [`VERSION`], the making's description, the driver's identity (vendor, device, driver
 //!   version, `pipelineCacheUUID`) and the digest of the layer settings the instance was created
@@ -266,6 +276,14 @@ struct Seed {
 /// data the making added as the record; `create` is handed a null cache where the driver makes
 /// none. `raw` is the device's checked accessor's (`DeviceShared::vk`).
 ///
+/// `create` returns, with what it made, what the driver reported of the making: whether it found
+/// the pipeline in the cache it was handed ([`found_in_cache`]'s answer: found, compiled, or
+/// `None`, unreported). A making seeded from its record that the driver reports found reads none
+/// of its cache's data back and writes nothing (counted, `driver_data_found`: the module docs);
+/// every other one reads its data and keeps it.
+///
+/// [`found_in_cache`]: super::found_in_cache
+///
 /// Once the process is exiting (`exiting`: the exit guard's [`closed`](exit_guard::closed), or a
 /// test's own), the making's own `vkCreate*Pipelines` is the one Vulkan call it makes: a pool
 /// piece's section, begun before the close, runs on past it (`exit_guard`), and what the making
@@ -278,10 +296,10 @@ pub(crate) fn make<T, E>(
     raw: &ash::Device,
     making: Making,
     exiting: impl Fn() -> bool,
-    create: impl FnOnce(vk::PipelineCache) -> Result<T, E>,
+    create: impl FnOnce(vk::PipelineCache) -> (Result<T, E>, Option<bool>),
 ) -> Result<T, E> {
     if exiting() {
-        return create(vk::PipelineCache::null());
+        return create(vk::PipelineCache::null()).0;
     }
     let name = records.name(making);
     let identity = &records.identity;
@@ -326,16 +344,19 @@ pub(crate) fn make<T, E>(
             exit_guard::called(Call::CreatePipelineCache);
             match made {
                 Ok(cache) => cache,
-                Err(_) => return create(vk::PipelineCache::null()),
+                Err(_) => return create(vk::PipelineCache::null()).0,
             }
         }
     };
-    let made = create(cache);
+    let (made, found) = create(cache);
     if exiting() {
         return made;
     }
     if made.is_ok() {
-        keep(store, (identity, &name), raw, cache, loaded);
+        match (loaded, found) {
+            (Some(_), Some(true)) => count(&store.counters.driver_data_found),
+            _ => keep(store, (identity, &name), raw, cache, loaded),
+        }
     }
     // SAFETY: the making returned, and nothing else holds the cache.
     unsafe { release::object(raw, cache) };

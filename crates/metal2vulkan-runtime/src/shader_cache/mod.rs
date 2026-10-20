@@ -182,8 +182,14 @@ pub struct ShaderCacheStatistics {
     pub driver_data_mismatched: u64,
     /// Reads of the driver's pipeline cache data that were the record the making loaded, byte
     /// for byte: nothing written. With [`driver_saves`](Self::driver_saves) and the two refusals,
-    /// one read per making the runtime finished while the process was not exiting.
+    /// one read per making the runtime finished while the process was not exiting and did not
+    /// count in [`driver_data_found`](Self::driver_data_found).
     pub driver_data_unchanged: u64,
+    /// Makings from their record that the driver reports found there (the whole pipeline's
+    /// `APPLICATION_PIPELINE_CACHE_HIT`, or every stage's), whose data is not read back:
+    /// nothing written. With the reads, one per making the runtime finished while the process
+    /// was not exiting.
+    pub driver_data_found: u64,
 }
 
 /// What an entry holds, in its name.
@@ -343,12 +349,14 @@ impl ShaderCache {
     /// the record `making` names where one loads, whose data is written as that record where the
     /// making added to it, and destroyed after (`driver.rs`); null where the driver makes none.
     /// The call holds a turn of the process's budget of makings in flight (`pipeline/budget.rs`):
-    /// its own, waited for, or its pool piece's.
+    /// its own, waited for, or its pool piece's. `create` returns, with what it made, whether the
+    /// driver reports its pipeline found in that cache ([`found_in_cache`], `None` where it
+    /// reports nothing): one found in its record's cache reads no data back (`driver.rs`).
     pub(super) fn make_pipelines<T, E>(
         &self,
         raw: &ash::Device,
         making: Making,
-        create: impl FnOnce(vk::PipelineCache) -> Result<T, E>,
+        create: impl FnOnce(vk::PipelineCache) -> (Result<T, E>, Option<bool>),
     ) -> Result<T, E> {
         let _turn = crate::pipeline::budget::program_turn();
         let made = driver::make(
@@ -542,6 +550,7 @@ impl ShaderCache {
             driver_data_truncated: read(&counters.driver_data_truncated),
             driver_data_mismatched: read(&counters.driver_data_mismatched),
             driver_data_unchanged: read(&counters.driver_data_unchanged),
+            driver_data_found: read(&counters.driver_data_found),
         }
     }
 }

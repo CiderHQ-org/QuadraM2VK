@@ -202,8 +202,9 @@ fn two_processes(case: &str) {
     );
     if c.driver_data_truncated == 0 {
         // Each of the first process's makings wrote its record; the second's makings each
-        // started from it, and wrote it again exactly where the driver's data was no longer the
-        // record's (RADV's data after a hit is not the record's bytes).
+        // started from it: one the driver reports found there read no data back, and every
+        // other one wrote it again exactly where the driver's data was no longer the record's
+        // (RADV's data after a hit is not the record's bytes).
         assert!(
             c.driver_saves > 0 && first_records.len() as u64 == c.driver_saves,
             "the first process: {c:?}"
@@ -222,7 +223,7 @@ fn two_processes(case: &str) {
             (
                 warm.count("driver_loads"),
                 warm.count("driver_saves"),
-                warm.count("driver_data_unchanged"),
+                warm.count("driver_data_unchanged") + warm.count("driver_data_found"),
                 warm.count("driver_data_truncated")
             ),
             (c.driver_saves, rewritten, c.driver_saves - rewritten, 0),
@@ -329,6 +330,7 @@ fn second_process() {
     println!(
         "\n{REPORT} hits={} misses={} rejected={} writes={} driver_loads={} driver_saves={} \
          driver_data_truncated={} driver_data_mismatched={} driver_data_unchanged={} \
+         driver_data_found={} \
          creation_us={} run_us={} output={}",
         s.hits,
         s.misses,
@@ -339,6 +341,7 @@ fn second_process() {
         s.driver_data_truncated,
         s.driver_data_mismatched,
         s.driver_data_unchanged,
+        s.driver_data_found,
         warm.creation.as_micros(),
         warm.run.as_micros(),
         hex(&warm.output)
@@ -472,23 +475,25 @@ fn a_cancelled_or_late_creation_refuses_until_its_translation_is_cached() {
     );
 }
 
-/// The reads of the driver's pipeline cache data a device's statistics count: those its
-/// makings' saves kept, those the checks refused (where the data is truncated, every read is
-/// refused), and those that were the record the making loaded (A pipeline two cases share is made
-/// again from the first making's record once its state went, and the driver's hit leaves the data
-/// as the record was).
-fn driver_reads(statistics: &ShaderCacheStatistics) -> u64 {
+/// The makings a device's statistics count by what became of the driver's pipeline cache data:
+/// those its makings' saves kept, those the checks refused (where the data is truncated, every
+/// read is refused), those that were the record the making loaded (A pipeline two cases share is
+/// made again from the first making's record once its state went, and the driver's hit leaves
+/// the data as the record was), and those the driver reported found in their record, whose data
+/// was not read.
+fn driver_makings(statistics: &ShaderCacheStatistics) -> u64 {
     statistics.driver_saves
         + statistics.driver_data_truncated
         + statistics.driver_data_mismatched
         + statistics.driver_data_unchanged
+        + statistics.driver_data_found
 }
 
 /// [`MAKERS`] threads run [`MADE_CASES`]' cases once each, every run making the case's pipeline
 /// state and its pipeline with a cache of its own: each making's data is read once it made its
-/// pipeline (kept, refused, or its record's unchanged), one read for each making the driver
-/// reports, no read or write failed, and nothing is reported. A case the device refuses typed is
-/// counted, not failed.
+/// pipeline (kept, refused, or its record's unchanged) unless the driver reports it found in its
+/// record, one making counted for each the driver reports, no read or write failed, and nothing
+/// is reported. A case the device refuses typed is counted, not failed.
 #[test]
 fn makings_on_several_threads_each_read_their_own_cache() {
     let seen = Cell::new(0usize);
@@ -546,21 +551,23 @@ fn makings_on_several_threads_each_read_their_own_cache() {
         (0, 0),
         "{statistics:?}"
     );
-    // The makings are the driver's reports, where it reports them, each with its read: a
-    // pipeline two cases share is made again from its record once the first case's state went.
+    // The makings are the driver's reports, where it reports them, each counted once by what
+    // became of its data: a pipeline two cases share is made again from its record once the
+    // first case's state went.
     let reported = statistics.driver_pipeline_hits + statistics.driver_pipeline_misses;
     assert!(
-        driver_reads(&statistics) > 0 && (reported == 0 || driver_reads(&statistics) == reported),
-        "{made} cases made, {} reads of their caches: {statistics:?}",
-        driver_reads(&statistics)
+        driver_makings(&statistics) > 0
+            && (reported == 0 || driver_makings(&statistics) == reported),
+        "{made} cases made, {} makings counted by their caches' data: {statistics:?}",
+        driver_makings(&statistics)
     );
     let mut failed = failed;
     failed.sort();
     failed.dedup();
     println!(
-        "driver cache: {} read(s), {} record(s), {} case(s) of {} made on {MAKERS} threads; {} \
+        "driver cache: {} making(s), {} record(s), {} case(s) of {} made on {MAKERS} threads; {} \
          failed alike: {failed:?}",
-        driver_reads(&statistics),
+        driver_makings(&statistics),
         driver_records(cache.path()).len(),
         made,
         cases.len(),

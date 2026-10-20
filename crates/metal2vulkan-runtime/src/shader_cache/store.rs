@@ -196,6 +196,7 @@ pub(crate) struct Counters {
     pub(crate) driver_data_truncated: AtomicU64,
     pub(crate) driver_data_mismatched: AtomicU64,
     pub(crate) driver_data_unchanged: AtomicU64,
+    pub(crate) driver_data_found: AtomicU64,
 }
 
 impl Counters {

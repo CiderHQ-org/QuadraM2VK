@@ -25,7 +25,7 @@ use crate::degradation::BoundFormats;
 use crate::error::{internal, vulkan, Error};
 use crate::render_target::{PassShape, RenderPassObject};
 use crate::shader_cache::driver::Making;
-use crate::shader_cache::REPORTED_STAGES;
+use crate::shader_cache::{found_in_cache, REPORTED_STAGES};
 use ash::vk;
 use metal2vulkan::cache::Hash256;
 use metal2vulkan::cache::SpecializationKey;
@@ -1043,21 +1043,30 @@ impl VariantObjects {
                         .map(|(raw, linked)| (raw, Some(linked)))
                 }
                 None => {
-                    let mut info = infos.whole();
+                    let info = infos.whole();
                     let count = info.stage_count as usize;
                     reported_stages = if count <= REPORTED_STAGES { count } else { 0 };
-                    let mut feedback = vk::PipelineCreationFeedbackCreateInfo::default()
-                        .pipeline_creation_feedback(&mut whole)
-                        .pipeline_stage_creation_feedbacks(&mut stages[..reported_stages]);
-                    if driver_reports {
-                        info = info.push_next(&mut feedback);
-                    }
                     let making_at = split.then(std::time::Instant::now);
                     let _ = creation_log::take_record();
-                    let made = shared.make_pipelines(making, |cache| {
+                    // With what the driver reports of the making: a pipeline found in its
+                    // record's cache reads no data back (`shader_cache/driver.rs`).
+                    let made = shared.make_pipelines_reported(making, |cache| {
+                        let reported = &mut stages[..reported_stages];
+                        let mut feedback = vk::PipelineCreationFeedbackCreateInfo::default()
+                            .pipeline_creation_feedback(&mut whole)
+                            .pipeline_stage_creation_feedbacks(reported);
+                        let mut info = info;
+                        if driver_reports {
+                            info = info.push_next(&mut feedback);
+                        }
                         // SAFETY: every pointer in `info` outlives the call; the pipeline
                         // cache is the making's own, destroyed once the call returned.
-                        unsafe { shared.vk().create_graphics_pipelines(cache, &[info], None) }
+                        let made =
+                            unsafe { shared.vk().create_graphics_pipelines(cache, &[info], None) };
+                        let found = driver_reports
+                            .then(|| found_in_cache(&whole, &stages[..reported_stages]))
+                            .flatten();
+                        (made, found)
                     });
                     if let Some(at) = making_at {
                         let record = creation_log::record_text(creation_log::take_record());

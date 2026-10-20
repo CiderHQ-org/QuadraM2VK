@@ -461,6 +461,19 @@ impl DeviceShared {
         making: crate::shader_cache::driver::Making,
         create: impl FnOnce(vk::PipelineCache) -> Result<T, E>,
     ) -> Result<T, E> {
+        self.make_pipelines_reported(making, |cache| (create(cache), None))
+    }
+
+    /// [`make_pipelines`](Self::make_pipelines), with what the driver reported of the making:
+    /// `create` returns, with what it made, whether the driver found its pipeline in the cache it
+    /// was handed (`shader_cache::found_in_cache`, `None` where it reports nothing). A making
+    /// from its record that the driver reports found reads no data back and writes nothing
+    /// (`shader_cache/driver.rs`).
+    pub(crate) fn make_pipelines_reported<T, E>(
+        &self,
+        making: crate::shader_cache::driver::Making,
+        create: impl FnOnce(vk::PipelineCache) -> (Result<T, E>, Option<bool>),
+    ) -> Result<T, E> {
         crate::exit_guard::driver_making(|| {
             self.shader_cache.make_pipelines(self.vk(), making, create)
         })

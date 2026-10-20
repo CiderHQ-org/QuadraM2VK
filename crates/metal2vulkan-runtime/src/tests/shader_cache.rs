@@ -815,7 +815,18 @@ fn fake_driver() -> ash::Device {
 /// One making on the fake driver with a store of `store`, the process exiting `before` it began
 /// and `after` its `vkCreate*Pipelines` returned: the driver's entry points it called (a run of
 /// calls of one, as `ash` reads data in two, counted once) and the cache that call was handed.
+/// The driver reports nothing of the making.
 fn made(store: &Store, before: bool, after: bool) -> (Vec<&'static str>, vk::PipelineCache) {
+    reported(store, (before, after), None)
+}
+
+/// [`made`], the driver reporting `found` of the making (`shader_cache::found_in_cache`'s
+/// answer).
+fn reported(
+    store: &Store,
+    (before, after): (bool, bool),
+    found: Option<bool>,
+) -> (Vec<&'static str>, vk::PipelineCache) {
     CALLS.with(|calls| calls.borrow_mut().clear());
     let records = Records {
         identity: identity(1),
@@ -836,7 +847,7 @@ fn made(store: &Store, before: bool, after: bool) -> (Vec<&'static str>, vk::Pip
         |cache| {
             created.set(true);
             handed = Some(cache);
-            Ok(())
+            (Ok(()), found)
         },
     );
     assert_eq!(result, Ok(()));
@@ -880,4 +891,46 @@ fn a_making_once_the_process_is_exiting_calls_the_driver_for_its_pipelines_alone
     );
     assert_eq!(cache, vk::PipelineCache::null());
     assert_eq!(saves(), 1, "a making saved once the process was exiting");
+}
+
+/// A making from its record that the driver reports found reads none of its cache's data back and
+/// writes nothing (`driver_data_found`); one with no record, or one the driver reports compiled,
+/// or one of a driver that reports nothing, reads its data and keeps it as before: a save where
+/// it had no record, the record's own bytes counted unchanged where it had one.
+#[test]
+fn a_making_its_driver_found_in_its_record_reads_no_data_back() {
+    let scratch = Scratch::new();
+    let store = store(scratch.path(), BUILD, 1 << 20);
+    let counter = |counter: &AtomicU64| counter.load(Ordering::Relaxed);
+    let counts = || {
+        let c = &store.counters;
+        (
+            counter(&c.driver_loads),
+            counter(&c.driver_saves),
+            counter(&c.driver_data_unchanged),
+            counter(&c.driver_data_found),
+        )
+    };
+    let read_back = [
+        "vkCreatePipelineCache",
+        "vkGetPipelineCacheData",
+        "vkDestroyPipelineCache",
+    ];
+    // No record: the driver's report of a hit changes nothing (an empty cache holds nothing to
+    // find), so the data is read and saved.
+    let (calls, _) = reported(&store, (false, false), Some(true));
+    assert_eq!(calls, read_back);
+    assert_eq!(counts(), (0, 1, 0, 0));
+    // From the record, found: no data read back, nothing written.
+    let (calls, _) = reported(&store, (false, false), Some(true));
+    assert_eq!(calls, ["vkCreatePipelineCache", "vkDestroyPipelineCache"]);
+    assert_eq!(counts(), (1, 1, 0, 1));
+    // From the record, compiled: read back, the record's bytes, unchanged.
+    let (calls, _) = reported(&store, (false, false), Some(false));
+    assert_eq!(calls, read_back);
+    assert_eq!(counts(), (2, 1, 1, 1));
+    // From the record, unreported: read back and compared, as before the reports.
+    let (calls, _) = made(&store, false, false);
+    assert_eq!(calls, read_back);
+    assert_eq!(counts(), (3, 1, 2, 1));
 }
