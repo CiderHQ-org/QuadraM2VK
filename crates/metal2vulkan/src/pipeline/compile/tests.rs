@@ -2673,6 +2673,52 @@ fn the_interface_states_whether_the_function_takes_a_command_buffer() {
     }
 }
 
+/// The interface states what the function may write into indirect command buffers, from its
+/// AIR: a kernel that encodes compute commands (`icb_replay_encode`) its operations' bits and no
+/// primitive type; kernels that draw (`icb_render_replay_encode_draw_only`,
+/// `icb_render_indexed_encode`) their draws' bits and the constant primitive type they pass
+/// (points); a kernel that takes no command buffer (`icb_replay_template`) nothing. A pipeline's
+/// interface holds its stages' together.
+#[test]
+fn the_interface_states_what_the_function_may_write_into_command_buffers() {
+    use crate::pipeline::interface::CommandWrites as W;
+    let p =
+        crate::pipeline::testing::profile("lavapipe", DevicePolicy::default()).expect("profile");
+    for (entry, operations, primitive_types) in [
+        (
+            "icb_replay_encode",
+            W::PIPELINE | W::BUFFER | W::THREADGROUP_MEMORY | W::DISPATCH | W::BARRIER,
+            0,
+        ),
+        ("icb_render_replay_encode_draw_only", W::DRAW, 0b1),
+        ("icb_render_indexed_encode", W::DRAW_INDEXED, 0b1),
+        ("icb_replay_template", 0, 0),
+    ] {
+        let bc = match llvm_assemble(&engine_dir().join(format!("{entry}.ll"))) {
+            Ok(b) => b,
+            Err(AssembleError::Missing(why)) => {
+                eprintln!("SKIPPED: {why}");
+                return;
+            }
+            Err(AssembleError::Rejected(why)) => panic!("llvm-as rejected {entry}.ll: {why}"),
+        };
+        let a = crate::pipeline::testing::compile(&bc, entry, &p)
+            .unwrap_or_else(|e| panic!("{entry}: {e}"));
+        let want = W {
+            operations,
+            primitive_types,
+        };
+        assert_eq!(a.interface.command_writes, want, "{entry}");
+        let linked = crate::pipeline::link::link(
+            &[&*a],
+            &crate::pipeline::link::LinkInputs::standalone(),
+            &p,
+        )
+        .unwrap_or_else(|e| panic!("{entry}: link: {e}"));
+        assert_eq!(linked.interface.command_writes, want, "{entry}");
+    }
+}
+
 /// The interface states whether the function may write a texture, from its AIR: a fragment
 /// function's `read_write` texture it writes (`rog_texture`), an argument buffer's texture array
 /// (`argument_buffer_array_write`), a heap's texture (`a4_heap_textures`), and texture atomics

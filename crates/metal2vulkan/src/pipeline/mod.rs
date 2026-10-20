@@ -121,10 +121,10 @@ pub use graphics::{
     StandInView, StorageAttachmentUse, StorageAttachmentView, TessellationState,
 };
 pub use interface::{
-    AccessSet, AttributeFetch, BufferForm, BufferKind, BufferSlot, DescriptorView, MeshRecords,
-    NumberedSampler, PatchDomain, PipelineInterface, PlacedField, PushLoc, PushPlacement,
-    RecordField, RecordValue, SamplerSlot, SlotInterface, TextureAccess, TextureSlot,
-    ThreadgroupArgument, Window,
+    AccessSet, AttributeFetch, BufferForm, BufferKind, BufferSlot, CommandWrites, DescriptorView,
+    MeshRecords, NumberedSampler, PatchDomain, PipelineInterface, PlacedField, PushLoc,
+    PushPlacement, RecordField, RecordValue, SamplerSlot, SlotInterface, TextureAccess,
+    TextureSlot, ThreadgroupArgument, Window,
 };
 pub use layout::{
     BindingSource, DescriptorBinding, DescriptorSetLayout, PipelineLayout, PushConstantRange,

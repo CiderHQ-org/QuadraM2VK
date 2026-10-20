@@ -374,6 +374,7 @@ surface! {
         enum BufferForm N;
         enum BufferKind N;
         struct BufferSlot N;
+        struct CommandWrites E;
         enum DescriptorView N;
         struct MeshRecords N;
         enum NumberedSampler N;

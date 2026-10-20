@@ -69,9 +69,9 @@ use metal2vulkan::bind::{BindShape, BindState, BindingPlan, FragmentTests};
 use metal2vulkan::cache::{PipelineKey, SpecializationKey, VariantKey};
 use metal2vulkan::metal::{BindingAccess, PixelFormat, PrimitiveTopologyClass, RenderStages};
 use metal2vulkan::pipeline::{
-    CaptureForm, ColorAttachmentDescriptor, MeshPipelineDescriptor, PipelineInterface,
-    RenderPipeline, RenderPipelineDescriptor, RuntimeFact, SpecKey, StageEntries, StageSource,
-    TessellationDescriptor,
+    CaptureForm, ColorAttachmentDescriptor, CommandWrites, MeshPipelineDescriptor,
+    PipelineInterface, RenderPipeline, RenderPipelineDescriptor, RuntimeFact, SpecKey,
+    StageEntries, StageSource, TessellationDescriptor,
 };
 use metal2vulkan::reflection::{LinkedUseAnswers, RenderPipelineReflection};
 use std::any::Any;
@@ -796,6 +796,21 @@ impl RenderPipelineState {
         match &self.0 {
             Kind::Graphics(state) => state.base().interface.reaches_command_buffers,
             Kind::Tile(state) => state.kernel().can_encode_indirect_commands(),
+        }
+    }
+
+    /// What the state's functions may write into the indirect command buffers they reach: a
+    /// runtime extension, with no Metal counterpart. It is the compiled pipeline's
+    /// `PipelineInterface::command_writes` (a tile pipeline's, its tile function's), read from
+    /// the functions' AIR, of the functions their constants specialized ([`CommandWrites`]: the
+    /// indirect-command operations their bodies may call, and the primitive types their draws
+    /// may pass, every type where a draw's is not a constant). A clear bit is proven: no function
+    /// of the state writes such a record field. Empty where
+    /// [`can_encode_indirect_commands`](Self::can_encode_indirect_commands) answers `false`.
+    pub fn indirect_command_writes(&self) -> CommandWrites {
+        match &self.0 {
+            Kind::Graphics(state) => state.base().interface.command_writes,
+            Kind::Tile(state) => state.kernel().indirect_command_writes(),
         }
     }
 

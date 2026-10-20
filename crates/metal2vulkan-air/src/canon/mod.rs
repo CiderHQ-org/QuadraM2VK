@@ -63,6 +63,7 @@
 //! which per-function SCCP could not, and deletes the callees' dead paths with the caller's.
 
 mod async_copy;
+mod command_writes;
 mod const_loads;
 mod devirt;
 #[cfg(test)]
@@ -118,6 +119,7 @@ use crate::ir::{Const, ConstTable, ModuleParts, Type, TypeId, TypeTable, Value};
 use crate::ir::{InstKind, Module};
 use crate::metal::DataType;
 
+pub use command_writes::CommandWrites;
 pub use link::{imports_dynamically, DynamicLinks, DynamicModule};
 use link::{Item, Stub, Stubs};
 pub use link::{LinkedCode, LinkedModule, LinkedName};
@@ -291,6 +293,17 @@ impl Entry {
     /// does not rest on that. Linear in the module's instructions, each visited once.
     pub fn may_encode_indirect_commands(&self) -> bool {
         self.ep.reaches_command_buffers(&self.structs) || calls_commands(&self.module, &self.ep)
+    }
+
+    /// What the entry's indirect-command operations may write into the records they reach
+    /// ([`CommandWrites`]): the operations its bodies call and the primitive types their draws
+    /// pass, or [`CommandWrites::ANY`] where a body makes a call the walk cannot see into, as
+    /// [`Entry::may_encode_indirect_commands`] counts one. A command buffer the metadata names
+    /// and no operation reaches adds nothing: an operation is the only way to its records. So
+    /// it is empty wherever `may_encode_indirect_commands` answers `false`. Linear in the
+    /// module's instructions, each visited once.
+    pub fn command_writes(&self) -> CommandWrites {
+        command_writes::command_writes(&self.module, &self.ep)
     }
 
     /// Whether the entry may write a texture: `false` only where its metadata names no texture

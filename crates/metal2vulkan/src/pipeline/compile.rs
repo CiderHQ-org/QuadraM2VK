@@ -2199,6 +2199,7 @@ fn compile_kept<K>(
     let helper_guard = crate::spirv::helper_branches::guard_for(&mut module, p, m)?;
     let function_tables = spec.function_tables.clone();
     let reaches_command_buffers = spec.may_encode_indirect_commands();
+    let command_writes = spec.command_writes();
     let writes_textures = spec.may_write_textures();
     // A binary function's and a function-pointer group's numbering is not measured.
     let unmeasured = r.linked.iter().any(|s| {
@@ -2330,7 +2331,7 @@ fn compile_kept<K>(
         writes_memory,
         &merged,
         &function_tables,
-        reaches_command_buffers,
+        (reaches_command_buffers, command_writes),
         (writes_textures, numbered_samplers),
         (own_pixel_textures, snapshot_textures),
     );
@@ -2557,7 +2558,8 @@ fn emitted_census(
 /// and a read where emission merged a store's partial word into the slot (`merged`): the sub-word
 /// store's atomics read the word they modify. A buffer slot at an index of `function_tables` holds
 /// a visible-function table read as its words. `reaches_command_buffers` is the canonical entry's
-/// `Entry::may_encode_indirect_commands`, `writes_textures` its `Entry::may_write_textures`, and
+/// `Entry::may_encode_indirect_commands`, `command_writes` its `Entry::command_writes`,
+/// `writes_textures` its `Entry::may_write_textures`, and
 /// `numbered_samplers` the samplers a pipeline state numbers for it (`numbered::samplers`).
 fn stage_interface(
     plan: &Plan,
@@ -2565,7 +2567,7 @@ fn stage_interface(
     writes_memory: bool,
     merged: &std::collections::BTreeSet<crate::pipeline::sym::SlotRef>,
     function_tables: &std::collections::BTreeSet<u32>,
-    reaches_command_buffers: bool,
+    (reaches_command_buffers, command_writes): (bool, crate::pipeline::interface::CommandWrites),
     (writes_textures, numbered_samplers): (bool, Vec<crate::pipeline::interface::NumberedSampler>),
     (own_pixel_textures, snapshot_textures): (Vec<u32>, Vec<u32>),
 ) -> StageInterface {
@@ -2627,6 +2629,7 @@ fn stage_interface(
         emulated_payload: crate::lower::mesh::emulated_payload(&plan.families.mesh),
         payload: plan.families.mesh.payload,
         reaches_command_buffers,
+        command_writes,
         writes_textures,
         numbered_samplers,
         own_pixel_textures,

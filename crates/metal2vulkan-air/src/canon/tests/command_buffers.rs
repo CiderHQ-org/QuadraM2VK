@@ -219,3 +219,164 @@ fn a_call_the_walk_cannot_see_into_counts() {
         assert_eq!(calls_commands(&module, &ep), may, "{what}");
     }
 }
+
+/// A call of the indirect-command operation `name`, of `params` (after the command, a device
+/// pointer), with `cmd` and `args`.
+fn operation(
+    f: &mut FunctionBuilder<'_>,
+    name: &str,
+    params: &[TypeId],
+    cmd: Value,
+    args: &[Value],
+) {
+    let void = f.module().void();
+    let dev = f.module().ptr(AddrSpace::Device);
+    let all: Vec<TypeId> = std::iter::once(dev).chain(params.iter().copied()).collect();
+    let ty = f.module().fn_ty(void, &all);
+    let decl = f.module().declare(name, ty);
+    let op = AirIntrinsic::parse(name).unwrap();
+    assert!(matches!(op, AirIntrinsic::IndirectCommand(_)), "{name}");
+    let all: Vec<Value> = std::iter::once(cmd).chain(args.iter().copied()).collect();
+    void_call(f, Callee::Air { decl, op }, &all);
+}
+
+/// `air.draw_primitives_render_command(cmd, 0, primitive_type, 0, 3, 1, 0)`.
+fn draw_of(f: &mut FunctionBuilder<'_>, cmd: Value, primitive_type: Value) {
+    let i32t = f.module().int(32);
+    let [zero, one, three] = [0, 1, 3].map(|v| f.module().const_int(i32t, v));
+    let args = [zero, primitive_type, zero, three, one, zero];
+    operation(
+        f,
+        "air.draw_primitives_render_command",
+        &[i32t; 6],
+        cmd,
+        &args,
+    );
+}
+
+/// An entry that draws a constant primitive type writes that type's bit alone; one whose type
+/// is loaded writes every type's; a value past Metal's five is no type, so every type's too.
+#[test]
+fn a_draw_writes_its_constant_primitive_type() {
+    for (raw, types) in [
+        (0u64, 0b1),
+        (3, 0b1000),
+        (4, 0b1_0000),
+        (5, CommandWrites::ALL_PRIMITIVE_TYPES),
+    ] {
+        let e = specialized(|f| {
+            let i32t = f.module().int(32);
+            let t = f.module().const_int(i32t, raw);
+            draw_of(f, arg(0), t);
+        });
+        let writes = e.command_writes();
+        assert_eq!(writes.operations, CommandWrites::DRAW, "{raw}");
+        assert_eq!(writes.primitive_types, types, "{raw}");
+        assert_eq!(
+            writes.may_draw_primitive_type(3),
+            types & 0b1000 != 0,
+            "{raw}"
+        );
+        assert!(!writes.may_draw_primitive_type(5));
+    }
+    let loaded = specialized(|f| {
+        let i32t = f.module().int(32);
+        let t = load(f, i32t, arg(1));
+        draw_of(f, arg(0), t);
+    });
+    assert_eq!(
+        loaded.command_writes().primitive_types,
+        CommandWrites::ALL_PRIMITIVE_TYPES
+    );
+}
+
+/// Each kind of operation writes its own bit: an indexed draw also its primitive type, a set
+/// barrier and a cleared one apart, and the operations of a defined function the entry calls
+/// count as the entry's.
+#[test]
+fn each_operation_writes_its_bit() {
+    let e = specialized(|f| {
+        let i32t = f.module().int(32);
+        let i64t = f.module().int(64);
+        let dev = f.module().ptr(AddrSpace::Device);
+        let [zero, one, six] = [0, 1, 6].map(|v| f.module().const_int(i32t, v));
+        let stride = f.module().const_int(i64t, 16);
+        operation(
+            f,
+            "air.draw_indexed_primitives_render_command.p1i16",
+            &[i32t, i32t, i32t, dev, i32t, i32t, i32t],
+            arg(0),
+            &[zero, zero, six, arg(1), one, zero, zero],
+        );
+        operation(
+            f,
+            "air.set_barrier_render_command",
+            &[i32t],
+            arg(0),
+            &[zero],
+        );
+        operation(
+            f,
+            "air.set_vertex_buffer_render_command.p1i8",
+            &[i32t, dev, i64t, i32t],
+            arg(0),
+            &[zero, arg(1), stride, one],
+        );
+        let void = f.module().void();
+        let ty = f.module().fn_ty(void, &[dev]);
+        let mut g = f.module().define("helper", ty);
+        operation(&mut g, "air.reset_render_command", &[i32t], arg(0), &[zero]);
+        operation(
+            &mut g,
+            "air.clear_barrier_render_command",
+            &[i32t],
+            arg(0),
+            &[zero],
+        );
+        g.ret(None);
+        let helper = g.finish();
+        void_call(f, Callee::Direct(helper), &[arg(0)]);
+    });
+    let writes = e.command_writes();
+    assert_eq!(
+        writes.operations,
+        CommandWrites::DRAW_INDEXED
+            | CommandWrites::BARRIER
+            | CommandWrites::BUFFER
+            | CommandWrites::RESET
+            | CommandWrites::CLEAR_BARRIER
+    );
+    assert_eq!(writes.primitive_types, 0b1);
+    assert!(!writes.may(CommandWrites::PIPELINE | CommandWrites::DRAW));
+}
+
+/// A command buffer the metadata names and no operation reaches is written nothing; a call the
+/// walk cannot see into may write anything.
+#[test]
+fn only_operations_and_unseen_calls_write() {
+    let command_buffer = ParamBinding {
+        role: ParamRole::CommandBuffer(ObjectArg {
+            location: Slot {
+                index: AbiInt::Const(0),
+                count: AbiInt::Const(1),
+            },
+            access: None,
+        }),
+        ..buffer(0, 0)
+    };
+    let (named, ep) = module(vec![command_buffer, buffer(1, 1)], |_| {});
+    let abi = abi(vec![ep], Vec::new());
+    let e = specialize(named, &abi, &request(&[]), &mut meter()).unwrap();
+    assert!(e.may_encode_indirect_commands());
+    assert!(e.command_writes().is_empty());
+    let (unseen, ep) = module(vec![buffer(0, 0), buffer(1, 1)], |f| {
+        let void = f.module().void();
+        let ty = f.module().fn_ty(void, &[]);
+        let decl = f.module().declare("elsewhere", ty);
+        void_call(f, Callee::Direct(decl), &[]);
+    });
+    assert_eq!(
+        command_writes::command_writes(&unseen, &ep),
+        CommandWrites::ANY
+    );
+}

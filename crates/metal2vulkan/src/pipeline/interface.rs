@@ -6,6 +6,7 @@
 
 use std::collections::BTreeMap;
 
+pub use crate::air::canon::CommandWrites;
 use crate::metal;
 use crate::pipeline::descriptor::TessellationDescriptor;
 use crate::pipeline::sym::{PushField, ResourceSlot, SampledType, SlotRef, SpecKey, Stage};
@@ -35,6 +36,11 @@ pub struct PipelineInterface {
     /// copy indirect commands; `false` is proven.
     #[cfg_attr(feature = "serde", serde(default))]
     pub reaches_command_buffers: bool,
+    /// What the stages' functions may write into the indirect command buffers they reach
+    /// (`StageInterface::command_writes`), all stages' together: a clear bit is proven of every
+    /// function of the pipeline.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub command_writes: CommandWrites,
     /// The stages whose function may write a texture (`StageInterface::writes_textures`), in the
     /// pipeline's stage order: a stage not listed writes no texture, which is proven.
     #[cfg_attr(feature = "serde", serde(default))]
@@ -331,6 +337,13 @@ pub struct StageInterface {
     /// of `metal2vulkan-air`). Only such a function can encode, reset or copy indirect commands.
     #[cfg_attr(feature = "serde", serde(default))]
     pub reaches_command_buffers: bool,
+    /// What the function's indirect-command operations may write into the records they reach,
+    /// of the entry its function constants specialized ([`CommandWrites`]: the operations it
+    /// may call and the primitive types its draws may pass; `Entry::command_writes` of
+    /// `metal2vulkan-air`). A clear bit is proven: no operation of the function writes it. Empty
+    /// where `reaches_command_buffers` is `false`.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub command_writes: CommandWrites,
     /// The function may write a texture, of the entry its function constants specialized;
     /// `false` only where the function provably writes none. It is `true` where the function
     /// takes a texture declared `access::write` or `access::read_write`, as an argument or as a

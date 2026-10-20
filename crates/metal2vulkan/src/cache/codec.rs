@@ -44,10 +44,10 @@ use crate::pipeline::graphics::{
     StandInView, StorageAttachmentUse, StorageAttachmentView, TessellationState,
 };
 use crate::pipeline::interface::{
-    AccessSet, BufferForm, BufferKind, BufferSlot, DescriptorView, MeshRecords, NumberedSampler,
-    PatchDomain, PipelineInterface, PlacedField, PushLoc, PushPlacement, RecordField, RecordValue,
-    SamplerSlot, SlotInterface, StageDescriptor, StageInterface, StageSpec, TessellationStage,
-    TextureAccess, TextureSlot, ThreadgroupArgument, Window,
+    AccessSet, BufferForm, BufferKind, BufferSlot, CommandWrites, DescriptorView, MeshRecords,
+    NumberedSampler, PatchDomain, PipelineInterface, PlacedField, PushLoc, PushPlacement,
+    RecordField, RecordValue, SamplerSlot, SlotInterface, StageDescriptor, StageInterface,
+    StageSpec, TessellationStage, TextureAccess, TextureSlot, ThreadgroupArgument, Window,
 };
 use crate::pipeline::layout::{
     BindingSource, DescriptorBinding, DescriptorSetLayout, PipelineLayout, PushConstantRange,
@@ -1043,10 +1043,12 @@ codec_enum! {
 // ---- Function interface (`pipeline::{interface, stage_io, facts, lower_inputs}`) ----
 
 codec_struct! {
+    CommandWrites { operations, primitive_types }
     StageInterface {
         stage, slots, threadgroup, push, descriptors, spec, needs_pointer_translation,
         needs_handle_translation, io, tessellation, writes_memory, mesh_records, emulated_payload,
-        payload, reaches_command_buffers, writes_textures, numbered_samplers, own_pixel_textures,
+        payload, reaches_command_buffers, command_writes, writes_textures, numbered_samplers,
+        own_pixel_textures,
         snapshot_textures, private_bytes,
     }
     TessellationStage { domain, control_points, emulated }
@@ -1286,7 +1288,7 @@ codec_struct! {
     }
     PipelineInterface {
         slots, threadgroup, needs_pointer_translation, needs_handle_translation, push,
-        reaches_command_buffers, texture_writing_stages, numbered_samplers,
+        reaches_command_buffers, command_writes, texture_writing_stages, numbered_samplers,
     }
     PipelineLayout { sets, push_constants, push_descriptor_eligible }
     DescriptorSetLayout { set, bindings, flags }

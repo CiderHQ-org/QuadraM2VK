@@ -703,6 +703,10 @@ mod serde_round_trips {
             needs_handle_translation: false,
             push: Vec::new(),
             reaches_command_buffers: true,
+            command_writes: CommandWrites {
+                operations: CommandWrites::DRAW | CommandWrites::RESET,
+                primitive_types: 0b1000,
+            },
             texture_writing_stages: vec![Stage::Vertex, Stage::Fragment],
             numbered_samplers: vec![
                 (

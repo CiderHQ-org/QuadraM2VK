@@ -573,6 +573,10 @@ for dependency in &pipeline.dependencies {
   an offset the alignment does not divide).
 - `interface.reaches_command_buffers` and `interface.texture_writing_stages` say, provably, which
   pipelines may touch an indirect command buffer and which stages may write a texture.
+  `interface.command_writes` (`CommandWrites`) says what its functions may write into the
+  records they reach: the indirect-command operations they may call, and the primitive types
+  their draws may pass (a draw's constant type, or all five where it is not a constant). A clear
+  bit is proven.
 
 ### Plans
 

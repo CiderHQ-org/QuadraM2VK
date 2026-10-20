@@ -115,7 +115,7 @@ use metal2vulkan::cache::{SpecializationKey, VariantKey};
 use metal2vulkan::error::{Feature, Needs, RuntimeInput};
 use metal2vulkan::metal::RenderStages;
 use metal2vulkan::pipeline::{
-    ComputePipeline, ComputePipelineDescriptor, FunctionDescriptor, LinkedFunction,
+    CommandWrites, ComputePipeline, ComputePipelineDescriptor, FunctionDescriptor, LinkedFunction,
     LinkedFunctions, PipelineInterface, PipelineLayout, RuntimeFact, SpecKey, Stage,
     StageInputDescriptor, StageSource, TileRenderPipelineDescriptor,
 };
@@ -904,6 +904,17 @@ impl ComputePipelineState {
     /// and never do so (a command buffer it takes and does not touch).
     pub fn can_encode_indirect_commands(&self) -> bool {
         self.interface().reaches_command_buffers
+    }
+
+    /// What the kernel may write into the indirect command buffers it reaches: a runtime
+    /// extension, with no Metal counterpart. It is the compiled pipeline's
+    /// `PipelineInterface::command_writes`, read from the function's AIR, of the function its
+    /// constants specialized ([`CommandWrites`]: the indirect-command operations its body may
+    /// call, and the primitive types its draws may pass, every type where a draw's is not a
+    /// constant). A clear bit is proven: the kernel writes no such record field. Empty where
+    /// [`can_encode_indirect_commands`](Self::can_encode_indirect_commands) answers `false`.
+    pub fn indirect_command_writes(&self) -> CommandWrites {
+        self.interface().command_writes
     }
 
     /// Whether the kernel may write a texture: a runtime extension, with no Metal counterpart

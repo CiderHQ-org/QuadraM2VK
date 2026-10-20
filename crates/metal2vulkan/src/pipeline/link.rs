@@ -1235,6 +1235,7 @@ fn pipeline_interface(ifaces: &[&StageInterface]) -> PipelineInterface {
         out.needs_pointer_translation |= i.needs_pointer_translation;
         out.needs_handle_translation |= i.needs_handle_translation;
         out.reaches_command_buffers |= i.reaches_command_buffers;
+        out.command_writes = out.command_writes.union(i.command_writes);
         if i.writes_textures {
             out.texture_writing_stages.push(i.stage);
         }

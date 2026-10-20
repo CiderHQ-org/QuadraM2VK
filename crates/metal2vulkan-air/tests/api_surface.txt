@@ -116,6 +116,7 @@ budget output_blocks_cap fn
 budget tree_bytes fn
 budget vec_bytes fn
 canon CallStack struct(E)
+canon CommandWrites use(command_writes::CommandWrites)
 canon ConstValue struct(E)
 canon ConstantRead use(reads::ConstantRead)
 canon DynamicLinks use(link::DynamicLinks)

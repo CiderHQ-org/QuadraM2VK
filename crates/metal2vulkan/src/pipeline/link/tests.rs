@@ -120,6 +120,7 @@ pub(super) fn iface(
         emulated_payload: None,
         payload: None,
         reaches_command_buffers: false,
+        command_writes: Default::default(),
         writes_textures: false,
         numbered_samplers: Vec::new(),
         own_pixel_textures: Vec::new(),
