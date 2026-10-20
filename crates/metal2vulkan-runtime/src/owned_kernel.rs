@@ -56,7 +56,7 @@ pub(super) enum OwnedModule {
     /// `bind::index_bounds_fill_module`: the plan's reservation in the index pool, filled.
     IndexBoundsFill,
     /// `bind::replay_preprocess_module`: a device replay's preprocess, which reads every buffer
-    /// at its device address (no storage buffer; its push bytes, `generated_execute.rs`).
+    /// at its device address (no storage buffer; its push bytes, `gpu_execute.rs`).
     ReplayPreprocess,
     /// `bind::flat_dispatch_module`: an indirect dispatch's region record and group counts on its
     /// flat variant, from Metal's arguments (`indirect_dispatch.rs`). No descriptor: it reaches

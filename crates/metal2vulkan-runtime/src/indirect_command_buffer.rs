@@ -2028,7 +2028,7 @@ impl IndirectCommandBuffer {
     /// Whether the CPU set a state on a command of `range` that the program released since:
     /// the command runs the state's program where its record names the ID the state had
     /// (`name_state`), which an execution the GPU alone runs, by the states alive at its commit
-    /// (`generated_execute.rs`), does not hold.
+    /// (`gpu_execute.rs`), does not hold.
     pub(super) fn sets_a_released_state(&self, range: Range<u32>) -> bool {
         let sets: Vec<CommandState> = {
             let pipelines = lock(&self.0.pipelines);

@@ -360,6 +360,8 @@ mod discard_hoist;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
 mod dispatch_costs;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
+mod dispatch_executions;
+#[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
 mod dispatch_work;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd), target_os = "linux"))]
 mod dma_buf_imports;

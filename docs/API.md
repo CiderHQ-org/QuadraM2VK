@@ -1314,8 +1314,12 @@ fast forms record, and each `PrecisionNote`'s rustdoc states its bound.
   its home layout at its end.
 - `metal2vulkan-degrade-host-replayed-indirect-commands` (performance).
   `HostReplayedIndirectCommands`: An execution of an indirect command buffer that an encoder made
-  resident for writing: the GPU may write the records it runs, so they are known only once the work
-  before it completed. Cost: one GPU-to-CPU round trip per execution: its command buffer's work
+  resident for writing, or that lies inside a block of command predication or reads its range from
+  a buffer, which the GPU cannot run alone: one with the caller's check
+  (`execute_commands_in_buffer_checked`), of a range read from a buffer, of a buffer that inherits
+  the encoder's buffers, or whose records may name a pipeline state whose kernel observes its
+  threadgroup partition or fetches `[[stage_in]]` attributes. The GPU may write the records it
+  runs, so they are known only once the work before it completed. Cost: one GPU-to-CPU round trip per execution: its command buffer's work
   before it, and every batch submitted before that on any queue, completes before the CPU records
   its commands from their records and submits the rest; the device's scheduler submits nothing else
   while it records them, and the first command of a threadgroup size or threadgroup lengths its

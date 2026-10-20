@@ -5,13 +5,13 @@
 //! partition: its flat replay variant binds no descriptor, so an execution is total where it is the
 //! only state made with `supportIndirectCommandBuffers`. Each test opens its device as the runtime
 //! does, `VK_EXT_device_generated_commands` enabled where the device has it (as every lane's
-//! device), and again with it withheld (`DeviceOptions::withhold_generated_commands`), the host
-//! step's leg:
+//! device), and again with it withheld (`DeviceOptions::withhold_generated_commands`), the indirect
+//! dispatches' leg (`dispatch_executions`):
 //!
-//! - with the extension, a total execution runs on the GPU alone: nothing is announced, and the
-//!   execution record lists the flat variant once; without it, the host step of part 3a runs,
-//!   announced once. Both write what Metal computes, in the encoder that wrote the commands and
-//!   in a later command buffer;
+//! - a total execution runs on the GPU alone, through the generated commands with the extension
+//!   and by indirect dispatches without it: nothing is announced, and the execution record lists
+//!   the flat variant once. Both write what Metal computes, in the encoder that wrote the commands
+//!   and in a later command buffer;
 //! - a state alive at the commit that observes its partition keeps the host step, which runs
 //!   what Metal computes, and so does one whose kernel fetches a `[[stage_in]]` attribute
 //!   (the host step checks each command's fetch past 4 GiB);
@@ -20,7 +20,7 @@
 //!   on either path: both reach every live buffer of its own.
 //!
 //! A device that has no `VK_EXT_device_generated_commands` (or not what it requires) runs the
-//! host step either way, and prints a `NO-DGC` line.
+//! indirect dispatches either way, and prints a `NO-DGC` line.
 
 use super::degrade_notices::assert_made_once;
 use super::indirect_dispatches::FLAT_SUM;
@@ -41,7 +41,7 @@ use metal2vulkan_runtime::{
 };
 
 /// The flat kernel's state on `device`, made with `supportIndirectCommandBuffers`.
-fn flat_template(device: &Device) -> ComputePipelineState {
+pub(super) fn flat_template(device: &Device) -> ComputePipelineState {
     let library = device
         .new_library_with_air(&llvm_assemble_text(FLAT_SUM).unwrap())
         .unwrap();
@@ -83,7 +83,7 @@ fn on_device(withheld: bool, test: impl FnOnce(&Device, &Messages, bool)) {
         if !withheld && !generated {
             println!(
                 "NO-DGC {}: the device enables no VK_EXT_device_generated_commands; the \
-                 GPU-only path did not run",
+                 generated-commands path did not run",
                 device.name()
             );
         }
@@ -92,7 +92,7 @@ fn on_device(withheld: bool, test: impl FnOnce(&Device, &Messages, bool)) {
     assert_eq!(messages.take(), Vec::new(), "the validation layer reported");
 }
 
-/// Whether `command_buffer` ran the flat kernel's flat variant: the GPU-only path's execution
+/// Whether `command_buffer` ran the flat kernel's flat variant: the GPU-alone path's execution
 /// record, where the host step's runs the variants its dispatches plan.
 fn ran_flat(command_buffer: &CommandBuffer) -> bool {
     command_buffer
@@ -107,9 +107,37 @@ fn ran_flat(command_buffer: &CommandBuffer) -> bool {
         })
 }
 
-/// Require that the host step was announced once where the GPU-only path did not run, and never
+/// The generated-commands executions and the indirect dispatches `device` replayed so far.
+fn recorded(device: &Device) -> (u64, u64) {
+    let replayed = device.work_counts().commands_replayed;
+    (
+        replayed.cmd_execute_generated_commands,
+        replayed.cmd_dispatch_indirect,
+    )
+}
+
+/// Require that the recording of an execution on the GPU alone that `generated` names ran since
+/// `before` ([`recorded`]): generated-commands executions where the device enabled the
+/// extension, else indirect dispatches and no generated-commands execution.
+fn ran_recording(device: &Device, generated: bool, before: (u64, u64), at: &str) {
+    let (executions, dispatches) = recorded(device);
+    if generated {
+        assert!(
+            executions > before.0,
+            "{at}: no generated-commands execution ran"
+        );
+    } else {
+        assert_eq!(
+            executions, before.0,
+            "{at}: a generated-commands execution ran"
+        );
+        assert!(dispatches > before.1, "{at}: no indirect dispatch ran");
+    }
+}
+
+/// Require that the host step was announced once where the GPU-alone path did not run, and never
 /// where it did. Beside it, only what the test's `Shared` buffers force on `device` the first time
-/// ([`shared_kinds`]); before, the GPU-only path let any other kind pass.
+/// ([`shared_kinds`]); before, the GPU-alone path let any other kind pass.
 fn announced(device: &Device, messages: &Messages, gpu: bool) {
     let kinds: &[Degradation] = match gpu {
         true => &[],
@@ -118,9 +146,10 @@ fn announced(device: &Device, messages: &Messages, gpu: bool) {
     assert_made_once(messages, kinds, &shared_kinds(device));
 }
 
-/// A total execution runs on the GPU alone where the device enables the extension, and through
-/// the host step otherwise; both write what Metal computes, in the encoder that wrote the
-/// commands and in a later command buffer, the second round as the first.
+/// A total execution runs on the GPU alone, through the generated commands where the device
+/// enables the extension and by indirect dispatches otherwise; both write what Metal computes, in
+/// the encoder that wrote the commands and in a later command buffer, the second round as the
+/// first.
 #[test]
 fn a_total_execution_runs_on_the_gpu_alone() {
     for withheld in [false, true] {
@@ -129,6 +158,7 @@ fn a_total_execution_runs_on_the_gpu_alone() {
             for round in 0..2 {
                 // One encoder.
                 let setup = Setup::with_template(device, 2, flat_template(device));
+                let before = recorded(device);
                 let command_buffer = queue.command_buffer().unwrap();
                 let mut encoder = command_buffer.compute_command_encoder().unwrap();
                 setup.write(&mut encoder);
@@ -137,9 +167,11 @@ fn a_total_execution_runs_on_the_gpu_alone() {
                 complete(&command_buffer);
                 let at = format!("withheld {withheld}, round {round}");
                 assert_eq!(setup.output(), expected(), "one encoder, {at}");
-                assert_eq!(ran_flat(&command_buffer), generated, "one encoder, {at}");
+                assert!(ran_flat(&command_buffer), "one encoder, {at}");
+                ran_recording(device, generated, before, &at);
                 // Two command buffers, the execution's committed first.
                 let setup = Setup::with_template(device, 2, flat_template(device));
+                let before = recorded(device);
                 let writing = queue.command_buffer().unwrap();
                 let mut encoder = writing.compute_command_encoder().unwrap();
                 setup.write(&mut encoder);
@@ -152,22 +184,24 @@ fn a_total_execution_runs_on_the_gpu_alone() {
                 complete(&executing);
                 wait(&writing);
                 assert_eq!(setup.output(), expected(), "two command buffers, {at}");
-                assert_eq!(ran_flat(&executing), generated, "two command buffers, {at}");
+                assert!(ran_flat(&executing), "two command buffers, {at}");
+                ran_recording(device, generated, before, &at);
             }
-            announced(device, messages, generated);
+            announced(device, messages, true);
         });
     }
 }
 
 /// An execution whose commands' windows no encoder made resident runs as one that made them
-/// resident: the GPU-only path's resident set holds every live buffer of its own, which the
+/// resident: the GPU-alone path's resident set holds every live buffer of its own, which the
 /// preprocess resolves the records' buffer addresses in, as the host step resolves them, and
-/// Metal's commands reach. Both paths write what Metal computes, announced as above.
+/// Metal's commands reach. Both recordings write what Metal computes, nothing announced.
 #[test]
 fn an_execution_reaches_buffers_no_encoder_named() {
     for withheld in [false, true] {
         on_device(withheld, |device, messages, generated| {
             let setup = Setup::with_template(device, 2, flat_template(device));
+            let before = recorded(device);
             let queue = device.new_command_queue().unwrap();
             let command_buffer = queue.command_buffer().unwrap();
             let mut encoder = command_buffer.compute_command_encoder().unwrap();
@@ -176,8 +210,9 @@ fn an_execution_reaches_buffers_no_encoder_named() {
             encoder.end_encoding().unwrap();
             complete(&command_buffer);
             assert_eq!(setup.output(), expected(), "withheld {withheld}");
-            assert_eq!(ran_flat(&command_buffer), generated, "withheld {withheld}");
-            announced(device, messages, generated);
+            assert!(ran_flat(&command_buffer), "withheld {withheld}");
+            ran_recording(device, generated, before, &format!("withheld {withheld}"));
+            announced(device, messages, true);
         });
     }
 }
@@ -235,6 +270,7 @@ fn an_encoding_fault_runs_no_command_on_either_path() {
     for withheld in [false, true] {
         on_device(withheld, |device, messages, generated| {
             let setup = Setup::with_template(device, 1, flat_template(device));
+            let before = recorded(device);
             let queue = device.new_command_queue().unwrap();
             let command_buffer = queue.command_buffer().unwrap();
             let mut encoder = command_buffer.compute_command_encoder().unwrap();
@@ -252,7 +288,8 @@ fn an_encoding_fault_runs_no_command_on_either_path() {
             assert!(report.replay_fault, "withheld {withheld}");
             assert_eq!(report.replay_faults, ReplayFaults::ENCODING);
             assert!(setup.output().iter().all(|&word| word == 0));
-            announced(device, messages, generated);
+            ran_recording(device, generated, before, &format!("withheld {withheld}"));
+            announced(device, messages, true);
         });
     }
 }

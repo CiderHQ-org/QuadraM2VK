@@ -399,7 +399,8 @@ pub(super) struct DeviceShared {
     pub(super) view_reinterpretation: bool,
     /// `VK_EXT_device_generated_commands`'s commands, where the runtime enabled the extension
     /// (`create.rs`): an execution of commands a kernel writes runs on the GPU alone through
-    /// them where every record it may hold is covered (`generated_execute.rs`).
+    /// them where every record it may hold is covered and the product sets their path up for its
+    /// variants (`generated_execute.rs`), and by indirect dispatches elsewhere (`gpu_execute.rs`).
     pub(super) generated_commands: Option<Commands>,
     /// The device enabled `hostImageCopy`: the runtime on a device it creates that has it
     /// (`create.rs`), the consumer on one it adopts that says so (`adopt.rs`). A heap's colour

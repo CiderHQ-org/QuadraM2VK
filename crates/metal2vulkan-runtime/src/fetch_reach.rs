@@ -27,7 +27,7 @@
 //!   its layout's buffer slot. An execution of commands a kernel writes, whose records' buffers
 //!   and grids are GPU memory, runs through the host step, which checks each command, wherever a
 //!   state its records may name fetches a stage-in attribute (`fetches_stage_in`), never on the
-//!   device's generated-commands path (`generated_execute.rs`).
+//!   GPU alone (`gpu_execute.rs`).
 
 use crate::argument_table::ArgumentTable;
 use crate::error::{Error, RuntimeGap};
@@ -134,7 +134,7 @@ pub(crate) fn check_stage_in_reach(
 
 /// Whether `pipeline`'s kernel fetches a `[[stage_in]]` attribute: its stage-input descriptor
 /// names one whose layout's buffer the kernel reads. An execution of commands a kernel writes
-/// runs through the host step where such a state may run (`generated_execute.rs`), which checks
+/// runs through the host step where such a state may run (`gpu_execute.rs`), which checks
 /// each command's reach.
 pub(crate) fn fetches_stage_in(pipeline: &ComputePipelineState) -> bool {
     pipeline.stage_input().is_some_and(|input| {

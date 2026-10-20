@@ -1207,7 +1207,25 @@ impl ComputeCommandEncoder {
         } else {
             ArgumentTable::default()
         };
-        let gate = self.core.command_buffer().state().predication.host_gate();
+        // Inside a block of command predication: the host step's check of the counter, and the
+        // gate the GPU-alone path's preprocess of a fixed range runs from (`gpu_execute.rs`), one
+        // invocation per command where the counter is 0.
+        let (gate, preprocess_gate) = {
+            let device = self.core.device().clone();
+            let mut state = self.core.command_buffer().state();
+            let held = &mut *state;
+            let gate = held.predication.host_gate();
+            let preprocess_gate = match (&gate, &range, &check) {
+                (Some(_), ExecutionRange::Fixed(range), None) if !range.is_empty() => {
+                    let count = [range.len() as u32, 1, 1];
+                    held.predication
+                        .gates(&mut held.uploads, &device, &[count])?
+                        .pop()
+                }
+                _ => None,
+            };
+            (gate, preprocess_gate)
+        };
         self.core.defer(Deferred::Execute(Arc::new(Execute {
             icb: icb.clone(),
             range,
@@ -1215,6 +1233,7 @@ impl ComputeCommandEncoder {
             table,
             ordered: self.dispatch_type == DispatchType::Serial,
             gate,
+            preprocess_gate,
             check: check.map(Mutex::new),
         })))?;
         // Its commands may name any pipeline state.

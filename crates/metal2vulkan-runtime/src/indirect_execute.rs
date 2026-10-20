@@ -10,9 +10,10 @@
 //! - **Records the GPU may write**. A buffer an encoder made resident for writing
 //!   (`IndirectCommandBuffer::gpu_written`, for good) is written by functions as they run, so its
 //!   records are known only once the work before the execution completed. Its segment starts a part
-//!   of the encoder, and a batch, of its own; the scheduler submits the batch once every batch
-//!   submitted before it on any queue completed and its host step recorded the segment from the
-//!   records then (`scheduler`), which the device announces once
+//!   of the encoder, and a batch, of its own. Where every record it may hold is covered, `commit`
+//!   records it to run on the GPU alone (`gpu_execute.rs`); otherwise the scheduler submits the
+//!   batch once every batch submitted before it on any queue completed and its host step recorded
+//!   the segment from the records then (`scheduler`), which the device announces once
 //!   (`Degradation::HostReplayedIndirectCommands`). So is a segment `commit` recorded from the
 //!   CPU's records whose buffer an encoder made resident for writing after the commit
 //!   ([`Unforeseen`]). The step compiles nothing: `commit`, or for such a segment the encoder's
@@ -82,6 +83,7 @@ use super::pipeline::{BufferForms, ComputePipelineState, IndirectStates, Variant
 use super::predication::HostGate;
 use super::residency::Residency;
 use super::tracker::Barrier;
+use super::upload::Upload;
 use super::Device;
 use metal2vulkan::bind::indirect_commands::{Action, BufferBinding, BufferStage, CommandRecord};
 use metal2vulkan::bind::{Dispatch, ImageblockSize, ReplayFaults, StageInRegion};
@@ -138,9 +140,14 @@ pub(super) struct Execute {
     /// The check of the block of command predication it was encoded in, if any
     /// (`predication.rs`): a host step records it, and nothing where the counter skips.
     pub(super) gate: Option<HostGate>,
+    /// Inside a block of command predication, for a range given as such
+    /// ([`ExecutionRange::Fixed`]) that is not empty and no caller's check: the gate its preprocess
+    /// runs from on the GPU-alone path (`gpu_execute.rs`), of one invocation per command of the
+    /// range, which the step before it writes (`Predication::gates`).
+    pub(super) preprocess_gate: Option<Upload>,
     /// The caller's check of the commands its host step records
     /// (`execute_commands_in_buffer_checked`): the step calls it before it records them, and it
-    /// keeps the execution off the GPU-alone path (`generated_execute.rs`).
+    /// keeps the execution off the GPU-alone path (`gpu_execute.rs`).
     pub(super) check: Option<Mutex<IndirectCommandCheck>>,
 }
 
@@ -409,7 +416,8 @@ impl Execute {
     }
 
     /// Whether it lies inside a block of command predication: a host step records it, once the
-    /// steps before it left their counter (`predication.rs`).
+    /// steps before it left their counter (`predication.rs`), unless it runs on the GPU alone from
+    /// its preprocess's gate (`gpu_execute.rs`).
     pub(super) fn predicated(&self) -> bool {
         self.gate.is_some()
     }

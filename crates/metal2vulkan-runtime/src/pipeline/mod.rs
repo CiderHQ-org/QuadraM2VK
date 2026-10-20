@@ -1102,7 +1102,7 @@ impl ComputePipelineState {
     /// The flat device-replay variant of the state's kernel (`VariantKey::flat_grid` and
     /// `replay_bindings`), compiled when first needed, and its plan for a bind state of `shape`
     /// (a replay's: no kernel buffer, and the resident set): what an execution of commands a
-    /// kernel writes runs on the GPU alone (`generated_execute.rs`). `None` where the compile
+    /// kernel writes runs on the GPU alone (`gpu_execute.rs`). `None` where the compile
     /// layer refuses the kernel one, `Unsupported{GpuEncodedIndirectCommands}` (as
     /// [`settle_flat`](Self::settle_flat)'s), or its plan binds a descriptor, which no record can
     /// supply on that path: the state remembers either, which no bind shape changes.

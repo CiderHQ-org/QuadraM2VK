@@ -604,7 +604,7 @@ pub(super) enum Pinned {
 /// alone (an encoder's `use_resource`, `use_heap`, a bound buffer no command reads), whose ranges
 /// the command buffer resolves again as it is first submitted.
 ///
-/// A GPU-alone replay of an indirect command buffer (`generated_execute.rs`) resolves its
+/// A GPU-alone replay of an indirect command buffer (`gpu_execute.rs`) resolves its
 /// resident set as the commit records it, into its scratch: its ranges (`resolved`) hold as the
 /// command buffer is first submitted only where the live buffers and what its encoders made
 /// resident still lie there.

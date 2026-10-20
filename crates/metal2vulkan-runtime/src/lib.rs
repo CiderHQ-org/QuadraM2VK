@@ -70,6 +70,7 @@ mod depth_stencil_scratch;
 mod descriptor_arena;
 mod detach;
 mod device;
+mod dispatch_execute;
 #[cfg(unix)]
 mod dma_buf;
 mod draw_source;
@@ -106,6 +107,7 @@ mod function_table;
 #[doc(hidden)]
 pub mod generated_commands;
 mod generated_execute;
+mod gpu_execute;
 mod gpu_pools;
 mod gpu_time;
 mod heap;

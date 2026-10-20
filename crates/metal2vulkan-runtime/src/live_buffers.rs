@@ -385,7 +385,7 @@ impl LiveTable {
     }
 
     /// Each listed buffer's range at its own length, before the set coalesced them, in the
-    /// list's order: what a replay's resident set lists apart (`generated_execute.rs`,
+    /// list's order: what a replay's resident set lists apart (`gpu_execute.rs`,
     /// `BindState::resident_ranges`).
     pub(super) fn ranges(&self) -> impl Iterator<Item = ResidentRange> + '_ {
         self.listed

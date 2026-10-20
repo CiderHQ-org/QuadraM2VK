@@ -39,7 +39,7 @@
 //!   other submission running, its signals firing and its handlers running: the gap until the
 //!   encoded uses resolve at submission, announced once
 //!   (`Degradation::EncodedUseRebound`). A GPU-alone replay's resident set, resolved at the
-//!   commit (`generated_execute.rs`), fails alike where a range of it lies elsewhere by then.
+//!   commit (`gpu_execute.rs`), fails alike where a range of it lies elsewhere by then.
 //! - **Each submission at its own batch**. The first submission finds which of Metal's submissions
 //!   are rebound, against the pages and the table it fixes for every later batch; each fails only
 //!   as its own batch is submitted, after that batch's submission checks (`checks.rs`). One its

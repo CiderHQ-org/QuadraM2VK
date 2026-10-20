@@ -4,7 +4,7 @@
 //! - **Why.** Which pipeline state an indirect command runs is decided by its record, which the
 //!   CPU or the GPU may write until the runtime reads it: in `commit` for the CPU's records, in
 //!   the host step for records the GPU may write (`IndirectCommandBuffer::gpu_written`), or on
-//!   the GPU alone (`generated_execute.rs`). A program that decides something of its own by the
+//!   the GPU alone (`gpu_execute.rs`). A program that decides something of its own by the
 //!   states the commands run (whether one can encode indirect commands, and which indirect
 //!   command buffers the command buffer made resident for writing) learns them there, from the
 //!   runtime, without reading the records again.
@@ -36,7 +36,7 @@ pub enum RecordsRead {
     /// In the host step, on the scheduler's thread: the records as the GPU and the CPU left
     /// them, once the work before the execution completed.
     HostStep,
-    /// Not on the host: the GPU reads them as it runs (`generated_execute.rs`), so
+    /// Not on the host: the GPU reads them as it runs (`gpu_execute.rs`), so
     /// [`ExecutedCommands::commands`] is empty and
     /// [`ExecutedCommands::unread_states_can_encode`] tells of every state the records may name.
     /// Decided in `commit`, on the committing thread.
