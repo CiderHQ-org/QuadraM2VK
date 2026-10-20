@@ -295,6 +295,7 @@ use crate::tracker::{
     Barrier, EncoderUses, GeometryWrites, IndirectReads, Summary, UnorderedWrites, Use,
 };
 use crate::visibility::{Lent, Visibility};
+use crate::written_commands::Writers;
 use crate::Device;
 use ahead::Ahead;
 use ash::vk;
@@ -553,6 +554,10 @@ impl RenderCommandEncoder {
         check: Option<IndirectCommandCheck>,
     ) -> Result<(), Error> {
         self.sync_heaps();
+        // Its commands run the states their records name, where it inherits none.
+        if !icb.descriptor().inherit_pipeline_state {
+            self.writers.runs(icb.written().named().writes);
+        }
         // An execution rewrites an extended-range or padded attachment as a draw does, of reset
         // commands too, and a signed normalized one's minimum codes, and an
         // `RGB9E5Float` one's words.
@@ -2179,6 +2184,7 @@ impl RenderExecution {
                 .arguments()
                 .with_buffer(storage.tile_memory),
             residency: residency.clone(),
+            writers: Writers::default(),
             executions: Vec::new(),
             pending: Vec::new(),
             draw_calls: 0,

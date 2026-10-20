@@ -214,6 +214,7 @@ mod ycbcr;
 
 #[cfg(test)]
 mod tests;
+mod written_commands;
 
 pub use address::{AddressPlacement, AddressRange, GpuAddress, PlacementConflict, RangeToken};
 pub use address_map::{AddressModeMap, MappedSampling};

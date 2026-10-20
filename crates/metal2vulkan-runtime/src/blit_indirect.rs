@@ -74,6 +74,7 @@ impl BlitCommandEncoder {
             return Ok(());
         }
         destination.written_by_gpu();
+        destination.written().copied_from(source.written());
         // The slots past the records', carried as Metal's copy carries every slot below the count.
         self.copy_overflow(source, from.clone(), destination, to.start)?;
         let bytes = IndirectCommandBuffer::record_bytes(from);

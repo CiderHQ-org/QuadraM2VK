@@ -75,6 +75,7 @@ use super::render::{index_size, DrawProblem};
 use super::resource_ids::{records_placement, IdPlacement, ResourceId, StateKind};
 use super::unique_identifier::{degrade_identifier, state_value_degradation, UniqueIdentifier};
 use super::values::{Origin, Region, Size};
+use super::written_commands::{Named, WrittenCommands};
 use super::{
     CpuCacheMode, Device, GpuAddress, HazardTrackingMode, PurgeableState, ResourceOptions,
     StorageMode,
@@ -89,6 +90,7 @@ use metal2vulkan::metal::{
     CullMode, DepthClipMode, IndexType, IndirectCommandType, PrimitiveType, TriangleFillMode,
     Winding,
 };
+use metal2vulkan::pipeline::CommandWrites;
 use std::collections::BTreeSet;
 use std::num::NonZeroU64;
 use std::ops::Range;
@@ -583,6 +585,7 @@ impl Device {
             unforeseen: Mutex::new(Vec::new()),
             barriers: AtomicBool::new(false),
             overflow,
+            written: Arc::default(),
         }));
         icb.initialize()?;
         self.take_device_sampler();
@@ -627,6 +630,26 @@ impl CommandState {
         match self {
             CommandState::Render(named, _, stamp) => Some((named.upgrade(), *stamp)),
             CommandState::Compute(..) => None,
+        }
+    }
+
+    /// What the state may do to indirect command buffers, of the program it runs.
+    fn named(&self) -> Named {
+        match self {
+            CommandState::Compute(_, program, _) => {
+                let state = program.state();
+                Named {
+                    encodes: state.can_encode_indirect_commands(),
+                    writes: state.indirect_command_writes(),
+                }
+            }
+            CommandState::Render(_, program, _) => {
+                let state = program.state();
+                Named {
+                    encodes: state.can_encode_indirect_commands(),
+                    writes: state.indirect_command_writes(),
+                }
+            }
         }
     }
 
@@ -911,6 +934,8 @@ struct IcbShared {
     barriers: AtomicBool,
     /// The buffer slots past the record's, where the descriptor counts more ([`Overflow`]).
     overflow: Option<Overflow>,
+    /// What its records may hold, from every route that writes them (`written_commands.rs`).
+    written: Arc<WrittenCommands>,
 }
 
 /// The buffer slots of each command past the 32 of a stage its record holds, below the
@@ -1281,7 +1306,10 @@ impl IndirectCommandBuffer {
         let mut pipelines = lock(&self.0.pipelines);
         let mut record = self.record(index)?;
         edit(&mut record, &mut pipelines[index as usize])?;
-        self.write(index, &record)
+        self.write(index, &record)?;
+        let named = pipelines[index as usize].as_ref().map(CommandState::named);
+        self.0.written.add_record(&record, named);
+        Ok(())
     }
 
     /// Reset command `index` (below the size) by `edit`, as [`edit`](Self::edit) changes it,
@@ -1755,6 +1783,41 @@ impl IndirectCommandBuffer {
     /// before then may not be what runs.
     pub fn gpu_written(&self) -> bool {
         self.0.gpu_written.load(Ordering::Acquire)
+    }
+
+    /// What the buffer's records may hold, from every route that writes them encoded so far: a
+    /// runtime extension, with no Metal counterpart. The CPU's setters add what each command
+    /// holds after the call (its draw or dispatch, a draw's primitive type among it, its barrier,
+    /// and [`CommandWrites::PIPELINE`] where it names a state); an encoder that made the buffer
+    /// resident for writing adds what its states may write
+    /// ([`ComputePipelineState::indirect_command_writes`],
+    /// [`RenderPipelineState::indirect_command_writes`]): the state set when it made the buffer
+    /// resident, each set after, and the states its executions' commands name; a blit encoder's
+    /// `copy_indirect_command_buffer` into it adds the source buffer's, now and as the source
+    /// gains more. Resets add nothing, and nothing is taken away: a record written again keeps
+    /// the earlier writes here, as a GPU write may stay. A clear bit is proven of every write
+    /// encoded so far: no command holds such a draw, dispatch, barrier or primitive type (a
+    /// point draw, where [`CommandWrites::may_draw_primitive_type`] of
+    /// `PrimitiveType::Point` answers `false`). A route encoded later adds its own then.
+    pub fn command_writes(&self) -> CommandWrites {
+        self.0.written.writes()
+    }
+
+    /// Whether a command of the buffer may name a pipeline state whose functions may encode,
+    /// reset or copy indirect commands, from every route that writes its records encoded so far:
+    /// a runtime extension, with no Metal counterpart. The CPU's setters add the states they set
+    /// (`can_encode_indirect_commands` of each); a function that may set a command's pipeline
+    /// state or copy a command (`CommandWrites::PIPELINE`, `CommandWrites::COPY`) in an encoder
+    /// that made the buffer resident for writing may name any state; a blit copy into it adds the
+    /// source buffer's answer, now and later. `false` is proven of every write encoded so far, as
+    /// [`command_writes`](Self::command_writes)' clear bits are.
+    pub fn may_name_encoding_states(&self) -> bool {
+        self.0.written.named().encodes
+    }
+
+    /// What its records may hold (`written_commands.rs`).
+    pub(super) fn written(&self) -> &Arc<WrittenCommands> {
+        &self.0.written
     }
 
     /// Whether the CPU ever set a render command's barrier, so an execution may split its render

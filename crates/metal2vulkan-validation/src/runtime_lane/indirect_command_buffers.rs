@@ -3413,3 +3413,97 @@ fn fragment_functions_are_linked_with_or_without_rasterization_as_metal_links_th
         }
     });
 }
+
+/// A compute state of the owned fixture kernel `entry`, made from `engine_dir()`.
+fn kernel_state(device: &Device, entry: &str) -> ComputePipelineState {
+    let bitcode = llvm_assemble(&engine_dir().join(format!("{entry}.ll"))).unwrap();
+    let library = device.new_library_with_air(&bitcode).unwrap();
+    let function = library.new_function_with_name(entry).unwrap();
+    let descriptor =
+        ComputePipelineDescriptor::new(StageSource::Function(function.function_descriptor()));
+    device
+        .new_compute_pipeline_state(&descriptor, &PipelineOptions::default())
+        .unwrap()
+}
+
+/// What a buffer's records may hold (`IndirectCommandBuffer::command_writes`,
+/// `may_name_encoding_states`), from each route as it is encoded: the CPU's draw of triangles and
+/// the state it names (the render template's, which encodes nothing); a kernel that draws points
+/// (`icb_render_replay_encode_draw_only`) in an encoder that made a second buffer resident for
+/// writing, set before the call, and one that draws indexed points
+/// (`icb_render_indexed_encode`) set after it; a blit copy of the second into a third, which
+/// gains what the second gains after the copy too. A buffer an encoder made resident for reading
+/// gains nothing, and neither does one no route reached. Each kernel state states its own
+/// (`ComputePipelineState::indirect_command_writes`).
+#[test]
+fn a_buffer_states_what_its_writers_may_write() {
+    use metal2vulkan::pipeline::CommandWrites as W;
+    let points = W {
+        operations: W::DRAW,
+        primitive_types: 0b1,
+    };
+    on_device(|device| {
+        let mut descriptor = render_descriptor();
+        descriptor.inherit_pipeline_state = false;
+        let [cpu, gpu, copied, read] = [(); 4].map(|_| icb(device, &descriptor, 2));
+        assert!(cpu.command_writes().is_empty());
+        let template = render_template_state(device, true);
+        let command = cpu.indirect_render_command_at(0).unwrap();
+        command.set_render_pipeline_state(&template).unwrap();
+        command
+            .draw_primitives(PrimitiveType::Triangle, 0, 3, 1, 0)
+            .unwrap();
+        assert_eq!(
+            cpu.command_writes(),
+            W {
+                operations: W::DRAW | W::PIPELINE,
+                primitive_types: 0b1000,
+            }
+        );
+        assert!(!template.can_encode_indirect_commands());
+        assert!(!cpu.may_name_encoding_states());
+
+        let draws = kernel_state(device, "icb_render_replay_encode_draw_only");
+        let indexed = kernel_state(device, "icb_render_indexed_encode");
+        assert_eq!(draws.indirect_command_writes(), points);
+        assert_eq!(
+            indexed.indirect_command_writes().operations,
+            W::DRAW_INDEXED
+        );
+        let queue = device.new_command_queue().unwrap();
+        let command_buffer = queue.command_buffer().unwrap();
+        let mut encoder = command_buffer.compute_command_encoder().unwrap();
+        encoder.set_compute_pipeline_state(&draws).unwrap();
+        encoder
+            .use_resource(gpu.as_resource(), ResourceUsage::WRITE)
+            .unwrap();
+        encoder
+            .use_resource(read.as_resource(), ResourceUsage::READ)
+            .unwrap();
+        assert_eq!(gpu.command_writes(), points);
+        encoder.end_encoding().unwrap();
+        let mut blit = command_buffer.blit_command_encoder().unwrap();
+        blit.copy_indirect_command_buffer(&gpu, 0..1, &copied, 0)
+            .unwrap();
+        blit.end_encoding().unwrap();
+        assert_eq!(copied.command_writes(), points);
+        let mut encoder = command_buffer.compute_command_encoder().unwrap();
+        encoder
+            .use_resource(gpu.as_resource(), ResourceUsage::WRITE)
+            .unwrap();
+        encoder.set_compute_pipeline_state(&indexed).unwrap();
+        encoder.end_encoding().unwrap();
+        for buffer in [&gpu, &copied] {
+            assert_eq!(
+                buffer.command_writes(),
+                W {
+                    operations: W::DRAW | W::DRAW_INDEXED,
+                    primitive_types: 0b1,
+                }
+            );
+            assert!(!buffer.may_name_encoding_states());
+        }
+        assert!(read.command_writes().is_empty());
+        assert_eq!(cpu.command_writes().primitive_types, 0b1000);
+    });
+}

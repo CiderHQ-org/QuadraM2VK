@@ -76,6 +76,11 @@ impl RenderCommandEncoder {
             if let Some(used) = self.residency.use_resource(resource, usage, stages) {
                 self.core.retain(used);
             }
+            if let ResourceRef::IndirectCommandBuffer(icb) = resource {
+                if usage.contains(ResourceUsage::WRITE) {
+                    self.writers.made_writable(icb.written());
+                }
+            }
         }
         Ok(())
     }
