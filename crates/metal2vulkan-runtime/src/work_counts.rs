@@ -93,6 +93,8 @@ pub(crate) struct Counters {
     heap_texture_untiled_layouts: AtomicU64,
     fills_recorded: AtomicU64,
     fills_by_transfers: AtomicU64,
+    ycbcr_refreshes: AtomicU64,
+    ycbcr_whole_conversions: AtomicU64,
     attachment_clears_recorded: AtomicU64,
     image_blits_recorded: AtomicU64,
     query_result_copies_recorded: AtomicU64,
@@ -465,6 +467,17 @@ impl Counters {
             false => &self.fills_recorded,
         };
         counter.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A YCbCr texture's conversion was recorded through its refresh, converting only where its
+    /// planes changed (`ycbcr.rs`).
+    pub(crate) fn ycbcr_refreshed(&self) {
+        self.ycbcr_refreshes.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A YCbCr texture's conversion was recorded whole (`ycbcr.rs`).
+    pub(crate) fn ycbcr_converted_whole(&self) {
+        self.ycbcr_whole_conversions.fetch_add(1, Ordering::Relaxed);
     }
 
     /// A `VkCommandPool` was made for a command buffer, none of the device's spares taken.
@@ -2328,6 +2341,14 @@ pub struct WorkCounts {
     /// measured to compile its fill per command pool (`DriverFact::FillCompiledPerCommandPool`,
     /// MoltenVK 1.4.1), which records no `vkCmdFillBuffer`.
     pub fills_by_transfers: u64,
+    /// Two-plane YCbCr textures' conversions recorded through their refresh (`ycbcr.rs`): a
+    /// comparison of the planes' words with the copy the last conversion read, and the conversion
+    /// dispatched through indirect arguments that run no workgroup where no word changed.
+    pub ycbcr_refreshes: u64,
+    /// Two-plane YCbCr textures' conversions recorded whole: a copy of the planes and a dispatch
+    /// over every texel, where the refresh is not made (planes not whole words, or past one
+    /// storage binding) or the planes' `VkBuffer` is not the one it binds.
+    pub ycbcr_whole_conversions: u64,
     // The commands MoltenVK 1.4.1 compiles a pipeline for per command pool on Apple's GPUs
     // (`PoolCompiled`), each counted as the runtime records it: a run's survey of which can
     // stall a commit behind a compile storm, as the fill did.
@@ -3458,6 +3479,8 @@ impl Device {
                 .load(Ordering::Relaxed),
             fills_recorded: counters.fills_recorded.load(Ordering::Relaxed),
             fills_by_transfers: counters.fills_by_transfers.load(Ordering::Relaxed),
+            ycbcr_refreshes: counters.ycbcr_refreshes.load(Ordering::Relaxed),
+            ycbcr_whole_conversions: counters.ycbcr_whole_conversions.load(Ordering::Relaxed),
             attachment_clears_recorded: counters.attachment_clears_recorded.load(Ordering::Relaxed),
             image_blits_recorded: counters.image_blits_recorded.load(Ordering::Relaxed),
             query_result_copies_recorded: counters

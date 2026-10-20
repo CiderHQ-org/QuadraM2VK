@@ -178,6 +178,7 @@ pub(crate) mod unused_bits;
 pub(crate) mod visibility_combine;
 pub(crate) mod visibility_resolve;
 pub(crate) mod ycbcr_convert;
+pub(crate) mod ycbcr_refresh;
 pub(crate) mod ycbcr_write;
 
 pub use acceleration::{
@@ -318,4 +319,5 @@ pub use ycbcr_convert::{
     ycbcr_convert_module, ycbcr_read, ycbcr_texel, YCbCrCodes, YCbCrConvertModule, YCbCrMatrix,
     YCbCrOutput, YCbCrPlanes, YCbCrRange,
 };
+pub use ycbcr_refresh::{ycbcr_refresh_module, YCbCrRefreshModule};
 pub use ycbcr_write::{ycbcr_store, ycbcr_write, ycbcr_write_module, YCbCrWriteModule};

@@ -114,7 +114,9 @@
 //! - **Converted texels** (`ycbcr.rs`): a two-plane YCbCr texture over a surface's two planes is an
 //!   image of the texels Metal reads from them ([`ShadowSource::Converted`]). Its copy in is a
 //!   conversion: the planes' bytes into a staging buffer of its own and a dispatch that writes
-//!   every texel. The rules above are the same with the conversion in the copy's place; nothing
+//!   every texel, which runs no workgroup where the planes' words are those the last conversion
+//!   read (`ycbcr.rs`, **When it converts**). The rules above are the same with the conversion in
+//!   the copy's place; nothing
 //!   writes the image (Metal drops a function's writes, and a pass into it is refused), so nothing
 //!   is copied back.
 //! - **YCbCr writes** (`ycbcr.rs`): a 4:4:4 two-plane YCbCr texture whose writes Metal stores into
@@ -1033,8 +1035,9 @@ impl ShadowCopy {
 
     /// The stages the copy runs in: a rotated texture's copies dispatch the rotation kernel, a
     /// heap's two-plane texture's the two-plane kernel, a tiled heap texture's the tiled texel
-    /// kernel (its keep too), and a keep that dispatches the copy back's kernel
-    /// (`ShadowMerge::dispatches`) that kernel.
+    /// kernel (its keep too), a keep that dispatches the copy back's kernel
+    /// (`ShadowMerge::dispatches`) that kernel, and a converted texture's copy in its refresh and
+    /// its conversion, dispatched through indirect arguments.
     pub(super) fn stages(&self) -> vk::PipelineStageFlags2 {
         let tiled = matches!(self.copies.target(), Some(ShadowTarget::Tiled { .. }));
         let rotated = tiled
@@ -1054,8 +1057,11 @@ impl ShadowCopy {
             Step::Keep(ref merge) if tiled || merge.dispatches() => {
                 vk::PipelineStageFlags2::TRANSFER | vk::PipelineStageFlags2::COMPUTE_SHADER
             }
+            // The refresh's dispatch reads the conversion's indirect arguments (`ycbcr.rs`).
             Step::Into if converted => {
-                vk::PipelineStageFlags2::TRANSFER | vk::PipelineStageFlags2::COMPUTE_SHADER
+                vk::PipelineStageFlags2::TRANSFER
+                    | vk::PipelineStageFlags2::DRAW_INDIRECT
+                    | vk::PipelineStageFlags2::COMPUTE_SHADER
             }
             Step::Back if encoded => {
                 vk::PipelineStageFlags2::TRANSFER | vk::PipelineStageFlags2::COMPUTE_SHADER
@@ -1078,6 +1084,12 @@ impl ShadowCopy {
         );
         let (truth, range) = c.truth();
         if let ShadowSource::Converted { conversion, .. } = &c.source {
+            // The planes' bytes are copied (a whole conversion) or read by the refresh's
+            // dispatch (`ycbcr.rs`).
+            let read = Access::new(
+                vk::PipelineStageFlags2::COPY | vk::PipelineStageFlags2::COMPUTE_SHADER,
+                vk::AccessFlags2::TRANSFER_READ | vk::AccessFlags2::SHADER_STORAGE_READ,
+            );
             return match &self.step {
                 Step::Into => conversion.uses(Use::reads(truth, c.tracked, range, read), c),
                 // Nothing writes the image: no copy back, keep or merge is made of it.

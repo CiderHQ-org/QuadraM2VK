@@ -34,8 +34,8 @@
 //!   `A2B10G10R10_UNORM_PACK32` or `R8G8B8A8_UNORM` of the codes, written through an `R32_UINT`
 //!   view), and a shadow
 //!   of the surface's bytes (`shadow.rs`, `ShadowSource::Converted`): its copy in is a
-//!   conversion, the planes' bytes copied into a staging buffer of the texture's and one
-//!   dispatch of the conversion kernel
+//!   conversion, the planes' bytes brought into a staging buffer of the texture's (**When it
+//!   converts** below) and one dispatch of the conversion kernel
 //!   (`bind::ycbcr_convert_module`, `owned_kernel.rs`) writing every texel. The texture reads
 //!   alpha 1 (`alpha_reads_one`) and maps those modes to clamp-to-edge (`address_mode_map`), so
 //!   a nearest sample and a border read are Metal's exactly.
@@ -44,8 +44,20 @@
 //!   over the planes such as a decoder's `R8Unorm` and `RG8Unorm` ones, or a blit): a use of the
 //!   bytes like any other, which the tracker orders after the writes of the same and earlier
 //!   command buffers. The surface's bytes are the CPU's to write unseen, so the runtime cannot
-//!   tell cheaply that they are unchanged since the last conversion, and converts at every
-//!   encoder that uses the texture.
+//!   tell at recording whether they changed since the last conversion; the device tells. The
+//!   copy in is the conversion's refresh (`bind::ycbcr_refresh_module`): one dispatch compares
+//!   every word of the planes with the staging buffer's copy (the bytes the last conversion
+//!   read), stores each word that differs into the copy, and sets the conversion's indirect
+//!   arguments to its whole grid where a word differed or the last conversion did not complete
+//!   (the staging buffer's completed word, cleared before the copy changes and set after the
+//!   conversion). The conversion is dispatched through those arguments: unchanged planes run no
+//!   workgroup of it, and changed ones convert every texel from the copy, as a whole conversion
+//!   does. A texture's staging buffer is its own and starts zeroed, no conversion completed, so
+//!   its first use converts every texel, and a texture made again over the same surface trusts
+//!   no other texture's copy. Where the refresh is not made (planes not whole words or not at a
+//!   word, past one storage range, or past the device's workgroup counts) or the planes' buffer
+//!   is not the one its set binds, the conversion copies the planes and converts whole
+//!   (`WorkCounts::ycbcr_refreshes`, `ycbcr_whole_conversions`).
 //! - **The texels Metal's copies move** are the luma plane's bytes, a code's bytes a texel
 //!   (for 4:2:2 and 4:4:4 and, for the code formats): `get_bytes`, `replace_region` and a blit to
 //!   or from a buffer move the luma rows (Metal keeps the chroma plane), the texture's `Texels`
@@ -130,7 +142,8 @@ use super::Device;
 use crate::device::functions::Vk;
 use ash::vk;
 use metal2vulkan::bind::{
-    YCbCrCodes, YCbCrConvertModule, YCbCrMatrix, YCbCrPlanes, YCbCrRange, YCbCrWriteModule,
+    YCbCrCodes, YCbCrConvertModule, YCbCrMatrix, YCbCrPlanes, YCbCrRange, YCbCrRefreshModule,
+    YCbCrWriteModule,
 };
 use metal2vulkan::error::{DiagName, Feature, Unsupported};
 use metal2vulkan::metal::format::{ycbcr_format, ChromaSubsampling};
@@ -172,9 +185,17 @@ const SURFACES: [(&[u8; 4], u32, bool, YCbCrRange, ChromaSubsampling); 18] = {
 /// rounded down to 16, rows `bytesPerRow` rounded down to 16 apart (`linear_plan.rs`), which
 /// the conversion is measured at only where the two agree.
 const PLANE_ALIGNMENT: u64 = 16;
-/// Where the planes' bytes start in the staging buffer, after the shape: a multiple of every
-/// `minStorageBufferOffsetAlignment`.
+/// Where the planes' bytes start in the staging buffer, after the shape and the refresh's state:
+/// a multiple of every `minStorageBufferOffsetAlignment`.
 const BYTES_AT: u64 = 256;
+/// Where the refresh's state lies in the staging buffer, after the shape (`YCbCrRefresh`): the
+/// conversion's `VkDispatchIndirectCommand` and the completed word the refresh reads
+/// (`YCbCrRefreshModule::STATE_WORDS`), then [`COMPLETED_AT`]'s word.
+const STATE_AT: u64 = 128;
+/// The word that says the image holds the conversion of the staging buffer's bytes, 1, or that
+/// no conversion completed since they last changed, 0: cleared before any of them changes, set
+/// once the conversion that reads them is recorded (`YCbCrConversion::record`).
+const COMPLETED_AT: u64 = STATE_AT + 4 * YCbCrRefreshModule::STATE_WORDS as u64;
 
 /// The facts of an IOSurface a two-plane YCbCr texture over it reads, and a two-plane
 /// extended-range one its plane 1 from
@@ -410,6 +431,81 @@ pub(super) struct YCbCrConversion {
     kernel: OwnedKernel,
     sets: OwnedSets,
     groups: [u32; 2],
+    /// The refresh that converts only where the planes changed, where the device makes it
+    /// ([`YCbCrRefresh`]); every conversion is whole without it.
+    refresh: Option<YCbCrRefresh>,
+}
+
+/// The refresh of a conversion's staging copy (the module docs' **When it converts**): one
+/// dispatch of the refresh kernel (`bind::ycbcr_refresh_module`) compares the planes' words with
+/// the copy, stores each changed one over it, and writes the conversion's group count into the
+/// indirect arguments where any changed or no conversion completed from the copy; the conversion
+/// is then dispatched through them. Its set binds the planes in the `VkBuffer` the texture was
+/// made over: a conversion recorded over another (a rebind of a no-copy buffer's pages) takes
+/// the whole conversion.
+struct YCbCrRefresh {
+    kernel: OwnedKernel,
+    sets: OwnedSets,
+    /// The `VkBuffer` its set binds the planes in.
+    planes: vk::Buffer,
+    shape: [u8; YCbCrRefreshModule::PUSH_BYTES as usize],
+    groups: [u32; 2],
+}
+
+impl YCbCrRefresh {
+    /// The refresh of the `span` bytes of planes at `at` of `planes`, a `VkBuffer`, into the
+    /// staging buffer `staging` (its `VkBuffer` and the copy's offset there), for a conversion of
+    /// `convert_groups` workgroups across; `None` where the planes' bytes are not whole words or
+    /// lie past what one storage binding reaches, or the device does not make the kernel.
+    fn new(
+        device: &Device,
+        (planes, at, span): (vk::Buffer, u64, u64),
+        (staging, start): (vk::Buffer, u64),
+        convert_groups: u32,
+    ) -> Option<YCbCrRefresh> {
+        if span == 0 || !span.is_multiple_of(4) || !at.is_multiple_of(4) {
+            return None;
+        }
+        let limits = &device.properties().description.limits;
+        let align = limits.min_storage_buffer_offset_alignment.max(4);
+        let offset = at - at % align;
+        let range = at + span - offset;
+        let first = (at - offset) / 4;
+        let words = u32::try_from(span / 4).ok()?;
+        if range > u64::from(limits.max_storage_buffer_range)
+            || first > u64::from(YCbCrRefreshModule::MOST_FIRST_WORD)
+        {
+            return None;
+        }
+        let groups = YCbCrRefreshModule::groups(words);
+        if groups[0] > limits.max_compute_work_group_count[0]
+            || groups[1] > limits.max_compute_work_group_count[1]
+        {
+            return None;
+        }
+        let kernel = device.owned_kernel(OwnedModule::YCbCrRefresh).ok()?;
+        let set = OwnedSet {
+            images: Vec::new(),
+            storage_images: Vec::new(),
+            buffers: vec![
+                (planes, offset, range),
+                (staging, start + BYTES_AT, span),
+                (
+                    staging,
+                    start + STATE_AT,
+                    4 * u64::from(YCbCrRefreshModule::STATE_WORDS),
+                ),
+            ],
+        };
+        let sets = OwnedSets::write_each(device, &[kernel], &[set]).ok()?;
+        Some(YCbCrRefresh {
+            kernel,
+            sets,
+            planes,
+            shape: YCbCrRefreshModule::shape([first as u32, 0], words, convert_groups),
+            groups,
+        })
+    }
 }
 
 impl YCbCrConversion {
@@ -419,7 +515,7 @@ impl YCbCrConversion {
     pub(super) fn new(
         device: &Device,
         (planes, bytes_in): (&YCbCrPlanes, Range<u64>),
-        at: u64,
+        (source, at): (vk::Buffer, u64),
         view: vk::ImageView,
     ) -> Result<YCbCrConversion, Error> {
         let span = bytes_in.end - bytes_in.start;
@@ -457,6 +553,7 @@ impl YCbCrConversion {
                 "a YCbCr texture past the device's workgroup counts",
             ));
         }
+        let refresh = YCbCrRefresh::new(device, (source, at, span), (raw, start), groups[0]);
         Ok(YCbCrConversion {
             source: (*planes, bytes_in),
             staging_use: (identity.key, range),
@@ -472,12 +569,28 @@ impl YCbCrConversion {
             kernel,
             sets,
             groups,
+            refresh,
         })
     }
 
     /// The planes it converts, and the bytes of their buffer they lie in.
     pub(super) fn source(&self) -> (YCbCrPlanes, Range<u64>) {
         (self.source.0, self.source.1.clone())
+    }
+
+    /// The staging buffer, and where the refresh's state lies in it: the conversion's
+    /// `VkDispatchIndirectCommand`, the completed word the refresh read, then the completed word
+    /// (five words); `None` where the conversion has no refresh.
+    #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
+    pub(crate) fn refresh_state(&self) -> Option<(&Buffer, u64)> {
+        self.refresh.as_ref().map(|_| (&self.staging, STATE_AT))
+    }
+
+    /// The conversion's workgroups across, which the refresh's indirect arguments take where it
+    /// converts.
+    #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
+    pub(crate) fn groups_across(&self) -> u32 {
+        self.groups[0]
     }
 
     /// Whether the texture is over plane 1 of its surface, its chroma codes the zeros the
@@ -501,12 +614,16 @@ impl YCbCrConversion {
                 tracked: copies.tracked,
                 range: UseRange::Bytes(range),
                 read: Access::new(
-                    vk::PipelineStageFlags2::COMPUTE_SHADER,
-                    vk::AccessFlags2::SHADER_STORAGE_READ,
+                    vk::PipelineStageFlags2::COMPUTE_SHADER
+                        | vk::PipelineStageFlags2::DRAW_INDIRECT
+                        | vk::PipelineStageFlags2::TRANSFER,
+                    vk::AccessFlags2::SHADER_STORAGE_READ
+                        | vk::AccessFlags2::INDIRECT_COMMAND_READ
+                        | vk::AccessFlags2::TRANSFER_READ,
                 ),
                 write: Access::new(
-                    vk::PipelineStageFlags2::TRANSFER,
-                    vk::AccessFlags2::TRANSFER_WRITE,
+                    vk::PipelineStageFlags2::TRANSFER | vk::PipelineStageFlags2::COMPUTE_SHADER,
+                    vk::AccessFlags2::TRANSFER_WRITE | vk::AccessFlags2::SHADER_STORAGE_WRITE,
                 ),
             },
             Use::writes(
@@ -522,7 +639,11 @@ impl YCbCrConversion {
     }
 
     /// Record the conversion of the planes in `source` (the surface's buffer's `VkBuffer` now)
-    /// into `command_buffer`.
+    /// into `command_buffer`: through the refresh where the conversion has one over `source`
+    /// ([`YCbCrRefresh`]), converting only where the planes' bytes changed since the conversion
+    /// its image holds, else whole. The completed word is cleared before any byte of the staging
+    /// buffer's copy changes and set after the conversion's dispatch, so a command buffer that
+    /// ends between the two, or never runs, leaves the next conversion whole.
     ///
     /// # Safety
     ///
@@ -534,12 +655,20 @@ impl YCbCrConversion {
         command_buffer: vk::CommandBuffer,
         source: vk::Buffer,
     ) {
+        let owner = self.staging.device();
         let staging = self.staging.at(0).0;
-        // SAFETY: the caller's contract; the shape and the copy lie in the staging buffer and
-        // the copy in `source` (checked when the texture was made), and the set binds them.
+        let state_at = self.shape_at + STATE_AT;
+        let completed_at = self.shape_at + COMPLETED_AT;
+        let word = |w: u32| w.to_le_bytes();
+        let refresh = self
+            .refresh
+            .as_ref()
+            .filter(|refresh| refresh.planes == source);
+        // SAFETY: the caller's contract; the shape, the state, the copy and the zeros lie in the
+        // staging buffer, the copy and the planes' words in `source` (checked when the texture was
+        // made), and the sets bind them.
         unsafe {
             device.cmd_update_buffer(command_buffer, staging, self.shape_at, &self.shape);
-            device.cmd_copy_buffer(command_buffer, source, staging, &[self.into]);
             let (zeros_at, zeros) = self.zeros;
             crate::word_fill::record(
                 self.staging.device(),
@@ -548,6 +677,49 @@ impl YCbCrConversion {
                 zeros_at..zeros_at + zeros,
                 0,
             );
+            match refresh {
+                Some(refresh) => {
+                    // The arguments of no workgroup across, which the refresh raises where it
+                    // must; the completed word, kept for the refresh, then cleared.
+                    let arguments: Vec<u8> =
+                        [0, self.groups[1], 1].into_iter().flat_map(word).collect();
+                    device.cmd_update_buffer(command_buffer, staging, state_at, &arguments);
+                    let kept = vk::BufferCopy {
+                        src_offset: completed_at,
+                        dst_offset: state_at + 4 * u64::from(YCbCrRefreshModule::COMPLETED),
+                        size: 4,
+                    };
+                    device.cmd_copy_buffer(command_buffer, staging, staging, &[kept]);
+                    Barrier::everything().record(device, command_buffer);
+                    device.cmd_update_buffer(command_buffer, staging, completed_at, &word(0));
+                    Barrier::everything().record(device, command_buffer);
+                    let point = vk::PipelineBindPoint::COMPUTE;
+                    device.cmd_bind_pipeline(command_buffer, point, refresh.kernel.pipeline);
+                    device.cmd_bind_descriptor_sets(
+                        command_buffer,
+                        point,
+                        refresh.kernel.layout,
+                        0,
+                        &refresh.sets.sets,
+                        &[],
+                    );
+                    device.cmd_push_constants(
+                        command_buffer,
+                        refresh.kernel.layout,
+                        vk::ShaderStageFlags::COMPUTE,
+                        0,
+                        &refresh.shape,
+                    );
+                    device.cmd_dispatch(command_buffer, refresh.groups[0], refresh.groups[1], 1);
+                    owner.shared().counts.ycbcr_refreshed();
+                }
+                None => {
+                    device.cmd_update_buffer(command_buffer, staging, completed_at, &word(0));
+                    Barrier::everything().record(device, command_buffer);
+                    device.cmd_copy_buffer(command_buffer, source, staging, &[self.into]);
+                    owner.shared().counts.ycbcr_converted_whole();
+                }
+            }
             Barrier::everything().record(device, command_buffer);
             device.cmd_bind_pipeline(
                 command_buffer,
@@ -562,7 +734,12 @@ impl YCbCrConversion {
                 &self.sets.sets,
                 &[],
             );
-            device.cmd_dispatch(command_buffer, self.groups[0], self.groups[1], 1);
+            match refresh {
+                Some(_) => device.cmd_dispatch_indirect(command_buffer, staging, state_at),
+                None => device.cmd_dispatch(command_buffer, self.groups[0], self.groups[1], 1),
+            }
+            Barrier::everything().record(device, command_buffer);
+            device.cmd_update_buffer(command_buffer, staging, completed_at, &word(1));
         }
     }
 }

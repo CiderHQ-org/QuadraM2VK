@@ -691,6 +691,8 @@ surface! {
         fn ycbcr_write;
         fn ycbcr_store;
         struct YCbCrWriteModule N;
+        fn ycbcr_refresh_module;
+        struct YCbCrRefreshModule N;
         fn planes_merge_modules;
         fn planes_split_module;
         enum PlanesCopy N;

@@ -101,6 +101,7 @@ fn modules() -> Vec<Build> {
         two_plane_texels_module,
         visibility_combine_module,
         visibility_resolve_module,
+        ycbcr_refresh_module,
         ycbcr_write_module,
     );
     let mut push =

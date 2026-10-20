@@ -114,6 +114,10 @@ pub(super) enum OwnedModule {
     /// planes into its image (`ycbcr.rs`), which it binds as a storage image: converted values,
     /// or (`YCbCrOutput::Codes`) the packed codes.
     YCbCrConvert(YCbCrOutput),
+    /// `bind::ycbcr_refresh_module`: a YCbCr texture's planes compared with the copy its last
+    /// conversion read, the changed words stored over it, and the conversion's indirect group
+    /// count written where any changed (`ycbcr.rs`).
+    YCbCrRefresh,
     /// `bind::two_plane_texels_module`: a heap's two-plane extended-range texture's texels moved
     /// between its image and its two planes in the heap's bytes (`texture/heap_two_planes.rs`).
     TwoPlaneTexels,
@@ -326,6 +330,12 @@ impl OwnedModule {
                     .map_err(Error::Compile)?;
                 Ok((module.spirv.to_vec(), 3, 0))
             }
+            OwnedModule::YCbCrRefresh => {
+                let module = metal2vulkan::bind::ycbcr_refresh_module(device.compile_device())
+                    .map_err(Error::Compile)?;
+                let push_bytes = metal2vulkan::bind::YCbCrRefreshModule::PUSH_BYTES;
+                Ok((module.spirv.to_vec(), 3, push_bytes))
+            }
             OwnedModule::TwoPlaneTexels => {
                 let module = metal2vulkan::bind::two_plane_texels_module(device.compile_device())
                     .map_err(Error::Compile)?;
@@ -455,6 +465,7 @@ pub(super) struct OwnedKernels {
     index_rewrites: HashMap<(RewriteProgram, RewritePhase), OwnedKernel>,
     rotate_texels: Option<OwnedKernel>,
     rows_copy: Option<OwnedKernel>,
+    ycbcr_refresh: Option<OwnedKernel>,
     ycbcr_converts: HashMap<YCbCrOutput, OwnedKernel>,
     two_plane_texels: Option<OwnedKernel>,
     plane_bytes_copy: Option<OwnedKernel>,
@@ -488,6 +499,7 @@ impl OwnedKernels {
             self.plane_copy,
             self.rotate_texels,
             self.rows_copy,
+            self.ycbcr_refresh,
             self.two_plane_texels,
             self.plane_bytes_copy,
             self.ycbcr_write,
@@ -619,6 +631,7 @@ impl OwnedKernels {
             OwnedModule::PlaneCopy => &mut self.plane_copy,
             OwnedModule::RotateTexels => &mut self.rotate_texels,
             OwnedModule::RowsCopy => &mut self.rows_copy,
+            OwnedModule::YCbCrRefresh => &mut self.ycbcr_refresh,
 
             OwnedModule::TwoPlaneTexels => &mut self.two_plane_texels,
             OwnedModule::PlaneBytesCopy => &mut self.plane_bytes_copy,

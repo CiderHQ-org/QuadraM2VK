@@ -30,8 +30,9 @@
 //! texture's 1920x1080 or 1920x1088 `BGRA8Unorm` texels, multiples of 4 KiB by a prime, 16 bytes
 //! times a prime, primes over and under 16 KiB, and the most bytes under 4 KiB a split leaves to
 //! one), with the regions the copies split, then a frame of a kernel's read of one texel of a
-//! `YCBCR8_420_2P` texture whose planes span [`SURFACE_SPAN`] bytes, which converts every texel
-//! first: the planes' bytes into its staging buffer as one region, split as any.
+//! `YCBCR8_420_2P` texture whose planes span [`SURFACE_SPAN`] bytes, which converts through its
+//! refresh: the first frame converts every texel, and each later one compares the unchanged
+//! planes with its staging buffer's copy and copies none of their bytes.
 
 use super::host_memory::{no_copy, on_device, Mapping, GUEST_PAGE};
 use super::{
@@ -768,7 +769,7 @@ fn span_copy_cost() {
         )
         .unwrap();
     let out = device.new_buffer(16, ResourceOptions::shared()).unwrap();
-    // A kernel's read of one texel, after the conversion of every texel from the planes.
+    // A kernel's read of one texel, after the texture's conversion through its refresh.
     let frame = || {
         let command_buffer = queue.command_buffer().unwrap();
         let mut encoder = command_buffer.compute_command_encoder().unwrap();

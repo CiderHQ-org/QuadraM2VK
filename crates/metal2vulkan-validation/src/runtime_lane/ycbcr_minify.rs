@@ -25,10 +25,10 @@
 //! misses about half), and MoltenVK on an M4 and lavapipe answered every output Metal's bytes,
 //! unannounced but for lavapipe's `shader-color-conversion`.
 //!
-//! The read's conversion copies the planes into the texture's staging buffer as one region, which
-//! the runtime records as two where its size is no multiple of 4 KiB
-//! (`WorkCounts::copy_regions_split`): [`PADDED`]'s span of 25,440,128 bytes, 3968 past one, where
-//! [`PACKED`]'s of 24,883,200 is one, counted over a second read. `read` checks those bytes too.
+//! A second `read` converts through the texture's refresh (`WorkCounts::ycbcr_refreshes`): the
+//! planes, unchanged, are compared with the staging buffer's copy, none of their bytes copied
+//! (`copy_regions_split` unchanged over [`PADDED`]'s span of 25,440,128 bytes, no multiple of
+//! 4 KiB), and it reads the first one's texels.
 
 use super::argument_linear_samples::{kernel, LINEAR_EDGE};
 use super::degrade_notices::{counts, on_device};
@@ -62,15 +62,6 @@ const H: u64 = 2160;
 struct Layout {
     luma: [u64; 2],
     chroma: [u64; 2],
-}
-
-impl Layout {
-    /// The bytes from the first plane's start to the last one's end.
-    fn span(self) -> u64 {
-        let end = |[at, row]: [u64; 2], rows: u64| at + row * (rows - 1) + 2 * W;
-        let start = self.luma[0].min(self.chroma[0]);
-        end(self.luma, H).max(end(self.chroma, H / 2)) - start
-    }
 }
 
 /// The luma plane at byte 0 and the chroma plane right after it, each row as long as its codes.
@@ -485,14 +476,20 @@ fn samples_as_metal_does(layout: Layout, what: &str) {
         let state = sampler(device);
         let mut wrong = Vec::new();
         let got = hash(&read_all(device, &texture));
-        // A second read's only long copy is the planes' into the staging buffer (the first's
-        // zeros the staging buffer too): split where its span is no multiple of 4 KiB (the padded
-        // layout's).
-        let before = device.work_counts().copy_regions_split;
+        // A second read's conversion goes through the texture's refresh over unchanged planes:
+        // no byte of them is copied (no long copy, so none split), and it reads the same texels.
+        let before = device.work_counts();
         let again = hash(&read_all(device, &texture));
-        let split = device.work_counts().copy_regions_split - before;
-        let want = u64::from(!layout.span().is_multiple_of(4096));
-        assert_eq!(split, want, "{what}: the planes' copy split");
+        let after = device.work_counts();
+        assert_eq!(
+            (
+                after.ycbcr_refreshes - before.ycbcr_refreshes,
+                after.ycbcr_whole_conversions - before.ycbcr_whole_conversions,
+                after.copy_regions_split - before.copy_regions_split,
+            ),
+            (1, 0, 0),
+            "{what}: a second read's conversion through the refresh"
+        );
         assert_eq!(again, got, "{what}: a second read");
         let is = verdict("read", &got);
         eprintln!("{what} read: {is:?} hash {got}");

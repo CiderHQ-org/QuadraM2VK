@@ -268,7 +268,8 @@ sizes: on ANV's UHD 770 one region of 8,294,411 bytes took 28-40 ms, one of 8,29
 0.006-0.035 ms. So every region over 16 KiB whose size is no multiple of 4 KiB is recorded as two,
 its bytes up to the last whole multiple of 4 KiB and the rest, whichever part of the runtime
 records it (`WorkCounts::copy_regions_split`): among them a two-plane YCbCr texture's planes copied
-into its staging buffer, and a staged texture's bytes and rows.
+into its staging buffer where it converts whole (`WorkCounts::ycbcr_whole_conversions`), and a
+staged texture's bytes and rows.
 
 ## 7. Check the integration
 

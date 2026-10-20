@@ -173,3 +173,5 @@ mod values;
 mod view_plan;
 mod word_fill;
 mod wrapped;
+#[cfg(any(m2v_gpu, m2v_cpu_icd))]
+mod ycbcr_refresh;
