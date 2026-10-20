@@ -61,7 +61,8 @@
 //!   depth-stencil state (two) every 16, the fragment sampler (two) every 32 and the cull mode
 //!   every 64. Per frame: the encoding thread's wall time from the command buffer's creation
 //!   through `endEncoding`, the commit call's, from its return to the wait's, the whole frame's,
-//!   the process's CPU time, and native's GPU time.
+//!   the process's CPU time, the encoding thread's CPU time through the commit's return, and
+//!   native's GPU time.
 //! - `memory`: `newBufferWithLength:` and `newBufferWithBytes:` of 4 KiB, 1 MiB and 64 MiB,
 //!   `newBufferWithBytesNoCopy:` of 1 MiB and 64 MiB, and a 1024x1024 `RGBA8Unorm` `Shared`
 //!   texture's `replaceRegion` and `getBytes`.

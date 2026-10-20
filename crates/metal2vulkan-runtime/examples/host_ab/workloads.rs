@@ -60,6 +60,20 @@ pub fn process_cpu() -> Duration {
     tv(usage.ru_utime) + tv(usage.ru_stime)
 }
 
+/// The calling thread's CPU time so far.
+pub fn thread_cpu() -> Duration {
+    // SAFETY: `clock_gettime` writes the struct it is given.
+    let spec = unsafe {
+        let mut spec = std::mem::zeroed::<libc::timespec>();
+        assert_eq!(
+            libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut spec),
+            0
+        );
+        spec
+    };
+    Duration::new(spec.tv_sec as u64, spec.tv_nsec as u32)
+}
+
 /// The rectangles' buffers: [`RECTS`] rectangles each, one every [`RECT_STRIDE`] bytes.
 const RECT_BUFFERS: usize = 4;
 const RECTS: usize = 1024;
@@ -1080,27 +1094,30 @@ impl<G: Gpu> ManyDraws<G> {
 
 /// The many-draws workload (module docs of `main.rs`): per frame, the encoding thread's wall
 /// time from the command buffer's creation through `endEncoding`, the commit call's, the commit's
-/// return to the wait's, the whole frame's, the process's CPU time, and the GPU time where the
-/// side measures it.
+/// return to the wait's, the whole frame's, the process's CPU time, the encoding thread's CPU
+/// time through the commit's return, and the GPU time where the side measures it.
 pub fn many_draws<G: Gpu>(g: &G, library: &G::Library, sizes: &Sizes) {
     let count = sizes.many_draws;
     let scene = ManyDraws::new(g, library, count);
-    let mut times: [Vec<f64>; 6] = Default::default();
+    let mut times: [Vec<f64>; 7] = Default::default();
     for frame in 0..sizes.timed + 3 {
         g.pool(|| {
             let cpu = process_cpu();
+            let thread = thread_cpu();
             let start = Instant::now();
             let command_buffer = g.command_buffer();
             scene.encode(g, &command_buffer, count);
             let encoded = Instant::now();
             g.commit(&command_buffer);
             let committed = Instant::now();
+            let thread = thread_cpu() - thread;
             g.wait(&command_buffer);
             let done = Instant::now();
             let cpu = process_cpu() - cpu;
             if frame < 3 {
                 return;
             }
+            times[6].push(ms(thread));
             times[0].push(ms(encoded - start));
             times[1].push(ms(committed - encoded));
             times[2].push(ms(done - committed));
@@ -1111,12 +1128,13 @@ pub fn many_draws<G: Gpu>(g: &G, library: &G::Library, sizes: &Sizes) {
             }
         });
     }
-    let [encode, commit, wait, frame, cpu, gpu] = &mut times;
+    let [encode, commit, wait, frame, cpu, gpu, thread] = &mut times;
     emit("many_draws", "encode", "ms", encode);
     emit("many_draws", "commit", "ms", commit);
     emit("many_draws", "commit_to_done", "ms", wait);
     emit("many_draws", "frame", "ms", frame);
     emit("many_draws", "cpu", "ms", cpu);
+    emit("many_draws", "thread_cpu", "ms", thread);
     if !gpu.is_empty() {
         emit("many_draws", "gpu", "ms", gpu);
     }
