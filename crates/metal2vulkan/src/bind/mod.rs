@@ -70,9 +70,9 @@
 //! command writes a buffer's bytes through a texture copied in and out of them and also another
 //! way, [`shadow_merge_module`] merges the bytes the texture changed into the buffer's in place of
 //! the copy back ([`shadow_merge_image_module`] reading the shadow's texels through its
-//! unsigned-integer view, where it has one, and [`shadow_merge_kept_image_module`] reading the
-//! kept texels from an image copy of the shadow too), and where a device copies a shadow back faster by a
-//! dispatch, [`shadow_copy_back_module`] stores its texels' words at their rows, and
+//! unsigned-integer view, where it has one, or its own 8-bit unsigned normalized view
+//! ([`ShadowMergeRead`]), and [`shadow_merge_kept_image_module`] reading the kept texels from an
+//! image copy of the shadow too), and where a device copies a shadow back faster by a dispatch, [`shadow_copy_back_module`] stores its texels' words at their rows, and
 //! [`shadow_copy_in_module`] copies a merged texture's texels in and keeps them with one dispatch.
 //! A copy of many
 //! equal rows between two buffers is one dispatch of [`rows_copy_module`] where a copy's region
@@ -295,6 +295,7 @@ pub use shadow_copy_in::{shadow_copy_in_module, ShadowCopyInModule};
 pub use shadow_merge::{shadow_merge_module, ShadowMergeModule};
 pub use shadow_merge_image::{
     shadow_merge_image_module, shadow_merge_kept_image_module, ShadowMergeImageModule,
+    ShadowMergeRead,
 };
 pub use status::{
     ExecutionStatus, MeshRecordsFault, ReplayFaults, StatusBits, StatusReport, StatusWord,

@@ -34,8 +34,8 @@ use crate::device::functions::Vk;
 use crate::shader_cache::driver::Making;
 use ash::vk;
 use metal2vulkan::bind::{
-    CompressedBlit, MipmapFilterKernel, RewritePhase, RewriteProgram, ShadowTexelView,
-    TessellationScanKernel, TexelWords, YCbCrOutput,
+    CompressedBlit, MipmapFilterKernel, RewritePhase, RewriteProgram, ShadowMergeRead,
+    ShadowTexelView, TessellationScanKernel, TexelWords, YCbCrOutput,
 };
 use metal2vulkan::metal::format::ExtendedRange;
 use metal2vulkan::metal::PixelFormat;
@@ -77,10 +77,11 @@ pub(super) enum OwnedModule {
     /// `bind::rows_copy_module`: many equal rows of words copied from one buffer into another by
     /// a dispatch, in place of a copy's region per row (`row_copies.rs`).
     RowsCopy,
-    /// `bind::shadow_merge_image_module` of one view of a texel (`ShadowTexelView`): a shadowed
+    /// `bind::shadow_merge_image_module` of one read of a texel (`ShadowMergeRead`): a shadowed
     /// texture's writes merged into its buffer's bytes, reading its shadow's texels through its
-    /// unsigned-integer view, its sampled image (`shadow_merge.rs`).
-    ShadowMergeImage(ShadowTexelView),
+    /// unsigned-integer view or its own 8-bit unsigned normalized view, its sampled image
+    /// (`shadow_merge.rs`).
+    ShadowMergeImage(ShadowMergeRead),
     /// `bind::shadow_merge_kept_image_module` of one view of a texel (`ShadowTexelView`): as
     /// [`OwnedModule::ShadowMergeImage`], the texels before the commands read from an image copy
     /// of the shadow, its second sampled image (`shadow_merge.rs`).
@@ -269,9 +270,9 @@ impl OwnedModule {
                 let push_bytes = metal2vulkan::bind::RowsCopyModule::PUSH_BYTES;
                 Ok((module.spirv.to_vec(), 2, push_bytes))
             }
-            OwnedModule::ShadowMergeImage(view) => {
+            OwnedModule::ShadowMergeImage(read) => {
                 let module =
-                    metal2vulkan::bind::shadow_merge_image_module(device.compile_device(), view)
+                    metal2vulkan::bind::shadow_merge_image_module(device.compile_device(), read)
                         .map_err(Error::Compile)?;
                 let push_bytes = metal2vulkan::bind::ShadowMergeImageModule::PUSH_BYTES;
                 Ok((module.spirv.to_vec(), 2, push_bytes))
@@ -455,7 +456,7 @@ pub(super) struct OwnedKernels {
     shadow_merge: Option<OwnedKernel>,
     depth_magnitude: Option<OwnedKernel>,
     shadow_copy_backs: HashMap<ShadowTexelView, OwnedKernel>,
-    shadow_merge_images: HashMap<ShadowTexelView, OwnedKernel>,
+    shadow_merge_images: HashMap<ShadowMergeRead, OwnedKernel>,
     shadow_merge_kept_images: HashMap<ShadowTexelView, OwnedKernel>,
     shadow_copy_ins: HashMap<ShadowTexelView, OwnedKernel>,
     mipmap_filters: HashMap<MipmapFilterKernel, OwnedKernel>,
@@ -532,7 +533,7 @@ impl OwnedKernels {
     fn get(&mut self, which: OwnedModule) -> Option<OwnedKernel> {
         match which {
             OwnedModule::ShadowCopyBack(view) => self.shadow_copy_backs.get(&view).copied(),
-            OwnedModule::ShadowMergeImage(view) => self.shadow_merge_images.get(&view).copied(),
+            OwnedModule::ShadowMergeImage(read) => self.shadow_merge_images.get(&read).copied(),
             OwnedModule::ShadowMergeKeptImage(view) => {
                 self.shadow_merge_kept_images.get(&view).copied()
             }
@@ -559,8 +560,8 @@ impl OwnedKernels {
             OwnedModule::ShadowCopyBack(view) => {
                 self.shadow_copy_backs.insert(view, kernel);
             }
-            OwnedModule::ShadowMergeImage(view) => {
-                self.shadow_merge_images.insert(view, kernel);
+            OwnedModule::ShadowMergeImage(read) => {
+                self.shadow_merge_images.insert(read, kernel);
             }
             OwnedModule::ShadowMergeKeptImage(view) => {
                 self.shadow_merge_kept_images.insert(view, kernel);

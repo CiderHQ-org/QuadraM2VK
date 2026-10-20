@@ -3299,8 +3299,9 @@ pub struct WorkCounts {
     /// of 4-byte words, each the same distance after the one before.
     pub row_copies_dispatched: u64,
     /// The merges of shadowed textures that fetch the texels after the commands from the shadow
-    /// through its unsigned-integer view, comparing them with the kept texels, in place of a copy
-    /// of them into the scratch (`shadow_merge.rs`): a cut merge whose shadow has the view.
+    /// through its unsigned-integer view, or its own `BGRA8Unorm` or `RGBA8Unorm` view, comparing
+    /// them with the kept texels, in place of a copy of them into the scratch (`shadow_merge.rs`):
+    /// a cut merge whose shadow has such a view.
     pub shadow_merges_fetched: u64,
     /// Of `shadow_merges_fetched`, those whose keep copies the shadow's texels into an image at
     /// their own coordinates (`vkCmdCopyImage`), which their kernel fetches beside the shadow's,

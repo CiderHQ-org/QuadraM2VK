@@ -995,7 +995,12 @@ fast forms record, and each `PrecisionNote`'s rustdoc states its bound.
   and reads them from there (`WorkCounts::shadow_merges_kept_in_images`). Its command queue keeps
   that image for its later merges of the same size and format, whatever their texture, each
   taking it once the encoder that took it last ended (`WorkCounts::shadow_merge_kept_images_made`,
-  `shadow_merge_kept_images_followed`, `shadow_merge_kept_images_live`).
+  `shadow_merge_kept_images_followed`, `shadow_merge_kept_images_live`). Where the image has no
+  unsigned-integer view (any device without that fact), a cut merge of a one-slice `BGRA8Unorm` or `RGBA8Unorm` texture reads the texels the commands left
+  from the image through a view of its own format, rebuilding each byte from its normalized value
+  (Vulkan defines that value as the byte over 255), with no copy of them
+  (`WorkCounts::shadow_merges_fetched`); every other format, the sRGB and 16-bit float ones among
+  them, copies them.
 - `metal2vulkan-degrade-staged-texture-buffer` (performance). `StagedTextureBuffer`: A texture
   buffer is viewed through a staging buffer: its texels start where the device views none
   (`minTexelBufferOffsetAlignment`). Cost: its texels are copied into a staging buffer before each

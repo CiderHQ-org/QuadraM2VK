@@ -149,7 +149,7 @@ use super::resource::ResourceKey;
 use super::rotated::{RotatedCopies, Turn};
 use super::row_copies::RowCopies;
 use super::shadow_copy_back::{CopyBack, WordView};
-use super::shadow_merge::{ScratchSpares, ShadowMerge};
+use super::shadow_merge::{ScratchSpares, ShadowMerge, UnormView};
 use super::texture::heap_tiled::HeapTiledCopies;
 use super::texture::heap_two_planes::HeapPlaneCopies;
 use super::texture::Texture;
@@ -371,6 +371,10 @@ pub(super) enum ShadowTarget {
         /// (`shadow_copy_back.rs`): through which its copies back dispatch and its merges read
         /// the texels the commands left (`shadow_merge.rs`); `None` where they copy.
         words: Option<WordView>,
+        /// The image's view of its own 8-bit unsigned normalized format, where it has no
+        /// unsigned-integer view: through which its merges read the texels the commands left
+        /// (`shadow_merge.rs`); `None` where they copy.
+        unorm: Option<UnormView>,
     },
     /// A texture buffer's staging buffer, which its bindings view.
     Buffer(ShadowStaging),

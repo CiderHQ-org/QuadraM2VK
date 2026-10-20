@@ -44,6 +44,7 @@ use super::shadow::{
 };
 use super::shadow_copy_back::WordView;
 use super::shadow_merge::ScratchSpares;
+use super::shadow_merge::UnormView;
 use super::texture::surface_two_planes;
 use super::texture::{IdUse, Texture};
 use super::texture_descriptor::{
@@ -1218,14 +1219,15 @@ impl Texels {
     /// size, which Vulkan copies texels at (a no-copy buffer's bytes need not start at one), the
     /// copies go through a staging buffer of the texture's ([`ShadowStaging`]). Its copies back
     /// dispatch through `words`, its image's integer view, where given and its one slice is
-    /// copied in place (`shadow_copy_back.rs`). Refused as `new_buffer` refuses the staging
-    /// buffer.
+    /// copied in place (`shadow_copy_back.rs`), and its merges read the texels through `unorm`,
+    /// its image's view of its own 8-bit unsigned normalized format, where given so
+    /// (`shadow_merge.rs`). Refused as `new_buffer` refuses the staging buffer.
     pub(super) fn shadow_copies(
         &self,
         image: vk::Image,
         identity: Identity,
         aspects: vk::ImageAspectFlags,
-        words: Option<WordView>,
+        (words, unorm): (Option<WordView>, Option<UnormView>),
     ) -> Result<ShadowCopies, Error> {
         let layout = &self.layout;
         let (buffer, at) = self.buffer.at_for(layout.offset, ReadApart::Texture);
@@ -1274,8 +1276,10 @@ impl Texels {
                 key: bytes.key,
                 bytes: tracked,
                 target: ShadowTarget::Image {
-                    // A copy back dispatches over one region copied in place alone.
+                    // A copy back dispatches, and a merge fetches, over one region copied in
+                    // place alone.
                     words: words.filter(|_| slices == 1 && staging.is_none()),
+                    unorm: unorm.filter(|_| slices == 1 && staging.is_none()),
                     image,
                     regions,
                     staging,

@@ -2762,6 +2762,7 @@ impl Device {
                         staging: None,
                         texel: None,
                         words: None,
+                        unorm: None,
                     },
                     // A heap's bytes join no other memory (`host_aliases.rs`).
                     alias: None,

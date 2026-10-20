@@ -98,6 +98,7 @@ use super::resource::{Identity, ObjectId, ResourceKey};
 use super::resource_ids::{Holder, IdHold, IdPlacement, IdSpace, ResourceId};
 use super::shadow::ShadowCopies;
 use super::shadow_copy_back::{self, with_word_view, WordView};
+use super::shadow_merge::{with_unorm_view, UnormView};
 use super::sharing::Sharing;
 use super::sparse::emulated::TileMapBuffer;
 use super::sparse::texture::{sparse_refusal, SparseExtras, SparseImage, SparseShape};
@@ -2165,6 +2166,12 @@ impl Device {
             true => with_word_view(plan, &facts, shadow_copy_back::dispatches_in(self)),
             false => (plan, None),
         };
+        // Without it, an 8-bit unsigned normalized image takes the view of its own format its
+        // merges read through (`shadow_merge.rs`).
+        let (plan, unorm) = match word {
+            Some(_) => (plan, None),
+            None => with_unorm_view(plan, &facts),
+        };
         let hazard = texels.options().hazard_tracking_mode()?;
         // A depth or stencil texture over a surface's plane copies the aspect the plane holds
         // alone (`copy_plan::surface_depth_unit`); its image's other aspect stays the zeros it
@@ -2211,7 +2218,22 @@ impl Device {
                 stores,
             })
         });
-        let copies = texels.shadow_copies(image.raw.get(), image.identity, aspects, words)?;
+        let unorm = unorm.and_then(|read| {
+            let view = image.own_view(&VkView {
+                view_type: ImageViewType::TYPE_2D,
+                format: image.plan().format,
+                components: ComponentMapping::IDENTITY,
+                aspect: ImageAspectFlags::COLOR,
+                base_level: 0,
+                level_count: 1,
+                base_layer: 0,
+                layer_count: 1,
+                usage: ImageUsageFlags::SAMPLED,
+            });
+            view.ok().map(|view| UnormView { view, read })
+        });
+        let views = (words, unorm);
+        let copies = texels.shadow_copies(image.raw.get(), image.identity, aspects, views)?;
         // Its copies keep its own image, which it presents again once the bytes lie in pages.
         self.stand_in_while_detached(&texels.buffer, &image)?;
         let (offset, bytes_per_row) = (texels.layout.offset, texels.layout.row_pitch);

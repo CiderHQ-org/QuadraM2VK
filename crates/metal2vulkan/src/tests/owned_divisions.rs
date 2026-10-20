@@ -156,12 +156,14 @@ fn modules() -> Vec<Build> {
             Box::new(move |d| Ok(bind::shadow_copy_in_module(d, view)?.spirv)),
         );
         push(
-            format!("shadow_merge_image_module({view:?})"),
-            Box::new(move |d| Ok(bind::shadow_merge_image_module(d, view)?.spirv)),
-        );
-        push(
             format!("shadow_merge_kept_image_module({view:?})"),
             Box::new(move |d| Ok(bind::shadow_merge_kept_image_module(d, view)?.spirv)),
+        );
+    }
+    for read in bind::ShadowMergeRead::ALL {
+        push(
+            format!("shadow_merge_image_module({read:?})"),
+            Box::new(move |d| Ok(bind::shadow_merge_image_module(d, read)?.spirv)),
         );
     }
     for output in [

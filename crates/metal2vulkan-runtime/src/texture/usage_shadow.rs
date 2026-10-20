@@ -289,7 +289,7 @@ impl Texture {
                     image.raw.get(),
                     image.identity,
                     texture_aspects(image.plan()),
-                    None,
+                    (None, None),
                 )?;
                 // The texture's own image lies in the bytes too where it aliases them.
                 if matches!(self.0.storage, Storage::Alias { .. }) {

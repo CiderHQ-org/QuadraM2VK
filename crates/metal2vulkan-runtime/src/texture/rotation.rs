@@ -237,7 +237,7 @@ impl Device {
             image.raw.get(),
             image.identity,
             texture_aspects(image.plan()),
-            None,
+            (None, None),
         )?;
         copies.drops_writes = true;
         self.degrade(Degradation::ShadowedTexture, || {

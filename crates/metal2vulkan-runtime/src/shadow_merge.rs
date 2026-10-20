@@ -47,25 +47,30 @@
 //! - **Fetched.** Where the shadow has its unsigned-integer view (`shadow_copy_back.rs`: on a
 //!   device that runs a copy back faster as a compute dispatch,
 //!   `DriverFact::ShadowCopyBackDispatchFaster`, a one-slice image of 4-, 8- or 16-byte texels
-//!   copied in place), a cut merge copies nothing of the texels the commands left: its kernel
-//!   (`bind::shadow_merge_image_module`) fetches them from the shadow through the view, the same
-//!   words a copy of them would hold, and compares them with the kept part's, so the scratch is
-//!   the kept part alone (`WorkCounts::shadow_merges_fetched`).
-//! - **Kept in an image.** Where such a merge's copy in takes no keep (the device copies in by no
-//!   dispatch, no `DriverFact::ShadowCopyInDispatchFaster`), its keep is a `vkCmdCopyImage` of
-//!   the cut rectangle from the shadow into a *kept image* at the same coordinates
+//!   copied in place), or else, a one-slice `BGRA8Unorm` or `RGBA8Unorm` image copied in place,
+//!   a view of its own format (`UnormView`, sampled usage on the image), a cut merge copies
+//!   nothing of the texels the commands left: its kernel (`bind::shadow_merge_image_module`)
+//!   fetches them from the shadow through the view, the same words a copy of them would hold
+//!   (through the unsigned normalized view, each byte rebuilt from its value, which Vulkan
+//!   defines as the byte over 255: `bind::ShadowMergeRead`), and compares them with the kept
+//!   part's, so the scratch is the kept part alone (`WorkCounts::shadow_merges_fetched`). Every
+//!   other format, sRGB and 16-bit float among them, copies them (`unorm_read`).
+//! - **Kept in an image.** Where a merge fetching through the unsigned-integer view takes no
+//!   keep in its copy in (the device copies in by no dispatch, no
+//!   `DriverFact::ShadowCopyInDispatchFaster`), its keep is a `vkCmdCopyImage` of the cut
+//!   rectangle from the shadow into a *kept image* at the same coordinates
 //!   (`texture/kept_image.rs`: the shadow's extent, of its view's unsigned-integer format, a
 //!   format of its compatibility class, so the copy holds the texels' bits), and its kernel
 //!   (`bind::shadow_merge_kept_image_module`) fetches the kept texels from it beside the shadow's:
 //!   no scratch (`WorkCounts::shadow_merges_kept_in_images`). On the Iris Xe of RPL-P such a copy
 //!   takes under a third of the GPU time of a copy or dispatch of the same texels into a buffer's
 //!   rows (`docs/FAST-PATHS.md`).
-//! - **Dispatched copies.** Where the shadow has that view, the copies of its texels into the
-//!   kept part, and into the changed part where the merge does not fetch, are that dispatch, each
-//!   storing the bytes the copy would (`WorkCounts::shadow_merge_copies_dispatched`). Where the
-//!   view also stores (`DriverFact::ShadowCopyInDispatchFaster`), a cut keep in place whose
-//!   texels the copy in before it moves, and no copy of the shadow between them, takes that copy
-//!   in with it: one dispatch reads the texels' words from the buffer and stores them in the
+//! - **Dispatched copies.** Where the shadow has its unsigned-integer view, the copies of its
+//!   texels into the kept part, and into the changed part where the merge does not fetch, are that
+//!   dispatch, each storing the bytes the copy would (`WorkCounts::shadow_merge_copies_dispatched`).
+//!   Where the view also stores (`DriverFact::ShadowCopyInDispatchFaster`), a cut keep in place
+//!   whose texels the copy in before it moves, and no copy of the shadow between them, takes that
+//!   copy in with it: one dispatch reads the texels' words from the buffer and stores them in the
 //!   shadow, through the view, and in the kept part (`shadow_copy_in.rs`,
 //!   `WorkCounts::shadow_copies_in_dispatched`).
 //! - **The scratch** is the command's, or for a merge in place of a copy back the encoder's, kept
@@ -87,8 +92,8 @@
 //!   4-byte words an invocation, the parts bound as its kept, changed and current storage
 //!   buffers, in windows of at most `maxStorageBufferRange` bytes and
 //!   `maxComputeWorkGroupCount[0]` groups, one dispatch each; where it fetches
-//!   (`bind::shadow_merge_image_module`, one per texel width), one invocation per texel, the
-//!   view, the kept part (or the kept image's view) and the bytes bound, in bands of rows each of
+//!   (`bind::shadow_merge_image_module`, one per read of a texel), four texels of a row an
+//!   invocation, the view, the kept part (or the kept image's view) and the bytes bound, in bands of rows each of
 //!   whose bindings stays within `maxStorageBufferRange` and whose rows within
 //!   `maxComputeWorkGroupCount[1]`.
 //!
@@ -103,6 +108,7 @@ use super::buffer::Buffer;
 use super::degradation::Degradation;
 use super::device::lock;
 use super::error::{internal, Error};
+use super::image_plan::{ImageFacts, ImagePlan};
 use super::linear_merge::gcd;
 use super::owned_kernel::{OwnedBinds, OwnedKernel, OwnedModule, OwnedSet};
 use super::resource::ResourceKey;
@@ -115,7 +121,10 @@ use super::values::{HazardTrackingMode, ResourceOptions};
 use super::Device;
 use crate::device::functions::Vk;
 use ash::vk;
-use metal2vulkan::bind::{ShadowMergeImageModule, ShadowMergeModule};
+use metal2vulkan::bind::{
+    ShadowMergeImageModule, ShadowMergeModule, ShadowMergeRead, ShadowTexelView,
+};
+use metal2vulkan::vk::{Format, FormatFeatureFlags2, ImageUsageFlags};
 use std::ops::Range;
 use std::sync::{Arc, Mutex};
 
@@ -180,12 +189,13 @@ enum Held {
 enum KeptIn {
     /// The scratch's kept part, row after row (or laid out as in the buffer).
     Part(Part),
-    /// A kept image, at their own coordinates: `copy` copies the cut rectangle of the `shadow`
-    /// into the `kept` image.
+    /// A kept image of the unsigned-integer format of `texel`, at their own coordinates: `copy`
+    /// copies the cut rectangle of the `shadow` into the `kept` image.
     Image {
         shadow: vk::Image,
         kept: vk::Image,
         copy: vk::ImageCopy,
+        texel: ShadowTexelView,
     },
 }
 
@@ -226,8 +236,8 @@ enum Changed {
         part: Part,
         dispatch: Option<CopyBack>,
     },
-    /// Fetched from the shadow through its unsigned-integer view by
-    /// `bind::shadow_merge_image_module`: no copy.
+    /// Fetched from the shadow through its unsigned-integer view, or its own 8-bit unsigned
+    /// normalized view, by `bind::shadow_merge_image_module`: no copy.
     Fetched,
 }
 
@@ -313,13 +323,14 @@ impl ShadowMerge {
             [0, 1].map(|axis| u64::from(limits.max_compute_work_group_count[axis]));
         // A merge in place whose commands bound no area is cut to every texel where it can be:
         // its parts hold the texels row after row, as a cut's do, and need no zero (below). A cut
-        // fetches the texels after the commands through the shadow's unsigned-integer view where
-        // it has one, and the rectangle lies within the kernel's origin and workgroups.
+        // fetches the texels after the commands through the shadow's unsigned-integer view, or
+        // its own 8-bit unsigned normalized view, where it has one (`fetch_view`), and the
+        // rectangle lies within the kernel's origin and workgroups.
         let cut = in_place
             .then(|| cut_of(copies, area))
             .flatten()
             .and_then(|(cut, geometry)| {
-                let view = word_view(copies).filter(|_| fetches(&cut, groups, groups_y));
+                let view = fetch_view(copies).filter(|_| fetches(&cut, groups, groups_y));
                 let rows = match view {
                     Some(_) => groups_y,
                     None => groups * GROUP_BYTES / geometry.row_bytes,
@@ -332,12 +343,15 @@ impl ShadowMerge {
         }
         .next_multiple_of(PART_ALIGNMENT);
         let fetched = cut.as_ref().and_then(|(.., view)| *view);
-        // A merge that fetches keeps the texels in an image at their own coordinates, copied from
-        // the shadow, where the copy in never takes the keep (the device copies in by no
-        // dispatch, `shadow_copy_in.rs`): no scratch.
+        // A merge that fetches through the unsigned-integer view keeps the texels in an image of
+        // its format at their own coordinates, copied from the shadow, where the copy in never
+        // takes the keep (the device copies in by no dispatch, `shadow_copy_in.rs`): no scratch.
+        // One that reads the shadow's own unsigned normalized view keeps them in the scratch.
         let kept_image = match (fetched, kept_extent(copies)) {
-            (Some(view), Some(extent)) if !shadow_copy_back::dispatches_in(device) => {
-                Some((view.texel, extent))
+            (Some((_, ShadowMergeRead::Words(texel))), Some(extent))
+                if !shadow_copy_back::dispatches_in(device) =>
+            {
+                Some((texel, extent))
             }
             _ => None,
         };
@@ -405,14 +419,17 @@ impl ShadowMerge {
         };
         let (kept_in, changed, current) = match (&held, &placed[..]) {
             (Held::Image(image), []) => {
-                let Some((
-                    Cut {
-                        image: shadow,
-                        region,
-                        ..
-                    },
-                    ..,
-                )) = &cut
+                let (
+                    Some((
+                        Cut {
+                            image: shadow,
+                            region,
+                            ..
+                        },
+                        ..,
+                    )),
+                    Some((texel, _)),
+                ) = (&cut, kept_image)
                 else {
                     return Err(internal("an uncut merge keeping its texels in an image"));
                 };
@@ -433,6 +450,7 @@ impl ShadowMerge {
                     shadow: *shadow,
                     kept: image.raw(),
                     copy,
+                    texel,
                 };
                 (kept_in, None, None)
             }
@@ -471,7 +489,7 @@ impl ShadowMerge {
             Held::Spare(..) | Held::Apart(_) => None,
         };
         let set = |buffers: Vec<(vk::Buffer, u64, u64)>| OwnedSet {
-            images: (fetched.iter().map(|view| view.view))
+            images: (fetched.iter().map(|&(view, _)| view))
                 .chain(kept_view)
                 .collect(),
             storage_images: Vec::new(),
@@ -579,11 +597,11 @@ impl ShadowMerge {
             }
         }
         let kernel = match (fetched, kept_in) {
-            (Some(view), KeptIn::Image { .. }) => {
-                device.owned_kernel(OwnedModule::ShadowMergeKeptImage(view.texel))?
+            (Some(_), KeptIn::Image { texel, .. }) => {
+                device.owned_kernel(OwnedModule::ShadowMergeKeptImage(texel))?
             }
-            (Some(view), KeptIn::Part(_)) => {
-                device.owned_kernel(OwnedModule::ShadowMergeImage(view.texel))?
+            (Some((_, read)), KeptIn::Part(_)) => {
+                device.owned_kernel(OwnedModule::ShadowMergeImage(read))?
             }
             (None, _) => device.owned_kernel(OwnedModule::ShadowMerge)?,
         };
@@ -861,7 +879,12 @@ impl ShadowMerge {
                 (None, KeptIn::Part(kept)) => {
                     self.record_out(device, command_buffer, copies, kept);
                 }
-                (None, KeptIn::Image { shadow, kept, copy }) => device.cmd_copy_image(
+                (
+                    None,
+                    KeptIn::Image {
+                        shadow, kept, copy, ..
+                    },
+                ) => device.cmd_copy_image(
                     command_buffer,
                     shadow,
                     vk::ImageLayout::GENERAL,
@@ -984,6 +1007,72 @@ fn word_view(copies: &ShadowCopies) -> Option<WordView> {
             ..
         } => Some(*words),
         _ => None,
+    }
+}
+
+/// A shadow's sampled view of its own 8-bit unsigned normalized format, through which its cut
+/// merges read the texels the commands left (`bind::ShadowMergeRead`) where it has no
+/// unsigned-integer view (`shadow_copy_back.rs`): one of the shadow image's own views
+/// (`Image::own_view`), which stays through a detach of the texture's bytes and goes as the image
+/// drops.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct UnormView {
+    pub(super) view: vk::ImageView,
+    /// How the kernel reads it: `B8G8R8A8Unorm` or `R8G8B8A8Unorm` ([`unorm_read`]).
+    pub(super) read: ShadowMergeRead,
+}
+
+/// How the kernel reads a shadow image of `format` through a view of its own format (the module
+/// docs): `B8G8R8A8_UNORM` and `R8G8B8A8_UNORM` alone. Every other format's merges copy the texels
+/// out: an sRGB format's fetch returns its bytes through the sRGB curve, not as `c / 255`, which
+/// the kernel does not invert; a 16-bit float format's widens each value to `f32`, through which a
+/// NaN's payload need not come back; and the kernel rebuilds no other format's bytes.
+fn unorm_read(format: Format) -> Option<ShadowMergeRead> {
+    match format {
+        Format::B8G8R8A8_UNORM => Some(ShadowMergeRead::B8G8R8A8Unorm),
+        Format::R8G8B8A8_UNORM => Some(ShadowMergeRead::R8G8B8A8Unorm),
+        _ => None,
+    }
+}
+
+/// `plan`, a shadow's image, made to take its [`UnormView`]: sampled usage, with the kernel's read
+/// ([`unorm_read`]). `None`, `plan` unchanged, for an image of another format, of more than one
+/// level or slice, or of a format the device does not sample. Sampled usage changes nothing of
+/// the texture MoltenVK makes for the image: MoltenVK 1.4.1 gives a texture
+/// `MTLTextureUsageShaderRead` for transfer-source usage, which every shadow has, as for sampled
+/// usage (`MVKPixelFormats::getMTLTextureUsage`), and the view, of the image's own format and
+/// mapping, takes no pixel-format view.
+pub(super) fn with_unorm_view(
+    mut plan: ImagePlan,
+    facts: &ImageFacts<'_>,
+) -> (ImagePlan, Option<ShadowMergeRead>) {
+    let single = plan.levels == 1 && plan.layers == 1 && plan.extent[2] == 1;
+    let sampled = facts
+        .optimal(plan.format)
+        .contains(FormatFeatureFlags2::SAMPLED_IMAGE);
+    let read = unorm_read(plan.format).filter(|_| single && sampled);
+    if read.is_some() {
+        plan.usage |= ImageUsageFlags::SAMPLED;
+    }
+    (plan, read)
+}
+
+/// The view a cut merge of the shadow of `copies` fetches the texels the commands left through,
+/// and how its kernel reads them: the shadow's unsigned-integer view where it has one
+/// (`shadow_copy_back.rs`), else its own 8-bit unsigned normalized view ([`UnormView`]); `None`
+/// where it has neither, and the merge copies them out.
+fn fetch_view(copies: &ShadowCopies) -> Option<(vk::ImageView, ShadowMergeRead)> {
+    let ShadowSource::Bytes {
+        target: ShadowTarget::Image { words, unorm, .. },
+        ..
+    } = &copies.source
+    else {
+        return None;
+    };
+    match (words, unorm) {
+        (Some(words), _) => Some((words.view, ShadowMergeRead::Words(words.texel))),
+        (None, Some(unorm)) => Some((unorm.view, unorm.read)),
+        (None, None) => None,
     }
 }
 

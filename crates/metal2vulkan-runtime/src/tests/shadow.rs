@@ -80,6 +80,7 @@ fn shadow_in(
                 staging: None,
                 texel: Some(4),
                 words: None,
+                unorm: None,
             },
             alias,
         },

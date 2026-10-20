@@ -146,6 +146,8 @@ mod shader_cache;
 mod shadow;
 #[cfg(any(m2v_gpu, m2v_cpu_icd))]
 mod shadow_host_writes;
+#[cfg(any(m2v_gpu, m2v_cpu_icd))]
+mod shadow_merge_read;
 mod shadow_stencil;
 mod sorted_chunks;
 mod spares;
