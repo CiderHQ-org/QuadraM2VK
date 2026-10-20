@@ -1,0 +1,400 @@
+//! The native side: Metal's calls on Metal itself (objc2-metal), on the system default device.
+
+use crate::gpu::{Format, Gpu};
+use block2::RcBlock;
+use objc2::rc::{autoreleasepool, Retained};
+use objc2::runtime::ProtocolObject;
+use objc2_foundation::{NSString, NSURL};
+use objc2_metal::{
+    MTLBlitCommandEncoder, MTLBuffer, MTLClearColor, MTLCommandBuffer, MTLCommandBufferStatus,
+    MTLCommandEncoder, MTLCommandQueue, MTLComputeCommandEncoder, MTLComputePipelineState,
+    MTLCreateSystemDefaultDevice, MTLDevice, MTLLibrary, MTLLoadAction, MTLOrigin, MTLPixelFormat,
+    MTLPrimitiveType, MTLRegion, MTLRenderCommandEncoder, MTLRenderPassDescriptor,
+    MTLRenderPipelineDescriptor, MTLRenderPipelineState, MTLResourceOptions, MTLSamplerDescriptor,
+    MTLSamplerMinMagFilter, MTLSamplerState, MTLSize, MTLStorageMode, MTLStoreAction, MTLTexture,
+    MTLTextureDescriptor, MTLTextureUsage,
+};
+use std::ffi::c_void;
+use std::path::Path;
+use std::ptr::NonNull;
+use std::sync::Mutex;
+
+type Object<T> = Retained<ProtocolObject<T>>;
+
+pub struct Native {
+    device: Object<dyn MTLDevice>,
+    queue: Object<dyn MTLCommandQueue>,
+}
+
+impl Native {
+    pub fn open() -> Native {
+        let device = MTLCreateSystemDefaultDevice().expect("MTLCreateSystemDefaultDevice");
+        let queue = device.newCommandQueue().expect("newCommandQueue");
+        Native { device, queue }
+    }
+}
+
+fn pixel_format(format: Format) -> MTLPixelFormat {
+    match format {
+        Format::Bgra8 => MTLPixelFormat::BGRA8Unorm,
+        Format::Rgba8 => MTLPixelFormat::RGBA8Unorm,
+        Format::Rgba16Float => MTLPixelFormat::RGBA16Float,
+    }
+}
+
+fn region(size: (usize, usize)) -> MTLRegion {
+    MTLRegion {
+        origin: MTLOrigin { x: 0, y: 0, z: 0 },
+        size: MTLSize {
+            width: size.0,
+            height: size.1,
+            depth: 1,
+        },
+    }
+}
+
+fn function(
+    library: &ProtocolObject<dyn MTLLibrary>,
+    name: &str,
+) -> Object<dyn objc2_metal::MTLFunction> {
+    library
+        .newFunctionWithName(&NSString::from_str(name))
+        .unwrap_or_else(|| panic!("newFunctionWithName {name}"))
+}
+
+impl Gpu for Native {
+    type Library = Object<dyn MTLLibrary>;
+    type RenderPipeline = Object<dyn MTLRenderPipelineState>;
+    type ComputePipeline = Object<dyn MTLComputePipelineState>;
+    type Buffer = Object<dyn MTLBuffer>;
+    type Texture = Object<dyn MTLTexture>;
+    type Sampler = Object<dyn MTLSamplerState>;
+    type CommandBuffer = Object<dyn MTLCommandBuffer>;
+    type RenderEncoder = Object<dyn MTLRenderCommandEncoder>;
+    type ComputeEncoder = Object<dyn MTLComputeCommandEncoder>;
+
+    fn label(&self) -> String {
+        format!("native Metal on {}", self.device.name())
+    }
+
+    fn library(&self, metallib: &Path) -> Self::Library {
+        let path = NSString::from_str(metallib.to_str().expect("a UTF-8 path"));
+        self.device
+            .newLibraryWithURL_error(&NSURL::fileURLWithPath(&path))
+            .expect("newLibraryWithURL")
+    }
+
+    fn render_pipeline(
+        &self,
+        library: &Self::Library,
+        vertex: &str,
+        fragment: &str,
+        format: Format,
+        blend: bool,
+    ) -> Self::RenderPipeline {
+        let descriptor = MTLRenderPipelineDescriptor::new();
+        descriptor.setVertexFunction(Some(&function(library, vertex)));
+        descriptor.setFragmentFunction(Some(&function(library, fragment)));
+        // SAFETY: attachment 0 exists.
+        let color = unsafe { descriptor.colorAttachments().objectAtIndexedSubscript(0) };
+        color.setPixelFormat(pixel_format(format));
+        color.setBlendingEnabled(blend);
+        self.device
+            .newRenderPipelineStateWithDescriptor_error(&descriptor)
+            .expect("newRenderPipelineStateWithDescriptor")
+    }
+
+    fn compute_pipeline(&self, library: &Self::Library, kernel: &str) -> Self::ComputePipeline {
+        self.device
+            .newComputePipelineStateWithFunction_error(&function(library, kernel))
+            .expect("newComputePipelineStateWithFunction")
+    }
+
+    fn buffer(&self, length: usize) -> Self::Buffer {
+        self.device
+            .newBufferWithLength_options(length, MTLResourceOptions::StorageModeShared)
+            .expect("newBufferWithLength")
+    }
+
+    fn buffer_with(&self, bytes: &[u8]) -> Self::Buffer {
+        let pointer = NonNull::new(bytes.as_ptr() as *mut c_void).expect("bytes");
+        // SAFETY: `bytes` holds `bytes.len()` bytes, which Metal copies.
+        unsafe {
+            self.device.newBufferWithBytes_length_options(
+                pointer,
+                bytes.len(),
+                MTLResourceOptions::StorageModeShared,
+            )
+        }
+        .expect("newBufferWithBytes")
+    }
+
+    unsafe fn buffer_no_copy(&self, pointer: *mut u8, length: usize) -> Self::Buffer {
+        let pointer = NonNull::new(pointer as *mut c_void).expect("a pointer");
+        // SAFETY: the caller's contract.
+        unsafe {
+            self.device
+                .newBufferWithBytesNoCopy_length_options_deallocator(
+                    pointer,
+                    length,
+                    MTLResourceOptions::StorageModeShared,
+                    None,
+                )
+        }
+        .expect("newBufferWithBytesNoCopy")
+    }
+
+    fn texture(&self, format: Format, width: usize, height: usize, target: bool) -> Self::Texture {
+        // SAFETY: plain sizes.
+        let descriptor = unsafe {
+            MTLTextureDescriptor::texture2DDescriptorWithPixelFormat_width_height_mipmapped(
+                pixel_format(format),
+                width,
+                height,
+                false,
+            )
+        };
+        if target {
+            descriptor.setUsage(MTLTextureUsage::RenderTarget);
+            descriptor.setStorageMode(MTLStorageMode::Private);
+        } else {
+            descriptor.setUsage(MTLTextureUsage::ShaderRead);
+            descriptor.setStorageMode(MTLStorageMode::Shared);
+        }
+        self.device
+            .newTextureWithDescriptor(&descriptor)
+            .expect("newTextureWithDescriptor")
+    }
+
+    fn replace_region(
+        &self,
+        texture: &Self::Texture,
+        size: (usize, usize),
+        bytes: &[u8],
+        row: usize,
+    ) {
+        let pointer = NonNull::new(bytes.as_ptr() as *mut c_void).expect("bytes");
+        // SAFETY: `bytes` holds the region's rows at `row` bytes each.
+        unsafe {
+            texture.replaceRegion_mipmapLevel_withBytes_bytesPerRow(region(size), 0, pointer, row)
+        };
+    }
+
+    fn get_bytes(
+        &self,
+        texture: &Self::Texture,
+        size: (usize, usize),
+        bytes: &mut [u8],
+        row: usize,
+    ) {
+        let pointer = NonNull::new(bytes.as_mut_ptr() as *mut c_void).expect("bytes");
+        // SAFETY: `bytes` has room for the region's rows at `row` bytes each.
+        unsafe {
+            texture.getBytes_bytesPerRow_fromRegion_mipmapLevel(pointer, row, region(size), 0)
+        };
+    }
+
+    fn sampler(&self, linear: bool) -> Self::Sampler {
+        let descriptor = MTLSamplerDescriptor::new();
+        if linear {
+            descriptor.setMinFilter(MTLSamplerMinMagFilter::Linear);
+            descriptor.setMagFilter(MTLSamplerMinMagFilter::Linear);
+        }
+        self.device
+            .newSamplerStateWithDescriptor(&descriptor)
+            .expect("newSamplerStateWithDescriptor")
+    }
+
+    fn command_buffer(&self) -> Self::CommandBuffer {
+        self.queue.commandBuffer().expect("commandBuffer")
+    }
+
+    fn render_encoder(
+        &self,
+        command_buffer: &Self::CommandBuffer,
+        target: &Self::Texture,
+        clear: bool,
+    ) -> Self::RenderEncoder {
+        let pass = MTLRenderPassDescriptor::renderPassDescriptor();
+        // SAFETY: attachment 0 exists.
+        let color = unsafe { pass.colorAttachments().objectAtIndexedSubscript(0) };
+        color.setTexture(Some(target));
+        color.setLoadAction(if clear {
+            MTLLoadAction::Clear
+        } else {
+            MTLLoadAction::Load
+        });
+        color.setStoreAction(MTLStoreAction::Store);
+        color.setClearColor(MTLClearColor {
+            red: 0.0,
+            green: 0.0,
+            blue: 0.0,
+            alpha: 1.0,
+        });
+        command_buffer
+            .renderCommandEncoderWithDescriptor(&pass)
+            .expect("renderCommandEncoderWithDescriptor")
+    }
+
+    fn set_render_pipeline(&self, encoder: &mut Self::RenderEncoder, state: &Self::RenderPipeline) {
+        encoder.setRenderPipelineState(state);
+    }
+
+    fn set_vertex_buffer(
+        &self,
+        encoder: &mut Self::RenderEncoder,
+        buffer: &Self::Buffer,
+        offset: usize,
+        index: usize,
+    ) {
+        // SAFETY: the offset lies in the buffer and the index is in Metal's range.
+        unsafe { encoder.setVertexBuffer_offset_atIndex(Some(buffer), offset, index) };
+    }
+
+    fn set_fragment_buffer(
+        &self,
+        encoder: &mut Self::RenderEncoder,
+        buffer: &Self::Buffer,
+        offset: usize,
+        index: usize,
+    ) {
+        // SAFETY: as `set_vertex_buffer`.
+        unsafe { encoder.setFragmentBuffer_offset_atIndex(Some(buffer), offset, index) };
+    }
+
+    fn set_fragment_texture(
+        &self,
+        encoder: &mut Self::RenderEncoder,
+        texture: &Self::Texture,
+        index: usize,
+    ) {
+        // SAFETY: the index is in Metal's range.
+        unsafe { encoder.setFragmentTexture_atIndex(Some(texture), index) };
+    }
+
+    fn set_fragment_sampler(
+        &self,
+        encoder: &mut Self::RenderEncoder,
+        sampler: &Self::Sampler,
+        index: usize,
+    ) {
+        // SAFETY: the index is in Metal's range.
+        unsafe { encoder.setFragmentSamplerState_atIndex(Some(sampler), index) };
+    }
+
+    fn draw_strip(&self, encoder: &mut Self::RenderEncoder, vertices: usize) {
+        // SAFETY: the bound state reads only its bound buffers.
+        unsafe {
+            encoder.drawPrimitives_vertexStart_vertexCount(
+                MTLPrimitiveType::TriangleStrip,
+                0,
+                vertices,
+            )
+        };
+    }
+
+    fn end_render(&self, encoder: Self::RenderEncoder) {
+        encoder.endEncoding();
+    }
+
+    fn compute_encoder(&self, command_buffer: &Self::CommandBuffer) -> Self::ComputeEncoder {
+        command_buffer
+            .computeCommandEncoder()
+            .expect("computeCommandEncoder")
+    }
+
+    fn set_compute_pipeline(
+        &self,
+        encoder: &mut Self::ComputeEncoder,
+        state: &Self::ComputePipeline,
+    ) {
+        encoder.setComputePipelineState(state);
+    }
+
+    fn set_buffer(
+        &self,
+        encoder: &mut Self::ComputeEncoder,
+        buffer: &Self::Buffer,
+        offset: usize,
+        index: usize,
+    ) {
+        // SAFETY: as `set_vertex_buffer`.
+        unsafe { encoder.setBuffer_offset_atIndex(Some(buffer), offset, index) };
+    }
+
+    fn set_texture(
+        &self,
+        encoder: &mut Self::ComputeEncoder,
+        texture: &Self::Texture,
+        index: usize,
+    ) {
+        // SAFETY: the index is in Metal's range.
+        unsafe { encoder.setTexture_atIndex(Some(texture), index) };
+    }
+
+    fn dispatch(&self, encoder: &mut Self::ComputeEncoder, groups: usize, threads: usize) {
+        let size = |width| MTLSize {
+            width,
+            height: 1,
+            depth: 1,
+        };
+        encoder.dispatchThreadgroups_threadsPerThreadgroup(size(groups), size(threads));
+    }
+
+    fn end_compute(&self, encoder: Self::ComputeEncoder) {
+        encoder.endEncoding();
+    }
+
+    fn fill(&self, command_buffer: &Self::CommandBuffer, buffer: &Self::Buffer, length: usize) {
+        let blit = command_buffer
+            .blitCommandEncoder()
+            .expect("blitCommandEncoder");
+        blit.fillBuffer_range_value(
+            buffer,
+            objc2_foundation::NSRange {
+                location: 0,
+                length,
+            },
+            0x5a,
+        );
+        blit.endEncoding();
+    }
+
+    fn commit(&self, command_buffer: &Self::CommandBuffer) {
+        command_buffer.commit();
+    }
+
+    fn wait(&self, command_buffer: &Self::CommandBuffer) {
+        command_buffer.waitUntilCompleted();
+        let status = command_buffer.status();
+        assert!(
+            status == MTLCommandBufferStatus::Completed,
+            "the command buffer ended {status:?}: {:?}",
+            command_buffer.error()
+        );
+    }
+
+    fn on_completed(
+        &self,
+        command_buffer: &Self::CommandBuffer,
+        handler: Box<dyn FnOnce() + Send>,
+    ) {
+        let handler = Mutex::new(Some(handler));
+        let block = RcBlock::new(move |_: NonNull<ProtocolObject<dyn MTLCommandBuffer>>| {
+            if let Some(handler) = handler.lock().unwrap().take() {
+                handler();
+            }
+        });
+        // SAFETY: the block is valid for the call, and Metal copies it before returning; it is
+        // added before the commit.
+        unsafe { command_buffer.addCompletedHandler(RcBlock::as_ptr(&block)) };
+    }
+
+    fn gpu_seconds(&self, command_buffer: &Self::CommandBuffer) -> Option<f64> {
+        Some(command_buffer.GPUEndTime() - command_buffer.GPUStartTime())
+    }
+
+    fn pool<R>(&self, f: impl FnOnce() -> R) -> R {
+        autoreleasepool(|_| f())
+    }
+}
