@@ -3187,7 +3187,7 @@ impl CommandBufferShared {
         let fence = unsafe { shared.fences.take(raw) }.ok()?;
         // SAFETY: a submission of no batch with an unsignaled fence in no pending submission;
         // the `VkQueue` is used under its lock.
-        shared.counts.queue_submitted(0);
+        shared.counts.queue_submitted(0, 0);
         let submitted = shared.submit_logged(
             (queue, None),
             Some(fence),

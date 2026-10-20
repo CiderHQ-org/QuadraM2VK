@@ -240,6 +240,35 @@ impl Gpu for Runtime {
         self.device.new_texture(&descriptor).expect("new_texture")
     }
 
+    fn tracked_heap(&self, size: usize) -> rt::Heap {
+        let options = rt::ResourceOptions::new(
+            rt::StorageMode::Shared,
+            rt::CpuCacheMode::DefaultCache,
+            rt::HazardTrackingMode::Tracked,
+        );
+        let descriptor = rt::HeapDescriptor::new(rt::HeapType::Placement, size as u64, options);
+        self.device.new_heap(&descriptor).expect("new_heap")
+    }
+
+    fn heap_render_texture(
+        &self,
+        heap: &rt::Heap,
+        format: Format,
+        side: usize,
+        offset: usize,
+    ) -> rt::Texture {
+        let mut descriptor = rt::TextureDescriptor::texture_2d(
+            pixel_format(format),
+            side as u64,
+            side as u64,
+            false,
+        );
+        descriptor.usage = TextureUsage::RENDER_TARGET | TextureUsage::SHADER_READ;
+        descriptor.resource_options = rt::ResourceOptions::shared();
+        heap.new_texture_at_offset(&descriptor, offset as u64)
+            .expect("new_texture_at_offset")
+    }
+
     fn replace_region(
         &self,
         texture: &rt::Texture,
@@ -546,5 +575,23 @@ impl Gpu for Runtime {
 
     fn pool<R>(&self, f: impl FnOnce() -> R) -> R {
         f()
+    }
+
+    fn work_counts(&self) -> Vec<(&'static str, f64)> {
+        let c = self.device.work_counts();
+        let replayed = &c.commands_replayed;
+        [
+            ("queue_submissions", c.queue_submissions),
+            ("submit_infos", c.submit_infos),
+            ("vk_command_buffers_submitted", c.command_buffers_submitted),
+            ("first_work_buffers", c.command_buffers_begun_batch_work),
+            ("barrier_buffers", c.command_buffers_begun_batch_barriers),
+            ("finales_apart", c.finales_apart),
+            ("render_passes_begun", replayed.cmd_begin_render_pass),
+            ("pipeline_barriers", replayed.cmd_pipeline_barrier),
+        ]
+        .into_iter()
+        .map(|(name, count)| (name, count as f64))
+        .collect()
     }
 }

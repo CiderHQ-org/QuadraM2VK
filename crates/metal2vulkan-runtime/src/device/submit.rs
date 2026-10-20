@@ -263,7 +263,7 @@ impl Device {
             let buffers = submits
                 .iter()
                 .map(|info| info.command_buffer_count as usize);
-            shared.counts.queue_submitted(buffers.sum());
+            shared.counts.queue_submitted(submits.len(), buffers.sum());
             raw.queue_submit(queue, &submits, objects.fence)
         });
         // A `vkQueueSubmit` that fails leaves what its submissions reference as it was, or loses
@@ -329,7 +329,7 @@ impl Device {
         // and in its memory at its alignment, of a type it takes (`dma_buf.rs`); the queue's
         // family binds sparse memory, and the queue is used under its lock; the signal is above
         // the timeline's value (the internal lock is held).
-        shared.counts.queue_submitted(0);
+        shared.counts.queue_submitted(0, 0);
         let bound = shared.use_queue(0, By::Runtime, |queue| unsafe {
             raw.queue_bind_sparse(queue, &[info], vk::Fence::null())
         });

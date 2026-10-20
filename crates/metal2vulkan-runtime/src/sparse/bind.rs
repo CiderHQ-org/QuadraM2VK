@@ -355,7 +355,7 @@ pub(crate) fn bind_batch(
     // submitted; the queue binds sparse memory (the device's support) and is used under its
     // lock. Where the queue's failures are relayed, one of the bind's loses the device
     // (`device/relay.rs`).
-    shared.counts.queue_submitted(0);
+    shared.counts.queue_submitted(0, 0);
     let bound = shared.use_queue(queue, By::Runtime, |vk_queue| unsafe {
         shared
             .vk()

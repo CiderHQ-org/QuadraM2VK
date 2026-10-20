@@ -105,6 +105,7 @@ pub(crate) struct Counters {
     indirect_records_read: AtomicU64,
     internal_submissions: AtomicU64,
     queue_submissions: AtomicU64,
+    submit_infos: AtomicU64,
     command_buffers_submitted: AtomicU64,
     batch_submit_nanos: AtomicU64,
     command_buffers_begun: AtomicU64,
@@ -830,10 +831,11 @@ impl Counters {
         self.internal_submissions.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// A `vkQueueSubmit` or `vkQueueBindSparse` call was made with `command_buffers`
-    /// `VkCommandBuffer`s among its `VkSubmitInfo`s.
-    pub(crate) fn queue_submitted(&self, command_buffers: usize) {
+    /// A `vkQueueSubmit` or `vkQueueBindSparse` call was made with `infos` `VkSubmitInfo`s
+    /// (none for a sparse bind) and `command_buffers` `VkCommandBuffer`s among them.
+    pub(crate) fn queue_submitted(&self, infos: usize, command_buffers: usize) {
         self.queue_submissions.fetch_add(1, Ordering::Relaxed);
+        self.submit_infos.fetch_add(infos as u64, Ordering::Relaxed);
         (self.command_buffers_submitted).fetch_add(command_buffers as u64, Ordering::Relaxed);
     }
 
@@ -2384,6 +2386,12 @@ pub struct WorkCounts {
     /// submission of its own to the driver; Mesa's drivers merge the `VkSubmitInfo`s of one call
     /// where no signal lies between a command and a later one, and no further (`vk_queue.c`).
     pub queue_submissions: u64,
+    /// The `VkSubmitInfo`s those calls held (a sparse bind's none, a call of none with a fence
+    /// none). MoltenVK 1.4.1 commits a Metal command buffer of its own for each, and one for a
+    /// call of none with a fence (`MVKQueue::submit`), each a submission of its own on Metal's
+    /// queue: on an M3 Max about 65 us of a thread of Metal's (`IOGPUMetalCommandQueue
+    /// submitCommandBuffers`, the consumer's guest drag), whether or not it holds work.
+    pub submit_infos: u64,
     /// The `VkCommandBuffer`s those calls submitted.
     pub command_buffers_submitted: u64,
     /// Nanoseconds the batches' `vkQueueSubmit` calls spent in the driver, from the call to its
@@ -3500,6 +3508,7 @@ impl Device {
             indirect_records_read: counters.indirect_records_read.load(Ordering::Relaxed),
             internal_submissions: counters.internal_submissions.load(Ordering::Relaxed),
             queue_submissions: counters.queue_submissions.load(Ordering::Relaxed),
+            submit_infos: counters.submit_infos.load(Ordering::Relaxed),
             command_buffers_submitted: counters.command_buffers_submitted.load(Ordering::Relaxed),
             batch_submit_nanos: counters.batch_submit_nanos.load(Ordering::Relaxed),
             command_buffers_begun: counters.command_buffers_begun.load(Ordering::Relaxed),

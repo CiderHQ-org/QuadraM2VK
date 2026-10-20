@@ -9,9 +9,9 @@ use objc2_metal::{
     MTLBlendFactor, MTLBlitCommandEncoder, MTLBuffer, MTLClearColor, MTLCommandBuffer,
     MTLCommandBufferStatus, MTLCommandEncoder, MTLCommandQueue, MTLCompareFunction,
     MTLComputeCommandEncoder, MTLComputePipelineState, MTLCreateSystemDefaultDevice, MTLCullMode,
-    MTLDepthStencilDescriptor, MTLDepthStencilState, MTLDevice, MTLHeap, MTLHeapDescriptor,
-    MTLHeapType, MTLIndexType, MTLLibrary, MTLLoadAction, MTLOrigin, MTLPixelFormat,
-    MTLPrimitiveType, MTLRegion, MTLRenderCommandEncoder, MTLRenderPassDescriptor,
+    MTLDepthStencilDescriptor, MTLDepthStencilState, MTLDevice, MTLHazardTrackingMode, MTLHeap,
+    MTLHeapDescriptor, MTLHeapType, MTLIndexType, MTLLibrary, MTLLoadAction, MTLOrigin,
+    MTLPixelFormat, MTLPrimitiveType, MTLRegion, MTLRenderCommandEncoder, MTLRenderPassDescriptor,
     MTLRenderPipelineDescriptor, MTLRenderPipelineState, MTLResourceOptions, MTLSamplerDescriptor,
     MTLSamplerMinMagFilter, MTLSamplerState, MTLSize, MTLStorageMode, MTLStoreAction, MTLTexture,
     MTLTextureDescriptor, MTLTextureUsage, MTLWinding,
@@ -246,6 +246,40 @@ impl Gpu for Native {
         self.device
             .newTextureWithDescriptor(&descriptor)
             .expect("newTextureWithDescriptor")
+    }
+
+    fn tracked_heap(&self, size: usize) -> Self::Heap {
+        let descriptor = MTLHeapDescriptor::new();
+        descriptor.setType(MTLHeapType::Placement);
+        descriptor.setStorageMode(MTLStorageMode::Shared);
+        descriptor.setHazardTrackingMode(MTLHazardTrackingMode::Tracked);
+        descriptor.setSize(size);
+        self.device
+            .newHeapWithDescriptor(&descriptor)
+            .expect("newHeapWithDescriptor")
+    }
+
+    fn heap_render_texture(
+        &self,
+        heap: &Self::Heap,
+        format: Format,
+        side: usize,
+        offset: usize,
+    ) -> Self::Texture {
+        // SAFETY: plain sizes.
+        let descriptor = unsafe {
+            MTLTextureDescriptor::texture2DDescriptorWithPixelFormat_width_height_mipmapped(
+                pixel_format(format),
+                side,
+                side,
+                false,
+            )
+        };
+        descriptor.setUsage(MTLTextureUsage::RenderTarget | MTLTextureUsage::ShaderRead);
+        descriptor.setStorageMode(MTLStorageMode::Shared);
+        // SAFETY: the workload places each texture within the heap at its alignment.
+        unsafe { heap.newTextureWithDescriptor_offset(&descriptor, offset) }
+            .expect("newTextureWithDescriptor:offset:")
     }
 
     fn replace_region(

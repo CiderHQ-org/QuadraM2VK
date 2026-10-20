@@ -480,7 +480,7 @@ impl super::DeviceShared {
                     true => std::slice::from_ref(&submit),
                     false => &[],
                 };
-                self.counts.queue_submitted(0);
+                self.counts.queue_submitted(submits.len(), 0);
                 // SAFETY: a submission of no work, with an unsignaled fence in no pending
                 // submission where it has one, signalling the timeline of marks above every
                 // value signalled there before where it has one; the queue is used under its

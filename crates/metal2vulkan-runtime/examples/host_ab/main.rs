@@ -68,14 +68,27 @@
 //! - `churn`: each frame makes eight 1280x800 `Private` render targets, clears and releases them,
 //!   the same size each frame (`same`) or one of 64 widths in turn (`varied`); and sixteen 64-KiB
 //!   buffers, filled and released (`buffers`) (`workloads::churn`).
+//! - `compositing`: frames of the consumer's compositing shape, paced at 60 Hz: 20 command
+//!   buffers a frame, and 10 new textures made in a `Placement` heap of tracked `Shared` storage
+//!   (as the guest makes heap textures each frame): 10 command buffers each clear one new
+//!   texture, made just before it, and draw 2 quads into it, 8 each draw 8 blended quads into one
+//!   of two 1024x1024 layers from 4 new textures and the other layer (each depending on the
+//!   command buffers before it), one dispatches 15 small kernels and fills a buffer, and the last
+//!   draws both layers and 4 new textures onto a screen texture. Per frame: the wall time from the
+//!   first command buffer's creation to the last one's completion (its median, its 99th
+//!   percentile and the frames over 16.7 ms), the encoding thread's time to encode and commit,
+//!   the process's CPU time, and on the runtime's side its work counts per frame (`rt_*`:
+//!   `vkQueueSubmit` calls, the `VkSubmitInfo`s they held, each a Metal command buffer under
+//!   MoltenVK, and the rest).
 //!
 //! Options: `--rounds N` (3), `--draws N` (2000), `--timed N` (30), `--latency N` (200),
-//! `--heavy-iterations N` (64), `--heavy-runs N` (15), `--many-draws N` (6000), `--scratch DIR`
-//! (metallibs and the runtime's shader caches; a directory under the OS's temporary directory by
-//! default, removed at the end), `--metallib PATH` (skip the compile; not with `pipeline`),
-//! `--cache DIR` (the runtime's shader cache, with `--side`), `--variants a,b,...` (the encode
-//! workload's variants alone: `draw_static`, `draw_bind`, `draw_pipeline`, `draw_passes`,
-//! `dispatch_static`, `dispatch_churn`; for a profile of one).
+//! `--heavy-iterations N` (64), `--heavy-runs N` (15), `--many-draws N` (6000), `--frames N`
+//! (120, the compositing workload's timed frames), `--scratch DIR` (metallibs and the runtime's
+//! shader caches; a directory under the OS's temporary directory by default, removed at the end),
+//! `--metallib PATH` (skip the compile; not with `pipeline`), `--cache DIR` (the runtime's shader
+//! cache, with `--side`), `--variants a,b,...` (the encode workload's variants alone:
+//! `draw_static`, `draw_bind`, `draw_pipeline`, `draw_passes`, `dispatch_static`,
+//! `dispatch_churn`; for a profile of one).
 //!
 //! On a Mac, the runtime's device opens the Vulkan loader (`/opt/homebrew/lib` among the places
 //! it looks) and MoltenVK's `MVK_CONFIG_*` variables apply. Run timings on an otherwise idle GPU.
@@ -93,7 +106,7 @@ use std::process::{Command, Stdio};
 use std::time::Instant;
 use workloads::Sizes;
 
-const WORKLOADS: [&str; 9] = [
+const WORKLOADS: [&str; 10] = [
     "encode",
     "fixed",
     "latency",
@@ -103,6 +116,7 @@ const WORKLOADS: [&str; 9] = [
     "frame",
     "many_draws",
     "churn",
+    "compositing",
 ];
 
 struct Options {
@@ -133,6 +147,7 @@ fn options() -> Options {
             heavy_iterations: 64,
             heavy_runs: 15,
             many_draws: 6000,
+            frames: 120,
         },
         scratch: None,
         metallib: None,
@@ -165,6 +180,7 @@ fn options() -> Options {
             }
             "--heavy-runs" => options.sizes.heavy_runs = number(&mut options.passed),
             "--many-draws" => options.sizes.many_draws = number(&mut options.passed),
+            "--frames" => options.sizes.frames = number(&mut options.passed),
             "--scratch" => options.scratch = Some(PathBuf::from(value())),
             "--metallib" => options.metallib = Some(PathBuf::from(value())),
             "--cache" => options.cache = Some(PathBuf::from(value())),
@@ -291,6 +307,7 @@ fn run<G: Gpu>(g: &G, opened: Instant, metallib: &Path, options: &Options) {
             "frame" => workloads::frame(g, &scene, sizes),
             "many_draws" => workloads::many_draws(g, &library, sizes),
             "churn" => workloads::churn(g, sizes),
+            "compositing" => workloads::compositing(g, &scene, sizes),
             _ => unreachable!(),
         }
     }

@@ -243,7 +243,7 @@ impl Device {
         // SAFETY: the queue is used under the staging lock alone; the command buffer is
         // executable; every value waited for was signalled (the host saw it); the signal of the
         // timeline is above its value.
-        shared.counts.queue_submitted(buffers.len());
+        shared.counts.queue_submitted(1, buffers.len());
         let submitted = unsafe {
             staging.word.restore();
             raw.queue_submit(queue, &[submit], made.fence)

@@ -92,6 +92,19 @@ pub trait Gpu {
     /// A 2D texture of one level: a render target of `Private` storage, or a `Shared` one the
     /// shaders read.
     fn texture(&self, format: Format, width: usize, height: usize, target: bool) -> Self::Texture;
+    /// `newHeapWithDescriptor:` of a `Placement` heap of `size` bytes of `Shared` storage,
+    /// its resources' hazards tracked.
+    fn tracked_heap(&self, size: usize) -> Self::Heap;
+    /// `newTextureWithDescriptor:offset:` of a `side` x `side` 2D texture of one level at
+    /// `offset` of `heap`, which draws render into and shaders read, its contents Metal's to
+    /// optimize.
+    fn heap_render_texture(
+        &self,
+        heap: &Self::Heap,
+        format: Format,
+        side: usize,
+        offset: usize,
+    ) -> Self::Texture;
     /// `replaceRegion:mipmapLevel:withBytes:bytesPerRow:` over the whole level 0.
     fn replace_region(
         &self,
@@ -211,4 +224,10 @@ pub trait Gpu {
 
     /// Run `f` inside an autorelease pool (native), as a Metal program's frame runs.
     fn pool<R>(&self, f: impl FnOnce() -> R) -> R;
+
+    /// The side's own counts of the work its calls made, by name, as they stand: the runtime's
+    /// `WorkCounts` the compositing workload reports; none natively.
+    fn work_counts(&self) -> Vec<(&'static str, f64)> {
+        Vec::new()
+    }
 }

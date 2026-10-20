@@ -485,7 +485,7 @@ impl Group {
         // timeline signal is above the queue's value; the `VkQueue` is used under its lock.
         let submitted =
             shared.submit_logged((queue, Some(value)), fence, &relayed, |vk_queue| unsafe {
-                shared.counts.queue_submitted(buffers);
+                shared.counts.queue_submitted(submits.len(), buffers);
                 raw.queue_submit(vk_queue, submits, fence.unwrap_or(vk::Fence::null()))
             });
         exit_guard::called(Call::QueueSubmit);
@@ -559,7 +559,7 @@ fn submit_alone(device: &Device, after: After<'_>) -> Result<(), vk::Result> {
     } = after;
     // SAFETY: the batch's submission's own (`submit.rs`).
     let submitted = shared.submit_logged((queue, Some(value)), fence, relayed, |vk_queue| unsafe {
-        shared.counts.queue_submitted(buffers);
+        shared.counts.queue_submitted(infos.len(), buffers);
         raw.queue_submit(vk_queue, infos, fence.unwrap_or(vk::Fence::null()))
     });
     exit_guard::called(Call::QueueSubmit);
@@ -585,7 +585,7 @@ fn signal_alone(
     // SAFETY: a submission of the signals a failed group's end held, each above its semaphore's
     // value (no batch signalled them); the `VkQueue` is used under its lock.
     let submitted = shared.submit_logged((queue, value), None, relayed, |vk_queue| unsafe {
-        shared.counts.queue_submitted(0);
+        shared.counts.queue_submitted(1, 0);
         raw.queue_submit(vk_queue, &[info], vk::Fence::null())
     });
     exit_guard::called(Call::QueueSubmit);

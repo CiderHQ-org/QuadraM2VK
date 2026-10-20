@@ -22,6 +22,8 @@ pub struct Sizes {
     pub heavy_runs: usize,
     /// Draws in the many-draws workload's frame.
     pub many_draws: usize,
+    /// Timed frames of the compositing workload.
+    pub frames: usize,
 }
 
 /// One result line (module docs) of `values`, which it sorts.
@@ -1186,4 +1188,167 @@ pub fn churn<G: Gpu>(g: &G, sizes: &Sizes) {
     }
     emit("churn", "buffers_frame", "ms", &mut frame);
     emit("churn", "buffers_cpu", "ms", &mut cpu);
+}
+
+/// The compositing workload's command buffers a frame, and the new heap textures each frame
+/// makes.
+const COMPOSITING_BUFFERS: usize = 20;
+const COMPOSITING_NEW: usize = 10;
+/// A new texture's side, and the heap's bytes for each (past any texture's alignment).
+const COMPOSITING_NEW_SIDE: usize = 256;
+const COMPOSITING_SLOT: usize = 1 << 20;
+/// The two layers' and the screen's side.
+const COMPOSITING_SIDE: usize = 1024;
+/// Frames run before the timed ones.
+const COMPOSITING_WARM: usize = 20;
+
+/// Frames of the consumer's compositing shape (module docs of `main.rs`), paced at 60 Hz: per
+/// frame, its wall time from the first command buffer's creation to the last one's completion,
+/// the process's CPU time over it, the encoding thread's time to encode and commit all, the
+/// frames over 16.7 ms and the 99th percentile, and the side's work counts per frame.
+pub fn compositing<G: Gpu>(g: &G, s: &Scene<G>, sizes: &Sizes) {
+    let heap = g.tracked_heap(COMPOSITING_NEW * COMPOSITING_SLOT);
+    let layers = [
+        g.texture(Format::Bgra8, COMPOSITING_SIDE, COMPOSITING_SIDE, true),
+        g.texture(Format::Bgra8, COMPOSITING_SIDE, COMPOSITING_SIDE, true),
+    ];
+    let screen = g.texture(Format::Bgra8, COMPOSITING_SIDE, COMPOSITING_SIDE, true);
+    let period = Duration::from_secs_f64(1.0 / 60.0);
+    let (mut wall, mut cpu, mut encode) = (vec![], vec![], vec![]);
+    let mut counts = Vec::new();
+    let mut next = Instant::now();
+    for frame in 0..COMPOSITING_WARM + sizes.frames {
+        if frame == COMPOSITING_WARM {
+            counts = g.work_counts();
+        }
+        g.pool(|| {
+            let cpu0 = process_cpu();
+            let t0 = Instant::now();
+            // Each new texture is made just before the command buffer that first draws into it.
+            let mut news = Vec::with_capacity(COMPOSITING_NEW);
+            let mut buffers = Vec::with_capacity(COMPOSITING_BUFFERS);
+            for c in 0..COMPOSITING_BUFFERS {
+                if c < COMPOSITING_NEW {
+                    let at = c * COMPOSITING_SLOT;
+                    news.push(g.heap_render_texture(
+                        &heap,
+                        Format::Bgra8,
+                        COMPOSITING_NEW_SIDE,
+                        at,
+                    ));
+                }
+                let command_buffer = g.command_buffer();
+                compositing_buffer(g, s, &command_buffer, (frame, c), &news, (&layers, &screen));
+                g.commit(&command_buffer);
+                buffers.push(command_buffer);
+            }
+            let t1 = Instant::now();
+            for command_buffer in &buffers {
+                g.wait(command_buffer);
+            }
+            let t2 = Instant::now();
+            if frame >= COMPOSITING_WARM {
+                wall.push(ms(t2 - t0));
+                encode.push(ms(t1 - t0));
+                cpu.push(ms(process_cpu() - cpu0));
+            }
+        });
+        next += period;
+        match next.checked_duration_since(Instant::now()) {
+            Some(left) => std::thread::sleep(left),
+            None => next = Instant::now(),
+        }
+    }
+    let over = wall.iter().filter(|&&ms| ms > 1e3 / 60.0).count();
+    emit("compositing", "over_16_7ms", "frames", &mut [over as f64]);
+    let mut sorted = wall.clone();
+    sorted.sort_by(f64::total_cmp);
+    let p99 = sorted[((sorted.len() - 1) as f64 * 0.99).round() as usize];
+    emit("compositing", "wall_p99", "ms", &mut [p99]);
+    emit("compositing", "wall", "ms", &mut wall);
+    emit("compositing", "encode_and_commit", "ms", &mut encode);
+    emit("compositing", "process_cpu", "ms", &mut cpu);
+    let after = g.work_counts();
+    for ((name, before), (_, now)) in counts.iter().zip(&after) {
+        let per_frame = (now - before) / sizes.frames as f64;
+        emit(
+            "compositing",
+            &format!("rt_{name}"),
+            "per frame",
+            &mut [per_frame],
+        );
+    }
+}
+
+/// Command buffer `c` of frame `frame`: the first ten each clear one of the frame's new
+/// textures (made just before it) and draw two textured quads into it; the next eight draw eight blended quads each
+/// into one of the two layers, from four of the new textures and the other layer (which the
+/// command buffer before drew into); one dispatches 15 small kernels and fills a buffer; the
+/// last draws both layers and four new textures onto the screen.
+fn compositing_buffer<G: Gpu>(
+    g: &G,
+    s: &Scene<G>,
+    command_buffer: &G::CommandBuffer,
+    (frame, c): (usize, usize),
+    news: &[G::Texture],
+    (layers, screen): (&[G::Texture; 2], &G::Texture),
+) {
+    let quad = |encoder: &mut G::RenderEncoder, n: usize| {
+        let rects = &s.rects[n % RECT_BUFFERS];
+        g.set_vertex_buffer(encoder, rects, (n % RECTS) * RECT_STRIDE, 0);
+        g.draw_strip(encoder, 4);
+    };
+    match c {
+        0..COMPOSITING_NEW => {
+            let mut encoder = g.render_encoder(command_buffer, &news[c], true);
+            g.set_render_pipeline(&mut encoder, &s.textured[0]);
+            g.set_fragment_sampler(&mut encoder, &s.sampler, 0);
+            g.set_fragment_texture(&mut encoder, &s.textures[(frame + c) % TEXTURES], 0);
+            g.set_vertex_buffer(&mut encoder, &s.full, 0, 0);
+            g.draw_strip(&mut encoder, 4);
+            quad(&mut encoder, frame + c);
+            g.end_render(encoder);
+        }
+        10..18 => {
+            let (layer, other) = (&layers[c % 2], &layers[(c + 1) % 2]);
+            let mut encoder = g.render_encoder(command_buffer, layer, c < 12);
+            g.set_render_pipeline(&mut encoder, &s.textured[1]);
+            g.set_fragment_sampler(&mut encoder, &s.sampler, 0);
+            for d in 0..8 {
+                let texture = match d {
+                    0..4 => &news[(c + d) % COMPOSITING_NEW],
+                    _ => other,
+                };
+                g.set_fragment_texture(&mut encoder, texture, 0);
+                quad(&mut encoder, c * 8 + d);
+            }
+            g.end_render(encoder);
+        }
+        18 => {
+            let mut encoder = g.compute_encoder(command_buffer);
+            g.set_compute_pipeline(&mut encoder, &s.tiny[0]);
+            g.set_buffer(&mut encoder, &s.tiny_values, 0, 1);
+            for d in 0..15 {
+                g.set_buffer(&mut encoder, &s.tiny_out, d * RECT_STRIDE, 0);
+                g.dispatch(&mut encoder, 1, 64);
+            }
+            g.end_compute(encoder);
+            g.fill(command_buffer, &s.fill, 4096);
+        }
+        _ => {
+            let mut encoder = g.render_encoder(command_buffer, screen, frame == 0);
+            g.set_render_pipeline(&mut encoder, &s.textured[1]);
+            g.set_fragment_sampler(&mut encoder, &s.sampler, 0);
+            for layer in layers {
+                g.set_fragment_texture(&mut encoder, layer, 0);
+                g.set_vertex_buffer(&mut encoder, &s.full, 0, 0);
+                g.draw_strip(&mut encoder, 4);
+            }
+            for (n, texture) in news.iter().take(4).enumerate() {
+                g.set_fragment_texture(&mut encoder, texture, 0);
+                quad(&mut encoder, n * 3);
+            }
+            g.end_render(encoder);
+        }
+    }
 }
