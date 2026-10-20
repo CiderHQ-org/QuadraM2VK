@@ -60,6 +60,7 @@ mod engine_gated_texture_slots;
 mod engine_gep_index;
 mod engine_global_builtins;
 mod engine_graphics_binder;
+mod engine_half_moves;
 mod engine_handles;
 mod engine_heap_binder;
 mod engine_helper_threads;
