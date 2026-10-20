@@ -1369,16 +1369,19 @@ fn a_heap_texture_s_replace_region_waits_for_no_gpu_work() {
     });
 }
 
-/// A new heap texture's staged copy goes in the same `vkQueueSubmit` as its first move, and
+/// A new heap texture's staged copy goes in the same `VkSubmitInfo` as its first move, and
 /// lands: with no submission between the texture's making and `replace_region`, the copy is
 /// staged (no host copy, no internal or staging submission), and the device's next submission
-/// carries the move, in a `VkSubmitInfo` of its own, and the copy at its work's start
-/// (`texture/first_move.rs`). MoltenVK runs each `VkSubmitInfo` as a Metal command buffer of its
-/// own, and lost such a copy recorded in the same Metal command buffer as the image's move.
-/// Down both submissions that take first work: a committed command buffer's blit
-/// (`command_buffer/submit.rs`) and `get_bytes`'s internal submission (`device/submit.rs`) each
-/// read the copy's bytes, in one `vkQueueSubmit` (the internal one followed by the relay's mark of
-/// no work where the runtime relays the driver's failures, `commit_work::relay_marks`).
+/// carries the move, in a command buffer first in its work's `VkSubmitInfo`, and the copy after
+/// it, at the work's start (`texture/first_move.rs`). MoltenVK runs each `VkSubmitInfo` as a
+/// Metal command buffer of its own, so the move, the copy and the work run in one, as the
+/// texture's first barrier names no host read (`image_barrier.rs`). Down both submissions that
+/// take first work: a committed command buffer's blit (`command_buffer/submit.rs`) and
+/// `get_bytes`'s internal submission (`device/submit.rs`) each read the copy's bytes, in one
+/// `vkQueueSubmit` of one `VkSubmitInfo` (the internal one followed by the relay's call of no
+/// work where the runtime relays the driver's failures, `commit_work::relay_marks`: after the
+/// runtime's own submission a fence alone, of no `VkSubmitInfo`). Then an empty command buffer committed after a new texture is made carries its
+/// first move in its batch's one `VkSubmitInfo`.
 #[test]
 fn a_new_heap_texture_s_staged_copy_lands_in_its_first_move_s_submission() {
     on_device(|device| {
@@ -1444,13 +1447,42 @@ fn a_new_heap_texture_s_staged_copy_lands_in_its_first_move_s_submission() {
                 u64::from(by_get_bytes),
                 "{path} on {name}: internal submissions"
             );
+            let calls = 1 + if by_get_bytes { marks } else { 0 };
             assert_eq!(
-                after.queue_submissions - before.queue_submissions,
-                1 + if by_get_bytes { marks } else { 0 },
-                "{path} on {name}: the move and the copy in one vkQueueSubmit"
+                (
+                    after.queue_submissions - before.queue_submissions,
+                    after.submit_infos - before.submit_infos,
+                ),
+                (calls, 1),
+                "{path} on {name}: the move, the copy and the work in one VkSubmitInfo"
             );
             drop((texture, heap));
         }
+        // A batch with no work: its first move rides in its one `VkSubmitInfo`, its end's.
+        let options = ResourceOptions::shared();
+        let heap =
+            (device.new_heap(&HeapDescriptor::new(HeapType::Placement, size, options))).unwrap();
+        let before = device.work_counts();
+        let texture = heap.new_texture_at_offset(&d, 0).unwrap();
+        let command_buffer = queue.command_buffer().unwrap();
+        command_buffer.commit().unwrap();
+        command_buffer.wait_until_completed_for(WAIT).unwrap();
+        assert_eq!(
+            command_buffer.error(),
+            None,
+            "an empty command buffer on {name}"
+        );
+        let after = device.work_counts();
+        assert_eq!(
+            (
+                after.command_buffers_begun_batch_work - before.command_buffers_begun_batch_work,
+                after.queue_submissions - before.queue_submissions,
+                after.submit_infos - before.submit_infos,
+            ),
+            (1, 1, 1),
+            "an empty command buffer on {name}: its first work, in its one VkSubmitInfo"
+        );
+        drop((texture, heap));
     });
 }
 

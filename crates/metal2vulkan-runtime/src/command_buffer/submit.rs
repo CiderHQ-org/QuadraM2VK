@@ -115,12 +115,20 @@
 //! of the batch, whether a use names the resource or not (a command may reach a texture through its
 //! resource ID, a buffer through its address), and the batch holds what it worked on until it
 //! completes. On a device of several `VkQueue`s every batch on another one waits for it until it
-//! completed. It is a `VkSubmitInfo` of its own, first in the batch's `vkQueueSubmit`, waiting for
-//! what the work waits for but a binary semaphore: MoltenVK 1.4.1 runs each `VkSubmitInfo` as a
-//! Metal command buffer of its own (`MVKQueue::submit`), and lost a copy into a new image
-//! recorded in the same one as the image's move; Mesa's drivers merge it with the work, as it
-//! signals nothing (`vk_queue_submits_merge`), so it costs no kernel submission of its own. A
-//! failed `vkQueueSubmit` made none of it, or lost the device.
+//! completed. It is a command buffer of its own, first in the batch's work's `VkSubmitInfo` (in
+//! a batch with no work, its end's), so it waits for what the work waits for: Vulkan's
+//! submission order puts it before every command of the batch ("the order in which command
+//! buffers are specified in the pCommandBuffers member of VkSubmitInfo ... determines their
+//! submission order", the Vulkan specification, Submission Order), and its last barrier,
+//! recorded outside a render pass, orders it before them all: "the first synchronization scope
+//! includes all commands that occur earlier in submission order ... the second synchronization
+//! scope includes all commands that occur later in submission order" (`vkCmdPipelineBarrier`).
+//! MoltenVK 1.4.1 runs each `VkSubmitInfo` as a Metal command buffer of its own
+//! (`MVKQueue::submit`), each about 65 us of a thread of Metal's on an M3 Max, so the first work
+//! adds none (`WorkCounts::submit_infos`). It takes no barrier that names a host read of an image
+//! (`image_barrier.rs`), the one MoltenVK took for a read back over a heap texture's own storage
+//! at its Metal command buffer's completion. A failed `vkQueueSubmit` made none of it, or lost
+//! the device.
 //!
 //! [`Device::new_texture_with_vk_image`]: crate::Device::new_texture_with_vk_image
 //!
@@ -658,12 +666,12 @@ impl CommandBufferShared {
             }
             work.extend(&state.recorded[start + offset].raws);
         }
-        // The first work goes in a `VkSubmitInfo` of its own just before the batch's, in its
-        // `vkQueueSubmit` (the module docs). Host calls' staged copies go at the batch's start.
+        // The first work goes first in the batch's work, or in a batch with no work in its end
+        // (the module docs). Host calls' staged copies go at the batch's start, after it.
         let lead = match first_work.has_first() {
             true => Some(self.record_raw(&mut state, |_, buffer| {
                 // SAFETY: the command buffer is recording, outside a render pass; it is
-                // submitted just before the batch, before any later one, and every batch on
+                // submitted first in the batch, before any later one, and every batch on
                 // another `VkQueue` waits for the batch (`FirstMoves::waits`).
                 unsafe { first_work.record(raw, buffer, shared.queue_flags_of(queue)) };
                 Ok(())
@@ -673,7 +681,7 @@ impl CommandBufferShared {
         if first_work.has_staged() {
             let staged = self.record_raw(&mut state, |_, buffer| {
                 // SAFETY: the command buffer is recording, outside a render pass; every image's
-                // move is in the first work's `VkSubmitInfo` or a submission before.
+                // move is in the first work's command buffer, before it, or a submission before.
                 unsafe { first_work.record_staged(raw, buffer) };
                 Ok(())
             })?;
@@ -737,22 +745,6 @@ impl CommandBufferShared {
             wait_semaphores.push(timeline);
             wait_values.push(value);
             wait_stages.push(vk::PipelineStageFlags::ALL_COMMANDS);
-        }
-        // The first work waits for what the batch's commands wait for (a heap's fill another
-        // queue did comes before a move of an image placed in it; an event the program waits
-        // for before reusing a heap's memory), but a binary semaphore, which one wait consumes;
-        // the batch's commands wait again (a timeline's wait may repeat).
-        let (mut lead_semaphores, mut lead_values, mut lead_stages) =
-            (Vec::new(), Vec::new(), Vec::new());
-        for ((&semaphore, &value), &stage) in wait_semaphores
-            .iter()
-            .zip(wait_values.iter())
-            .zip(wait_stages.iter())
-            .filter(|((semaphore, _), _)| !binary_waits.contains(semaphore))
-        {
-            lead_semaphores.push(semaphore);
-            lead_values.push(value);
-            lead_stages.push(stage);
         }
         let mut order_semaphores: Vec<vk::Semaphore> =
             order_waits.iter().map(|&(s, _)| s).collect();
@@ -821,7 +813,7 @@ impl CommandBufferShared {
             || !exits.is_empty()
             || stamps.start.is_some()
             || stamps.end.is_some();
-        let finale: Vec<vk::CommandBuffer> = match ends && !folded {
+        let mut finale: Vec<vk::CommandBuffer> = match ends && !folded {
             true => {
                 let finale_barriers: Vec<Barrier> = exit_barrier
                     .into_iter()
@@ -849,6 +841,16 @@ impl CommandBufferShared {
             true => (&signal_semaphores[..], &signal_values[..]),
             false => (&[][..], &[][..]),
         };
+        // The first work, first in the batch's work or, where it has none, in its end: it waits
+        // for what the batch's commands wait for (a heap's fill another queue did comes before a
+        // move of an image placed in it; an event the program waits for before reusing a heap's
+        // memory).
+        if let Some(lead) = lead {
+            match single {
+                true => finale.insert(0, lead),
+                false => work.insert(0, lead),
+            }
+        }
         // Its deferred command buffers go as their replays (`recorder`), after every check above
         // that compares them as encoded: its encoders', replayed before the first work's take
         // (above); the barriers recorded since, replayed here where the recorder's thread has
@@ -898,20 +900,7 @@ impl CommandBufferShared {
             (false, true) => &infos[..1],
             (false, false) => &infos[..],
         };
-        let lead_buffers: Vec<vk::CommandBuffer> = lead.into_iter().collect();
-        let mut lead_timeline =
-            vk::TimelineSemaphoreSubmitInfo::default().wait_semaphore_values(&lead_values);
-        let lead_info = vk::SubmitInfo::default()
-            .wait_semaphores(&lead_semaphores)
-            .wait_dst_stage_mask(&lead_stages)
-            .command_buffers(&lead_buffers)
-            .push_next(&mut lead_timeline);
-        // The first work's `VkSubmitInfo` leads the batch's, in one `vkQueueSubmit`.
-        let submits: Vec<vk::SubmitInfo<'_>> = (!lead_buffers.is_empty())
-            .then_some(lead_info)
-            .into_iter()
-            .chain(infos.iter().copied())
-            .collect();
+        let submits = infos;
         let buffers = (submits.iter())
             .map(|info| info.command_buffer_count as usize)
             .sum();
@@ -955,7 +944,7 @@ impl CommandBufferShared {
             }
             let after = After {
                 queue,
-                infos: &submits,
+                infos: submits,
                 buffers,
                 value: at.value,
                 fence,

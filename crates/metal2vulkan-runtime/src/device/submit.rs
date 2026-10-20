@@ -8,9 +8,8 @@
 //! instead (`command_buffer/submit.rs`). Each first does the
 //! new resources' first GPU work that waits (`texture/first_move.rs`), after the batches on other
 //! `VkQueue`s that did such work: no new resource waits for one, so making one waits for no GPU
-//! work. That work goes in a `VkSubmitInfo` of its own just before the work's, in its
-//! `vkQueueSubmit`, as a batch's does (`command_buffer/submit.rs`): one kernel submission on
-//! Mesa's drivers.
+//! work. That work goes in a command buffer of its own, first in the work's `VkSubmitInfo`, as a
+//! batch's does (`command_buffer/submit.rs`).
 //!
 //! The one submission no one waits for is a no-copy buffer's sparse binding of its dma-bufs
 //! (`dma_buf.rs`), on the same queue and timeline: it would wait behind the queue's work in
@@ -73,8 +72,7 @@ impl OwnTimeline {
 pub(super) struct Internal {
     pool: vk::CommandPool,
     buffer: vk::CommandBuffer,
-    /// The command buffer of a submission's first work, in a `VkSubmitInfo` of its own just
-    /// before the work's.
+    /// The command buffer of a submission's first work, first in the work's `VkSubmitInfo`.
     first: vk::CommandBuffer,
     fence: vk::Fence,
     /// The timeline each submission signals, and the value the last one signalled: a batch on
@@ -185,18 +183,17 @@ impl Device {
         let waits = firsts.waits(0, |point| {
             shared.queues[point.queue].completed_value() >= point.value
         });
-        // The first work goes in a command buffer and a `VkSubmitInfo` of its own, just before
-        // the work's, in its `vkQueueSubmit`: MoltenVK runs each `VkSubmitInfo` as a Metal
-        // command buffer of its own, and lost a copy into a new image recorded in the same one as
-        // the image's move.
+        // The first work goes in a command buffer of its own, first in the work's `VkSubmitInfo`
+        // (`command_buffer/submit.rs`: MoltenVK runs each `VkSubmitInfo` as a Metal command
+        // buffer of its own).
         let lead = taken.has_first();
         if lead {
             // SAFETY: as below, for the first work's command buffer.
             unsafe { raw.begin_command_buffer(objects.first, &begin) }.map_err(vulkan)?;
             shared.counts.command_buffer_begun(Begun::Internal);
             // SAFETY: recording, outside a render pass, for the queue family; it is submitted
-            // just before the work's submission, which is waited for before anything that uses
-            // the resources is submitted after it.
+            // first in the work's submission, which is waited for before anything that uses the
+            // resources is submitted after it.
             unsafe { taken.record(raw, objects.first, shared.queue_flags_of(0)) };
             // SAFETY: as above.
             unsafe { raw.end_command_buffer(objects.first) }.map_err(vulkan)?;
@@ -205,7 +202,7 @@ impl Device {
         // the internal lock is held; beginning it resets it (the pool resets command buffers).
         unsafe { raw.begin_command_buffer(objects.buffer, &begin) }.map_err(vulkan)?;
         shared.counts.command_buffer_begun(Begun::Internal);
-        // Host calls' staged copies, after the first work's `VkSubmitInfo`, before the work.
+        // Host calls' staged copies, after the first work's command buffer, before the work.
         // SAFETY: recording, outside a render pass; every image's move is in the first work's
         // submission or one before.
         unsafe { taken.record_staged(raw, objects.buffer) };
@@ -214,7 +211,8 @@ impl Device {
         unsafe { raw.end_command_buffer(objects.buffer) }.map_err(vulkan)?;
         // SAFETY: the fence is unsignaled or signaled and not pending.
         unsafe { raw.reset_fences(&[objects.fence]) }.map_err(vulkan)?;
-        let buffers = [objects.buffer];
+        let buffers = [objects.first, objects.buffer];
+        let buffers = &buffers[usize::from(!lead)..];
         // And the last binding of a no-copy buffer's dma-bufs, until it completed.
         let waits: Vec<(vk::Semaphore, u64)> = (waits.iter())
             .map(|point| (shared.queues[point.queue].timeline, point.value))
@@ -234,25 +232,12 @@ impl Device {
         let submit = vk::SubmitInfo::default()
             .wait_semaphores(&wait_semaphores)
             .wait_dst_stage_mask(&wait_stages)
-            .command_buffers(&buffers)
+            .command_buffers(buffers)
             .signal_semaphores(&signal_semaphores)
             .push_next(&mut timeline);
-        let first_buffers = [objects.first];
         // The first work waits as the work's does (a heap's fill another queue did comes before
-        // a move of an image placed in it), and the work after it waits again: a timeline's wait
-        // may repeat.
-        let mut lead_timeline =
-            vk::TimelineSemaphoreSubmitInfo::default().wait_semaphore_values(&wait_values);
-        let lead_submit = vk::SubmitInfo::default()
-            .wait_semaphores(&wait_semaphores)
-            .wait_dst_stage_mask(&wait_stages)
-            .command_buffers(&first_buffers)
-            .push_next(&mut lead_timeline);
-        let submits: Vec<vk::SubmitInfo<'_>> = lead
-            .then_some(lead_submit)
-            .into_iter()
-            .chain([submit])
-            .collect();
+        // a move of an image placed in it).
+        let submits = [submit];
         // Where freed memory waits for the work in flight, it waits for this until it completed
         // (`freed_memory.rs`).
         let _own = (shared.parking.get()).map(|parking| parking.own_submission(self));

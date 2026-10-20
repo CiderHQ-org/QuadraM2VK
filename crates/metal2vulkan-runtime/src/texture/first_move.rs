@@ -42,10 +42,9 @@
 //!   commands name, so no command reads the image before its move; an internal submission, whose
 //!   commands are the runtime's own, takes it only where they name the image's key (a host call
 //!   on its texture, whose contract orders the program's GPU work on it). The work goes in
-//!   a `VkSubmitInfo` of its own just before the submission's, first in its `vkQueueSubmit`,
-//!   waiting for what that one waits for but a binary semaphore: MoltenVK runs each
-//!   `VkSubmitInfo` as a Metal command buffer of its own, and Mesa's drivers merge it with the
-//!   submission's into one kernel submission (`command_buffer/submit.rs`).
+//!   a command buffer of its own, first in the submission's `VkSubmitInfo`, waiting for what
+//!   the submission waits for: MoltenVK runs each `VkSubmitInfo` as a Metal command buffer of its
+//!   own, so it adds none (`command_buffer/submit.rs`).
 //! - **Staged copies**. `replace_region` of a texture whose `VkImage` is its own for good (in
 //!   memory of its own, or a heap's own pages) and takes no host copies stages the bytes
 //!   ([`TexelCopy`], [`FirstMoves::register_texels`]): the next submission copies them in at
@@ -1357,10 +1356,9 @@ impl Taken<'_> {
     }
 
     /// Record the host calls' staged copies it took into `command_buffer`, each after every
-    /// write before it (the first work, which a `VkSubmitInfo` of its own submitted before; the
+    /// write before it (the first work, which a command buffer submitted before it records; the
     /// copy before), then the barrier that makes them visible to every command after and to the
-    /// host. Apart from [`record`](Self::record)'s work: MoltenVK lost a copy into a new image
-    /// recorded in the same Metal command buffer as the image's move.
+    /// host.
     ///
     /// # Safety
     ///
