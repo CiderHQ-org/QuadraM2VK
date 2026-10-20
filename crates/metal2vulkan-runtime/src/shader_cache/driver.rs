@@ -13,7 +13,9 @@
 //!   with; and by the device's profile fingerprint (`store::entry_name`). A program's pipeline is
 //!   described by its variant's stages (SPIR-V words, entry points, stage flags, required subgroup
 //!   sizes, specialization), its layout (its immutable samplers among it), and the state its
-//!   making adds (a graphics key; a compute pipeline's specialization and flags); a helper of the
+//!   making adds (a graphics key, whose line topology is named as the triangle topology of its
+//!   shape, so a state's line and triangle pipelines share their record: `record_topology` in
+//!   `pipeline/graphics.rs`; a compute pipeline's specialization and flags); a helper of the
 //!   runtime's by its SPIR-V and its parameters. Records live in the content directory, which no
 //!   build owns (`store.rs`): a new build of the runtime or the translator that leaves a
 //!   pipeline's SPIR-V and state as they were finds its record. The driver keys each pipeline by

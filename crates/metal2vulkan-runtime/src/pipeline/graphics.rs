@@ -121,6 +121,34 @@ pub(crate) fn keyed_assembly(
     (topology, primitive_restart)
 }
 
+/// The topology a graphics making's record is named by (`shader_cache/driver.rs`): a line
+/// topology names it as the triangle topology of its shape, so a state's line and triangle
+/// pipelines of an otherwise equal key share one record; every other topology names its own.
+///
+/// The topology class enters no stage's code there on MoltenVK 1.4.1, which keys a converted
+/// stage by its SPIR-V (`MVKShaderModule`'s key, its code's size and hash) and its conversion
+/// configuration (`MVKPipelineCache::getShaderLibraryImpl`, which takes the first entry whose
+/// `SPIRVToMSLConversionConfiguration::matches`); the topology reaches that configuration through
+/// `enable_point_size_builtin` alone, set for the point class (`MVKGraphicsPipeline::
+/// isRenderingPoints`). So a line pipeline made after its triangle sibling takes the sibling's
+/// converted stages from the shared record, where a record of its own made it convert them
+/// again from SPIR-V (120 ms and more for a 271k-word fragment module). Points keep their own
+/// record: their stages convert otherwise. A record is a cache the driver may use or not: one
+/// whose driver compiles the two classes apart holds both pipelines once both are made, which
+/// costs a larger record, never a wrong pipeline.
+fn record_topology(
+    topology: metal2vulkan::vk::PrimitiveTopology,
+) -> metal2vulkan::vk::PrimitiveTopology {
+    use metal2vulkan::vk::PrimitiveTopology as T;
+    match topology {
+        T::LINE_LIST => T::TRIANGLE_LIST,
+        T::LINE_STRIP => T::TRIANGLE_STRIP,
+        T::LINE_LIST_WITH_ADJACENCY => T::TRIANGLE_LIST_WITH_ADJACENCY,
+        T::LINE_STRIP_WITH_ADJACENCY => T::TRIANGLE_STRIP_WITH_ADJACENCY,
+        other => other,
+    }
+}
+
 /// The render encoder's state a pipeline takes as static state where it does not make it
 /// dynamic; a state it makes dynamic is left at Vulkan's zero value here, so it does not split
 /// the memo.
@@ -969,12 +997,17 @@ impl VariantObjects {
         let mut stages = [vk::PipelineCreationFeedback::default(); REPORTED_STAGES];
         let mut reported_stages = 0;
         let driver_reports = shared.shader_cache.driver_reports() && libraries.is_none();
-        // Its record is named by the variant's content and what this making adds to it.
+        // Its record is named by the variant's content and what this making adds to it, a line
+        // topology as its triangle sibling's (`record_topology`).
+        let sibling = (record_topology(key.topology) != key.topology).then(|| GraphicsKey {
+            topology: record_topology(key.topology),
+            ..key.clone()
+        });
         let making = self
             .making("graphics")
             .text(&pipeline.vertex_input)
             .text(graphics)
-            .text(key);
+            .text(sibling.as_ref().unwrap_or(key));
         // The diagnostics the device's driver is measured to report as it makes this pipeline,
         // withheld inside its creation alone (`driver_facts.rs`).
         let expected: Vec<_> = self
@@ -1234,6 +1267,37 @@ mod tests {
             FixedState::without_dynamic(a, &[DynamicState::CULL_MODE]),
             FixedState::without_dynamic(c, &[DynamicState::CULL_MODE])
         );
+    }
+
+    /// A line topology names its making's record as the triangle topology of its shape; the
+    /// point, triangle and patch topologies name their own (`record_topology`).
+    #[test]
+    fn a_line_topology_names_its_triangle_sibling_s_record() {
+        use metal2vulkan::vk::PrimitiveTopology as T;
+        for (topology, named) in [
+            (T::POINT_LIST, T::POINT_LIST),
+            (T::LINE_LIST, T::TRIANGLE_LIST),
+            (T::LINE_STRIP, T::TRIANGLE_STRIP),
+            (T::TRIANGLE_LIST, T::TRIANGLE_LIST),
+            (T::TRIANGLE_STRIP, T::TRIANGLE_STRIP),
+            (T::TRIANGLE_FAN, T::TRIANGLE_FAN),
+            (T::LINE_LIST_WITH_ADJACENCY, T::TRIANGLE_LIST_WITH_ADJACENCY),
+            (
+                T::LINE_STRIP_WITH_ADJACENCY,
+                T::TRIANGLE_STRIP_WITH_ADJACENCY,
+            ),
+            (
+                T::TRIANGLE_LIST_WITH_ADJACENCY,
+                T::TRIANGLE_LIST_WITH_ADJACENCY,
+            ),
+            (
+                T::TRIANGLE_STRIP_WITH_ADJACENCY,
+                T::TRIANGLE_STRIP_WITH_ADJACENCY,
+            ),
+            (T::PATCH_LIST, T::PATCH_LIST),
+        ] {
+            assert_eq!(super::record_topology(topology), named, "{topology:?}");
+        }
     }
 
     /// Where a pipeline makes the topology and restart dynamic, every Metal primitive type keys
