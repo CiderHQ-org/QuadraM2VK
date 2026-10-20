@@ -52,7 +52,6 @@ use super::{
 use crate::air_library::AirLibrary;
 use crate::gpu::TEST_DEVICE;
 use metal2vulkan::bind::SamplerDescriptor;
-use metal2vulkan::device::VkProperty;
 use metal2vulkan::metal::{PixelFormat, PrimitiveType, SamplerMinMagFilter, TextureUsage};
 use metal2vulkan::pipeline::{ColorAttachmentDescriptor, RenderPipelineDescriptor, StageSource};
 use metal2vulkan_devtools::llvm_assemble_text;
@@ -860,10 +859,11 @@ fn quadrants(
 
 /// Draws whose `VkPipeline`s the runtime makes on its pool while the draws go on draw as draws of
 /// pipelines made already: one state drawn binding each of four formats into a quadrant each, then
-/// as a line, under a `Counting` visibility query. The format draws share one `VkPipeline`, each
-/// format's class reaching the function as a push field: the one the state's creation made where
-/// the draws key as it predicted, else one they hand to the pool; the line, whose key no creation
-/// predicts, hands its making to the pool; none is made at a draw; the command buffer completes,
+/// as a line, under a `Counting` visibility query. The format draws take two `VkPipeline`s, each
+/// format's class reaching the function as a push field but for whether its `half` texels are the
+/// plain rounding: the one the state's creation made where a draw keys as it predicted, and one
+/// the first draw that keys apart hands to the pool; the line, whose key no creation predicts,
+/// hands its making to the pool; none is made at a draw; the command buffer completes,
 /// and a command buffer committed after it on its queue completes after it. The same draws again,
 /// their pipelines made, hand nothing to the pool, and render the same bytes and count the same
 /// samples. The validation layer reports nothing.
@@ -949,20 +949,18 @@ fn draws_made_on_the_pool_draw_as_made_ones() {
         let counted = u64::from_le_bytes(read_buffer(&results, 0, 8).unwrap().try_into().unwrap());
         (pixels, counted)
     };
-    // Every format's draw takes one key, the bound format's class being a push field. On a
-    // device that samples through Metal's own texture unit, the draws through the probe's linear
-    // samplers of normalized coordinates key as the state's creation predicted, no texture bound
-    // and Metal's default sampler: its pipeline was made at the creation. Elsewhere the samplers'
-    // word keys apart, and the first draw hands that key's making to the pool. The line hands its
-    // own to the pool on every device.
-    let metal = device
-        .compile_device()
-        .profile()
-        .enabled()
-        .properties
-        .contains(&VkProperty::MetalSampler);
-    assert_eq!(VARIANTS[0], PixelFormat::RGBA8Unorm);
-    let pooled = draw(2 - u64::from(metal));
+    // The bound format's class is a push field. On a device that samples through Metal's own
+    // texture unit, the draws through the probe's linear samplers of normalized coordinates key as
+    // the state's creation predicted (no texture bound and Metal's default sampler: its pipeline
+    // was made at the creation) where the class's `half` texels are the plain rounding
+    // (`TexelFormat::plain_on_metal_sampler`: the 8-bit normalized ones); the 16-bit normalized
+    // ones key apart (`SpecKey::PlainHalfTexels` 0), and the first of them hands that key's making
+    // to the pool. Elsewhere the samplers' word keys apart and the first draw hands that key's
+    // making to the pool. The line hands its own to the pool on every device.
+    assert!(VARIANTS
+        .iter()
+        .any(|format| matches!(format, PixelFormat::RGBA16Snorm | PixelFormat::RGBA16Unorm)));
+    let pooled = draw(2);
     let made = draw(0);
     assert!(pooled.1 > 0, "the draws counted samples");
     assert_eq!(pooled.1, made.1, "the same samples counted");
