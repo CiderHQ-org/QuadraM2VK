@@ -1,0 +1,156 @@
+target triple = "air64_v28-apple-macosx26.0.0"
+source_filename = "-"
+; datalayout DataLayout { endian: Little, pointers: {0: PointerSpec { size_bits: 64, abi_bits: 64, pref_bits: 64, index_bits: 64 }}, ints: {1: AlignSpec { abi_bits: 8, pref_bits: 8 }, 8: AlignSpec { abi_bits: 8, pref_bits: 8 }, 16: AlignSpec { abi_bits: 16, pref_bits: 16 }, 32: AlignSpec { abi_bits: 32, pref_bits: 32 }, 64: AlignSpec { abi_bits: 64, pref_bits: 64 }}, floats: {16: AlignSpec { abi_bits: 16, pref_bits: 16 }, 32: AlignSpec { abi_bits: 32, pref_bits: 32 }, 64: AlignSpec { abi_bits: 64, pref_bits: 64 }, 128: AlignSpec { abi_bits: 128, pref_bits: 128 }}, vectors: {16: AlignSpec { abi_bits: 16, pref_bits: 16 }, 24: AlignSpec { abi_bits: 32, pref_bits: 32 }, 32: AlignSpec { abi_bits: 32, pref_bits: 32 }, 48: AlignSpec { abi_bits: 64, pref_bits: 64 }, 64: AlignSpec { abi_bits: 64, pref_bits: 64 }, 96: AlignSpec { abi_bits: 128, pref_bits: 128 }, 128: AlignSpec { abi_bits: 128, pref_bits: 128 }, 192: AlignSpec { abi_bits: 256, pref_bits: 256 }, 256: AlignSpec { abi_bits: 256, pref_bits: 256 }, 512: AlignSpec { abi_bits: 512, pref_bits: 512 }, 1024: AlignSpec { abi_bits: 1024, pref_bits: 1024 }}, aggregate: AlignSpec { abi_bits: 0, pref_bits: 64 }, native_ints: [8, 16, 32], stack_align_bits: None, alloca_space: 0, program_space: 0, globals_space: 0, mangling: None, fn_ptr_align: None, non_integral: [] }
+%t2 = type [128 x i32]
+%t7 = type void (ptr addrspace(1), ptr addrspace(1), ptr addrspace(1), ptr addrspace(1), ptr addrspace(1), ptr addrspace(1), ptr addrspace(2), ptr addrspace(2), i32, i32)
+%t8 = type void (i32, i32)
+%t10 = type [2 x i32]
+c7 = %t10 [27, 0]
+@g0 "_ZZ14hwd_half_readsPU9MTLdeviceKDhPU9MTLdeviceDhPU9MTLdevicefPU9MTLdevicejS2_S2_PU11MTLconstantKDhRU11MTLconstantKjjjE5words" = internal addrspace(3) global %t2 undef, align 4
+
+define %t7 @f0 "hwd_half_reads" convergent "frame-pointer"="all" "min-legal-vector-width"="0" "no-builtins"="" "no-trapping-math"="true" "stack-protector-buffer-size"="8" %a0( Ref nocapture "air-buffer-no-alias"="" ) %a1( Mod nocapture "air-buffer-no-alias"="" ) %a2( Mod nocapture "air-buffer-no-alias"="" ) %a3( Mod nocapture "air-buffer-no-alias"="" ) %a4( Mod nocapture "air-buffer-no-alias"="" ) %a5( Mod nocapture "air-buffer-no-alias"="" ) %a6( Ref nocapture "air-buffer-no-alias"="" ) %a7( align 4 dereferenceable(4) Ref nocapture "air-buffer-no-alias"="" ) {
+bb0:
+  %i0 = zext %a8 to i64
+  %i1 = getelementptr inbounds half, %a0, %i0
+  %i2 = load half, %i1, align 2
+  %i3 = zext %a9 to i64
+  %i4 = getelementptr inbounds half, ptr addrspace(3) @g0, %i3
+  store %i2, %i4, align 2
+  tail call void @f1 [air Sync(Barrier { name: Threadgroup, flags: MemFlags { device: false, threadgroup: true, texture: false, threadgroup_imageblock: false, object_data: false }, order: None, scope: Threadgroup, memory: Threadgroup })](i32 2, i32 1) convergent
+  %i7 = sub i32 i32 255, %a9
+  %i8 = zext %i7 to i64
+  %i9 = getelementptr inbounds half, ptr addrspace(3) @g0, %i8
+  %i10 = load half, %i9, align 2
+  %i11 = load half, %a6, align 2
+  %i12 = fadd half %i10, %i11
+  %i13 = getelementptr inbounds half, %a1, %i0
+  store %i12, %i13, align 2
+  %i15 = fpext %i10 to float
+  %i16 = getelementptr inbounds float, %a2, %i0
+  store %i15, %i16, align 4
+  %i18 = getelementptr inbounds half, %a6, i64 2
+  %i19 = load half, %i18, align 2
+  %i20 = fcmp olt %i10, %i19
+  %i21 = zext %i20 to i32
+  %i22 = getelementptr inbounds i32, %a3, %i0
+  store %i21, %i22, align 4
+  %i24 = load i32, %a7, align 4
+  %i25 = icmp eq %i24, i32 0
+  br %i25, bb1, bb2
+bb1:
+  %i27 = add i32 %a9, i32 1
+  %i28 = and i32 %i27, i32 255
+  %i29 = zext %i28 to i64
+  %i30 = getelementptr inbounds half, ptr addrspace(3) @g0, %i29
+  %i31 = load half, %i30, align 2
+  %i32 = getelementptr inbounds half, %a6, i64 1
+  %i33 = load half, %i32, align 2
+  br bb3
+bb2:
+  %i35 = getelementptr inbounds half, %a6, i64 1
+  %i36 = load half, %i35, align 2
+  br bb3
+bb3:
+  %i38 = phi half [%i33, bb1], [%i36, bb2]
+  %i39 = phi half [%i31, bb1], [%i36, bb2]
+  %i40 = getelementptr inbounds half, %a4, %i0
+  store %i39, %i40, align 2
+  %i42 = xor i32 %a8, i32 1
+  %i43 = zext %i42 to i64
+  %i44 = getelementptr inbounds half, %a0, %i43
+  %i45 = load half, %i44, align 2
+  %i46 = fmul half %i45, %i38
+  %i47 = getelementptr inbounds half, %a5, %i0
+  store %i46, %i47, align 2
+  ret void
+}
+
+declare %t8 @f1 "air.wg.barrier" convergent
+!md0 = !"SDK Version"
+!md1 = !"wchar_size"
+!md2 = !"frame-pointer"
+!md3 = !"air.max_device_buffers"
+!md4 = !"air.max_constant_buffers"
+!md5 = !"air.max_threadgroup_buffers"
+!md6 = !"air.max_textures"
+!md7 = !"air.max_read_write_textures"
+!md8 = !"air.max_samplers"
+!md9 = !"air.buffer"
+!md10 = !"air.location_index"
+!md11 = !"air.read"
+!md12 = !"air.address_space"
+!md13 = !"air.arg_type_size"
+!md14 = !"air.arg_type_align_size"
+!md15 = !"air.arg_type_name"
+!md16 = !"half"
+!md17 = !"air.arg_name"
+!md18 = !"src"
+!md19 = !"air.read_write"
+!md20 = !"sums"
+!md21 = !"float"
+!md22 = !"wides"
+!md23 = !"uint"
+!md24 = !"less"
+!md25 = !"moved"
+!md26 = !"prods"
+!md27 = !"k"
+!md28 = !"air.buffer_size"
+!md29 = !"flag"
+!md30 = !"air.thread_position_in_grid"
+!md31 = !"g"
+!md32 = !"air.thread_index_in_threadgroup"
+!md33 = !"t"
+!md34 = !"air.compile.denorms_disable"
+!md35 = !"air.compile.fast_math_disable"
+!md36 = !"air.compile.framebuffer_fetch_enable"
+!md37 = !"Apple metal version 32023.921 (metalfe-32023.921.6)"
+!md38 = !"Metal"
+!md39 = i32 2
+!md40 = %t10 c7
+!md41 = i32 1
+!md42 = i32 4
+!md43 = i32 7
+!md44 = i32 31
+!md45 = i32 128
+!md46 = i32 8
+!md47 = i32 16
+!md48 = ptr addrspace(0) @f0
+!md49 = i32 0
+!md50 = i32 3
+!md51 = i32 5
+!md52 = i32 6
+!md53 = i32 9
+!md54 = !{!md39, !md0, !md40}
+!md55 = !{!md41, !md1, !md42}
+!md56 = !{!md43, !md2, !md39}
+!md57 = !{!md43, !md3, !md44}
+!md58 = !{!md43, !md4, !md44}
+!md59 = !{!md43, !md5, !md44}
+!md60 = !{!md43, !md6, !md45}
+!md61 = !{!md43, !md7, !md46}
+!md62 = !{!md43, !md8, !md47}
+!md63 = !{}
+!md64 = !{!md49, !md9, !md10, !md49, !md41, !md11, !md12, !md41, !md13, !md39, !md14, !md39, !md15, !md16, !md17, !md18}
+!md65 = !{!md41, !md9, !md10, !md41, !md41, !md19, !md12, !md41, !md13, !md39, !md14, !md39, !md15, !md16, !md17, !md20}
+!md66 = !{!md39, !md9, !md10, !md39, !md41, !md19, !md12, !md41, !md13, !md42, !md14, !md42, !md15, !md21, !md17, !md22}
+!md67 = !{!md50, !md9, !md10, !md50, !md41, !md19, !md12, !md41, !md13, !md42, !md14, !md42, !md15, !md23, !md17, !md24}
+!md68 = !{!md42, !md9, !md10, !md42, !md41, !md19, !md12, !md41, !md13, !md39, !md14, !md39, !md15, !md16, !md17, !md25}
+!md69 = !{!md51, !md9, !md10, !md51, !md41, !md19, !md12, !md41, !md13, !md39, !md14, !md39, !md15, !md16, !md17, !md26}
+!md70 = !{!md52, !md9, !md10, !md52, !md41, !md11, !md12, !md39, !md13, !md39, !md14, !md39, !md15, !md16, !md17, !md27}
+!md71 = !{!md43, !md9, !md28, !md42, !md10, !md43, !md41, !md11, !md12, !md39, !md13, !md42, !md14, !md42, !md15, !md23, !md17, !md29}
+!md72 = !{!md46, !md30, !md15, !md23, !md17, !md31}
+!md73 = !{!md53, !md32, !md15, !md23, !md17, !md33}
+!md74 = !{!md64, !md65, !md66, !md67, !md68, !md69, !md70, !md71, !md72, !md73}
+!md75 = !{!md48, !md63, !md74}
+!md76 = !{!md34}
+!md77 = !{!md35}
+!md78 = !{!md36}
+!md79 = !{!md37}
+!md80 = !{!md39, !md46, !md49}
+!md81 = !{!md38, !md42, !md49, !md49}
+!"llvm.module.flags" = !{!md54, !md55, !md56, !md57, !md58, !md59, !md60, !md61, !md62}
+!"air.kernel" = !{!md75}
+!"air.compile_options" = !{!md76, !md77, !md78}
+!"llvm.ident" = !{!md79}
+!"air.version" = !{!md80}
+!"air.language_version" = !{!md81}
