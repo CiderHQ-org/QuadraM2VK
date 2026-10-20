@@ -474,6 +474,9 @@ fn an_implicit_slice_copies_the_whole_imageblock() {
         let Some((plan, m)) = module(&bc, "kernel_imageblock_scaled_tile", &stem, &p) else {
             continue;
         };
+        // Its slices are written at `thread_position_in_grid`, which differs between the
+        // threadgroup's invocations: the invocation at local id 0 writes them alone.
+        assert!(plan.families.texture.cooperative.is_empty(), "{stem}");
         let d = Dispatch {
             local: [8, 8],
             block: [16, 16],
@@ -878,5 +881,120 @@ fn a_narrow_slice_plans_against_any_bound_format() {
         if let Err(e) = pipe.plan(&dev, &state(pf).shape()) {
             panic!("{pf:?}: {e:?}");
         }
+    }
+}
+
+/// A kernel whose 4x4 threads each store their cell `(x, y, 7, 9)`, then, after the imageblock
+/// barrier and `between`, under the guard `guard` (which defines `%g`), write the whole imageblock
+/// to texture 0 at their threadgroup's position times 4: the shape `texture::cooperative` shares
+/// out when the guard selects local id 0 right after the barrier.
+fn shared_slice_kernel(between: &str, guard: &str) -> String {
+    format!(
+        r#"%"struct.metal::_imageblock_base" = type {{ ptr addrspace(4) }}
+
+define void @shared_slice(%"struct.metal::_imageblock_base" %block, ptr addrspace(1) %out, <2 x i16> %lid, <2 x i16> %tgp, ptr addrspace(1) %log) {{
+entry:
+  %cell = call ptr addrspace(4) @air.imageblock_data(<2 x i16> %lid, i32 0, i16 0)
+  %x = extractelement <2 x i16> %lid, i64 0
+  %y = extractelement <2 x i16> %lid, i64 1
+  %xf = uitofp i16 %x to float
+  %yf = uitofp i16 %y to float
+  %c0 = insertelement <4 x float> <float 0.0, float 0.0, float 7.0, float 9.0>, float %xf, i64 0
+  %c1 = insertelement <4 x float> %c0, float %yf, i64 1
+  store <4 x float> %c1, ptr addrspace(4) %cell, align 16
+  call void @air.wg.barrier(i32 8, i32 1)
+{between}{guard}  br i1 %g, label %write, label %done
+
+write:
+  %first = call ptr addrspace(4) @air.imageblock_data(<2 x i16> zeroinitializer, i32 0, i16 0)
+  %at = shl <2 x i16> %tgp, <i16 2, i16 2>
+  call void @air.write_imageblock_slice_to_texture_2d.i16.v4f32(ptr addrspace(1) %out, ptr addrspace(4) %first, i1 false, <2 x i16> zeroinitializer, <2 x i16> undef, <2 x i16> %at, i16 0, i1 false, i32 2)
+  br label %done
+
+done:
+  ret void
+}}
+
+declare ptr addrspace(4) @air.imageblock_data(<2 x i16>, i32, i16)
+declare void @air.wg.barrier(i32, i32)
+declare void @air.write_imageblock_slice_to_texture_2d.i16.v4f32(ptr addrspace(1), ptr addrspace(4), i1, <2 x i16>, <2 x i16>, <2 x i16>, i16, i1, i32)
+
+!air.kernel = !{{!0}}
+!0 = !{{ptr @shared_slice, !1, !2}}
+!1 = !{{}}
+!2 = !{{!3, !5, !6, !7, !8}}
+!3 = !{{i32 0, !"air.imageblock", !"explicit", !"air.imageblock_data_size", i32 16, !"air.struct_type_info", !4, !"air.arg_type_align_size", i32 16, !"air.arg_type_name", !"imageblock<Cell, layout_explicit>", !"air.arg_name", !"block"}}
+!4 = !{{i32 0, i32 16, i32 0, !"float4", !"colour"}}
+!5 = !{{i32 1, !"air.texture", !"air.location_index", i32 0, i32 1, !"air.write", !"air.arg_type_name", !"texture2d<float, write>", !"air.arg_name", !"out"}}
+!6 = !{{i32 2, !"air.thread_position_in_threadgroup", !"air.arg_type_name", !"ushort2", !"air.arg_name", !"lid"}}
+!7 = !{{i32 3, !"air.threadgroup_position_in_grid", !"air.arg_type_name", !"ushort2", !"air.arg_name", !"tgp"}}
+!8 = !{{i32 4, !"air.buffer", !"air.location_index", i32 0, i32 1, !"air.read_write", !"air.address_space", i32 1, !"air.arg_type_size", i32 4, !"air.arg_type_align_size", i32 4, !"air.arg_type_name", !"uint", !"air.arg_name", !"log"}}
+"#
+    )
+}
+
+/// The guard `(lid.x | lid.y) == 0`, which holds at local id 0 alone.
+const ORIGIN_GUARD: &str = "  %o = or i16 %x, %y\n  %g = icmp eq i16 %o, 0\n";
+
+/// Run `shared_slice` (one threadgroup of 4x4 threads, a 4x4 imageblock) on every profile that
+/// compiles it without inputs: whether its slice is shared (`TexturePlan::cooperative`), and the
+/// texture every invocation of both scheduling orders leaves, each texel the cell's `(x, y, 7, 9)`.
+fn run_shared_slice(name: &str, between: &str, guard: &str) -> Option<Vec<bool>> {
+    let bc = assemble_text(name, &shared_slice_kernel(between, guard))?;
+    let mut shared = Vec::new();
+    for (stem, p) in committed_profiles().expect("profiles") {
+        let Some((plan, m)) = module(&bc, "shared_slice", &stem, &p) else {
+            continue;
+        };
+        let d = Dispatch {
+            local: [4, 4],
+            block: [4, 4],
+            buffers: &[vec![0; 16]],
+            threadgroup: &[],
+        };
+        let (_, imgs) = run(&plan, &m, &d, &[poisoned(0, [4, 4], 1)]);
+        for y in 0..4u32 {
+            for x in 0..4u32 {
+                assert_eq!(
+                    texel(&imgs[0], 0, x, y),
+                    [fl(x as f32), fl(y as f32), fl(7.0), fl(9.0)],
+                    "{name} {stem} ({x}, {y})"
+                );
+            }
+        }
+        shared.push(!plan.families.texture.cooperative.is_empty());
+    }
+    assert!(!shared.is_empty(), "{name}: no profile compiled it");
+    Some(shared)
+}
+
+/// A slice write right after the imageblock barrier, under a guard that holds at local id 0, with
+/// operands every invocation holds alike (the threadgroup's position), is written by every
+/// invocation, a strided share each (`texture::cooperative`): the guard's branch is taken by all,
+/// and the texture holds every cell exactly as the one writing invocation leaves it.
+#[test]
+fn a_slice_written_by_local_id_zero_after_the_barrier_is_shared() {
+    let Some(shared) = run_shared_slice("shared", "", ORIGIN_GUARD) else {
+        return;
+    };
+    assert!(shared.iter().all(|s| *s), "{shared:?}");
+}
+
+/// Fallbacks to the writing invocation's own loop, the same texels: a guard that selects another
+/// invocation (`lid.x == 1`), a store between the barrier and the guard, and a guard on a value the
+/// local id alone does not decide (a loaded word).
+#[test]
+fn a_slice_outside_the_shared_shape_keeps_its_writer() {
+    let late_store = "  %li = zext i16 %x to i64\n  %lp = getelementptr inbounds i32, ptr addrspace(1) %log, i64 %li\n  store i32 1, ptr addrspace(1) %lp, align 4\n";
+    let loaded = "  %w = load i32, ptr addrspace(1) %log, align 4\n  %g = icmp eq i32 %w, 0\n";
+    for (name, between, guard) in [
+        ("other_id", "", "  %g = icmp eq i16 %x, 1\n"),
+        ("late_store", late_store, ORIGIN_GUARD),
+        ("loaded_guard", "", loaded),
+    ] {
+        let Some(shared) = run_shared_slice(name, between, guard) else {
+            return;
+        };
+        assert!(shared.iter().all(|s| !*s), "{name}: {shared:?}");
     }
 }

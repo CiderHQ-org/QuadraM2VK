@@ -498,6 +498,10 @@ pub fn plan_kernel(cx: &mut SelectCx<'_>, tier: Tier) -> Result<DispatchPlan, Er
     if cx.families.stage_io.reads_grid_position {
         builtins.insert(KernelBuiltin::ThreadPositionInGrid);
     }
+    // A slice write every invocation shares reads its thread's index (`texture::cooperative`).
+    if !cx.families.texture.cooperative.is_empty() {
+        builtins.insert(KernelBuiltin::ThreadIndexInThreadgroup);
+    }
     // A tile function's staging reads the tile and its threads.
     if crate::lower::access::tile::stages_any(&cx.families.access) {
         for b in crate::lower::access::tile::BUILTINS {

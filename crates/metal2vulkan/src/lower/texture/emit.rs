@@ -3927,7 +3927,10 @@ fn slice_texel(fb: &mut FunctionBuilder<'_>, form: TexelForm, v: SValue) -> BRes
 
 /// Copy imageblock slice `s` to its texture: a counted loop over the block's cells, `k` the cell
 /// `(k mod bw, k / bw)` of a `bw · bh` block clipped to the imageblock, whose element at the
-/// field's offset is written at `coord + (x, y)`, discarded outside the texture.
+/// field's offset is written at `coord + (x, y)`, discarded outside the texture. A cooperative
+/// slice (`super::cooperative`) runs in every invocation: cells `k = lin, lin + n, ...`, `lin`
+/// the invocation's index in the threadgroup and `n` its threads, then a workgroup barrier over
+/// the arena, so that no invocation stores a cell before every share is written.
 fn slice<'c>(cx: &mut EmitCx<'c>, fb: &mut FunctionBuilder<'_>, s: &Slice) -> BResult<()> {
     let Loaded {
         decl,
@@ -3954,9 +3957,13 @@ fn slice<'c>(cx: &mut EmitCx<'c>, fb: &mut FunctionBuilder<'_>, s: &Slice) -> BR
     };
     let n = fb.binary(BinOp::IMul, bw, bh)?;
     let u = u32_ty(fb)?;
-    let zero = fb.u32_const(0)?;
-    let var = fb.local_var(u, Some(zero))?;
+    let (first, step) = match s.cooperative {
+        true => shares(cx, fb)?,
+        false => (u32s(fb, 1, 0)?, u32s(fb, 1, 1)?),
+    };
+    let var = fb.local_var(u, None)?;
     let counter = fb.var_ptr(var)?;
+    fb.store(counter, first, MemAccess::default())?;
     let dims = coord_len(&decl);
     let s = *s;
     let mem = texel_memory(cx, fb, &s.image)?;
@@ -3992,8 +3999,7 @@ fn slice<'c>(cx: &mut EmitCx<'c>, fb: &mut FunctionBuilder<'_>, s: &Slice) -> BR
             Ok(ArmEnd::Exits)
         });
         fb.if_(cx, done, exit, None)?;
-        let one = u32s(fb, 1, 1)?;
-        let next = fb.binary(BinOp::IAdd, k, one)?;
+        let next = fb.binary(BinOp::IAdd, k, step)?;
         fb.store(counter, next, MemAccess::default())?;
         let x = fb.binary(BinOp::UMod, k, bw)?;
         let y = fb.binary(BinOp::UDiv, k, bw)?;
@@ -4058,7 +4064,40 @@ fn slice<'c>(cx: &mut EmitCx<'c>, fb: &mut FunctionBuilder<'_>, s: &Slice) -> BR
         fb.if_(cx, inb, then, None)?;
         Ok(())
     });
-    fb.loop_(cx, LoopSpec::default(), body)
+    fb.loop_(cx, LoopSpec::default(), body)?;
+    if s.cooperative {
+        let flags = crate::air::intrinsics::MemFlags {
+            threadgroup_imageblock: true,
+            ..Default::default()
+        };
+        let sem = crate::lower::sync::barrier::semantics(
+            flags,
+            MemoryOrder::AcquireRelease,
+            memory_model(cx.plan),
+        );
+        fb.control_barrier(Scope::Workgroup, Scope::Workgroup, sem)?;
+    }
+    Ok(())
+}
+
+/// A cooperative slice's first cell and step: the invocation's index in the threadgroup and the
+/// threadgroup's threads.
+fn shares(cx: &mut EmitCx<'_>, fb: &mut FunctionBuilder<'_>) -> BResult<(SValue, SValue)> {
+    use crate::lower::dispatch::KernelBuiltin;
+    let decl: &crate::lower::emit::Declared = cx.decl;
+    let Some(k) = decl.families.dispatch.kernel.as_ref() else {
+        return Err(cx.fail("a cooperative slice write outside a kernel"));
+    };
+    let lin = k.value(fb, KernelBuiltin::ThreadIndexInThreadgroup, &mut |fb| {
+        cx.push_field(fb, crate::pipeline::sym::PushField::DispatchRegion)
+    })?;
+    let threads = k.running_threads(fb)?;
+    let tx = fb.composite_extract(threads, &[0])?;
+    let ty_ = fb.composite_extract(threads, &[1])?;
+    let tz = fb.composite_extract(threads, &[2])?;
+    let txy = fb.binary(BinOp::IMul, tx, ty_)?;
+    let n = fb.binary(BinOp::IMul, txy, tz)?;
+    Ok((lin, n))
 }
 
 fn query(cx: &mut EmitCx<'_>, fb: &mut FunctionBuilder<'_>, q: &QueryOp) -> BResult<SValue> {

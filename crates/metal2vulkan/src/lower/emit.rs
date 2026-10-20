@@ -1157,6 +1157,16 @@ impl CodeEmitter for Emitter<'_> {
     }
 
     fn cond(&mut self, v: ValueId, fb: &mut FunctionBuilder<'_>) -> BResult<SValue> {
+        // The guard of a slice write every invocation shares is taken by every invocation
+        // (`texture::cooperative`); the condition has no other use.
+        if self.cx.plan.families.texture.cooperative.contains(&v) {
+            let b = fb.module().ty(crate::spirv::ir::Type::Bool)?;
+            let t = fb.module().constant(crate::spirv::ir::Constant::Scalar {
+                ty: b,
+                bits: crate::spirv::ir::ConstBits(1),
+            })?;
+            return fb.module().const_value(t);
+        }
         if self.predicated() {
             self.ensure(fb, v)?;
         }

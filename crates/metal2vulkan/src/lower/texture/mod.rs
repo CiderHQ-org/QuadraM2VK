@@ -116,6 +116,7 @@
 mod absent;
 mod alpha;
 mod atomic;
+mod cooperative;
 mod emit;
 pub mod float_texel;
 pub mod half;
@@ -985,6 +986,9 @@ pub struct TexturePlan {
     /// (`ExtendedRange::HEAP_READ`): `false` a `float` one, `true` a `half` one. The module
     /// defines that decode's routine for each ([`heap_raw::define`]).
     pub heap_raw: BTreeSet<bool>,
+    /// The guard conditions of the slice writes every invocation shares (`cooperative`): each
+    /// one's branch is taken by every invocation, so its condition is emitted as `true`.
+    pub cooperative: BTreeSet<ValueId>,
     /// Which families the module's `half` routine tells apart ([`half_families`]): every
     /// measured one, or on a device that samples through Metal's own texture unit only those
     /// whose `half` is not Metal's `float` texel rounded to nearest even.
@@ -2304,7 +2308,7 @@ pub fn select(
         let group = heap_group(cx, tex, m)?;
         if slice {
             // A slice write to a heap element writes it as a heap write does.
-            return slice::select(cx, t, &ops, ImageRef::Heap { group, handle });
+            return slice::select(cx, (at, t), &ops, ImageRef::Heap { group, handle }, m);
         }
         if sampling {
             // The heap element through a separate heap sampler; its residency is refused (an LOD
@@ -2342,7 +2346,7 @@ pub fn select(
     if slice {
         return match target {
             HandleTarget::One(Candidate::Texture(index)) => {
-                slice::select(cx, t, &ops, ImageRef::Slot(index))
+                slice::select(cx, (at, t), &ops, ImageRef::Slot(index), m)
             }
             // A slice write to a switched or null texture is not modelled yet.
             _ => Err(Unsupported::not_implemented(Feature::Imageblocks).into()),

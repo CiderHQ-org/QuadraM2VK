@@ -45,7 +45,8 @@
 //! element's class is the group's from another operation (no slot has a format input to give it).
 
 use crate::air::intrinsics::{Elem, TexRole, Texture};
-use crate::air::ir::{Value, ValueId};
+use crate::air::ir::{InstId, Value, ValueId};
+use crate::budget::Meter;
 use crate::error::{Error, Feature, RuntimeInput, Unsupported};
 use crate::lower::access::imageblock;
 use crate::lower::arith::legal::held_on;
@@ -98,6 +99,9 @@ pub struct Slice {
     /// Each texel of a half-float member stores its bits through the heap group's unsigned
     /// integer twin where the handle's class names one (`super::Write::heap_bits`).
     pub heap_bits: bool,
+    /// Every invocation of the workgroup writes a strided share of the cells, then a workgroup
+    /// barrier (`super::cooperative`); else the writing invocation writes them all.
+    pub cooperative: bool,
 }
 
 impl Slice {
@@ -119,6 +123,7 @@ impl Slice {
             } else {
                 0
             }
+            + if self.cooperative { 24 } else { 0 }
             + 320
     }
 }
@@ -186,12 +191,13 @@ fn heap_integer_class(cx: &SelectCx<'_>, group: u32) -> Result<TexelClass, Error
     }
 }
 
-/// Select a slice write to `image`, a texture slot or a heap element.
+/// Select slice write `call` to `image`, a texture slot or a heap element.
 pub(super) fn select(
     cx: &mut SelectCx<'_>,
-    t: &Texture,
+    (call, t): (InstId, &Texture),
     ops: &Operands<'_>,
     image: ImageRef,
+    m: &mut Meter,
 ) -> Result<TextureStrategy, Error> {
     let elem = t
         .texel
@@ -334,6 +340,18 @@ pub(super) fn select(
         false => super::HalfNans::Held,
     };
     mark(cx, image, |u| u.write = true);
+    // Every invocation shares the write where its guard selects local id 0 at a uniform point.
+    let cooperative = match super::cooperative::guard(cx, call, m)? {
+        Some(cond) => {
+            let v = cx
+                .values
+                .inst(cond)
+                .ok_or_else(|| cx.invariant("a guard without a value"))?;
+            cx.families.texture.cooperative.insert(v);
+            true
+        }
+        None => false,
+    };
     Ok(TextureStrategy::ImageblockSlice(Box::new(Slice {
         image,
         at,
@@ -350,5 +368,6 @@ pub(super) fn select(
         heap_small_floats,
         half_nans,
         heap_bits,
+        cooperative,
     })))
 }
