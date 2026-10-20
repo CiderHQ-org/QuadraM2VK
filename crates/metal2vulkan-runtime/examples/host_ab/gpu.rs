@@ -247,7 +247,7 @@ pub trait Gpu {
     fn pool<R>(&self, f: impl FnOnce() -> R) -> R;
 
     /// The side's own counts of the work its calls made, by name, as they stand: the runtime's
-    /// `WorkCounts` the compositing workload reports; none natively.
+    /// `WorkCounts` the compositing and burst workloads report; none natively.
     fn work_counts(&self) -> Vec<(&'static str, f64)> {
         Vec::new()
     }

@@ -662,6 +662,14 @@ impl Gpu for Runtime {
             ("splits_visibility", c.instance_splits_visibility),
             ("splits_shape", c.instance_splits_shape),
             ("pipeline_barriers", replayed.cmd_pipeline_barrier),
+            ("vk_images_destroyed", c.object_churn.vk_images_destroyed),
+            ("images_own_memory", c.object_churn.images_own_memory),
+            ("images_parked", c.object_churn.images_parked),
+            ("images_recycled", c.object_churn.images_recycled),
+            ("images_evicted", c.object_churn.images_evicted),
+            ("requirement_images_made", c.requirement_images_made),
+            ("arena_pools_made", c.arena_pools_made),
+            ("command_pools_made", c.command_pools_made),
         ]
         .into_iter()
         .map(|(name, count)| (name, count as f64))

@@ -1521,3 +1521,233 @@ fn compositing_buffer<G: Gpu>(
         }
     }
 }
+
+/// The burst workload's period and its burst, in frames at 60 Hz: each period's last
+/// `BURST_FRAMES` frames are a burst.
+const BURST_PERIOD: usize = 180;
+const BURST_FRAMES: usize = 60;
+/// Periods run before the timed ones, and the timed ones.
+const BURST_WARM: usize = 1;
+const BURST_TIMED: usize = 3;
+/// Command buffers a frame, calm and in a burst.
+const BURST_CALM_BUFFERS: usize = 20;
+const BURST_BUFFERS: usize = 60;
+/// The render targets every frame makes, of the same sizes each frame ([`burst_stable_side`]).
+const BURST_STABLE: usize = 15;
+/// The render targets a burst's frame makes besides, each of a width no other of the last
+/// `BURST_ONE_OFF_WIDTHS` made had: makings seen once.
+const BURST_ONE_OFF: usize = 45;
+const BURST_ONE_OFF_WIDTHS: usize = 4096;
+/// The heap textures each frame makes; a burst's take sides cycling through `BURST_HEAP_SIDES`.
+const BURST_HEAP: usize = 10;
+const BURST_HEAP_SIDES: usize = 128;
+
+/// Stable render target `i`'s width (each is 96 texels high).
+fn burst_stable_side(i: usize) -> usize {
+    96 + 32 * i
+}
+
+/// What one frame of the burst workload measured: its start, its encoding and commits, and the
+/// process's CPU time at its start.
+struct BurstFrame {
+    start: Instant,
+    encoded: Duration,
+    cpu: Duration,
+}
+
+/// Frames of a window server's shape paced at 60 Hz, each period of 3 s ending in a burst of
+/// 1 s, as a guest's window server bursts (a VM's work counts: about three times the command
+/// buffers, many new render targets of sizes made once, heap textures of more sizes, command
+/// buffers left in flight). Calm, a frame makes the `BURST_STABLE` render targets and the
+/// `BURST_HEAP` heap textures, clears each and draws into it, draws the heap textures onto a
+/// screen texture in its last command buffer, and waits for its `BURST_CALM_BUFFERS` command
+/// buffers. In a burst it also makes `BURST_ONE_OFF` render targets of one-off widths, its heap
+/// textures take sides cycling through `BURST_HEAP_SIDES`, it spreads the work over
+/// `BURST_BUFFERS` command buffers, and it waits at its start for the frame before's instead of
+/// its own. Calm and burst frames apart: the interval from a frame's start to the next one's (its
+/// median, its 99th percentile, and those over 16.7 and 25 ms), the encoding thread's time to
+/// encode and commit, and, over the same interval (a burst's command buffers complete, and their
+/// textures go, while the frame after waits for its start), the process's CPU time and the side's
+/// work counts.
+pub fn burst<G: Gpu>(g: &G, s: &Scene<G>) {
+    // Two sets of heap slots: a burst's frame leaves the frame before's in flight.
+    let heap = g.tracked_heap(2 * BURST_HEAP * COMPOSITING_SLOT);
+    let screen = g.texture(Format::Bgra8, COMPOSITING_SIDE, COMPOSITING_SIDE, true);
+    let period = Duration::from_secs_f64(1.0 / 60.0);
+    let warm = BURST_WARM * BURST_PERIOD;
+    let mut frames: Vec<(bool, BurstFrame)> = Vec::new();
+    // The work counts' changes over calm frames and over burst frames, each from a frame's start
+    // to the next one's, and the frames of each.
+    let mut counts: [(usize, Vec<(&'static str, f64)>); 2] = [(0, vec![]), (0, vec![])];
+    let mut add =
+        |bursting: bool, before: &[(&'static str, f64)], after: &[(&'static str, f64)]| {
+            let (n, sum) = &mut counts[usize::from(bursting)];
+            *n += 1;
+            if sum.is_empty() {
+                *sum = after.iter().map(|&(name, _)| (name, 0.0)).collect();
+            }
+            for ((_, total), ((_, b), (_, a))) in sum.iter_mut().zip(before.iter().zip(after)) {
+                *total += a - b;
+            }
+        };
+    let mut one_off = 0;
+    let mut in_flight: Vec<G::CommandBuffer> = Vec::new();
+    // The frame before's class and its start's counts, once timed.
+    let mut last: Option<(bool, Vec<(&'static str, f64)>)> = None;
+    let mut next = Instant::now();
+    for frame in 0..warm + BURST_TIMED * BURST_PERIOD {
+        let bursting = frame % BURST_PERIOD >= BURST_PERIOD - BURST_FRAMES;
+        let before = g.work_counts();
+        if let Some((was_bursting, then)) = last.take() {
+            add(was_bursting, &then, &before);
+        }
+        let measured = g.pool(|| {
+            let cpu = process_cpu();
+            let start = Instant::now();
+            for command_buffer in in_flight.drain(..) {
+                g.wait(&command_buffer);
+            }
+            let slots = (frame % 2) * BURST_HEAP;
+            let heaped: Vec<G::Texture> = (0..BURST_HEAP)
+                .map(|i| {
+                    let side = match bursting {
+                        true => 128 + 2 * ((frame * BURST_HEAP + i) % BURST_HEAP_SIDES),
+                        false => COMPOSITING_NEW_SIDE,
+                    };
+                    let at = (slots + i) * COMPOSITING_SLOT;
+                    g.heap_render_texture(&heap, Format::Bgra8, side, at)
+                })
+                .collect();
+            let mut targets: Vec<G::Texture> = (0..BURST_STABLE)
+                .map(|i| g.texture(Format::Bgra8, burst_stable_side(i), 96, true))
+                .collect();
+            if bursting {
+                for _ in 0..BURST_ONE_OFF {
+                    let width = 128 + one_off % BURST_ONE_OFF_WIDTHS;
+                    one_off += 1;
+                    targets.push(g.texture(Format::Bgra8, width, 64, true));
+                }
+            }
+            let buffers = match bursting {
+                true => BURST_BUFFERS,
+                false => BURST_CALM_BUFFERS,
+            };
+            // Each texture is cleared and drawn into by one of the command buffers before the
+            // last, in turn; the last draws the heap textures onto the screen.
+            let drawn: Vec<&G::Texture> = heaped.iter().chain(&targets).collect();
+            let mut committed = Vec::with_capacity(buffers);
+            for c in 0..buffers {
+                let command_buffer = g.command_buffer();
+                if c + 1 < buffers {
+                    let mine = drawn
+                        .iter()
+                        .enumerate()
+                        .filter(|(n, _)| n % (buffers - 1) == c);
+                    for (n, target) in mine {
+                        let mut encoder = g.render_encoder(&command_buffer, target, true);
+                        g.set_render_pipeline(&mut encoder, &s.textured[0]);
+                        g.set_fragment_sampler(&mut encoder, &s.sampler, 0);
+                        g.set_fragment_texture(&mut encoder, &s.textures[n % TEXTURES], 0);
+                        g.set_vertex_buffer(&mut encoder, &s.full, 0, 0);
+                        g.draw_strip(&mut encoder, 4);
+                        g.end_render(encoder);
+                    }
+                } else {
+                    let mut encoder = g.render_encoder(&command_buffer, &screen, false);
+                    g.set_render_pipeline(&mut encoder, &s.textured[1]);
+                    g.set_fragment_sampler(&mut encoder, &s.sampler, 0);
+                    for (n, texture) in heaped.iter().enumerate() {
+                        g.set_fragment_texture(&mut encoder, texture, 0);
+                        let rects = &s.rects[n % RECT_BUFFERS];
+                        g.set_vertex_buffer(&mut encoder, rects, (n % RECTS) * RECT_STRIDE, 0);
+                        g.draw_strip(&mut encoder, 4);
+                    }
+                    g.end_render(encoder);
+                }
+                g.commit(&command_buffer);
+                committed.push(command_buffer);
+            }
+            let encoded = start.elapsed();
+            if bursting {
+                in_flight = committed;
+            } else {
+                for command_buffer in &committed {
+                    g.wait(command_buffer);
+                }
+            }
+            BurstFrame {
+                start,
+                encoded,
+                cpu,
+            }
+        });
+        if frame >= warm {
+            last = Some((bursting, before));
+            frames.push((bursting, measured));
+        }
+        next += period;
+        match next.checked_duration_since(Instant::now()) {
+            Some(left) => std::thread::sleep(left),
+            None => next = Instant::now(),
+        }
+    }
+    for command_buffer in in_flight.drain(..) {
+        g.wait(&command_buffer);
+    }
+    if let Some((was_bursting, then)) = last.take() {
+        add(was_bursting, &then, &g.work_counts());
+    }
+    for (bursting, name) in [(false, "calm"), (true, "burst")] {
+        // A frame's interval: from its start to the next frame's (the run's last has none).
+        let pairs = || (frames.windows(2)).filter(|pair| pair[0].0 == bursting);
+        let mut intervals: Vec<f64> = pairs()
+            .map(|pair| ms(pair[1].1.start - pair[0].1.start))
+            .collect();
+        let over = |limit: f64| intervals.iter().filter(|&&ms| ms > limit).count() as f64;
+        let (over_16_7, over_25) = (over(1e3 / 60.0), over(25.0));
+        emit(
+            "burst",
+            &format!("{name}_over_16_7ms"),
+            "frames",
+            &mut [over_16_7],
+        );
+        emit(
+            "burst",
+            &format!("{name}_over_25ms"),
+            "frames",
+            &mut [over_25],
+        );
+        let mut sorted = intervals.clone();
+        sorted.sort_by(f64::total_cmp);
+        let p99 = sorted[((sorted.len() - 1) as f64 * 0.99).round() as usize];
+        emit("burst", &format!("{name}_interval_p99"), "ms", &mut [p99]);
+        emit("burst", &format!("{name}_interval"), "ms", &mut intervals);
+        let class = || {
+            frames
+                .iter()
+                .filter(|(b, _)| *b == bursting)
+                .map(|(_, f)| f)
+        };
+        let mut encoded: Vec<f64> = class().map(|f| ms(f.encoded)).collect();
+        emit(
+            "burst",
+            &format!("{name}_encode_and_commit"),
+            "ms",
+            &mut encoded,
+        );
+        let mut cpu: Vec<f64> = pairs()
+            .map(|pair| ms(pair[1].1.cpu - pair[0].1.cpu))
+            .collect();
+        emit("burst", &format!("{name}_process_cpu"), "ms", &mut cpu);
+        let (n, sum) = &counts[usize::from(bursting)];
+        for (count, total) in sum {
+            let per_frame = total / *n as f64;
+            emit(
+                "burst",
+                &format!("{name}_rt_{count}"),
+                "per frame",
+                &mut [per_frame],
+            );
+        }
+    }
+}

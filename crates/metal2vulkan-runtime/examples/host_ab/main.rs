@@ -93,6 +93,16 @@
 //!   the process's CPU time, and on the runtime's side its work counts per frame (`rt_*`:
 //!   `vkQueueSubmit` calls, the `VkSubmitInfo`s they held, each a Metal command buffer under
 //!   MoltenVK, and the rest).
+//! - `burst`: a window server's frames paced at 60 Hz, each period of 3 s ending in a burst of
+//!   1 s, shaped as a guest's bursts in a VM's work counts (`workloads::burst`). Calm, a frame
+//!   makes 15 `Private` render targets of the same sizes each frame and 10 heap textures, clears
+//!   and draws into each over 20 command buffers, draws the heap textures onto a screen texture,
+//!   and waits for its command buffers. In a burst it also makes 45 render targets of widths made
+//!   once, its heap textures take 128 sides in turn, it spreads the work over 60 command buffers,
+//!   and it leaves them in flight until the next frame starts. Calm and burst frames apart: the
+//!   interval from a frame's start to the next one's (its median, its 99th percentile, and those
+//!   over 16.7 and 25 ms), the encoding thread's time to encode and commit, the process's CPU
+//!   time, and on the runtime's side its work counts per frame (`rt_*`).
 //!
 //! Options: `--rounds N` (3), `--draws N` (2000), `--timed N` (30), `--latency N` (200),
 //! `--heavy-iterations N` (64), `--heavy-runs N` (15), `--many-draws N` (6000), `--frames N`
@@ -119,7 +129,7 @@ use std::process::{Command, Stdio};
 use std::time::Instant;
 use workloads::Sizes;
 
-const WORKLOADS: [&str; 11] = [
+const WORKLOADS: [&str; 12] = [
     "encode",
     "fixed",
     "latency",
@@ -131,6 +141,7 @@ const WORKLOADS: [&str; 11] = [
     "churn",
     "compositing",
     "drag",
+    "burst",
 ];
 
 struct Options {
@@ -335,6 +346,7 @@ fn run<G: Gpu>(g: &G, opened: Instant, metallib: &Path, options: &Options) {
             "churn" => workloads::churn(g, sizes),
             "compositing" => workloads::compositing(g, &scene, sizes),
             "drag" => workloads::drag(g, &scene, sizes),
+            "burst" => workloads::burst(g, &scene),
             _ => unreachable!(),
         }
     }
