@@ -14,6 +14,7 @@ use crate::churn_counts::{self, VkRelease};
 use crate::exit_guard::{self, Call};
 use crate::generated_commands::{Commands, Handle};
 use ash::vk;
+use std::panic::Location;
 
 /// A Vulkan object a device releases.
 pub(crate) trait Released {
@@ -36,11 +37,13 @@ pub(crate) struct WholeDevice;
 
 /// Release `object` with `device`'s functions, inside a section of the exit guard, marking its
 /// entry point; once the process is exiting, leave it to the process's end. Whether it was
-/// released. Inside a section already (a whole drop's), it is always released.
+/// released. Inside a section already (a whole drop's), it is always released. An image, a
+/// buffer or a memory released is counted at its caller's place (`churn_counts.rs`).
 ///
 /// # Safety
 ///
 /// As the entry point's: the object is `device`'s, and nothing pending uses it.
+#[track_caller]
 pub(crate) unsafe fn object<T: Released>(device: &ash::Device, object: T) -> bool {
     let Some(_busy) = exit_guard::enter() else {
         return false;
@@ -56,7 +59,7 @@ pub(crate) unsafe fn object<T: Released>(device: &ash::Device, object: T) -> boo
         _ => None,
     };
     if let Some(what) = counted {
-        churn_counts::vk_released(what);
+        churn_counts::vk_released(what, Location::caller());
     }
     true
 }

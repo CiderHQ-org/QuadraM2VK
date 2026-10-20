@@ -14,10 +14,16 @@
 //!   planned them (a render pass's attachments, a compute dispatch's bindings, a blit), cut to a
 //!   rectangle or of every texel, and the texels they copy.
 
+use crate::work_counts::{CopySite, CopySites, COPY_SITES};
+use std::panic::Location;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::LazyLock;
 
 /// The Vulkan releases of the process MoltenVK commits its residency set at, by entry point.
 static VK_RELEASES: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
+
+/// The places in the runtime that released those, the first [`COPY_SITES`] met.
+static RELEASE_SITES: LazyLock<CopySites> = LazyLock::new(CopySites::default);
 
 /// An entry point [`VK_RELEASES`] counts.
 #[derive(Clone, Copy)]
@@ -28,9 +34,16 @@ pub(crate) enum VkRelease {
     Memory = 3,
 }
 
-/// A release of `what` (`release::object`).
-pub(crate) fn vk_released(what: VkRelease) {
+/// A release of `what` (`release::object`), called `at`.
+pub(crate) fn vk_released(what: VkRelease, at: &Location<'static>) {
     VK_RELEASES[what as usize].fetch_add(1, Ordering::Relaxed);
+    let command = match what {
+        VkRelease::Image => "vkDestroyImage",
+        VkRelease::Buffer => "vkDestroyBuffer",
+        VkRelease::BufferView => "vkDestroyBufferView",
+        VkRelease::Memory => "vkFreeMemory",
+    };
+    RELEASE_SITES.count(command, at, 0);
 }
 
 /// What owned an image or a texture as it went.
@@ -135,6 +148,7 @@ impl ChurnCounters {
                 images_parked: self.recycled[1].load(Ordering::Relaxed),
                 images_evicted: self.recycled[2].load(Ordering::Relaxed),
                 imports_inside_live: self.imports_inside_live.load(Ordering::Relaxed),
+                release_sites: RELEASE_SITES.read(),
             },
             ShadowKeeps {
                 render_cut: keep(KeepBy::Render, 0),
@@ -194,6 +208,9 @@ pub struct ObjectChurn {
     /// No-copy buffers that imported their pages where a live import of another no-copy buffer
     /// held all of them (`host_aliases.rs`): imports a buffer could have lain in, at an offset.
     pub imports_inside_live: u64,
+    /// The places that released the images, buffers, buffer views and memory counted above, each
+    /// with its calls (`regions` unused): the first 32 the process met.
+    pub release_sites: [CopySite; COPY_SITES],
 }
 
 /// The keeps of merged-back shadows by who planned them, cut to a rectangle or of every texel
