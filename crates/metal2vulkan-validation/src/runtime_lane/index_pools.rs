@@ -144,6 +144,11 @@ fn command_buffers_in_flight_at_once_make_pool_blocks_once() {
                 "round {round}: blocks made and released"
             );
         }
+        assert_eq!(
+            lane.device.work_counts().gpu_pool_leases_peak,
+            2,
+            "two blocks leased at once at most"
+        );
     }
     assert_eq!(messages.take(), Vec::new(), "the validation layer reported");
 }

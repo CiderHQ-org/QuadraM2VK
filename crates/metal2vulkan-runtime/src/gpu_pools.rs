@@ -112,11 +112,16 @@ pub(super) struct Spares<T> {
     /// The idle blocks, the one given back last at the end, each with when it was given back:
     /// from the front, the oldest.
     idle: Vec<(T, Instant)>,
+    /// The blocks leased now.
+    leased: usize,
 }
 
 impl<T> Default for Spares<T> {
     fn default() -> Spares<T> {
-        Spares { idle: Vec::new() }
+        Spares {
+            idle: Vec::new(),
+            leased: 0,
+        }
     }
 }
 
@@ -127,9 +132,16 @@ impl<T> Spares<T> {
         self.idle.pop().map(|(block, _)| block)
     }
 
+    /// A block taken or made went to a lease: the blocks leased now, this one's included.
+    pub(super) fn leased(&mut self) -> usize {
+        self.leased += 1;
+        self.leased
+    }
+
     /// Give back `block` as its lease ends at `now`: the spares to release, those given back
     /// [`QUIET`] or longer before, the oldest first.
     pub(super) fn give(&mut self, block: T, now: Instant) -> Vec<T> {
+        self.leased = self.leased.saturating_sub(1);
         self.idle.push((block, now));
         let stale = self
             .idle
@@ -294,6 +306,8 @@ impl Device {
                 block
             }
         };
+        let leased = lock(shared.gpu_pools.spares(kind)).leased();
+        shared.counts.gpu_pool_leased(leased as u64);
         Ok(PoolLease {
             device: self.clone(),
             kind,

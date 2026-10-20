@@ -105,6 +105,7 @@ pub(crate) struct Counters {
     indirect_records_read: AtomicU64,
     gpu_pool_blocks_made: AtomicU64,
     gpu_pool_blocks_released: AtomicU64,
+    gpu_pool_leases_peak: AtomicU64,
     internal_submissions: AtomicU64,
     queue_submissions: AtomicU64,
     submit_infos: AtomicU64,
@@ -778,6 +779,13 @@ impl Counters {
     /// A command buffer's lease made a block of a GPU pool: no spare was idle (`gpu_pools.rs`).
     pub(crate) fn gpu_pool_block_made(&self) {
         self.gpu_pool_blocks_made.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A lease of a GPU pool's block began, `leased` of its kind leased now, this one's included
+    /// (`gpu_pools.rs`).
+    pub(crate) fn gpu_pool_leased(&self, leased: u64) {
+        self.gpu_pool_leases_peak
+            .fetch_max(leased, Ordering::Relaxed);
     }
 
     /// A spare block of a GPU pool was released as a lease ended: it stayed idle too long
@@ -2481,6 +2489,11 @@ pub struct WorkCounts {
     /// Spare blocks of the GPU pools released before the device's teardown: a spare that stayed
     /// idle for two seconds, released as another lease of its kind ended.
     pub gpu_pool_blocks_released: u64,
+    /// The most blocks of one kind of GPU pool leased at once: as many command buffers held an
+    /// index pool's block (or a mesh records pool's) between their first pass that needs one and
+    /// their completion. The device holds that many blocks of the kind (each a sixty-fourth of
+    /// its largest device-local heap) while they keep coming, and two seconds after.
+    pub gpu_pool_leases_peak: u64,
     /// Internal submissions made (`device/submit.rs`), each one a host call waits for: a host
     /// copy through the GPU, a clear of a live buffer, a neutral's making.
     pub internal_submissions: u64,
@@ -3659,6 +3672,7 @@ impl Device {
             indirect_records_read: counters.indirect_records_read.load(Ordering::Relaxed),
             gpu_pool_blocks_made: counters.gpu_pool_blocks_made.load(Ordering::Relaxed),
             gpu_pool_blocks_released: counters.gpu_pool_blocks_released.load(Ordering::Relaxed),
+            gpu_pool_leases_peak: counters.gpu_pool_leases_peak.load(Ordering::Relaxed),
             internal_submissions: counters.internal_submissions.load(Ordering::Relaxed),
             queue_submissions: counters.queue_submissions.load(Ordering::Relaxed),
             submit_infos: counters.submit_infos.load(Ordering::Relaxed),

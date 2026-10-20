@@ -7,10 +7,12 @@ use std::time::{Duration, Instant};
 
 /// A lease from `spares`: the spare given back last, or block `made + 1`, made.
 fn lease(spares: &mut Spares<u32>, made: &mut u32) -> u32 {
-    spares.take().unwrap_or_else(|| {
+    let block = spares.take().unwrap_or_else(|| {
         *made += 1;
         *made
-    })
+    });
+    spares.leased();
+    block
 }
 
 /// Two command buffers in flight at once, round after round, the first given back before the
@@ -63,6 +65,22 @@ fn spares_idle_past_the_quiet_period_go_as_a_later_lease_ends() {
     assert_eq!(made, 4, "no block made after the burst");
     assert_eq!(released, [1, 2, 3], "the idle ones, the oldest first");
     assert_eq!(spares.idle(), 1);
+}
+
+/// Each lease counts the blocks leased with it (`WorkCounts::gpu_pool_leases_peak` keeps the
+/// most), and each block given back leaves the count.
+#[test]
+fn leases_count_the_blocks_leased_at_once() {
+    let mut spares = Spares::default();
+    let now = Instant::now();
+    assert_eq!(spares.leased(), 1);
+    assert_eq!(spares.leased(), 2);
+    assert!(spares.give(1u32, now).is_empty());
+    assert_eq!(spares.take(), Some(1));
+    assert_eq!(spares.leased(), 2);
+    assert!(spares.give(1, now).is_empty());
+    assert!(spares.give(2, now).is_empty());
+    assert_eq!(spares.leased(), 1);
 }
 
 /// A device's spares all go as it is destroyed.
