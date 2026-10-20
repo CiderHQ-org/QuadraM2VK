@@ -19,7 +19,11 @@
 //!   completed and its queue stalled.
 //! - **Descriptor pools are bounded.** At most [`DESCRIPTOR_POOLS`] descriptor pools of at most
 //!   [`DESCRIPTORS`] descriptors together; a descriptor pool given back past them releases the
-//!   oldest spares first, so the spares follow the shapes in use.
+//!   oldest spares first, so the spares follow the shapes in use. The descriptors bound the
+//!   memory; the count is set by a frame's demand: a window server's frame of 40 command
+//!   buffers, 31 of a pass and 22 of a dispatch (host_ab's `drag`), holds about 53 pools in
+//!   flight, a draw's needs and a dispatch's each opening a pool of their own, and under a bound of
+//!   32 it made about 21 pools anew a frame.
 //! - **Fitted arenas keep spares of their own.** The pools of the runtime's own kernels' sets
 //!   (`DescriptorArena::fitted`) go back to a list apart from the command buffers', bounded the
 //!   same way: a command buffer's set 0 takes any spare with room, so in one list it took the
@@ -105,8 +109,9 @@ use ash::vk;
 use std::collections::VecDeque;
 use std::sync::Mutex;
 
-/// The most spare descriptor pools a device keeps.
-pub(super) const DESCRIPTOR_POOLS: usize = 32;
+/// The most spare descriptor pools a device keeps (of each list, a command buffer's arenas' and
+/// the fitted arenas'): a few frames' worth of a window server's (the module docs).
+pub(super) const DESCRIPTOR_POOLS: usize = 256;
 
 /// The most descriptors the spare descriptor pools hold together.
 pub(super) const DESCRIPTORS: u64 = 1 << 18;
