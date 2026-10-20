@@ -46,11 +46,13 @@
 //!   descriptors pushes only those (`WorkCounts::set_zero_writes_pushed`). Each test of set 0 runs
 //!   with `VK_KHR_push_descriptor` withheld too, so every device runs the path of one without the
 //!   push command, which binds set 0.
-//! - **Retains.** An argument table that binds the objects its encoder last retained it with is
-//!   not retained again (`WorkCounts::argument_tables_retained`): one whose objects changed is,
-//!   and an object the program let go of after its draw lives until the command buffer
-//!   completes. Its encoder lists every object a retain took or held already
-//!   (`CommandBuffer::ended_encoders`), a slot rebound to one that looks like its last included.
+//! - **Retains.** An argument table whose every object its encoder holds already, from its last
+//!   retain or an earlier one of any table, is not retained again
+//!   (`WorkCounts::argument_tables_retained`); one that binds an object the encoder does not hold
+//!   is, taking hold of those alone (`WorkCounts::argument_objects_retained`), and an object the
+//!   program let go of after its draw lives until the command buffer completes. Its encoder lists
+//!   every object a retain took or held already (`CommandBuffer::ended_encoders`), a slot rebound
+//!   to one that looks like its last included.
 //! - **Uploads.** Draws that set their bytes write them, and their tables, into no device-local
 //!   memory on a device with host-coherent, host-cached system memory
 //!   (`WorkCounts::upload_chunks_in_device_memory`).
@@ -482,8 +484,9 @@ fn draws_read_only_the_stage_tables_a_call_changed() {
 
 /// Draws that each bind another texture of the same type, format and usage, and other inline
 /// bytes of the same length, one column each: none past the first makes a bind shape (its
-/// texture slot keeps its shape) or settles, and each retains the fragment table, whose texture
-/// changed, alone. Each column is its own draw's texture's.
+/// texture slot keeps its shape) or settles, and only the second retains the fragment table,
+/// taking hold of its texture: each later draw's texture is held from an earlier one. Each column
+/// is its own draw's texture's.
 #[test]
 fn draws_of_other_objects_of_one_shape_make_and_settle_nothing() {
     on_device(|device, _| {
@@ -504,10 +507,10 @@ fn draws_of_other_objects_of_one_shape_make_and_settle_nothing() {
         }
         let (first, rest) = (first.unwrap(), device.work_counts());
         encoder.end_encoding().unwrap();
-        let later = SIDE - 1;
         assert_eq!(grew(&first, &rest, |c| c.draw_shapes_made), 0);
         assert_eq!(grew(&first, &rest, |c| c.draws_settled), 0);
-        assert_eq!(grew(&first, &rest, |c| c.argument_tables_retained), later);
+        assert_eq!(grew(&first, &rest, |c| c.argument_tables_retained), 1);
+        assert_eq!(grew(&first, &rest, |c| c.argument_objects_retained), 1);
         let pixels = scene.pixels(&command_buffer);
         for (at, &pixel) in pixels.iter().enumerate() {
             let want = [RED, GREEN][at % 2];
@@ -1663,10 +1666,11 @@ fn a_texture_let_go_after_its_draw_lives_until_the_command_buffer_completes() {
 }
 
 /// A fragment table that binds two textures, one slot rebound mid-encoder to a texture the program
-/// lets go of after its draw: each draw that changed the slot retains the table, and one that
-/// changed nothing does not; the texture lives until the command buffer completes (its column is
-/// its own, and the validation layer reports no use of a destroyed object), as the other slot's,
-/// held from the first retain, does. The columns left of the first draw's keep the clear.
+/// lets go of after its draw: each draw that binds a texture its encoder does not hold yet retains
+/// the table, and one whose objects the encoder holds does not; the texture lives until the
+/// command buffer completes (its column is its own, and the validation layer reports no use of a
+/// destroyed object), as the other slot's, held from the first retain, does. The columns left of
+/// the first draw's keep the clear.
 #[test]
 fn a_slot_rebound_to_a_texture_let_go_after_its_draw_holds_it_until_completion() {
     on_device(|device, _| {
@@ -1696,9 +1700,11 @@ fn a_slot_rebound_to_a_texture_let_go_after_its_draw_holds_it_until_completion()
         }
         let (first, rest) = (first.unwrap(), device.work_counts());
         encoder.end_encoding().unwrap();
-        // After the first draw: each odd column's draw and each even column's first.
-        let changed = SIDE - 2;
-        assert_eq!(grew(&first, &rest, |c| c.argument_tables_retained), changed);
+        // After the first draw: the green texture's first draw, and each later odd column's of
+        // its own red texture.
+        let taking = 1 + (SIDE - 2) / 2;
+        assert_eq!(grew(&first, &rest, |c| c.argument_tables_retained), taking);
+        assert_eq!(grew(&first, &rest, |c| c.argument_objects_retained), taking);
         let pixels = scene.pixels(&command_buffer);
         for (at, &pixel) in pixels.iter().enumerate() {
             let want = match at as u64 % SIDE {
@@ -1713,10 +1719,10 @@ fn a_slot_rebound_to_a_texture_let_go_after_its_draw_holds_it_until_completion()
 
 /// Draws that each set other vertex bytes and rebind the fragment table's texture slot 0 in turn
 /// to one of two textures that look alike (one format, size, usage and texels), the table also
-/// binding a buffer and, at slot 1, a texture the shader does not read: each draw retains the
-/// table, holding what its last retain held and taking the rest. The ended encoder lists the
-/// target, the buffer and the three textures (`CommandBuffer::ended_encoders`), whether a draw
-/// took one or held it already; each column is the textures' color.
+/// binding a buffer and, at slot 1, a texture the shader does not read: the second draw retains
+/// the table, taking the second texture, and each later one holds every object already. The ended
+/// encoder lists the target, the buffer and the three textures (`CommandBuffer::ended_encoders`),
+/// whether a draw took one or held it already; each column is the textures' color.
 #[test]
 fn draws_rebinding_a_slot_to_a_texture_that_looks_alike_list_each_object() {
     on_device(|device, _| {
@@ -1744,10 +1750,8 @@ fn draws_rebinding_a_slot_to_a_texture_that_looks_alike_list_each_object() {
         }
         let (first, rest) = (first.unwrap(), device.work_counts());
         encoder.end_encoding().unwrap();
-        assert_eq!(
-            grew(&first, &rest, |c| c.argument_tables_retained),
-            SIDE - 1
-        );
+        assert_eq!(grew(&first, &rest, |c| c.argument_tables_retained), 1);
+        assert_eq!(grew(&first, &rest, |c| c.argument_objects_retained), 1);
         let ended = command_buffer.ended_encoders();
         assert_eq!(ended.len(), 1);
         let used = &ended[0].used_resources;

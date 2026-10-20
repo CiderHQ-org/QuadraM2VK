@@ -65,8 +65,8 @@ use std::panic::Location;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-/// The cores made so far in the process: the next one's [`EncoderCore::id`].
-static CORES: AtomicU64 = AtomicU64::new(0);
+/// The next core's [`EncoderCore::id`]: from 1, so none is `retained::HeldBy`'s 0.
+static CORES: AtomicU64 = AtomicU64::new(1);
 
 /// One ended encoder's recording, or one part of it (`EncoderUses::split`), in its command
 /// buffer's encoding order.

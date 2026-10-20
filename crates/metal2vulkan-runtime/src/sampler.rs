@@ -77,6 +77,7 @@ use super::device::lock;
 use super::error::{Error, SamplerLimit};
 use super::exit_guard;
 use super::resource_ids::{ElementHold, Holder, IdHold, IdPlacement, IdSpace, ResourceId};
+use super::retained::HeldBy;
 use super::Device;
 use crate::release;
 use ash::vk;
@@ -321,6 +322,8 @@ pub(super) struct SamplerShared {
     element: ElementHold,
     /// The Vulkan samplers made for binds, least recently bound first.
     kept: Mutex<Vec<(metal2vulkan::vk::SamplerDesc, Arc<OwnedSampler>)>>,
+    /// The encoder core that holds it from an argument table's retain (`retained::HeldBy`).
+    held_by: HeldBy,
 }
 
 impl std::fmt::Debug for SamplerState {
@@ -462,6 +465,7 @@ impl Device {
             id,
             element,
             kept: Mutex::new(Vec::new()),
+            held_by: HeldBy::default(),
         }));
         live.retain(|_, state| state.strong_count() > 0);
         live.insert(key, Arc::downgrade(&state.0));
@@ -603,9 +607,9 @@ impl SamplerState {
         self.0.clone()
     }
 
-    /// The sampler state's address: no other object's while it lives.
-    pub(super) fn address(&self) -> usize {
-        Arc::as_ptr(&self.0) as usize
+    /// The encoder core that holds it from an argument table's retain (`retained::HeldBy`).
+    pub(super) fn held_by(&self) -> &HeldBy {
+        &self.0.held_by
     }
 
     /// `device`: the device that made the state.

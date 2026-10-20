@@ -39,6 +39,7 @@ use super::program_objects::ProgramObject;
 use super::rebind::{ImportHold, Unexact};
 use super::recycle::{self, BufferMaking};
 use super::resource::{Identity, ObjectId, ResourceKey};
+use super::retained::HeldBy;
 use super::texture::first_move::Filled;
 use super::values::{CpuCacheMode, HazardTrackingMode, ResourceOptions, StorageMode};
 use super::Device;
@@ -84,6 +85,8 @@ struct BufferShared {
     address: GpuAddress,
     attributes: ResourceAttributes,
     bytes: Bytes,
+    /// The encoder core that holds it from an argument table's retain (`retained::HeldBy`).
+    held_by: HeldBy,
 }
 
 /// Where a buffer's bytes are.
@@ -2289,6 +2292,7 @@ impl Device {
             address,
             attributes: ResourceAttributes::new(),
             bytes: Bytes::Own(own),
+            held_by: HeldBy::default(),
         }))
     }
 
@@ -2474,6 +2478,7 @@ impl Heap {
                 // A placement heap's buffer answers aliasable from the start, as Metal's does.
                 aliasable: AtomicBool::new(self.heap_type() == HeapType::Placement),
             }),
+            held_by: HeldBy::default(),
         }))
     }
 }
@@ -2793,9 +2798,9 @@ impl Buffer {
         self.0.clone()
     }
 
-    /// The buffer's address: no other object's while it lives.
-    pub(super) fn address(&self) -> usize {
-        Arc::as_ptr(&self.0) as usize
+    /// The encoder core that holds it from an argument table's retain (`retained::HeldBy`).
+    pub(super) fn held_by(&self) -> &HeldBy {
+        &self.0.held_by
     }
 
     /// The buffer's identity for hazard tracking: a heap buffer's is its heap's, as Metal tracks

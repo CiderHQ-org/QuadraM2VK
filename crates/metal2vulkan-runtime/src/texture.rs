@@ -96,6 +96,7 @@ use super::pvrtc::{
 use super::recycle::{self, ImageMaking, Recycler};
 use super::resource::{Identity, ObjectId, ResourceKey};
 use super::resource_ids::{Holder, IdHold, IdPlacement, IdSpace, ResourceId};
+use super::retained::HeldBy;
 use super::shadow::ShadowCopies;
 use super::shadow_copy_back::{self, with_word_view, WordView};
 use super::shadow_merge::{with_unorm_view, UnormView};
@@ -367,6 +368,9 @@ pub(super) struct TextureShared {
     label: Mutex<Option<String>>,
     /// Its identity (`object_id`), its own also for a view.
     object_id: ObjectId,
+    /// The encoder core that holds it from an argument table's retain (`retained::HeldBy`), its
+    /// own also for a view.
+    held_by: HeldBy,
     /// The image a slot binding takes where the texture's image and usage both lack the usage
     /// the binding needs (`texture/usage_shadow.rs`), made at the first such binding.
     usage_shadow: Mutex<Option<Arc<usage_shadow::UsageShadow>>>,
@@ -3906,6 +3910,7 @@ impl Texture {
             id,
             label: Mutex::new(None),
             object_id: ObjectId::new(),
+            held_by: HeldBy::default(),
             usage_shadow: Mutex::new(None),
             snapshot: Mutex::new(Vec::new()),
             kept_backings: Mutex::new(Vec::new()),
@@ -4775,6 +4780,11 @@ impl Texture {
     /// The texture's address: no other object's while it lives.
     pub(super) fn address(&self) -> usize {
         Arc::as_ptr(&self.0) as usize
+    }
+
+    /// The encoder core that holds it from an argument table's retain (`retained::HeldBy`).
+    pub(super) fn held_by(&self) -> &HeldBy {
+        &self.0.held_by
     }
 
     /// The key the texture's uses name (`bound_use`): its image's, or the bytes' of the buffer

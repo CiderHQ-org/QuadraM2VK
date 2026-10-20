@@ -179,6 +179,7 @@ pub(crate) struct Counters {
     two_plane_draws: AtomicU64,
     bound_notices_made: AtomicU64,
     argument_tables_retained: AtomicU64,
+    argument_objects_retained: AtomicU64,
     graphics_pipelines_looked_up: AtomicU64,
     linear_passes_in_place: AtomicU64,
     linear_passes_through_copies: AtomicU64,
@@ -1286,10 +1287,13 @@ impl Counters {
         self.bound_notices_made.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// A command retained what an argument table binds (`ArgumentTable::retain`).
-    pub(crate) fn argument_table_retained(&self) {
+    /// A command retained what an argument table binds (`ArgumentTable::retain`), taking hold of
+    /// `objects` of them, one at least.
+    pub(crate) fn argument_table_retained(&self, objects: u64) {
         self.argument_tables_retained
             .fetch_add(1, Ordering::Relaxed);
+        self.argument_objects_retained
+            .fetch_add(objects, Ordering::Relaxed);
     }
 
     /// A draw looked its `VkPipeline` up in its variant's memo by key
@@ -2945,9 +2949,13 @@ pub struct WorkCounts {
     /// (`DeviceOptions::announce_each`), made for a bind: once per variant until the
     /// specializations or the formats its notices name change; each bind announces them.
     pub bound_notices_made: u64,
-    /// Argument tables a dispatch or draw retained what they bind from: none for a table that is
-    /// unchanged since its encoder's last command retained it.
+    /// Argument tables a dispatch or draw retained what they bind from, taking hold of an object
+    /// at least: none for a table whose every object its encoder holds already, from an earlier
+    /// retain of one of its tables at whatever slot (`retained::HeldBy`), a table unchanged since
+    /// its last retain among them.
     pub argument_tables_retained: u64,
+    /// Objects those retains took hold of: none that the encoder holds already.
+    pub argument_objects_retained: u64,
     /// Draws that looked their `VkPipeline` up in their variant's memo by key: none for a draw
     /// whose key is one of those its pipeline state's last draws found made, while that entry
     /// stays.
@@ -3816,6 +3824,7 @@ impl Device {
             two_plane_draws: counters.two_plane_draws.load(Ordering::Relaxed),
             bound_notices_made: counters.bound_notices_made.load(Ordering::Relaxed),
             argument_tables_retained: counters.argument_tables_retained.load(Ordering::Relaxed),
+            argument_objects_retained: counters.argument_objects_retained.load(Ordering::Relaxed),
             graphics_pipelines_looked_up: counters
                 .graphics_pipelines_looked_up
                 .load(Ordering::Relaxed),

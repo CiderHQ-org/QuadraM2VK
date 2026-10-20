@@ -19,9 +19,11 @@
 //! it, it was replaced before any did, or it was bound after the last (the M3 Max under macOS
 //! 27.0.1, probes `dealloc-probe` and `dealloc-probe2`, compute and render encoders). A command
 //! that uses the table retains what it binds (`ArgumentTable::retain`); an object replaced or
-//! unbound that no such command retained at its slot, and one still bound as the encoder ends, is
-//! retained then (`ArgumentTable::let_go`, `ArgumentTable::let_go_all`). So a bind before each
-//! draw retains nothing of its own: it looks its slot up among what the last retain held.
+//! unbound that no such command retained, and one still bound as the encoder ends, is retained
+//! then (`let_go`, `ArgumentTable::let_go_all`). Each object names the core that holds it from
+//! such a retain (`retained::HeldBy`), so an object retained once is not retained again by that
+//! core, whichever slot binds it: a bind before each draw, and a draw that binds objects an
+//! earlier draw of the encoder bound, retain nothing of their own.
 //!
 //! A compute encoder's table differs in two answers, as plain Metal's compute encoder gave them
 //! on an M4 where its API validation asserts: it holds a buffer bound past
@@ -39,6 +41,8 @@ use super::encoder::EncoderCore;
 use super::error::{invalid, Error, Problem};
 use super::function_table::{FunctionTableProblem, VisibleFunctionTable};
 use super::live_bind::Reshape;
+use super::resource::ResourceKey;
+use super::retained::HeldBy;
 use super::sampler::SamplerState;
 use super::texture::Texture;
 use super::upload::Upload;
@@ -200,11 +204,9 @@ impl Default for Stamp {
     }
 }
 
-/// The core an argument table was last retained into ([`EncoderCore::id`]) and the objects it
-/// bound then, by slot and address in its order ([`ArgumentTable::retain`]). The table holds none
-/// of them, so it never holds an object longer than the core does: the core holds each from that
-/// retain or an earlier one until its command buffer completes, and nothing is retained into it
-/// once it ends, so while it is the core named here no other object has one of the addresses.
+/// The core an argument table was last retained into ([`EncoderCore::id`]) and the table's stamp
+/// then ([`ArgumentTable::retain`]): while both hold, that core holds every object the table
+/// binds.
 #[derive(Default)]
 struct Retained(Mutex<RetainedBy>);
 
@@ -219,9 +221,6 @@ struct RetainedBy {
     core: Option<u64>,
     /// The table's stamp then: while it holds, the table binds those objects still.
     stamp: Option<Stamp>,
-    /// Each object's slot (its table, then its index) and address; its storage is kept from
-    /// one retain to the next.
-    bound: Vec<((SlotClass, u32), usize)>,
 }
 
 /// An object an argument table binds, which a command that uses the table holds.
@@ -232,12 +231,22 @@ enum Bound<'a> {
     Sampler(&'a SamplerState),
 }
 
-impl Bound<'_> {
-    fn address(self) -> usize {
+impl<'a> Bound<'a> {
+    /// The core that holds it from a table's retain.
+    fn held_by(self) -> &'a HeldBy {
         match self {
-            Bound::Buffer(buffer) => buffer.address(),
-            Bound::Texture(texture) => texture.address(),
-            Bound::Sampler(sampler) => sampler.address(),
+            Bound::Buffer(buffer) => buffer.held_by(),
+            Bound::Texture(texture) => texture.held_by(),
+            Bound::Sampler(sampler) => sampler.held_by(),
+        }
+    }
+
+    /// The key its uses name, which a core that retains it keeps: none for a sampler state.
+    fn key(self) -> Option<ResourceKey> {
+        match self {
+            Bound::Buffer(buffer) => Some(buffer.identity().key),
+            Bound::Texture(texture) => Some(texture.use_key()),
+            Bound::Sampler(_) => None,
         }
     }
 
@@ -307,7 +316,7 @@ fn set_entry<T>(table: &mut BTreeMap<u32, T>, index: u32, value: Option<T>) -> O
 
 /// Bind the handle `value` at `index` of `table` with `with` (its offset, its clamps), or unbind
 /// the index when `value` is `None`: the handle it replaced or unbound, another object than
-/// `value` ([`ArgumentTable::let_go`]). The handle already bound there (the same object) keeps
+/// `value` ([`let_go`]). The handle already bound there (the same object) keeps
 /// its hold and takes `with` alone: binding it again takes no new reference, whose count the
 /// threads that release the encoder's holds share.
 fn set_handle<T: Clone + PartialEq, W>(
@@ -481,7 +490,7 @@ impl ArgumentTable {
         self.null_tables.remove(&index);
         self.bytes.remove(&index);
         if let Some(replaced) = replaced {
-            self.let_go(core, (SlotClass::Buffer, index), Bound::Buffer(&replaced));
+            let_go(core, Bound::Buffer(&replaced));
         }
         Ok(())
     }
@@ -532,7 +541,7 @@ impl ArgumentTable {
             self.null_tables.remove(&index);
             self.bytes.remove(&index);
             if let Some(replaced) = replaced {
-                self.let_go(core, (SlotClass::Buffer, index), Bound::Buffer(&replaced));
+                let_go(core, Bound::Buffer(&replaced));
             }
         }
         Ok(())
@@ -604,7 +613,7 @@ impl ArgumentTable {
             self.attribute_strides.remove(&index);
             self.null_tables.insert(index);
             if let Some((words, _)) = words {
-                self.let_go(core, (SlotClass::Buffer, index), Bound::Buffer(&words));
+                let_go(core, Bound::Buffer(&words));
             }
             return Ok(());
         }
@@ -663,7 +672,7 @@ impl ArgumentTable {
         self.function_tables.remove(&index);
         self.null_tables.remove(&index);
         if let Some((replaced, _)) = replaced {
-            self.let_go(core, (SlotClass::Buffer, index), Bound::Buffer(&replaced));
+            let_go(core, Bound::Buffer(&replaced));
         }
         self.bytes.insert(
             index,
@@ -697,7 +706,7 @@ impl ArgumentTable {
         }
         for (texture, index) in textures.iter().zip(first..) {
             if let Some(replaced) = set_bare_handle(&mut self.textures, index, *texture) {
-                self.let_go(core, (SlotClass::Texture, index), Bound::Texture(&replaced));
+                let_go(core, Bound::Texture(&replaced));
             }
         }
         Ok(())
@@ -728,7 +737,7 @@ impl ArgumentTable {
         for (i, (sampler, index)) in samplers.iter().zip(first..).enumerate() {
             let clamp = clamps.map(|(min, max)| [min[i], max[i]]);
             if let Some(replaced) = set_handle(&mut self.samplers, index, *sampler, clamp) {
-                self.let_go(core, (SlotClass::Sampler, index), Bound::Sampler(&replaced));
+                let_go(core, Bound::Sampler(&replaced));
             }
         }
         Ok(())
@@ -767,7 +776,7 @@ impl ArgumentTable {
                     .get(&index)
                     .is_some_and(|(bound, _)| bound == replaced)
             }) {
-                self.let_go(core, (SlotClass::Buffer, index), Bound::Buffer(&replaced));
+                let_go(core, Bound::Buffer(&replaced));
             }
         }
         Ok(())
@@ -1155,13 +1164,12 @@ impl ArgumentTable {
 
     /// Hold everything bound until `core`'s command buffer completes: a command uses it, and
     /// the command buffer lists it among its used resources (`used_resources.rs`). Once while it
-    /// binds the same objects: where `core` retained the table before and it binds exactly the
-    /// objects it bound then (by identity; at once where its stamp is the one it had then, else
-    /// slot by slot), `core` holds them and keeps their keys, each a function of its object, until
-    /// the command buffer completes, so nothing is retained again. Where it binds others, `core`
-    /// holds each object the table bound at its slot then already, and takes the rest, each by
-    /// another reference to it (`retained.rs`): its last first, so they go in the table's order,
-    /// as one hold of them all went.
+    /// binds the same objects: where `core` retained the table before under its stamp now,
+    /// nothing is retained again. Else each object `core` holds from an earlier retain
+    /// (`retained::HeldBy`) is held and its key kept already, each a function of its object;
+    /// `core` keeps the others' keys and takes them, each by another reference to it
+    /// (`retained.rs`): its last first, so they go in the table's order, as one hold of them all
+    /// went.
     pub(super) fn retain(&self, core: &mut EncoderCore) {
         let mut retained = lock(&self.retained.0);
         let objects = (&self.buffers, &self.textures, &self.samplers);
@@ -1184,26 +1192,8 @@ impl ArgumentTable {
         retain_into((buffers, textures, samplers), *stamp, retained, core);
     }
 
-    /// Let go of `object`, which the table bound at `slot` until a call replaced or unbound it:
-    /// `core` holds it until its command buffer completes, as Metal holds every object an encoder
-    /// was handed, a binding replaced before any command used it included (the M3 Max under macOS
-    /// 27.0.1, probes `dealloc-probe` and `dealloc-probe2`: a no-copy buffer so bound, then
-    /// released, ran its deallocator only after the command buffer completed). Nothing is retained
-    /// where `core` holds it already, from a command that used the table with it at `slot`
-    /// ([`retain`](Self::retain)): a bind before each draw retains nothing here.
-    fn let_go(&mut self, core: &mut EncoderCore, slot: (SlotClass, u32), object: Bound<'_>) {
-        let retained = self
-            .retained
-            .0
-            .get_mut()
-            .unwrap_or_else(PoisonError::into_inner);
-        if !retained.holds(core, slot, object) {
-            core.retain_shared(object.held());
-        }
-    }
-
     /// Let go of everything the table binds, as its encoder ends or its state is set back:
-    /// [`let_go`](Self::let_go) of each object, the last first, so they go in the table's order.
+    /// [`let_go`] of each object, the last first, so they go in the table's order.
     /// Metal holds what an encoder was handed until its command buffer completes, a binding no
     /// command used included (probe `dealloc-probe2`: a buffer or texture bound after the last
     /// draw or dispatch).
@@ -1212,19 +1202,30 @@ impl ArgumentTable {
             buffers,
             textures,
             samplers,
-            retained,
             ..
         } = self;
         // A stage the encoder bound nothing to (most often its object, mesh and tile stages').
         if buffers.is_empty() && textures.is_empty() && samplers.is_empty() {
             return;
         }
-        let retained = retained.0.get_mut().unwrap_or_else(PoisonError::into_inner);
-        for (slot, object) in bound_in(buffers, textures, samplers).rev() {
-            if !retained.holds(core, slot, object) {
+        for object in bound_in(buffers, textures, samplers).rev() {
+            if !object.held_by().is(core.id()) {
                 core.retain_shared(object.held());
             }
         }
+    }
+}
+
+/// Let go of `object`, which a table bound until a call replaced or unbound it: `core` holds it
+/// until its command buffer completes, as Metal holds every object an encoder was handed, a
+/// binding replaced before any command used it included (the M3 Max under macOS 27.0.1, probes
+/// `dealloc-probe` and `dealloc-probe2`: a no-copy buffer so bound, then released, ran its
+/// deallocator only after the command buffer completed). Nothing is retained where `core` holds
+/// it already, from a command that used a table that bound it ([`ArgumentTable::retain`]): a
+/// bind before each draw retains nothing here.
+fn let_go(core: &mut EncoderCore, object: Bound<'_>) {
+    if !object.held_by().is(core.id()) {
+        core.retain_shared(object.held());
     }
 }
 
@@ -1241,58 +1242,38 @@ fn retain_into(
     core: &mut EncoderCore,
 ) {
     let (buffers, textures, samplers) = objects;
+    // No call changed what it binds since: the same objects, by the stamp.
+    if retained.core == Some(core.id()) && retained.stamp == Some(stamp) {
+        return;
+    }
+    let id = core.id();
     let bound = || bound_in(buffers, textures, samplers);
-    if retained.core == Some(core.id()) {
-        // No call changed what it binds since: the same objects, by the stamp.
-        if retained.stamp == Some(stamp) {
-            return;
-        }
-        let now = bound().map(|(slot, object)| (slot, object.address()));
-        if retained.bound.iter().copied().eq(now) {
-            retained.stamp = Some(stamp);
-            return;
-        }
+    let fresh = |object: &Bound<'_>| !object.held_by().is(id);
+    core.touch_keys(bound().filter(fresh).filter_map(Bound::key));
+    let mut taken = 0;
+    for object in bound().rev().filter(fresh) {
+        core.retain_shared(object.held());
+        object.held_by().set(id);
+        taken += 1;
     }
-    let keys = buffers.values().map(|(b, _)| b.identity().key);
-    let texture_keys = textures.values().map(Texture::use_key);
-    core.touch_keys(keys.chain(texture_keys));
-    for (slot, object) in bound().rev() {
-        if !retained.holds(core, slot, object) {
-            core.retain_shared(object.held());
-        }
-    }
-    retained.bound.clear();
-    (retained.bound).extend(bound().map(|(slot, object)| (slot, object.address())));
-    retained.core = Some(core.id());
+    retained.core = Some(id);
     retained.stamp = Some(stamp);
-    core.device().shared().counts.argument_table_retained();
+    if taken > 0 {
+        core.device().shared().counts.argument_table_retained(taken);
+    }
 }
 
-/// The objects a table's `buffers`, `textures` and `samplers` bind, by slot, in the table's order:
-/// its buffers, then its textures, then its sampler states, each by index.
+/// The objects a table's `buffers`, `textures` and `samplers` bind, in the table's order: its
+/// buffers, then its textures, then its sampler states, each by index.
 fn bound_in<'a>(
     buffers: &'a BTreeMap<u32, (Buffer, u64)>,
     textures: &'a BTreeMap<u32, Texture>,
     samplers: &'a BTreeMap<u32, (SamplerState, Option<[f32; 2]>)>,
-) -> impl DoubleEndedIterator<Item = ((SlotClass, u32), Bound<'a>)> {
-    let buffers = buffers
-        .iter()
-        .map(|(&index, (buffer, _))| ((SlotClass::Buffer, index), Bound::Buffer(buffer)));
-    let textures = textures
-        .iter()
-        .map(|(&index, texture)| ((SlotClass::Texture, index), Bound::Texture(texture)));
+) -> impl DoubleEndedIterator<Item = Bound<'a>> {
+    let buffers = buffers.values().map(|(buffer, _)| Bound::Buffer(buffer));
+    let textures = textures.values().map(Bound::Texture);
     let samplers = samplers
-        .iter()
-        .map(|(&index, (sampler, _))| ((SlotClass::Sampler, index), Bound::Sampler(sampler)));
+        .values()
+        .map(|(sampler, _)| Bound::Sampler(sampler));
     buffers.chain(textures).chain(samplers)
-}
-
-impl RetainedBy {
-    /// Whether `core` holds `object`, bound at `slot`, from the table's last retain into it.
-    fn holds(&self, core: &EncoderCore, slot: (SlotClass, u32), object: Bound<'_>) -> bool {
-        self.core == Some(core.id())
-            && (self.bound)
-                .binary_search_by_key(&slot, |&(slot, _)| slot)
-                .is_ok_and(|at| self.bound[at].1 == object.address())
-    }
 }

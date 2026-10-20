@@ -12,6 +12,7 @@
 //!   hold was an entry of its own.
 
 use std::any::Any;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 /// The holds an encoder's storage makes room for at its first: a pass's draws of a few pipeline
@@ -36,6 +37,28 @@ impl Drop for Holds {
                 Held::Boxed(object) => drop(object),
             }
         }
+    }
+}
+
+/// The encoder core whose command buffer holds an object an argument table binds, from a retain
+/// of the table that kept its key among the core's (`argument_table::retain_into`): that core's
+/// [`EncoderCore::id`](super::encoder::EncoderCore::id), 0 for none (ids start at 1). A core
+/// holds what it retained until its command buffer completes, and no other core has its id, so
+/// while the object lives the core named here holds it and keeps its key: that core retains it
+/// again for nothing. Only a core that just retained the object names itself; a core that reads
+/// another's id retains it as before.
+#[derive(Default)]
+pub(super) struct HeldBy(AtomicU64);
+
+impl HeldBy {
+    /// Whether the core `core` holds the object and keeps its key.
+    pub(super) fn is(&self, core: u64) -> bool {
+        self.0.load(Ordering::Relaxed) == core
+    }
+
+    /// Name `core`, which just retained the object and kept its key.
+    pub(super) fn set(&self, core: u64) {
+        self.0.store(core, Ordering::Relaxed);
     }
 }
 
