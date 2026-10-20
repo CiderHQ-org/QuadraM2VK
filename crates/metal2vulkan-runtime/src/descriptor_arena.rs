@@ -24,9 +24,10 @@
 //!   them.
 //! - **Fitted arenas.** The sets of the runtime's own kernels (`owned_kernel.rs`) come from an
 //!   arena of their own, which a command buffer or a resource holds as long as it holds the sets
-//!   and then gives back. It takes a spare only where the spare holds no more descriptors than the
-//!   pool it would open ([`DescriptorArena::fitted`]), so a texture that holds its sets for its
-//!   life holds no pool a command buffer of many draws grew.
+//!   and then gives back. It takes and gives back spares of a list of the fitted arenas' own
+//!   (`spares.rs`), which a command buffer's arena never takes, and only a spare that holds no
+//!   more descriptors than the pool it would open ([`DescriptorArena::fitted`]), so a texture that
+//!   holds its sets for its life holds no larger pool than its own.
 
 use super::error::{vulkan, Error};
 use super::spares::{release_in_section, DescriptorPool};
@@ -246,7 +247,9 @@ impl DescriptorArena {
         };
         let shared = device.shared();
         for pool in self.pools.drain(..) {
-            shared.spares.give_descriptor_pool(shared, pool);
+            shared
+                .spares
+                .give_descriptor_pool(shared, pool, self.fitted);
         }
     }
 

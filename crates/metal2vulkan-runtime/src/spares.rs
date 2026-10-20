@@ -20,6 +20,11 @@
 //! - **Descriptor pools are bounded.** At most [`DESCRIPTOR_POOLS`] descriptor pools of at most
 //!   [`DESCRIPTORS`] descriptors together; a descriptor pool given back past them releases the
 //!   oldest spares first, so the spares follow the shapes in use.
+//! - **Fitted arenas keep spares of their own.** The pools of the runtime's own kernels' sets
+//!   (`DescriptorArena::fitted`) go back to a list apart from the command buffers', bounded the
+//!   same way: a command buffer's set 0 takes any spare with room, so in one list it took the
+//!   small pools a texture's moves gave back, and under a window server's command buffers a frame
+//!   the fitted arenas made about a third of their pools anew.
 //! - **A pool whose command buffers all ended is not reset; its command buffers are, as they are
 //!   begun.** Its pools are made with `VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT`, and
 //!   Vulkan: "If a command buffer is in the invalid, or executable state, and the command buffer
@@ -281,8 +286,10 @@ pub(super) struct DescriptorPool {
 #[derive(Default)]
 pub(super) struct Spares {
     command_pools: Mutex<Vec<CommandPool>>,
-    /// Oldest first.
+    /// The command buffers' arenas', oldest first.
     descriptor_pools: Mutex<VecDeque<DescriptorPool>>,
+    /// The fitted arenas' (the module docs), oldest first.
+    fitted_pools: Mutex<VecDeque<DescriptorPool>>,
 }
 
 impl Spares {
@@ -352,19 +359,24 @@ impl Spares {
         }
     }
 
-    /// A spare descriptor pool of `device`, reset, with room for one set of `needs` (and of at
-    /// most `most` descriptors, where given), the newest such; `None` when there is none, or this
+    /// A spare descriptor pool of `device`, reset, with room for one set of `needs`, the newest
+    /// such: a command buffer's arena's, or, for a fitted arena (`fitted`, the most descriptors
+    /// it takes a spare of), one of the fitted arenas' own; `None` when there is none, or this
     /// thread is in a section.
     pub(super) fn descriptor_pool(
         &self,
         device: &DeviceShared,
         needs: &SetNeeds,
-        most: Option<u64>,
+        fitted: Option<u64>,
     ) -> Result<Option<DescriptorPool>, Error> {
         if exit_guard::in_section() {
             return Ok(None);
         }
-        let pool = take_descriptor_pool(&mut lock(&self.descriptor_pools), needs, most);
+        let pools = match fitted {
+            Some(_) => &self.fitted_pools,
+            None => &self.descriptor_pools,
+        };
+        let pool = take_descriptor_pool(&mut lock(pools), needs, fitted);
         let Some(pool) = pool else {
             return Ok(None);
         };
@@ -383,10 +395,20 @@ impl Spares {
         Ok(Some(pool))
     }
 
-    /// Keep `pool` of `device`, of a command buffer that completed, releasing the oldest spares
-    /// past the bounds (or `pool` itself, when it alone is past them).
-    pub(super) fn give_descriptor_pool(&self, device: &DeviceShared, pool: DescriptorPool) {
-        let past = keep_descriptor_pool(&mut lock(&self.descriptor_pools), pool);
+    /// Keep `pool` of `device`, whose sets nothing uses any more, among a command buffer's
+    /// arena's spares or, where `fitted`, among the fitted arenas', releasing the oldest of that
+    /// list past the bounds (or `pool` itself, when it alone is past them).
+    pub(super) fn give_descriptor_pool(
+        &self,
+        device: &DeviceShared,
+        pool: DescriptorPool,
+        fitted: bool,
+    ) {
+        let pools = match fitted {
+            true => &self.fitted_pools,
+            false => &self.descriptor_pools,
+        };
+        let past = keep_descriptor_pool(&mut lock(pools), pool);
         for raw in past {
             // SAFETY: nothing uses the pool's sets (the caller's, or a spare's), and nothing else
             // holds it.
@@ -400,9 +422,11 @@ impl Spares {
             // SAFETY: no command buffer is left, so nothing of the pool is pending.
             unsafe { release_in_section(device, pool.raw) };
         }
-        for pool in lock(&self.descriptor_pools).drain(..) {
-            // SAFETY: as above.
-            unsafe { release_in_section(device, pool.raw) };
+        for pools in [&self.descriptor_pools, &self.fitted_pools] {
+            for pool in lock(pools).drain(..) {
+                // SAFETY: as above.
+                unsafe { release_in_section(device, pool.raw) };
+            }
         }
     }
 }

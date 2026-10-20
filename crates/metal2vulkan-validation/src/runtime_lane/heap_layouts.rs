@@ -37,6 +37,7 @@
 
 use super::degrade_notices::{counts, on_device, on_device_with};
 use super::host_memory::{not_importable, run, Mapping};
+use super::indirect_host_steps;
 use super::no_copy_heaps::{shared, HEAP};
 use super::{buffer_with, read_buffer, Messages};
 use crate::air_library::AirLibrary;
@@ -475,6 +476,54 @@ fn a_texture_made_again_asks_the_device_nothing_its_first_making_asked() {
             );
             eprintln!("HEAPLAYOUT {what}: asked {counts:?}, kept {kept}");
         }
+    });
+}
+
+/// A texture made again in a heap over host pages while a command buffer encodes dispatches whose
+/// set 0 holds storage buffers alone, as its moves' sets do, makes no descriptor pool: the
+/// runtime's own kernels' sets take spares of a list of their own, which a command buffer's set 0
+/// never takes, so the pool the dropped texture's moves gave back is there
+/// (`WorkCounts::arena_pools_made`). It lies in Metal's tiles all the same.
+#[test]
+fn a_texture_made_again_beside_dispatches_takes_its_moves_pool_back() {
+    on_device(|device, _| {
+        let queue = device.new_command_queue().unwrap();
+        let mapping = Mapping::anonymous(HEAP);
+        let Some(heap) = heap_over(device, &mapping) else {
+            return;
+        };
+        let plain = plains()[2];
+        let descriptor = plain.descriptor();
+        let kernel = indirect_host_steps::state(device, "a4_index_word", false);
+        let words = buffer_with(device, &vec![0; 4096]).unwrap();
+        let zero = vec![0u8; HEAP];
+        let len = plain.texels() * plain.unit as usize;
+        let mut made = Vec::new();
+        let mut texture = None;
+        for round in 0..3 {
+            // The command buffer's arena takes its pools as it encodes, and holds them until it
+            // completes.
+            let command_buffer = queue.command_buffer().unwrap();
+            let mut encoder = command_buffer.compute_command_encoder().unwrap();
+            encoder.set_compute_pipeline_state(&kernel).unwrap();
+            for at in 0..64u64 {
+                encoder.set_buffer(Some(&words), 0, 0).unwrap();
+                encoder.set_buffer(Some(&words), 64 * at, 1).unwrap();
+                let threads = Size::new(4, 1, 1);
+                encoder.dispatch_threads(threads, threads).unwrap();
+            }
+            encoder.end_encoding().unwrap();
+            let held = named(len, round);
+            mapping.write(0, &plain.laid(&held, &zero));
+            let before = device.work_counts().arena_pools_made;
+            let made_now = heap.new_texture_at_offset(&descriptor, OFFSET).unwrap();
+            made.push(device.work_counts().arena_pools_made - before);
+            run(&command_buffer);
+            assert_eq!(blit_out(&queue, &made_now, &plain), held, "round {round}");
+            // The texture before it goes, giving its moves' pool back.
+            drop(texture.replace(made_now));
+        }
+        assert_eq!(made[2..], [0], "pools made by each making: {made:?}");
     });
 }
 
