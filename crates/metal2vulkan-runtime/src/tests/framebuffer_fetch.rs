@@ -6,7 +6,7 @@ use super::texture_descriptor::APPLE;
 use crate::framebuffer_fetch::{
     fetch_candidate, planes_candidate, planes_copies, planes_copies_gap, storage_candidate,
     stores_samples, through_inputs, through_multisampled_storage, through_planes, through_storage,
-    UsageAnswers,
+    UsageAnswers, ANSWERS,
 };
 use crate::image_plan::{plan_image, ImagePlan};
 use crate::texture_descriptor::{TextureDescriptor, TextureLayout};
@@ -271,11 +271,11 @@ fn the_planes_usage_is_offered_to_multisampled_color_targets_where_the_fetch_rea
     assert!(offered > 0, "a planes profile offers the usage");
 }
 
-/// The answers keep the latest 64 image descriptions: the oldest goes first, and an answer is
-/// found by the whole description and the candidate's: one description answers each usage added
-/// to it apart.
+/// The answers keep the latest [`ANSWERS`] asked: the least recently asked goes first (an answer
+/// asked again stays), and an answer is found by the whole description and the candidate's: one
+/// description answers each usage added to it apart.
 #[test]
-fn storage_answers_keep_the_latest_descriptions() {
+fn storage_answers_keep_the_latest_asked() {
     let (_, desc, device) = committed()
         .into_iter()
         .find(|(_, _, device)| through_storage(device.profile()))
@@ -297,24 +297,34 @@ fn storage_answers_keep_the_latest_descriptions() {
     };
     let storage = |width| with(width, ImageUsageFlags::STORAGE);
     let input = |width| with(width, ImageUsageFlags::INPUT_ATTACHMENT);
+    let most = ANSWERS as u64;
     let mut answers = UsageAnswers::default();
-    for width in 1..=64 {
+    for width in 1..=most {
         answers.remember(plan(width), storage(width), width % 2 == 0);
     }
+    assert_eq!(answers.answer(&plan(most), &storage(most)), Some(true));
+    assert_eq!(answers.answer(&plan(most + 1), &storage(most + 1)), None);
+    assert_eq!(answers.answer(&plan(most), &input(most)), None);
+    // Asked again, the first answer is the most recently asked: the second goes in its place.
     assert_eq!(answers.answer(&plan(1), &storage(1)), Some(false));
-    assert_eq!(answers.answer(&plan(64), &storage(64)), Some(true));
-    assert_eq!(answers.answer(&plan(65), &storage(65)), None);
-    assert_eq!(answers.answer(&plan(64), &input(64)), None);
-    answers.remember(plan(65), storage(65), true);
-    assert_eq!(answers.answer(&plan(1), &storage(1)), None);
-    assert_eq!(answers.answer(&plan(2), &storage(2)), Some(true));
-    assert_eq!(answers.answer(&plan(65), &storage(65)), Some(true));
-    // One description's answers for two usages are two answers: the oldest, its `STORAGE`
-    // one, goes for its input attachment one.
-    answers.remember(plan(2), input(2), false);
-    assert_eq!(answers.answer(&plan(2), &input(2)), Some(false));
+    answers.remember(plan(most + 1), storage(most + 1), true);
     assert_eq!(answers.answer(&plan(2), &storage(2)), None);
+    assert_eq!(answers.answer(&plan(1), &storage(1)), Some(false));
     assert_eq!(answers.answer(&plan(3), &storage(3)), Some(false));
+    assert_eq!(
+        answers.answer(&plan(most + 1), &storage(most + 1)),
+        Some(true)
+    );
+    // One description's answers for two usages are two answers: the least recently asked, the
+    // fourth's `STORAGE` one, goes for the third's input attachment one.
+    answers.remember(plan(3), input(3), true);
+    assert_eq!(answers.answer(&plan(3), &input(3)), Some(true));
+    assert_eq!(answers.answer(&plan(3), &storage(3)), Some(false));
+    assert_eq!(answers.answer(&plan(4), &storage(4)), None);
+    // Remembered again (another thread asked meanwhile), an answer is kept once, as given.
+    answers.remember(plan(3), input(3), false);
+    assert_eq!(answers.answer(&plan(3), &input(3)), Some(false));
+    assert_eq!(answers.answer(&plan(5), &storage(5)), Some(false));
 }
 
 /// A multisampled depth/stencil render target takes `SAMPLED` as a candidate exactly where the

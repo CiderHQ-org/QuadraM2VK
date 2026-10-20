@@ -95,6 +95,7 @@ use super::depth_stencil_scratch;
 use super::device::lock;
 use super::error::Error;
 use super::image_plan::{hiz_candidate, ImagePlan};
+use super::key_hash::KeyMap;
 use super::Device;
 use metal2vulkan::bind::PlanesCopy;
 use metal2vulkan::device::{DeviceProfile, DriverFact, FormatUsage, VkProperty};
@@ -103,7 +104,7 @@ use metal2vulkan::metal::format::WordAttachment;
 use metal2vulkan::metal::TextureType;
 use metal2vulkan::pipeline::StorageAttachmentUse;
 use metal2vulkan::vk::{Format, ImageCreateFlags, ImageUsageFlags, NumericFormat};
-use std::collections::VecDeque;
+use std::collections::BTreeMap;
 
 /// Whether the compile layer reads `profile`'s fetched color attachments as input attachments
 /// in rasterization order (`lower::fragment::fetch`): where the device has
@@ -182,34 +183,71 @@ pub(crate) fn stores_in_place(profile: &DeviceProfile, format: Format, plan: &Im
     }
 }
 
-/// The image descriptions remembered at most: past this many, the oldest answer goes.
-const ANSWERS: usize = 64;
+/// The answers remembered at most: past this many, the least recently asked goes.
+pub(crate) const ANSWERS: usize = 1024;
 
 /// A device's answers, by image description and the description with a usage added, to whether
 /// the usage costs a color render target's image nothing (the module docs): what a framebuffer
 /// fetch's form needs, `STORAGE` ([`storage_candidate`]) or what the sample planes' copies need
 /// ([`planes_candidate`]), and the input attachment usage the exact resolve reads through
 /// (`color_resolve::input_candidate`); for a memoryless attachment's input attachment usage,
-/// whether the device makes the image ([`Device::with_free_usage`]). Bounded: the oldest answer
-/// goes first.
+/// whether the device makes the image ([`Device::with_free_usage`]). Found by a hash of the
+/// description and the candidate. Bounded: past [`ANSWERS`], the least recently asked goes first,
+/// so the descriptions a program makes every frame keep their answers through a run of
+/// descriptions made once.
 #[derive(Default)]
-pub(crate) struct UsageAnswers(VecDeque<(ImagePlan, ImagePlan, bool)>);
+pub(crate) struct UsageAnswers {
+    /// Each answer and when it was last asked, by description and candidate.
+    answers: KeyMap<ImagePlan, KeyMap<ImagePlan, (bool, u64)>>,
+    /// The descriptions and candidates answered, by when each was last asked.
+    asked: BTreeMap<u64, (ImagePlan, ImagePlan)>,
+    /// When the next ask is.
+    clock: u64,
+}
 
 impl UsageAnswers {
-    /// The answer for an image of `plan` given `candidate`'s usage, if remembered.
-    pub(crate) fn answer(&self, plan: &ImagePlan, candidate: &ImagePlan) -> Option<bool> {
-        self.0
-            .iter()
-            .find(|(p, c, _)| p == plan && c == candidate)
-            .map(|&(_, _, free)| free)
+    /// The answer for an image of `plan` given `candidate`'s usage, if remembered, now the most
+    /// recently asked.
+    pub(crate) fn answer(&mut self, plan: &ImagePlan, candidate: &ImagePlan) -> Option<bool> {
+        let (free, asked) = self.answers.get_mut(plan)?.get_mut(candidate)?;
+        self.clock += 1;
+        if let Some(pair) = self.asked.remove(&*asked) {
+            self.asked.insert(self.clock, pair);
+        }
+        *asked = self.clock;
+        Some(*free)
     }
 
-    /// Remember `free` for an image of `plan` given `candidate`'s usage.
+    /// Remember `free` for an image of `plan` given `candidate`'s usage, the most recently asked.
     pub(crate) fn remember(&mut self, plan: ImagePlan, candidate: ImagePlan, free: bool) {
-        if self.0.len() == ANSWERS {
-            self.0.pop_front();
+        // Another thread may have remembered it since this one asked.
+        if self.answer(&plan, &candidate).is_some() {
+            if let Some((kept, _)) =
+                (self.answers.get_mut(&plan)).and_then(|candidates| candidates.get_mut(&candidate))
+            {
+                *kept = free;
+            }
+            return;
         }
-        self.0.push_back((plan, candidate, free));
+        self.clock += 1;
+        if !self.answers.contains_key(&plan) {
+            self.answers.insert(plan.clone(), KeyMap::default());
+        }
+        if let Some(candidates) = self.answers.get_mut(&plan) {
+            candidates.insert(candidate.clone(), (free, self.clock));
+        }
+        self.asked.insert(self.clock, (plan, candidate));
+        if self.asked.len() > ANSWERS {
+            let Some((_, (plan, candidate))) = self.asked.pop_first() else {
+                return;
+            };
+            if let Some(candidates) = self.answers.get_mut(&plan) {
+                candidates.remove(&candidate);
+                if candidates.is_empty() {
+                    self.answers.remove(&plan);
+                }
+            }
+        }
     }
 }
 
