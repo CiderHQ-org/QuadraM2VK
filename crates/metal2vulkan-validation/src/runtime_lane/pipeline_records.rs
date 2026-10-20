@@ -13,8 +13,9 @@
 //!   byte for byte the first device's. A making from a record writes it again exactly where the driver's data after the
 //!   making is no longer the record's bytes (RADV's after its first hit from a compile's record is
 //!   not, and settles), and counts every other read unchanged (`driver_data_unchanged`).
-//! - **Overwrite.** A record holding another pipeline's data (a dispatch's compute pipeline's
-//!   record copied over each of a render state's) is loaded: the driver's miss, and where the
+//! - **Overwrite.** A record holding another pipeline's data (one of a dispatch's compute
+//!   pipelines' records, the state's predicted threadgroup's or the dispatch's, copied over each
+//!   of a render state's) is loaded: the driver's miss, and where the
 //!   driver's data holds its pipelines the making adds its own, so the record is written again,
 //!   holding this pipeline now. A later device then hits it, writing it again only where the data
 //!   changed. The other pipeline is a compute pipeline, which no making of a render state is on
@@ -719,9 +720,11 @@ fn a_later_device_makes_every_pipeline_an_earlier_one_made_from_its_records() {
 #[test]
 fn a_record_holding_another_pipeline_s_data_is_written_again() {
     let messages = Messages::default();
-    // The record of a dispatch's compute pipeline, in a directory of its own.
+    // The records of a dispatch's compute pipelines, in a directory of their own: the state's
+    // creation makes the pipeline of its predicted threadgroup, and the dispatch its own where its
+    // threadgroup is another (`pipeline/dispatch_making.rs`), a making and a record each.
     let other = ScratchCache::new().unwrap();
-    let (driver, foreign) = {
+    let (driver, foreign, saves) = {
         let _driver_cache = DriverCache::fresh();
         let device = validated_device_with(TEST_DEVICE, &messages, other.path(), |_| {}).unwrap();
         let driver = DriverData::of(&device);
@@ -729,7 +732,7 @@ fn a_record_holding_another_pipeline_s_data_is_written_again() {
         let made = device.shader_cache_statistics();
         report("the compute pipeline", &made);
         assert_eq!(kept(&made), driver.whole(), "the driver's data: {driver:?}");
-        (driver, records(other.path()))
+        (driver, records(other.path()), made.driver_saves)
     };
     // Data that ends inside its header is never kept (the module docs): no record to copy.
     if !driver.whole() {
@@ -742,7 +745,12 @@ fn a_record_holding_another_pipeline_s_data_is_written_again() {
         return;
     }
     let foreign: Vec<Vec<u8>> = foreign.into_values().collect();
-    assert_eq!(foreign.len(), 1, "the compute pipeline's record");
+    assert!(
+        !foreign.is_empty() && foreign.len() as u64 == saves,
+        "the compute pipelines' records: {} of {saves} makings saved",
+        foreign.len()
+    );
+    // Any of them is another pipeline's data for the render state: the first.
     let foreign = &foreign[0];
     // A `BGRA8Unorm` state's makings: their records, then the compute pipeline's bytes put in
     // each one's place: another pipeline's data.
