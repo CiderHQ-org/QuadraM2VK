@@ -1674,10 +1674,12 @@ impl RenderCommandEncoder {
         let mut argument_samplers = ArgumentSamplers::taken(self.core.device());
         let function_tables = state.function_tables();
         let live = Arc::clone(&self.live);
+        let pass_start = PassStartTables::default();
+        let sampler_maps = self.sampler_maps(state, &pass_start)?;
         let settled = self.settle_draw(
             &mut lock(&live),
             (state, &settings),
-            &PassStartTables::default(),
+            (&pass_start, &sampler_maps),
             (&mut argument_samplers, &mut None),
             (&function_tables, &mut None),
         )?;

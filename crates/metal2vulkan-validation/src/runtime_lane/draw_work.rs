@@ -36,9 +36,12 @@
 //!   up (`WorkCounts::graphics_pipelines_looked_up`), states and keys switched between included.
 //! - **Recorded states.** A draw records into its secondary command buffer only the state
 //!   commands that set what changed since the draws before it there
-//!   (`WorkCounts::draw_states_recorded`): of an unchanged state, none but its own descriptor set
-//!   (none at all where the device pushes set 0, `WorkCounts::draws_pushing_set_zero`);
+//!   (`WorkCounts::draw_states_recorded`): of an unchanged state, none (its set 0 the last draw's,
+//!   or pushed alike where the device pushes set 0, `WorkCounts::draws_pushing_set_zero`);
 //!   switching pipelines, not the dynamic states both make dynamic.
+//! - **Bound sets.** Where the device binds set 0, a draw that writes the descriptors its
+//!   encoder's last draw wrote into a set of the same layout binds that set again
+//!   (`WorkCounts::set_zero_sets_reused`); any change of what set 0 holds writes a set of its own.
 //! - **Pushed sets.** Where the device pushes set 0, a draw that changes some of its set's
 //!   descriptors pushes only those (`WorkCounts::set_zero_writes_pushed`). Each test of set 0 runs
 //!   with `VK_KHR_push_descriptor` withheld too, so every device runs the path of one without the
@@ -63,7 +66,8 @@ use metal2vulkan::device::VkExtension;
 use metal2vulkan::library::{FunctionConstantValue, FunctionConstantValues};
 use metal2vulkan::metal::state::DepthStencilDescriptor;
 use metal2vulkan::metal::{
-    BlendFactor, CompareFunction, DataType, DepthClipMode, PixelFormat, PrimitiveType, TextureUsage,
+    BlendFactor, CompareFunction, DataType, DepthClipMode, PixelFormat, PrimitiveType,
+    SamplerMinMagFilter, TextureUsage,
 };
 use metal2vulkan::pipeline::{ColorAttachmentDescriptor, RenderPipelineDescriptor, StageSource};
 use metal2vulkan_devtools::{engine_dir, llvm_assemble};
@@ -1081,10 +1085,10 @@ pub(super) fn on_device_both_ways(test: impl Fn(&Device)) {
 }
 
 /// Draws of an unchanged state into one render pass instance record its state commands once:
-/// past the first, a draw records at most its own descriptor set (each draw writes an allocated
-/// set 0 anew), so no pipeline, push constant, buffer or dynamic state is set again. Where the
-/// device pushes set 0 ([`pushes`]), every draw pushes it, and past the first a draw records
-/// nothing, its writes the same. The first draw records them all, and the target is the
+/// past the first, a draw records nothing, so no pipeline, descriptor set, push constant, buffer
+/// or dynamic state is set again: where the device binds set 0, each draw past the first binds
+/// the set its last draw wrote, the same descriptors (`WorkCounts::set_zero_sets_reused`), and
+/// where it pushes set 0 ([`pushes`]), every draw pushes it, its writes the same. The first draw records them all, and the target is the
 /// texture's. Every draw takes its key's own pipeline, made beforehand ([`make`]), none the
 /// residual form, so no pipeline is bound again past the first draw. Both ways
 /// ([`on_device_both_ways`]).
@@ -1106,6 +1110,7 @@ fn draws_of_an_unchanged_state_record_its_commands_once() {
             .collect();
         let after = device.work_counts();
         let pushed = grew(&before, &after, |c| c.draws_pushing_set_zero);
+        let reused = grew(&before, &after, |c| c.set_zero_sets_reused);
         encoder.end_encoding().unwrap();
         let residual = grew(&before, &after, |c| c.residual_form_draws);
         assert_eq!(
@@ -1114,11 +1119,124 @@ fn draws_of_an_unchanged_state_record_its_commands_once() {
         );
         let pushes = pushes(device);
         assert_eq!(pushed, if pushes { DRAWS as u64 } else { 0 }, "{pushes}");
-        let most = if pushes { 0 } else { 1 };
+        let sets = if pushes { 0 } else { DRAWS as u64 - 1 };
+        assert_eq!(reused, sets, "{pushes}");
         assert!(first > 1, "the first draw recorded {first}");
-        assert!(later.iter().all(|&n| n <= most), "{first}, then {later:?}");
+        assert!(later.iter().all(|&n| n == 0), "{first}, then {later:?}");
         let pixels = scene.pixels(&command_buffer);
         assert!(pixels.iter().all(|&p| p == RED), "{pixels:?}");
+    });
+}
+
+/// A draw binds the set 0 its encoder's last draw allocated and wrote only where it writes the
+/// same descriptors into a set of the same layout (`WorkCounts::set_zero_sets_reused`): a draw
+/// again of an unchanged state takes it; a draw after a change of an object set 0 names writes its
+/// own: another texture, the texture an earlier draw but not the last bound, a sampler state of
+/// another descriptor, a buffer in place of bytes; and a second encoder's first draw of the first
+/// encoder's last state writes its own, the memo being its encoder's. Whether other inline bytes
+/// or another offset of a buffer change the set's writes is the variant's (either may be push
+/// data); each column holds what its last draw drew all the same, so a set taken again held
+/// what its draw reads. Where the device pushes set 0, none binds one. Both ways
+/// ([`on_device_both_ways`]).
+#[test]
+fn a_draw_binds_the_last_set_zero_only_where_it_writes_the_same() {
+    on_device_both_ways(|device| {
+        let scene = Scene::new(device);
+        let red = solid(device, PixelFormat::RGBA8Unorm, RED);
+        let green = solid(device, PixelFormat::RGBA8Unorm, GREEN);
+        let mut linear = SamplerDescriptor::new();
+        linear.min_filter = SamplerMinMagFilter::Linear;
+        linear.mag_filter = SamplerMinMagFilter::Linear;
+        let linear = device.new_sampler_state(&linear).unwrap();
+        // Each column's corners at 256 bytes of the next, a constant buffer's offset alignment.
+        let columns: Vec<u8> = (0..SIDE)
+            .flat_map(|c| {
+                let mut corners = column(c);
+                corners.resize(256, 0);
+                corners
+            })
+            .collect();
+        let columns = buffer_with(device, &columns).unwrap();
+        let (command_buffer, mut encoder) = scene.encoder(device);
+        let mut reused = Vec::new();
+        let mut drawn = |encoder: &mut RenderCommandEncoder| {
+            let before = device.work_counts();
+            draw(encoder);
+            reused.push(grew(&before, &device.work_counts(), |c| {
+                c.set_zero_sets_reused
+            }));
+        };
+        encoder.set_fragment_texture(Some(&red), 0).unwrap();
+        encoder.set_vertex_bytes(&column(0), 0).unwrap();
+        drawn(&mut encoder);
+        // The same again.
+        drawn(&mut encoder);
+        encoder.set_vertex_bytes(&column(1), 0).unwrap();
+        drawn(&mut encoder);
+        encoder.set_fragment_texture(Some(&green), 0).unwrap();
+        drawn(&mut encoder);
+        encoder.set_vertex_bytes(&column(2), 0).unwrap();
+        drawn(&mut encoder);
+        encoder.set_fragment_texture(Some(&red), 0).unwrap();
+        drawn(&mut encoder);
+        encoder
+            .set_fragment_sampler_state(Some(&linear), 0)
+            .unwrap();
+        drawn(&mut encoder);
+        encoder
+            .set_vertex_buffer(Some(&columns), 256 * 3, 0)
+            .unwrap();
+        drawn(&mut encoder);
+        encoder.set_vertex_buffer_offset(256 * 4, 0).unwrap();
+        drawn(&mut encoder);
+        encoder.end_encoding().unwrap();
+        // The last state again, in another encoder of the command buffer.
+        let mut encoder = command_buffer
+            .render_command_encoder(&scene.pass(LoadAction::Load))
+            .unwrap();
+        encoder.set_render_pipeline_state(&scene.pipeline).unwrap();
+        encoder
+            .set_fragment_sampler_state(Some(&linear), 0)
+            .unwrap();
+        encoder.set_fragment_texture(Some(&red), 0).unwrap();
+        encoder
+            .set_vertex_buffer(Some(&columns), 256 * 4, 0)
+            .unwrap();
+        drawn(&mut encoder);
+        encoder.set_vertex_buffer_offset(256 * 5, 0).unwrap();
+        drawn(&mut encoder);
+        encoder.end_encoding().unwrap();
+        // `None` where the variant decides (the bytes and offsets alone changed).
+        let binds = !pushes(device);
+        let want = [
+            Some(0),
+            Some(u64::from(binds)),
+            None,
+            Some(0),
+            None,
+            Some(0),
+            Some(0),
+            Some(0),
+            None,
+            Some(0),
+            None,
+        ];
+        assert_eq!(reused.len(), want.len());
+        for (at, (&reused, want)) in reused.iter().zip(want).enumerate() {
+            match want {
+                Some(want) => assert_eq!(reused, want, "draw {at}"),
+                None => assert!(reused <= u64::from(binds), "draw {at}"),
+            }
+        }
+        let pixels = scene.pixels(&command_buffer);
+        for (at, &pixel) in pixels.iter().enumerate() {
+            let want = match at as u64 % SIDE {
+                1 => GREEN,
+                0 | 2..=5 => RED,
+                _ => CLEAR,
+            };
+            assert_eq!(pixel, want, "pixel {at}: {pixels:?}");
+        }
     });
 }
 

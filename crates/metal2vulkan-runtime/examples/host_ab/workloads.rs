@@ -242,7 +242,13 @@ enum Churn {
     Bind,
     /// As `Bind`, and the pipeline state switched between two.
     Pipeline,
+    /// As `Pipeline`, in render passes of [`PASS_DRAWS`] draws each (the pass loads the target,
+    /// the first clears it): a window server's few draws a pass, each binding its own.
+    Passes,
 }
+
+/// The draws of each pass of [`Churn::Passes`].
+const PASS_DRAWS: usize = 3;
 
 impl Churn {
     fn name(self) -> &'static str {
@@ -250,6 +256,7 @@ impl Churn {
             Churn::Static => "static",
             Churn::Bind => "bind",
             Churn::Pipeline => "pipeline",
+            Churn::Passes => "passes",
         }
     }
 }
@@ -268,12 +275,17 @@ fn encode_draws<G: Gpu>(
     g.set_vertex_buffer(&mut encoder, &s.rects[0], 0, 0);
     g.set_fragment_texture(&mut encoder, &s.textures[0], 0);
     for draw in 0..draws {
+        if matches!(churn, Churn::Passes) && draw > 0 && draw % PASS_DRAWS == 0 {
+            g.end_render(encoder);
+            encoder = g.render_encoder(command_buffer, &s.target, false);
+            g.set_fragment_sampler(&mut encoder, &s.sampler, 0);
+        }
         if !matches!(churn, Churn::Static) {
             let buffer = &s.rects[(draw / 7) % RECT_BUFFERS];
             g.set_vertex_buffer(&mut encoder, buffer, (draw % RECTS) * RECT_STRIDE, 0);
             g.set_fragment_texture(&mut encoder, &s.textures[draw % TEXTURES], 0);
         }
-        if matches!(churn, Churn::Pipeline) {
+        if matches!(churn, Churn::Pipeline | Churn::Passes) {
             g.set_render_pipeline(&mut encoder, &s.textured[draw % 2]);
         }
         g.draw_strip(&mut encoder, 4);
@@ -312,7 +324,7 @@ fn encode_dispatches<G: Gpu>(
 pub fn encode<G: Gpu>(g: &G, s: &Scene<G>, sizes: &Sizes, variants: &[String]) {
     let n = sizes.draws;
     let runs = |name: String| variants.is_empty() || variants.contains(&name);
-    for churn in [Churn::Static, Churn::Bind, Churn::Pipeline] {
+    for churn in [Churn::Static, Churn::Bind, Churn::Pipeline, Churn::Passes] {
         if !runs(format!("draw_{}", churn.name())) {
             continue;
         }
@@ -826,4 +838,98 @@ pub fn memory<G: Gpu>(g: &G, sizes: &Sizes) {
     assert!(back == bytes, "getBytes read back what replaceRegion wrote");
     emit("memory", "texture_replace_region_4m", "us", &mut replace);
     emit("memory", "texture_get_bytes_4m", "us", &mut get);
+}
+
+/// The `frame` workload's textures, their side, and the bytes between their offsets.
+const FRAME_TEXTURES: usize = 8;
+const FRAME_SIDE: usize = 256;
+const FRAME_STRIDE: usize = 1 << 20;
+
+/// One frame of the `frame` workload (module docs of `main.rs`) in `heap`: the textures made,
+/// each rendered by a pass of three draws, each sampled into the target, committed, waited for
+/// and dropped; the times of each step into `times` (`[encode, make, drop, process CPU]`, the CPU
+/// per frame).
+fn frame_once<G: Gpu>(g: &G, s: &Scene<G>, heap: &G::Heap, times: &mut [Vec<f64>; 4]) {
+    g.pool(|| {
+        let cpu0 = process_cpu();
+        let t0 = Instant::now();
+        let textures: Vec<G::Texture> = (0..FRAME_TEXTURES)
+            .map(|i| g.heap_texture(heap, FRAME_SIDE, FRAME_SIDE, i * FRAME_STRIDE))
+            .collect();
+        let t1 = Instant::now();
+        let command_buffer = g.command_buffer();
+        for (i, texture) in textures.iter().enumerate() {
+            let mut encoder = g.render_encoder(&command_buffer, texture, true);
+            g.set_render_pipeline(&mut encoder, &s.textured[0]);
+            g.set_fragment_sampler(&mut encoder, &s.sampler, 0);
+            for draw in 0..PASS_DRAWS {
+                let rect = (i * PASS_DRAWS + draw) % RECTS;
+                g.set_vertex_buffer(&mut encoder, &s.rects[0], rect * RECT_STRIDE, 0);
+                g.set_fragment_texture(&mut encoder, &s.textures[(i + draw) % TEXTURES], 0);
+                g.draw_strip(&mut encoder, 4);
+            }
+            g.end_render(encoder);
+        }
+        let mut encoder = g.render_encoder(&command_buffer, &s.target, true);
+        g.set_render_pipeline(&mut encoder, &s.textured[1]);
+        g.set_fragment_sampler(&mut encoder, &s.sampler, 0);
+        for (i, texture) in textures.iter().enumerate() {
+            g.set_vertex_buffer(&mut encoder, &s.rects[1], i * RECT_STRIDE, 0);
+            g.set_fragment_texture(&mut encoder, texture, 0);
+            g.draw_strip(&mut encoder, 4);
+        }
+        g.end_render(encoder);
+        g.commit(&command_buffer);
+        let t2 = Instant::now();
+        g.wait(&command_buffer);
+        let t3 = Instant::now();
+        drop(textures);
+        let t4 = Instant::now();
+        let cpu1 = process_cpu();
+        times[0].push(us(t2 - t0));
+        times[1].push(us(t1 - t0));
+        times[2].push(us(t4 - t3));
+        times[3].push(us(cpu1 - cpu0));
+    });
+}
+
+/// A window server's frame of heap textures (module docs of `main.rs`), in a heap of the device,
+/// and the runtime's over host pages.
+pub fn frame<G: Gpu>(g: &G, s: &Scene<G>, sizes: &Sizes) {
+    let size = FRAME_TEXTURES * FRAME_STRIDE;
+    let run = |name: &str, heap: &G::Heap| {
+        let mut times: [Vec<f64>; 4] = Default::default();
+        for run in 0..sizes.timed + 3 {
+            let mut taken: [Vec<f64>; 4] = Default::default();
+            frame_once(g, s, heap, &mut taken);
+            if run >= 3 {
+                for (all, one) in times.iter_mut().zip(taken) {
+                    all.extend(one);
+                }
+            }
+        }
+        let [encode, make, dropped, cpu] = &mut times;
+        emit("frame", &format!("{name}_encode"), "us", encode);
+        emit("frame", &format!("{name}_make_textures"), "us", make);
+        emit("frame", &format!("{name}_drop_textures"), "us", dropped);
+        emit("frame", &format!("{name}_process_cpu"), "us", cpu);
+    };
+    run("frame", &g.heap(size));
+    // SAFETY: an anonymous private mapping of `size` bytes, never unmapped: the process's to its
+    // end, past the heap and every texture placed in it.
+    let pointer = unsafe {
+        libc::mmap(
+            std::ptr::null_mut(),
+            size,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_ANON | libc::MAP_PRIVATE,
+            -1,
+            0,
+        )
+    };
+    assert_ne!(pointer, libc::MAP_FAILED);
+    // SAFETY: page-aligned read-write memory of `size` bytes that outlives the heap.
+    if let Some(heap) = unsafe { g.heap_no_copy(pointer as *mut u8, size) } {
+        run("frame_no_copy", &heap);
+    }
 }

@@ -8,11 +8,11 @@ use objc2_foundation::{NSString, NSURL};
 use objc2_metal::{
     MTLBlitCommandEncoder, MTLBuffer, MTLClearColor, MTLCommandBuffer, MTLCommandBufferStatus,
     MTLCommandEncoder, MTLCommandQueue, MTLComputeCommandEncoder, MTLComputePipelineState,
-    MTLCreateSystemDefaultDevice, MTLDevice, MTLLibrary, MTLLoadAction, MTLOrigin, MTLPixelFormat,
-    MTLPrimitiveType, MTLRegion, MTLRenderCommandEncoder, MTLRenderPassDescriptor,
-    MTLRenderPipelineDescriptor, MTLRenderPipelineState, MTLResourceOptions, MTLSamplerDescriptor,
-    MTLSamplerMinMagFilter, MTLSamplerState, MTLSize, MTLStorageMode, MTLStoreAction, MTLTexture,
-    MTLTextureDescriptor, MTLTextureUsage,
+    MTLCreateSystemDefaultDevice, MTLDevice, MTLHeap, MTLHeapDescriptor, MTLHeapType, MTLLibrary,
+    MTLLoadAction, MTLOrigin, MTLPixelFormat, MTLPrimitiveType, MTLRegion, MTLRenderCommandEncoder,
+    MTLRenderPassDescriptor, MTLRenderPipelineDescriptor, MTLRenderPipelineState,
+    MTLResourceOptions, MTLSamplerDescriptor, MTLSamplerMinMagFilter, MTLSamplerState, MTLSize,
+    MTLStorageMode, MTLStoreAction, MTLTexture, MTLTextureDescriptor, MTLTextureUsage,
 };
 use std::ffi::c_void;
 use std::path::Path;
@@ -72,6 +72,7 @@ impl Gpu for Native {
     type CommandBuffer = Object<dyn MTLCommandBuffer>;
     type RenderEncoder = Object<dyn MTLRenderCommandEncoder>;
     type ComputeEncoder = Object<dyn MTLComputeCommandEncoder>;
+    type Heap = Object<dyn MTLHeap>;
 
     fn label(&self) -> String {
         format!("native Metal on {}", self.device.name())
@@ -142,6 +143,44 @@ impl Gpu for Native {
                 )
         }
         .expect("newBufferWithBytesNoCopy")
+    }
+
+    fn heap(&self, size: usize) -> Self::Heap {
+        let descriptor = MTLHeapDescriptor::new();
+        descriptor.setType(MTLHeapType::Placement);
+        descriptor.setStorageMode(MTLStorageMode::Shared);
+        descriptor.setSize(size);
+        self.device
+            .newHeapWithDescriptor(&descriptor)
+            .expect("newHeapWithDescriptor")
+    }
+
+    unsafe fn heap_no_copy(&self, _pointer: *mut u8, _size: usize) -> Option<Self::Heap> {
+        None
+    }
+
+    fn heap_texture(
+        &self,
+        heap: &Self::Heap,
+        width: usize,
+        height: usize,
+        offset: usize,
+    ) -> Self::Texture {
+        // SAFETY: plain sizes.
+        let descriptor = unsafe {
+            MTLTextureDescriptor::texture2DDescriptorWithPixelFormat_width_height_mipmapped(
+                MTLPixelFormat::BGRA8Unorm,
+                width,
+                height,
+                false,
+            )
+        };
+        descriptor.setUsage(MTLTextureUsage::RenderTarget | MTLTextureUsage::ShaderRead);
+        descriptor.setStorageMode(MTLStorageMode::Shared);
+        descriptor.setAllowGPUOptimizedContents(false);
+        // SAFETY: the offset lies inside the heap, aligned for the texture (the workload's).
+        unsafe { heap.newTextureWithDescriptor_offset(&descriptor, offset) }
+            .expect("newTextureWithDescriptor:offset:")
     }
 
     fn texture(&self, format: Format, width: usize, height: usize, target: bool) -> Self::Texture {

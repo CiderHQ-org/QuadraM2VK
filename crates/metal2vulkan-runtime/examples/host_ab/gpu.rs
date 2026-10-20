@@ -23,6 +23,7 @@ pub trait Gpu {
     type CommandBuffer;
     type RenderEncoder;
     type ComputeEncoder;
+    type Heap;
 
     /// The side and the device's name.
     fn label(&self) -> String;
@@ -53,6 +54,26 @@ pub trait Gpu {
     /// `pointer` is page-aligned, `length` (a multiple of the page size) bytes of read-write
     /// memory that outlive the buffer.
     unsafe fn buffer_no_copy(&self, pointer: *mut u8, length: usize) -> Self::Buffer;
+    /// `newHeapWithDescriptor:` of a `Placement` heap of `Shared` storage, `size` bytes.
+    fn heap(&self, size: usize) -> Self::Heap;
+    /// The runtime's heap of the same over `size` bytes of host pages at `pointer`
+    /// (`new_heap_with_bytes_no_copy`); none natively.
+    ///
+    /// # Safety
+    ///
+    /// `pointer` is page-aligned, `size` (a multiple of the page size) bytes of read-write memory
+    /// that outlive the heap and every texture placed in it.
+    unsafe fn heap_no_copy(&self, pointer: *mut u8, size: usize) -> Option<Self::Heap>;
+    /// `newTextureWithDescriptor:offset:` of `heap`: a 2D `BGRA8Unorm` texture of one level that
+    /// passes render to and the shaders read, at `offset`, whose contents Metal does not optimize
+    /// for the GPU (`allowGPUOptimizedContents` off), so its bytes in the heap are its texels.
+    fn heap_texture(
+        &self,
+        heap: &Self::Heap,
+        width: usize,
+        height: usize,
+        offset: usize,
+    ) -> Self::Texture;
     /// A 2D texture of one level: a render target of `Private` storage, or a `Shared` one the
     /// shaders read.
     fn texture(&self, format: Format, width: usize, height: usize, target: bool) -> Self::Texture;

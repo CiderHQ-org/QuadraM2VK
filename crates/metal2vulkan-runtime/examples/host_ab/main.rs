@@ -17,8 +17,9 @@
 //!
 //! - `encode`: CPU cost of encoding. A render pass of `--draws` small textured draws into a
 //!   512x512 `BGRA8Unorm` target, `static` (nothing set between draws), `bind` (each draw another
-//!   vertex buffer and offset, and another fragment texture) and `pipeline` (as `bind`, and the
-//!   pipeline state switched between two), and a compute encoder of as many single-threadgroup
+//!   vertex buffer and offset, and another fragment texture), `pipeline` (as `bind`, and the
+//!   pipeline state switched between two) and `passes` (as `pipeline`, in render passes of three
+//!   draws, as a window server draws), and a compute encoder of as many single-threadgroup
 //!   dispatches, `static` and `churn` (the pipeline state and both buffers' offsets each
 //!   dispatch). Per draw and dispatch: the encoding thread's wall time from the command buffer's
 //!   creation through `endEncoding`, and the whole process's CPU time until the wait returned.
@@ -42,6 +43,15 @@
 //!   fresh `NONCE` (`host_ab.metal`): `cold_*` (no cache holds its functions) and `warm_*` (a
 //!   second process over the same runtime shader cache directory, after Metal's own caches took
 //!   the first).
+//! - `frame`: a window server's frame of heap textures: eight `BGRA8Unorm` textures of 256x256
+//!   (`allowGPUOptimizedContents` off) made at their offsets of a `Placement` heap of `Shared`
+//!   storage, each rendered by a pass of
+//!   three textured draws, then each sampled into the target by one draw of a last pass, the
+//!   command buffer committed and waited for, and the textures dropped. Per frame: the encoding
+//!   thread's wall time from the first texture's creation through the commit, the textures'
+//!   creation alone, their drop, and the process's CPU time until the drop returned. The
+//!   runtime's alone (`frame_no_copy_*`): the same over a heap of host pages
+//!   (`new_heap_with_bytes_no_copy`), as a guest's heap is.
 //! - `memory`: `newBufferWithLength:` and `newBufferWithBytes:` of 4 KiB, 1 MiB and 64 MiB,
 //!   `newBufferWithBytesNoCopy:` of 1 MiB and 64 MiB, and a 1024x1024 `RGBA8Unorm` `Shared`
 //!   texture's `replaceRegion` and `getBytes`.
@@ -51,8 +61,8 @@
 //! runtime's shader caches; a directory under the OS's temporary directory by default, removed at
 //! the end), `--metallib PATH` (skip the compile; not with `pipeline`), `--cache DIR` (the
 //! runtime's shader cache, with `--side`), `--variants a,b,...` (the encode workload's variants
-//! alone: `draw_static`, `draw_bind`, `draw_pipeline`, `dispatch_static`, `dispatch_churn`; for a
-//! profile of one).
+//! alone: `draw_static`, `draw_bind`, `draw_pipeline`, `draw_passes`, `dispatch_static`,
+//! `dispatch_churn`; for a profile of one).
 //!
 //! On a Mac, the runtime's device opens the Vulkan loader (`/opt/homebrew/lib` among the places
 //! it looks) and MoltenVK's `MVK_CONFIG_*` variables apply. Run timings on an otherwise idle GPU.
@@ -70,7 +80,9 @@ use std::process::{Command, Stdio};
 use std::time::Instant;
 use workloads::Sizes;
 
-const WORKLOADS: [&str; 6] = ["encode", "fixed", "latency", "gpu", "pipeline", "memory"];
+const WORKLOADS: [&str; 7] = [
+    "encode", "fixed", "latency", "gpu", "pipeline", "memory", "frame",
+];
 
 struct Options {
     side: Option<String>,
@@ -232,6 +244,7 @@ fn run<G: Gpu>(g: &G, opened: Instant, metallib: &Path, options: &Options) {
             "latency" => workloads::latency(g, &scene, sizes),
             "gpu" => workloads::gpu(g, &scene, sizes),
             "memory" => workloads::memory(g, sizes),
+            "frame" => workloads::frame(g, &scene, sizes),
             _ => unreachable!(),
         }
     }

@@ -7273,6 +7273,9 @@ impl RenderCommandEncoder {
         // through a snapshot where it can (`render/snapshot.rs`): asked of the plan, kept where
         // the plan reads so, else `None` and the split.
         let mut snapshot = self.snapshot_wanted(&pipeline, &reformats, capture.is_some());
+        // Its runtime samplers' address modes as the textures they sample map them: what it
+        // settles under, and binds with.
+        let sampler_maps = self.sampler_maps(&pipeline, &pass_start)?;
         let Settled {
             shape,
             variant,
@@ -7280,7 +7283,7 @@ impl RenderCommandEncoder {
         } = self.settle_draw(
             live,
             (&pipeline, &settings),
-            &pass_start,
+            (&pass_start, &sampler_maps),
             (&mut argument_samplers, &mut unlisted),
             (&function_tables, &mut snapshot),
         )?;
@@ -7847,7 +7850,7 @@ impl RenderCommandEncoder {
             .with_pass(layout, views)
             .with_residency(&self.residency)
             .with_texture_table(texture_table.as_ref())
-            .with_sampler_maps(self.sampler_maps(&pipeline, &pass_start)?);
+            .with_sampler_maps(sampler_maps);
         // The listed function tables: set 1's elements, or the snapshot a variant without the
         // function-table array reads in set 0, which has no heap of its own.
         tables = tables.with_function_tables(&function_tables);
@@ -8228,7 +8231,7 @@ impl RenderCommandEncoder {
         // The formats the draw binds, which a specialized notice names.
         let formats = |slot| tables.bound_format(slot);
         device.degrade_half_texel_writes(&variant.pipeline().dependencies, Some(&formats));
-        device.degrade_bound_formats(&variant.pipeline().stages, Some(&formats));
+        (variant.objects()).degrade_bound_formats(&variant.pipeline().stages, Some(&formats));
         // A variant whose notes test no bound value is quiet at every draw, and kept as none
         // (`Device::tests_bound_values`).
         let quiet = !super::Device::tests_bound_values(&variant.pipeline().stages)
@@ -8294,12 +8297,11 @@ impl RenderCommandEncoder {
         // emptied as the draw returns: their keepers hold nothing past it.
         let mut writes = Emptied::new(&mut live.writes);
         let objects = Arc::clone(variant.objects());
-        // Set 0 per draw, from the command buffer's arena under the bind's one lock of its state;
-        // set 1 the device's (written below, once nothing refuses).
-        let (bound, set) = {
+        // Set 1 the device's (written below, once nothing refuses).
+        let bound = {
             let mut state = self.core.command_buffer().state();
             let memo = Some(&mut self.bind_memo);
-            let bound = binding::bind(
+            binding::bind(
                 call,
                 &device,
                 &mut state,
@@ -8307,8 +8309,7 @@ impl RenderCommandEncoder {
                 &command,
                 &tables,
                 (memo, &mut writes),
-            )?;
-            (bound, objects.set_zero(&mut state.descriptors)?)
+            )?
         };
         // The draw's push bytes, filled in place, over the last draw's (`LiveBind::pushes`).
         binding::push_writes_into(&commands.push_constants, &bound.holes, &mut live.pushes)?;
@@ -8339,19 +8340,15 @@ impl RenderCommandEncoder {
             _ => Vec::new(),
         };
         let heap_writes: Vec<_> = writes.extract_if(.., |write| write.set > 0).collect();
-        let pushed: &[binding::SetWrite] = match objects.pushes_set_zero() {
+        // Set 0: pushed, or the encoder's last set where it holds the same writes, else one from
+        // the command buffer's arena, written (`EncoderCore::set_zero`).
+        let (set, pushed): (_, &[binding::SetWrite]) = match objects.pushes_set_zero() {
             true => {
                 // Over the last draw's, in their storage (`LiveBind::pushed`).
                 binding::SetWrite::push_into(&writes, objects.immutable_pushes(), &mut live.pushed);
-                &live.pushed
+                (None, &live.pushed)
             }
-            false => {
-                // SAFETY: the set was just allocated and no command uses it yet; every buffer,
-                // view and sampler written is live (the command buffer retains them below, and a
-                // refusal leaves the set unused in its pool).
-                unsafe { binding::write_sets(&device, set.as_slice(), &writes) }?;
-                &[]
-            }
+            false => (self.core.set_zero(&objects, &writes)?, &[]),
         };
         // The Vulkan draws: the binder's, the index bounds pass's two, or the index rewrite
         // pass's one.
@@ -9461,7 +9458,8 @@ impl RenderCommandEncoder {
 
     /// Bring `live`, the encoder's kept bind state, to the bind state a draw of `pipeline` under
     /// `settings` binds in, its vertex, object and mesh tables `pass_start`'s or the encoder's
-    /// ([`refresh_bind_state`](Self::refresh_bind_state)), and answer the variant it runs on in
+    /// ([`refresh_bind_state`](Self::refresh_bind_state)), its runtime samplers' address modes
+    /// `sampler_maps` ([`sampler_maps`](Self::sampler_maps)), and answer the variant it runs on in
     /// the encoder's buffer forms ([`BufferForms`]) with its plan and the state's shape: of the
     /// device's sampler states in `argument_samplers`, those at IDs no set-1 sampler array of the
     /// variant holds left out (`heap_sets::fit_samplers`, `unlisted` saying so), and
@@ -9471,12 +9469,10 @@ impl RenderCommandEncoder {
         &self,
         live: &mut LiveBind,
         (pipeline, settings): (&DrawingState, &DrawSettings),
-        pass_start: &PassStartTables,
+        (pass_start, sampler_maps): (&PassStartTables, &SamplerMaps),
         (argument_samplers, unlisted): (&mut ArgumentSamplers, &mut Option<(u64, u64)>),
         (function_tables, snapshot): (&[VisibleFunctionTable], &mut Option<snapshot::Wanted>),
     ) -> Result<Settled, Error> {
-        // Its runtime samplers' address modes as the textures they sample map them.
-        let sampler_maps = self.sampler_maps(pipeline, pass_start)?;
         // The pass's extended-range colors' shadows, which a variant that writes or reads them
         // reads and writes beside the codes (`render/extended_shadow.rs`).
         let mut shadows = self.extended_shadows_bound();
@@ -9487,7 +9483,7 @@ impl RenderCommandEncoder {
                 live,
                 pass_start,
                 (argument_samplers, function_tables),
-                (pipeline, &sampler_maps),
+                (pipeline, sampler_maps),
             );
             let state = &mut live.state;
             // Each field the draw's settings or the loop hold on to compared in place, and copied

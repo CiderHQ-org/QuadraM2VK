@@ -3364,12 +3364,15 @@ impl Device {
     /// slot bound to nothing reads zero and holds no NaN, so a clause testing it does not hold.
     /// Such a clause is announced here alone: no pipeline's key tells it. A filter note's (a
     /// two-plane YCbCr texture that Metal's own sampler filters) is announced as
-    /// `ycbcr-filter-not-exact`. A kind already announced costs one atomic load.
+    /// `ycbcr-filter-not-exact`. A kind already announced costs one atomic load. Whether any
+    /// note named a format (`VariantObjects::degrade_bound_formats` keeps the formats under which
+    /// none did).
     pub(crate) fn degrade_bound_formats(
         &self,
         stages: &[StageModule],
         formats: Option<BoundFormats<'_>>,
-    ) {
+    ) -> bool {
+        let mut named = false;
         for stage in stages {
             for s in &stage.specialized_notes {
                 // A filter note's clauses of the bound formats test a two-plane YCbCr format
@@ -3408,6 +3411,7 @@ impl Device {
                     continue;
                 }
                 let slots = tested_slots(held.iter().copied());
+                named = true;
                 self.degrade(kind, || {
                     let bound: Vec<String> = slots
                         .iter()
@@ -3435,6 +3439,7 @@ impl Device {
                 });
             }
         }
+        named
     }
 
     /// Announce `cross-class-texture-neutral` at a draw or dispatch whose plan binds a slot's

@@ -110,6 +110,11 @@ struct HeapUse {
 }
 
 impl Residency {
+    /// Whether it holds nothing: no resource, heap or live table.
+    pub(super) fn is_empty(&self) -> bool {
+        self.used.is_empty() && self.heaps.is_empty() && self.live.is_none()
+    }
+
     /// Make `resource` resident with `usage` in render `stages` (none for a compute encoder),
     /// joined to the usage and stages it had: the resource, when the encoder first uses it here
     /// (the caller then holds it until the command buffer completes).

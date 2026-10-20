@@ -368,6 +368,9 @@ pub(crate) struct VariantObjects {
     /// The notices its last bind announced at every occurrence, and what they were made for
     /// (`announce_bound`).
     bound: Mutex<Option<BoundNotices>>,
+    /// The formats at its tested slots under which its notes of the bound formats last named
+    /// nothing (`degrade_bound_formats`).
+    quiet_formats: Mutex<Option<TestedFormats>>,
     /// The layout's set 1, the heap, where it has one.
     heap_layout: Option<DescriptorSetLayout>,
     /// The device's heap set of that layout, from the variant's first command that binds it
@@ -574,6 +577,7 @@ impl VariantObjects {
             kinds: Kinds::of(stages, pipeline),
             tested: tested_slots_of(stages),
             bound: Mutex::new(None),
+            quiet_formats: Mutex::new(None),
             keep: None,
             content: variant_content(layout, stages, &words),
             words: Arc::clone(&words),
@@ -650,6 +654,7 @@ impl VariantObjects {
             kinds: Kinds::of(stages, pipeline),
             tested: tested_slots_of(stages),
             bound: Mutex::new(None),
+            quiet_formats: Mutex::new(None),
             keep: Some(instance),
             content: back.objects.content,
             words: back.objects.words,
@@ -679,6 +684,32 @@ impl VariantObjects {
             .iter()
             .map(|&slot| (slot, formats(slot)))
             .collect()
+    }
+
+    /// Announce what the notes of the bound formats of `stages`, the variant's, name at a command
+    /// that binds `formats` (`Device::degrade_bound_formats`), but where the formats at its tested
+    /// slots are those under which they last named nothing (`quiet_formats`): what they name is a
+    /// function of those formats, of its stages, and of the kinds the device has yet to announce,
+    /// which only shrink, so they name nothing again. A command whose formats are unknown (an
+    /// indirect command's) announces as before.
+    pub(crate) fn degrade_bound_formats(
+        &self,
+        stages: &[StageModule],
+        formats: Option<BoundFormats<'_>>,
+    ) {
+        let Some(formats) = formats else {
+            self.device.degrade_bound_formats(stages, None);
+            return;
+        };
+        let quiet = lock(&self.quiet_formats)
+            .as_ref()
+            .is_some_and(|quiet| quiet.iter().all(|&(slot, format)| formats(slot) == format));
+        if quiet {
+            return;
+        }
+        if !self.device.degrade_bound_formats(stages, Some(formats)) {
+            *lock(&self.quiet_formats) = Some(self.tested_formats(formats));
+        }
     }
 
     /// Announce, at a dispatch's or draw's bind of the variant, the notices its making announces
@@ -754,6 +785,15 @@ impl VariantObjects {
     /// Whether its layout bakes an immutable sampler.
     pub(crate) fn bakes_samplers(&self) -> bool {
         !self.samplers.samplers.is_empty()
+    }
+
+    /// The layout of the set 0 its commands allocate: none where [`set_zero`](Self::set_zero)
+    /// allocates none.
+    pub(crate) fn set_zero_layout(&self) -> Option<vk::DescriptorSetLayout> {
+        match (self.layout.set_layouts().first(), self.set_needs.first()) {
+            (Some(&layout), Some(needs)) if !needs.is_empty() => Some(layout),
+            _ => None,
+        }
     }
 
     /// A command's set 0, from its command buffer's pools `arena`; none when the layout has no

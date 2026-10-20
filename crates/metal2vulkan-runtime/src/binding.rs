@@ -891,13 +891,22 @@ impl SetWrite {
     /// the caller keeps it (`LiveBind::pushed`).
     pub(super) fn push_into(writes: &[Write], immutable: &[SetWrite], pushed: &mut Vec<SetWrite>) {
         pushed.clear();
-        let writes = writes.iter().map(|write| SetWrite {
+        pushed.extend(
+            writes
+                .iter()
+                .map(SetWrite::of)
+                .chain(immutable.iter().copied()),
+        );
+    }
+
+    /// `write`'s descriptor, without its set number and keeper.
+    fn of(write: &Write) -> SetWrite {
+        SetWrite {
             binding: write.binding,
             element: write.element,
             ty: write.ty,
             info: write.info,
-        });
-        pushed.extend(writes.chain(immutable.iter().copied()));
+        }
     }
 
     /// Whether it writes what `other` writes.
@@ -1080,6 +1089,57 @@ pub(super) unsafe fn write_sets(
         };
     }
     Ok(())
+}
+
+/// The set 0 an encoder's last command allocated and wrote (`EncoderCore::set_zero`): the set,
+/// its layout and the descriptors written into it. A later command of the encoder that writes the
+/// same descriptors into a set of the same layout binds this set again, and allocates and writes
+/// none (`WorkCounts::set_zero_sets_reused`). Exact:
+///
+/// - **The set holds what was written.** A set is written once, as it is allocated, and nothing
+///   writes it again; set 0's writes hold no keeper (only the heap set's do, `Write::held`).
+/// - **No handle it holds names another object.** The set lies in its command buffer's pools,
+///   which last until the command buffer completes; so do the objects its writes name, which the
+///   command that wrote them holds (its buffers, textures, views and samplers), the command
+///   buffer's arena (uploads) or the device (neutrals). The memo lives with its encoder, inside
+///   its command buffer's life.
+/// - **The writes compare by value** ([`SetWrite::same`], in order: each binding, element, type
+///   and descriptor, a buffer's offset and range, an image's view, sampler and layout), so the set
+///   is bound again only where every descriptor written is the one the command writes.
+#[derive(Default)]
+pub(super) struct LastSetZero {
+    layout: vk::DescriptorSetLayout,
+    set: vk::DescriptorSet,
+    writes: Vec<SetWrite>,
+}
+
+impl LastSetZero {
+    /// The kept set, where it is of `layout` and holds `writes` (set 0's).
+    pub(super) fn holds(
+        &self,
+        layout: vk::DescriptorSetLayout,
+        writes: &[Write],
+    ) -> Option<vk::DescriptorSet> {
+        let same = self.set != vk::DescriptorSet::null()
+            && self.layout == layout
+            && self.writes.len() == writes.len()
+            && (self.writes.iter().zip(writes))
+                .all(|(kept, write)| kept.same(&SetWrite::of(write)));
+        same.then_some(self.set)
+    }
+
+    /// Keep `set`, of `layout`, as written with `writes` (set 0's), over the last one's storage.
+    pub(super) fn keep(
+        &mut self,
+        layout: vk::DescriptorSetLayout,
+        set: vk::DescriptorSet,
+        writes: &[Write],
+    ) {
+        self.layout = layout;
+        self.set = set;
+        self.writes.clear();
+        self.writes.extend(writes.iter().map(SetWrite::of));
+    }
 }
 
 /// The texel buffer view of `write`, a storage texel buffer's (`storage`) or a uniform one's.

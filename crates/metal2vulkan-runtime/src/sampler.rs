@@ -506,7 +506,7 @@ impl Device {
 
     /// [`argument_samplers`](Self::argument_samplers), with the count of the sampler IDs' slots'
     /// changes they are live at ([`sampler_slots_changed`](Self::sampler_slots_changed)).
-    fn argument_samplers_at(&self) -> (u64, Vec<SamplerState>) {
+    pub(super) fn argument_samplers_at(&self) -> (u64, Vec<SamplerState>) {
         let (changed, states) = lock(&self.shared().resource_ids).samplers();
         (changed, states.into_iter().map(SamplerState).collect())
     }

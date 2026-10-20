@@ -183,6 +183,8 @@ pub(crate) struct Counters {
     set_zero_writes_on_equal_shape_switches: AtomicU64,
     set_zero_writes_if_shapes_shared: AtomicU64,
     dispatches_pushing_set_zero: AtomicU64,
+    set_zero_sets_reused: AtomicU64,
+    dispatches_settled_as_before: AtomicU64,
     baked_sampler_dispatches_apart: AtomicU64,
     host_deallocators_delayed: AtomicU64,
     host_import_releases_posted: AtomicU64,
@@ -1239,6 +1241,19 @@ impl Counters {
     /// A dispatch encoded with its set 0 pushed (`pipeline::objects::pushes_set_zero`).
     pub(crate) fn dispatch_pushing_set_zero(&self) {
         self.dispatches_pushing_set_zero
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A command that bound the set 0 its encoder's last command wrote, the same descriptors
+    /// into a set of the same layout (`binding::LastSetZero`).
+    pub(crate) fn set_zero_set_reused(&self) {
+        self.set_zero_sets_reused.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A compute encoder's dispatch that took what its last dispatch settled
+    /// (`compute::DispatchMemo`).
+    pub(crate) fn dispatch_settled_as_before(&self) {
+        self.dispatches_settled_as_before
             .fetch_add(1, Ordering::Relaxed);
     }
 
@@ -2787,6 +2802,18 @@ pub struct WorkCounts {
     /// a kernel's variant whose set 0 a push descriptor set layout can hold, on a device of Vulkan
     /// 1.4 or `VK_KHR_push_descriptor`. Every dispatch pushes all of its set's writes.
     pub dispatches_pushing_set_zero: u64,
+    /// Draws and dispatches that bound the set 0 their encoder's last command allocated and wrote,
+    /// rather than allocating and writing their own: those that write the same descriptors into a
+    /// set of the same layout (`binding::LastSetZero`). Their recording binds no set where the set
+    /// is bound already.
+    pub set_zero_sets_reused: u64,
+    /// Compute encoders' dispatches that took the bind state, variant, plan, commands and made
+    /// `VkPipeline`s their encoder's last dispatch settled, rather than settling them again:
+    /// those of the same pipeline state, dispatch, table (no call changed it since), threadgroup
+    /// lengths, imageblock size and stage-in region, in an encoder that made nothing resident, of
+    /// a state that made no visible-function table, while no no-copy buffer moved and no sampler
+    /// state was made or went (`compute::DispatchMemo`).
+    pub dispatches_settled_as_before: u64,
     /// Dispatches of a kernel's variant whose layout bakes immutable samplers (constexpr
     /// samplers'), their pipelines made, recorded in a `VkCommandBuffer` of their own, as a
     /// dispatch whose pipeline is still being made is (`pending_dispatch.rs`): on a device whose
@@ -3555,6 +3582,9 @@ impl Device {
             set_zero_writes_if_shapes_shared: (counters.set_zero_writes_if_shapes_shared)
                 .load(Ordering::Relaxed),
             dispatches_pushing_set_zero: (counters.dispatches_pushing_set_zero)
+                .load(Ordering::Relaxed),
+            set_zero_sets_reused: counters.set_zero_sets_reused.load(Ordering::Relaxed),
+            dispatches_settled_as_before: (counters.dispatches_settled_as_before)
                 .load(Ordering::Relaxed),
             baked_sampler_dispatches_apart: (counters.baked_sampler_dispatches_apart)
                 .load(Ordering::Relaxed),

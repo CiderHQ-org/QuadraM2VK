@@ -54,6 +54,7 @@ impl Gpu for Runtime {
     type CommandBuffer = rt::CommandBuffer;
     type RenderEncoder = rt::RenderCommandEncoder;
     type ComputeEncoder = rt::ComputeCommandEncoder;
+    type Heap = rt::Heap;
 
     fn label(&self) -> String {
         format!("runtime on {}", self.device.name())
@@ -123,6 +124,54 @@ impl Gpu for Runtime {
             )
         }
         .expect("new_buffer_with_bytes_no_copy")
+    }
+
+    fn heap(&self, size: usize) -> rt::Heap {
+        let descriptor = rt::HeapDescriptor::new(
+            rt::HeapType::Placement,
+            size as u64,
+            rt::ResourceOptions::shared(),
+        );
+        self.device.new_heap(&descriptor).expect("new_heap")
+    }
+
+    unsafe fn heap_no_copy(&self, pointer: *mut u8, size: usize) -> Option<rt::Heap> {
+        let pointer = NonNull::new(pointer).expect("a pointer");
+        let descriptor = rt::HeapDescriptor::new(
+            rt::HeapType::Placement,
+            size as u64,
+            rt::ResourceOptions::shared(),
+        );
+        // SAFETY: the caller's contract: page-aligned read-write memory that outlives the heap.
+        let heap = unsafe {
+            self.device.new_heap_with_bytes_no_copy(
+                rt::HostMemory::new(pointer),
+                &descriptor,
+                None,
+                None,
+            )
+        };
+        Some(heap.expect("new_heap_with_bytes_no_copy"))
+    }
+
+    fn heap_texture(
+        &self,
+        heap: &rt::Heap,
+        width: usize,
+        height: usize,
+        offset: usize,
+    ) -> rt::Texture {
+        let mut descriptor = rt::TextureDescriptor::texture_2d(
+            PixelFormat::BGRA8Unorm,
+            width as u64,
+            height as u64,
+            false,
+        );
+        descriptor.usage = TextureUsage::RENDER_TARGET | TextureUsage::SHADER_READ;
+        descriptor.resource_options = rt::ResourceOptions::shared();
+        descriptor.allow_gpu_optimized_contents = false;
+        heap.new_texture_at_offset(&descriptor, offset as u64)
+            .expect("new_texture_at_offset")
     }
 
     fn texture(&self, format: Format, width: usize, height: usize, target: bool) -> rt::Texture {

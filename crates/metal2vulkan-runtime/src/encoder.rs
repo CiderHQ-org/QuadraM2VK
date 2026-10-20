@@ -27,6 +27,7 @@
 //! - Encoders are `Send` but not `Sync`: every method takes `&mut self`, and the core holds a
 //!   `!Sync` marker so no encoder is shared between threads by reference.
 
+use super::binding::{self, LastSetZero, Write};
 use super::buffer::Buffer;
 use super::command_buffer::CommandBuffer;
 use super::deferred::{Deferred, StepInputs};
@@ -36,6 +37,7 @@ use super::fresh_unwritten::FreshRead;
 use super::heap::Heap;
 use super::noted_apart::{NotedApart, NotedInto};
 use super::pending_dispatch::PendingDispatch;
+use super::pipeline::VariantObjects;
 use super::rebind::{Holds, Taken};
 use super::replay::Replay;
 use super::residency::Residency;
@@ -246,6 +248,9 @@ pub(super) struct EncoderCore {
     /// It encodes an ended encoder's calls again, its command buffer committed (`replay.rs`):
     /// its commands take what they use without holding it (`Rebinds::pin`).
     replaying: bool,
+    /// The set 0 its last command allocated and wrote, which a later command that writes the same
+    /// into a set of the same layout binds again ([`set_zero`](Self::set_zero)).
+    last_set_zero: LastSetZero,
     _not_sync: PhantomData<std::cell::Cell<()>>,
 }
 
@@ -345,6 +350,7 @@ impl EncoderCore {
             aliased_uses: Vec::new(),
             id: CORES.fetch_add(1, Ordering::Relaxed),
             replaying: false,
+            last_set_zero: LastSetZero::default(),
             _not_sync: PhantomData,
         })
     }
@@ -423,6 +429,7 @@ impl EncoderCore {
             aliased_uses: Vec::new(),
             id: CORES.fetch_add(1, Ordering::Relaxed),
             replaying: false,
+            last_set_zero: LastSetZero::default(),
             _not_sync: PhantomData,
         })
     }
@@ -430,6 +437,32 @@ impl EncoderCore {
     /// The device.
     pub(super) fn device(&self) -> &Device {
         self.open.command_buffer.device()
+    }
+
+    /// Set 0 of a command of `objects`'s variant that writes `writes` (set 0's): the set the
+    /// encoder's last command allocated, where it is of the same layout and holds the same writes
+    /// (`binding::LastSetZero`), else one allocated from the command buffer's pools and written.
+    /// `None` where the variant allocates none (`VariantObjects::set_zero`), its writes then
+    /// refused as `binding::write_sets` refuses them.
+    pub(super) fn set_zero(
+        &mut self,
+        objects: &VariantObjects,
+        writes: &[Write],
+    ) -> Result<Option<vk::DescriptorSet>, Error> {
+        let layout = objects.set_zero_layout();
+        if let Some(set) = layout.and_then(|layout| self.last_set_zero.holds(layout, writes)) {
+            self.device().shared().counts.set_zero_set_reused();
+            return Ok(Some(set));
+        }
+        let set = objects.set_zero(&mut self.command_buffer().state().descriptors)?;
+        // SAFETY: the set was just allocated and no command uses it yet; every buffer, view and
+        // sampler written is live (the command buffer retains them, and a refusal leaves the set
+        // unused in its pool).
+        unsafe { binding::write_sets(self.device(), set.as_slice(), writes) }?;
+        if let (Some(layout), Some(set)) = (layout, set) {
+            self.last_set_zero.keep(layout, set, writes);
+        }
+        Ok(set)
     }
 
     /// The queue flags of the family its command buffer records for: its queue's `VkQueue`'s.
