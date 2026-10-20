@@ -83,8 +83,8 @@
 //!   texel its kernel reads. Any other merge's scratch is new and all zero, so the bytes between
 //!   the texture's rows, which no copy of the shadow writes, are the same in the kept and changed
 //!   parts (`WorkCounts::shadow_merge_scratches_zeroed`).
-//! - **The kernel** (`bind::shadow_merge_module`, one per device, `owned_kernel.rs`): one
-//!   invocation per 4-byte word, the parts bound as its kept, changed and current storage
+//! - **The kernel** (`bind::shadow_merge_module`, one per device, `owned_kernel.rs`): four
+//!   4-byte words an invocation, the parts bound as its kept, changed and current storage
 //!   buffers, in windows of at most `maxStorageBufferRange` bytes and
 //!   `maxComputeWorkGroupCount[0]` groups, one dispatch each; where it fetches
 //!   (`bind::shadow_merge_image_module`, one per texel width), one invocation per texel, the
@@ -119,8 +119,8 @@ use metal2vulkan::bind::{ShadowMergeImageModule, ShadowMergeModule};
 use std::ops::Range;
 use std::sync::{Arc, Mutex};
 
-/// Bytes one workgroup merges: a word per invocation.
-const GROUP_BYTES: u64 = 4 * ShadowMergeModule::LOCAL_SIZE as u64;
+/// Bytes one workgroup merges: `ShadowMergeModule::WORDS` words per invocation.
+const GROUP_BYTES: u64 = 4 * (ShadowMergeModule::WORDS * ShadowMergeModule::LOCAL_SIZE) as u64;
 /// What each part of the scratch is rounded up to: a multiple of every
 /// `minStorageBufferOffsetAlignment` and of every texel's size.
 const PART_ALIGNMENT: u64 = 256;
@@ -322,9 +322,7 @@ impl ShadowMerge {
                 let view = word_view(copies).filter(|_| fetches(&cut, groups, groups_y));
                 let rows = match view {
                     Some(_) => groups_y,
-                    None => {
-                        groups * u64::from(ShadowMergeModule::LOCAL_SIZE) / (geometry.row_bytes / 4)
-                    }
+                    None => groups * GROUP_BYTES / geometry.row_bytes,
                 };
                 Some((cut, geometry, geometry.band(range, rows)?, view))
             });
@@ -516,8 +514,8 @@ impl ShadowMerge {
                             row_words,
                             first_word,
                         );
-                        let local = u64::from(ShadowMergeModule::LOCAL_SIZE);
-                        dispatches.push(([u32_of(total.div_ceil(local))?, 1], shape));
+                        let groups = ShadowMergeModule::groups(u32_of(total)?);
+                        dispatches.push(([groups, 1], shape));
                     }
                     (None, kept_in) => {
                         // The kept texels: the kept part's rows, or the kept image's, fetched at
@@ -576,7 +574,7 @@ impl ShadowMerge {
                 ]));
                 // The window's words, one row of them.
                 let shape = ShadowMergeModule::shape(words, words, 0, first_word);
-                dispatches.push(([words.div_ceil(ShadowMergeModule::LOCAL_SIZE), 1], shape));
+                dispatches.push(([ShadowMergeModule::groups(words), 1], shape));
                 start += size;
             }
         }

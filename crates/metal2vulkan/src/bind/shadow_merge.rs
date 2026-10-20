@@ -33,14 +33,21 @@
 //! The shape's words, in order: `width`, the words of one row of the region (at least 1);
 //! `count`, the region's words (`width` times its rows); `row_words`, the current buffer's rows
 //! apart in words; and `first_word`, the word of the region's first in the current binding.
-//! Invocation `i` below `count` takes word `i` of the kept and changed buffers and, where they
-//! differ, word `first_word + (i / width) · row_words + i % width` of the current buffer: each
-//! of its bytes where the changed word's differs from the kept one's becomes the changed word's,
-//! and the others keep the current word's. Where the kept and changed words are equal it reads
-//! and writes nothing of the current buffer; one past `count` does nothing. Contiguous bytes are
-//! one row: `width` and `count` the words, `row_words` any, `first_word` 0. A consumer whose
-//! bytes exceed `maxStorageBufferRange` or `maxComputeWorkGroupCount[0]` workgroups binds them
-//! in windows, one dispatch each: the merge of one byte reads no other byte.
+//! Invocation `g` takes words `i` from `4g` to `4g + 3` ([`ShadowMergeModule::WORDS`]), one
+//! after the other; a word `i` below `count` takes word `i` of the kept and changed buffers and,
+//! where they differ, word `first_word + (i / width) · row_words + i % width` of the current
+//! buffer: each of its bytes where the changed word's differs from the kept one's becomes the
+//! changed word's, and the others keep the current word's. Where the kept and changed words are
+//! equal it reads and writes nothing of the current buffer; a word past `count` does nothing.
+//! A dispatch takes [`ShadowMergeModule::groups`] workgroups. Contiguous bytes are one row:
+//! `width` and `count` the words, `row_words` any, `first_word` 0. A consumer whose bytes
+//! exceed `maxStorageBufferRange` or `maxComputeWorkGroupCount[0]` workgroups binds them in
+//! windows, one dispatch each: the merge of one byte reads no other byte.
+//!
+//! Four words an invocation: at one word an invocation the kernel's time went to its
+//! invocations, not to memory. On an M3 Max under MoltenVK 1.4.1, one dispatch over a 1920x1080
+//! surface's words, in its own Metal encoder (about 17 us of it), took 99 us with no word changed
+//! and 107 us with every word changed at one word an invocation, and 46 us and 74 us at four.
 //!
 //! **Synchronization** (consumer): the copies' `TRANSFER_WRITE` → `SHADER_STORAGE_READ` and
 //! `SHADER_STORAGE_WRITE` in `COMPUTE_SHADER` before the dispatch; its writes →
@@ -81,10 +88,17 @@ impl ShadowMergeModule {
     pub const CHANGED_BINDING: u32 = 1;
     /// The buffer's bytes after the command, a storage buffer the dispatch merges into.
     pub const CURRENT_BINDING: u32 = 2;
-    /// Invocations of one workgroup, along x: one 4-byte word each.
+    /// Invocations of one workgroup, along x: [`WORDS`](Self::WORDS) 4-byte words each.
     pub const LOCAL_SIZE: u32 = 64;
+    /// The words one invocation merges, one after the other.
+    pub const WORDS: u32 = 4;
     /// Bytes of the `COMPUTE` push-constant range at offset 0: the region's shape.
     pub const PUSH_BYTES: u32 = 16;
+
+    /// The workgroups of a dispatch over `count` words.
+    pub fn groups(count: u32) -> u32 {
+        count.div_ceil(Self::LOCAL_SIZE * Self::WORDS)
+    }
 
     /// The push bytes of a region of `count` words, `width` a row (at least 1), its rows
     /// `row_words` apart in the current buffer from its word `first_word` (the module docs).
@@ -167,7 +181,7 @@ fn typed_module() -> BResult<TypedModule> {
     let zero = u32_value(&mut f, 0)?;
     let invocation = f.module().global_value(invocation)?;
     let invocation = f.load(invocation, MemAccess::default())?;
-    let i = f.composite_extract(invocation, &[0])?;
+    let g = f.composite_extract(invocation, &[0])?;
     let kept = f.module().global_value(kept)?;
     let changed = f.module().global_value(changed)?;
     let current = f.module().global_value(current)?;
@@ -179,29 +193,36 @@ fn typed_module() -> BResult<TypedModule> {
     let count = f.composite_extract(shape, &[1])?;
     let row_words = f.composite_extract(shape, &[2])?;
     let first_word = f.composite_extract(shape, &[3])?;
-    let inside = f.binary(BinOp::ULessThan, i, count)?;
-    let merge: ArmFn<'_, ()> = Box::new(move |f, _| {
-        let p = f.access_chain(kept, &[zero, i])?;
-        let before = f.load(p, MemAccess::default())?;
-        let p = f.access_chain(changed, &[zero, i])?;
-        let after = f.load(p, MemAccess::default())?;
-        let differ = f.binary(BinOp::BitwiseXor, before, after)?;
-        let moved = f.binary(BinOp::INotEqual, differ, zero)?;
-        // A word the command left as it was is neither read nor written.
-        let write: ArmFn<'_, ()> = Box::new(move |f, _| {
-            let y = f.binary(BinOp::UDiv, i, width)?;
-            let x = f.binary(BinOp::UMod, i, width)?;
-            let row = f.binary(BinOp::IMul, y, row_words)?;
-            let word = f.binary(BinOp::IAdd, first_word, row)?;
-            let word = f.binary(BinOp::IAdd, word, x)?;
-            let at = f.access_chain(current, &[zero, word])?;
-            merge_word(f, at, after, differ)?;
+    let words = u32_value(&mut f, ShadowMergeModule::WORDS)?;
+    let first = f.binary(BinOp::IMul, g, words)?;
+    // The invocation's words, one after the other, each as one invocation took it alone.
+    for k in 0..ShadowMergeModule::WORDS {
+        let step = u32_value(&mut f, k)?;
+        let i = f.binary(BinOp::IAdd, first, step)?;
+        let inside = f.binary(BinOp::ULessThan, i, count)?;
+        let merge: ArmFn<'_, ()> = Box::new(move |f, _| {
+            let p = f.access_chain(kept, &[zero, i])?;
+            let before = f.load(p, MemAccess::default())?;
+            let p = f.access_chain(changed, &[zero, i])?;
+            let after = f.load(p, MemAccess::default())?;
+            let differ = f.binary(BinOp::BitwiseXor, before, after)?;
+            let moved = f.binary(BinOp::INotEqual, differ, zero)?;
+            // A word the command left as it was is neither read nor written.
+            let write: ArmFn<'_, ()> = Box::new(move |f, _| {
+                let y = f.binary(BinOp::UDiv, i, width)?;
+                let x = f.binary(BinOp::UMod, i, width)?;
+                let row = f.binary(BinOp::IMul, y, row_words)?;
+                let word = f.binary(BinOp::IAdd, first_word, row)?;
+                let word = f.binary(BinOp::IAdd, word, x)?;
+                let at = f.access_chain(current, &[zero, word])?;
+                merge_word(f, at, after, differ)?;
+                Ok(ArmEnd::FallThrough(Vec::new()))
+            });
+            f.if_(&mut (), moved, write, None)?;
             Ok(ArmEnd::FallThrough(Vec::new()))
         });
-        f.if_(&mut (), moved, write, None)?;
-        Ok(ArmEnd::FallThrough(Vec::new()))
-    });
-    f.if_(&mut (), inside, merge, None)?;
+        f.if_(&mut (), inside, merge, None)?;
+    }
     f.ret(None)?;
     let id = f.finish()?;
     b.entry(

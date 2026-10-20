@@ -141,7 +141,7 @@ impl LinearMerge {
         let limits = &device.properties().description.limits;
         let range = u64::from(limits.max_storage_buffer_range);
         let groups = u64::from(limits.max_compute_work_group_count[0]);
-        let local = u64::from(ShadowMergeModule::LOCAL_SIZE);
+        let per_group = u64::from(ShadowMergeModule::LOCAL_SIZE * ShadowMergeModule::WORDS);
         let words = row_bytes / 4;
         let pitch = layout.row_pitch;
         // A band's rows: within every limit, and a whole number of steps, so the next band's kept
@@ -152,7 +152,7 @@ impl LinearMerge {
             None => 0,
         };
         let by_kept = range / row_bytes;
-        let by_groups = groups * local / words;
+        let by_groups = groups * per_group / words;
         let most = rows.min(by_current).min(by_kept).min(by_groups);
         let band = match most == rows {
             true => rows,
@@ -211,7 +211,7 @@ impl LinearMerge {
                 });
                 let total = count * words;
                 dispatches.push(Dispatch {
-                    groups: u32_of(total.div_ceil(local))?,
+                    groups: ShadowMergeModule::groups(u32_of(total)?),
                     shape: ShadowMergeModule::shape(
                         u32_of(words)?,
                         u32_of(total)?,
