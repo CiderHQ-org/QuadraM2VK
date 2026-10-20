@@ -1515,75 +1515,94 @@ impl IndirectCommandBuffer {
     pub fn commands(&self, range: Range<u64>) -> Result<Vec<IndirectCommand>, Error> {
         self.check_command_types("commands")?;
         let range = self.command_range("commands", range)?;
-        if self.is_render() {
-            // A getter runs nothing, so it announces none of the commands it reads that name a
-            // released state: an execution of them does.
-            let (records, _) = self.render_records(range.clone(), Reader::Getter)?;
-            let sets = self.sets(range.clone());
-            let commands: Vec<IndirectCommand> = records
-                .into_iter()
-                .zip(sets)
-                .zip(range)
-                .map(|(((record, pipeline), set), index)| {
+        let (records, sets) = self.read_records(range.clone())?;
+        let read = range
+            .zip(&records)
+            .zip(&sets)
+            .map(|((index, record), set)| (index, record, set.as_ref()));
+        Ok(self.getter_commands(read))
+    }
+
+    /// The commands `read` (each one's index, record and the state the CPU set on it), as
+    /// [`commands`](Self::commands) reads them, announcing their identifiers' kinds as it does.
+    fn getter_commands<'r>(
+        &self,
+        read: impl Iterator<Item = (u32, &'r CommandRecord, Option<&'r CommandState>)> + Clone,
+    ) -> Vec<IndirectCommand> {
+        // A getter runs nothing, so it announces none of the commands it reads that name a
+        // released state: an execution of them does.
+        let commands: Vec<IndirectCommand> = if self.is_render() {
+            let live = || RenderPipelineState::indirect_states(self.device());
+            let (named, _) = self.name_records(read.clone(), Reader::Getter, &RENDER, live);
+            read.zip(named)
+                .map(|((index, record, set), pipeline)| {
                     let named = record.bindings.pipeline.or(record.retained_pipeline);
                     let identifier =
-                        self.pipeline_identifier(named, set.as_ref(), &RENDER, pipeline.as_ref());
+                        self.pipeline_identifier(named, set, &RENDER, pipeline.as_ref());
                     IndirectCommand::Render(self.render_command(
-                        (index, &record),
+                        (index, record),
                         pipeline,
                         identifier,
                     ))
                 })
-                .collect();
-            self.announce_identifiers(&commands);
-            return Ok(commands);
-        }
-        // A pipeline a reset retained runs but reads as none, as Metal's getter reports it.
-        let (records, _) = self.records(range.clone(), Reader::Getter)?;
-        let sets = self.sets(range.clone());
-        let commands: Vec<IndirectCommand> = records
-            .into_iter()
-            .zip(sets)
-            .zip(range)
-            .map(|(((record, pipeline), set), index)| {
-                let reported = pipeline.filter(|_| record.bindings.pipeline.is_some());
-                let named = record.bindings.pipeline;
-                let identifier =
-                    self.pipeline_identifier(named, set.as_ref(), &COMPUTE, reported.as_ref());
-                IndirectCommand::Compute(self.compute_command(
-                    (index, &record),
-                    reported,
-                    identifier,
-                ))
-            })
-            .collect();
+                .collect()
+        } else {
+            let live = || ComputePipelineState::indirect_states(self.device());
+            let (named, _) = self.name_records(read.clone(), Reader::Getter, &COMPUTE, live);
+            read.zip(named)
+                .map(|((index, record, set), pipeline)| {
+                    // A pipeline a reset retained runs but reads as none, as Metal's getter
+                    // reports it.
+                    let reported = pipeline.filter(|_| record.bindings.pipeline.is_some());
+                    let named = record.bindings.pipeline;
+                    let identifier =
+                        self.pipeline_identifier(named, set, &COMPUTE, reported.as_ref());
+                    IndirectCommand::Compute(self.compute_command(
+                        (index, record),
+                        reported,
+                        identifier,
+                    ))
+                })
+                .collect()
+        };
         self.announce_identifiers(&commands);
-        Ok(commands)
+        commands
     }
 
-    /// Call `check` on each command of `range` (inside the size) whose record `recorded` holds,
-    /// in order, as [`commands`](Self::commands) reads them now: the host step's check of the
-    /// commands it will record, before it records any ([`IndirectCommandCheck`]). `recorded` is
-    /// the step's records of the range, `None` for one that faulted; an empty list (a faulted
-    /// header) checks nothing.
-    pub(super) fn check_recorded<T>(
+    /// Call `check` on each command whose record `recorded` holds, commands from `start` (inside
+    /// the size), in order, as [`commands`](Self::commands) reads them now: the host step's check
+    /// of the commands it will record, before it records any ([`IndirectCommandCheck`]).
+    /// `recorded` is the step's records, `None` for one that faulted; an empty list (a faulted
+    /// header) checks nothing. The check reads the step's records, which the step read once the
+    /// work before it completed, as the getter would read them then: none is read again.
+    pub(super) fn check_recorded(
         &self,
         check: &Mutex<IndirectCommandCheck>,
-        range: Range<u32>,
-        recorded: &[Option<T>],
-    ) -> Result<(), Error> {
-        if range.is_empty() || recorded.iter().all(Option::is_none) {
-            return Ok(());
+        start: u32,
+        recorded: &[Option<CommandRecord>],
+    ) {
+        let held: Vec<(u32, &CommandRecord)> = (start..)
+            .zip(recorded)
+            .filter_map(|(index, record)| Some((index, record.as_ref()?)))
+            .collect();
+        if held.is_empty() {
+            return;
         }
-        let first = u64::from(range.start);
-        let commands = self.commands(first..u64::from(range.end))?;
+        let sets: Vec<Option<CommandState>> = {
+            let pipelines = lock(&self.0.pipelines);
+            held.iter()
+                .map(|&(index, _)| pipelines.get(index as usize).cloned().flatten())
+                .collect()
+        };
+        let read = held
+            .iter()
+            .zip(&sets)
+            .map(|(&(index, record), set)| (index, record, set.as_ref()));
+        let commands = self.getter_commands(read);
         let mut check = lock(check);
-        for ((index, command), record) in (first..).zip(&commands).zip(recorded) {
-            if record.is_some() {
-                check(index, command);
-            }
+        for (&(index, _), command) in held.iter().zip(&commands) {
+            check(u64::from(index), command);
         }
-        Ok(())
     }
 
     /// Announce the kinds of the states' identifiers `commands` answer, none of which is measured
@@ -1601,14 +1620,6 @@ impl IndirectCommandBuffer {
         for kind in kinds {
             degrade_identifier(self.device(), kind, "an indirect command's pipeline state");
         }
-    }
-
-    /// The pipeline state the CPU set on each command of `range` (inside the size).
-    fn sets(&self, range: Range<u32>) -> Vec<Option<CommandState>> {
-        let pipelines = lock(&self.0.pipelines);
-        range
-            .map(|index| pipelines.get(index as usize).cloned().flatten())
-            .collect()
     }
 
     /// `getPipelineStateUniqueIdentifier` of a command whose record names pipeline state ID
@@ -1791,6 +1802,10 @@ impl IndirectCommandBuffer {
                 records: Vec::new(),
             });
         }
+        self.device()
+            .shared()
+            .counts
+            .indirect_records_read(range.len() as u64);
         let mut faults = ReplayFaults::default();
         let mut records = Vec::with_capacity(range.len());
         for index in range {
@@ -1867,40 +1882,60 @@ impl IndirectCommandBuffer {
         of: &Of<S>,
         live: impl Fn() -> Vec<S>,
     ) -> Result<(Vec<(CommandRecord, Option<S>)>, Released), Error> {
-        let start = range.start;
-        let records: Vec<(CommandRecord, Option<CommandState>)> = {
-            let pipelines = lock(&self.0.pipelines);
-            range
-                .map(|index| Ok((self.record(index)?, pipelines[index as usize].clone())))
-                .collect::<Result<_, Error>>()?
-        };
+        let (records, sets) = self.read_records(range.clone())?;
+        let read = range
+            .zip(&records)
+            .zip(&sets)
+            .map(|((index, record), set)| (index, record, set.as_ref()));
+        let (named, released) = self.name_records(read, reader, of, live);
+        Ok((records.into_iter().zip(named).collect(), released))
+    }
+
+    /// The records of commands `range` (inside the size) as they are now, and the state the CPU
+    /// set on each, read together.
+    fn read_records(
+        &self,
+        range: Range<u32>,
+    ) -> Result<(Vec<CommandRecord>, Vec<Option<CommandState>>), Error> {
+        self.device()
+            .shared()
+            .counts
+            .indirect_records_read(range.len() as u64);
+        let pipelines = lock(&self.0.pipelines);
+        range
+            .map(|index| Ok((self.record(index)?, pipelines[index as usize].clone())))
+            .collect()
+    }
+
+    /// The state of kind `of` each of `read` (a command's index, record and the state the CPU
+    /// set on it) names for `reader` (`name_state`), the live states of its ID listed by `live`,
+    /// once; and the commands an execution runs otherwise than Metal's may (`Released`).
+    fn name_records<'r, S: Clone>(
+        &self,
+        read: impl Iterator<Item = (u32, &'r CommandRecord, Option<&'r CommandState>)>,
+        reader: Reader,
+        of: &Of<S>,
+        live: impl Fn() -> Vec<S>,
+    ) -> (Vec<Option<S>>, Released) {
         // The live states are listed with no lock of the buffer held, once.
         let mut listed: Option<Vec<S>> = None;
         let mut unmatched = Vec::new();
-        let named = records
-            .into_iter()
-            .zip(start..)
-            .map(|((record, set), index)| {
+        let named = read
+            .map(|(index, record, set)| {
                 // The pipeline the command executes with: a retained one too.
-                let state = record
-                    .bindings
-                    .pipeline
-                    .or(record.retained_pipeline)
-                    .and_then(|named| {
-                        let holder = || {
-                            listed
-                                .get_or_insert_with(&live)
-                                .iter()
-                                .find(|state| (of.id)(state) == named.get())
-                                .cloned()
-                        };
-                        let at = (index, named.get());
-                        self.name_state(at, reader, set.as_ref(), of, holder, &mut unmatched)
-                    });
-                (record, state)
+                let named = record.bindings.pipeline.or(record.retained_pipeline)?;
+                let holder = || {
+                    listed
+                        .get_or_insert_with(&live)
+                        .iter()
+                        .find(|state| (of.id)(state) == named.get())
+                        .cloned()
+                };
+                let at = (index, named.get());
+                self.name_state(at, reader, set, of, holder, &mut unmatched)
             })
             .collect();
-        Ok((named, Released(unmatched)))
+        (named, Released(unmatched))
     }
 
     /// For a host step: the compute state each of `records` names (commands from `start`, as

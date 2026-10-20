@@ -96,6 +96,7 @@ pub(crate) struct Counters {
     query_result_copies_recorded: AtomicU64,
     visibility_queries_begun: AtomicU64,
     indirect_draws_recorded: AtomicU64,
+    indirect_records_read: AtomicU64,
     internal_submissions: AtomicU64,
     queue_submissions: AtomicU64,
     command_buffers_submitted: AtomicU64,
@@ -676,6 +677,13 @@ impl Counters {
     pub(crate) fn unlisted_argument_sampler_failure(&self) {
         self.unlisted_argument_sampler_failures
             .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// `count` records of an indirect command buffer's commands were read from its storage and
+    /// decoded (`indirect_command_buffer.rs`).
+    pub(crate) fn indirect_records_read(&self, count: u64) {
+        self.indirect_records_read
+            .fetch_add(count, Ordering::Relaxed);
     }
 
     /// A host step's variant made immutable samplers no live set had (`pipeline/objects.rs`).
@@ -2294,6 +2302,11 @@ pub struct WorkCounts {
     pub visibility_queries_begun: u64,
     /// `vkCmdDrawIndirect` and `vkCmdDrawIndexedIndirect` recorded (`render.rs`).
     pub indirect_draws_recorded: u64,
+    /// Records of indirect command buffers' commands read from their storage and decoded, one a
+    /// command each time an execution recorded at its commit, a host step (its check included,
+    /// `IndirectCommandCheck`) or `IndirectCommandBuffer::commands` reads it; a setter's own
+    /// read of the command it changes is not counted.
+    pub indirect_records_read: u64,
     /// Internal submissions made (`device/submit.rs`), each one a host call waits for: a host
     /// copy through the GPU, a clear of a live buffer, a neutral's making.
     pub internal_submissions: u64,
@@ -3398,6 +3411,7 @@ impl Device {
                 .load(Ordering::Relaxed),
             visibility_queries_begun: counters.visibility_queries_begun.load(Ordering::Relaxed),
             indirect_draws_recorded: counters.indirect_draws_recorded.load(Ordering::Relaxed),
+            indirect_records_read: counters.indirect_records_read.load(Ordering::Relaxed),
             internal_submissions: counters.internal_submissions.load(Ordering::Relaxed),
             queue_submissions: counters.queue_submissions.load(Ordering::Relaxed),
             command_buffers_submitted: counters.command_buffers_submitted.load(Ordering::Relaxed),

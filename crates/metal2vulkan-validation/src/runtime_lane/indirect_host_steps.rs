@@ -15,6 +15,8 @@
 //! - a second execution makes no `VkPipeline`;
 //! - a sticky encoding fault in the header runs no command, and the execution report says so;
 //! - an execution reads its range from a buffer as it runs;
+//! - a checked execution's host step checks each command before it records any, from the records
+//!   it read once;
 //! - the blit encoder's copy, reset and optimize act on the commands as they run;
 //! - a kernel reaches the buffer made last with the ID it encodes through, placed or not, and
 //!   none once that one is gone;
@@ -493,6 +495,49 @@ fn a_checked_execution_checks_each_written_command_before_its_step_records_it() 
         assert!(!setup.icb.gpu_written());
         assert_eq!(setup.output(), expected(), "the CPU's records run");
         assert_eq!(calls.load(Ordering::SeqCst), 0, "no host step, no check");
+    });
+}
+
+/// A checked execution's host step reads each command's record once
+/// (`WorkCounts::indirect_records_read`): its check reads the commands from the records the step
+/// read, which are the commands `IndirectCommandBuffer::commands` reads once they ran.
+#[test]
+fn a_checked_host_step_reads_each_record_once() {
+    on_device_forcing(&[Degradation::UnmeasuredUniqueIdentifier], |device| {
+        let queue = device.new_command_queue().unwrap();
+        let setup = Setup::new(device, 2);
+        let seen: Arc<Mutex<Vec<String>>> = Arc::default();
+        let command_buffer = queue.command_buffer().unwrap();
+        let mut encoder = command_buffer.compute_command_encoder().unwrap();
+        setup.write(&mut encoder);
+        encoder
+            .use_resource(setup.params.as_resource(), ResourceUsage::READ)
+            .unwrap();
+        encoder
+            .use_resource(setup.out.as_resource(), ResourceUsage::WRITE)
+            .unwrap();
+        let log = Arc::clone(&seen);
+        encoder
+            .execute_commands_in_buffer_checked(
+                &setup.icb,
+                0..COMMANDS,
+                Box::new(move |_, command| log.lock().unwrap().push(format!("{command:?}"))),
+            )
+            .unwrap();
+        encoder.end_encoding().unwrap();
+        let before = device.work_counts().indirect_records_read;
+        complete(&command_buffer);
+        let read = device.work_counts().indirect_records_read - before;
+        assert_eq!(read, COMMANDS, "each record read once");
+        assert_eq!(setup.output(), expected(), "the checked commands run");
+        let getter: Vec<String> = setup
+            .icb
+            .commands(0..COMMANDS)
+            .unwrap()
+            .iter()
+            .map(|command| format!("{command:?}"))
+            .collect();
+        assert_eq!(*seen.lock().unwrap(), getter, "the getter's commands");
     });
 }
 

@@ -447,7 +447,7 @@ impl Execute {
         // The caller's check sees each command the step will record, before it records any.
         if let Some(check) = &self.check {
             self.icb
-                .check_recorded(check, range.clone(), &written.records)?;
+                .check_recorded(check, range.start, &written.records);
         }
         // A record naming the ID of the state the CPU set runs its program, else the state of its
         // ID among `states` (`IndirectCommandBuffer::step_states`).
