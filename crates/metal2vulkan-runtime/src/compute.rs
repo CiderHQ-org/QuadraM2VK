@@ -59,7 +59,7 @@ use super::fetch_reach;
 use super::function_table::VisibleFunctionTable;
 use super::heap::Heap;
 use super::heap_sets;
-use super::indirect_command_buffer::IndirectCommandBuffer;
+use super::indirect_command_buffer::{IndirectCommandBuffer, IndirectCommandCheck};
 use super::indirect_dispatch::{
     self, ArgumentDispatch, Arguments, FlatCall, FlatPreprocess, HostDispatch,
     STAGE_IN_REGION_BYTES,
@@ -91,7 +91,7 @@ use metal2vulkan::metal::{BarrierScope, DispatchType, RenderStages, ResourceUsag
 use metal2vulkan::pipeline::Stage;
 use std::collections::BTreeMap;
 use std::ops::Range;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 /// Entries of a compute encoder's threadgroup memory table.
 pub(super) const THREADGROUP_SLOTS: u32 = 31;
@@ -1027,6 +1027,35 @@ impl ComputeCommandEncoder {
         icb: &IndirectCommandBuffer,
         range: Range<u64>,
     ) -> Result<(), Error> {
+        self.execute_range(icb, range, None)
+    }
+
+    /// [`execute_commands_in_buffer`](Self::execute_commands_in_buffer) with a check of the
+    /// commands its host step runs (a runtime extension; Metal has none): where a host step
+    /// records the execution from the records as the GPU and the CPU left them (an encoder made
+    /// `icb` resident for writing, or the execution lies inside a block of command predication),
+    /// the step first calls `check` with each command it will record, in order, before it records
+    /// any of them ([`IndirectCommandCheck`]). An execution recorded at the commit from the CPU's
+    /// records never calls it, and one with a check never runs on the GPU alone
+    /// (`VK_EXT_device_generated_commands`), so the step always reads the records. Refused as
+    /// [`execute_commands_in_buffer`](Self::execute_commands_in_buffer) refuses.
+    pub fn execute_commands_in_buffer_checked(
+        &mut self,
+        icb: &IndirectCommandBuffer,
+        range: Range<u64>,
+        check: IndirectCommandCheck,
+    ) -> Result<(), Error> {
+        self.execute_range(icb, range, Some(check))
+    }
+
+    /// [`execute_commands_in_buffer`](Self::execute_commands_in_buffer), with `check` for its
+    /// host step where one is given.
+    fn execute_range(
+        &mut self,
+        icb: &IndirectCommandBuffer,
+        range: Range<u64>,
+        check: Option<IndirectCommandCheck>,
+    ) -> Result<(), Error> {
         self.log(|_| ComputeCall::Execute(icb.clone(), range.clone()));
         const CALL: &str = indirect_execute::CALL;
         self.core.check_device(CALL, icb.device())?;
@@ -1045,7 +1074,7 @@ impl ComputeCommandEncoder {
             return Ok(());
         }
         let fixed = u64::from(range.start)..u64::from(range.end);
-        self.defer_execution(icb, ExecutionRange::Fixed(range), pipeline)?;
+        self.defer_execution(icb, ExecutionRange::Fixed(range), pipeline, check)?;
         self.capture(|| Event::Execute(icb.clone(), fixed));
         Ok(())
     }
@@ -1075,6 +1104,35 @@ impl ComputeCommandEncoder {
         range_buffer: &Buffer,
         offset: u64,
     ) -> Result<(), Error> {
+        self.execute_indirect_range(icb, range_buffer, offset, None)
+    }
+
+    /// [`execute_commands_in_buffer_indirect`](Self::execute_commands_in_buffer_indirect) with a
+    /// check of the commands its host step runs, which always records it: the step first calls
+    /// `check` with each command of the range it read that it will record, in order, before it
+    /// records any of them, as
+    /// [`execute_commands_in_buffer_checked`](Self::execute_commands_in_buffer_checked)'s does
+    /// ([`IndirectCommandCheck`]). Refused as
+    /// [`execute_commands_in_buffer_indirect`](Self::execute_commands_in_buffer_indirect) refuses.
+    pub fn execute_commands_in_buffer_indirect_checked(
+        &mut self,
+        icb: &IndirectCommandBuffer,
+        range_buffer: &Buffer,
+        offset: u64,
+        check: IndirectCommandCheck,
+    ) -> Result<(), Error> {
+        self.execute_indirect_range(icb, range_buffer, offset, Some(check))
+    }
+
+    /// [`execute_commands_in_buffer_indirect`](Self::execute_commands_in_buffer_indirect), with
+    /// `check` for its host step where one is given.
+    fn execute_indirect_range(
+        &mut self,
+        icb: &IndirectCommandBuffer,
+        range_buffer: &Buffer,
+        offset: u64,
+        check: Option<IndirectCommandCheck>,
+    ) -> Result<(), Error> {
         self.log(|_| ComputeCall::ExecuteIndirect(icb.clone(), range_buffer.clone(), offset));
         const CALL: &str = indirect_execute::CALL_INDIRECT;
         self.core.check_device(CALL, icb.device())?;
@@ -1094,7 +1152,7 @@ impl ComputeCommandEncoder {
             offset,
             indirect_execute::RANGE_BYTES,
         )?;
-        self.defer_execution(icb, ExecutionRange::Indirect(copy), pipeline)?;
+        self.defer_execution(icb, ExecutionRange::Indirect(copy), pipeline, check)?;
         self.capture(|| Event::ExecuteIndirect(icb.clone(), range_buffer.clone(), offset));
         Ok(())
     }
@@ -1115,12 +1173,13 @@ impl ComputeCommandEncoder {
 
     /// Leave the execution of `range` of `icb` to record later (`indirect_execute.rs`), with
     /// the encoder's pipeline state `pipeline` where `icb` inherits it, its bound buffers where
-    /// `icb` inherits them, and what it made resident so far.
+    /// `icb` inherits them, and what it made resident so far, and `check` for its host step.
     fn defer_execution(
         &mut self,
         icb: &IndirectCommandBuffer,
         range: ExecutionRange,
         pipeline: Option<ComputePipelineState>,
+        check: Option<IndirectCommandCheck>,
     ) -> Result<(), Error> {
         self.sync_heaps();
         let table = if icb.descriptor().inherit_buffers {
@@ -1136,6 +1195,7 @@ impl ComputeCommandEncoder {
             table,
             ordered: self.dispatch_type == DispatchType::Serial,
             gate,
+            check: check.map(Mutex::new),
         })))?;
         // Its commands may name any pipeline state.
         self.command_encoded(true);

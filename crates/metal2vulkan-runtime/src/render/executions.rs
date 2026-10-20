@@ -271,7 +271,9 @@ use crate::encoder::{EncoderCore, RecordedSegment};
 use crate::error::{internal, invalid, vulkan, Error, Problem, RuntimeGap};
 use crate::executed_commands::{ExecutedCommand, RecordsRead};
 use crate::fragment_imageblock::PassImageblock;
-use crate::indirect_command_buffer::{IndirectCommandBuffer, IndirectCommandBufferProblem, Reader};
+use crate::indirect_command_buffer::{
+    IndirectCommandBuffer, IndirectCommandBufferProblem, IndirectCommandCheck, Reader,
+};
 use crate::indirect_dispatch;
 use crate::indirect_execute::{self, ExecutionRange};
 use crate::pipeline::budget::Urgency;
@@ -305,7 +307,7 @@ use metal2vulkan::pipeline::VertexStride;
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 mod ahead;
 
@@ -352,6 +354,34 @@ impl RenderCommandEncoder {
         icb: &IndirectCommandBuffer,
         range: Range<u64>,
     ) -> Result<(), Error> {
+        self.execute_range(icb, range, None)
+    }
+
+    /// [`execute_commands_in_buffer`](Self::execute_commands_in_buffer) with a check of the
+    /// commands its host step runs (a runtime extension; Metal has none): where a host step
+    /// records the pass from the records as the GPU and the CPU left them (an encoder made `icb`
+    /// resident for writing, `IndirectCommandBuffer::gpu_written`), the step first calls `check`
+    /// with each command of the range it will record, in order, before it records any of them
+    /// ([`IndirectCommandCheck`]). An execution `commit` records from the CPU's records never
+    /// calls it. Refused as [`execute_commands_in_buffer`](Self::execute_commands_in_buffer)
+    /// refuses.
+    pub fn execute_commands_in_buffer_checked(
+        &mut self,
+        icb: &IndirectCommandBuffer,
+        range: Range<u64>,
+        check: IndirectCommandCheck,
+    ) -> Result<(), Error> {
+        self.execute_range(icb, range, Some(check))
+    }
+
+    /// [`execute_commands_in_buffer`](Self::execute_commands_in_buffer), with `check` for its
+    /// host step where one is given.
+    fn execute_range(
+        &mut self,
+        icb: &IndirectCommandBuffer,
+        range: Range<u64>,
+        check: Option<IndirectCommandCheck>,
+    ) -> Result<(), Error> {
         self.log(|_| RenderCall::Execute(icb.clone(), range.clone()));
         self.core.check_device(CALL, icb.device())?;
         if !icb.is_render() {
@@ -375,7 +405,7 @@ impl RenderCommandEncoder {
             Inherited::Encoder(state) => Some(state),
         };
         self.degrade_repeated_start(icb, &range);
-        self.defer_execution(icb, ExecutionRange::Fixed(range), pipeline)
+        self.defer_execution(icb, ExecutionRange::Fixed(range), pipeline, check)
     }
 
     /// `executeCommandsInBuffer:indirectBuffer:indirectBufferOffset:`: run the render commands
@@ -408,6 +438,35 @@ impl RenderCommandEncoder {
         range_buffer: &Buffer,
         offset: u64,
     ) -> Result<(), Error> {
+        self.execute_indirect_range(icb, range_buffer, offset, None)
+    }
+
+    /// [`execute_commands_in_buffer_indirect`](Self::execute_commands_in_buffer_indirect) with a
+    /// check of the commands its host step runs, which always records the pass: the step first
+    /// calls `check` with each command of the range it read that it will record, in order, before
+    /// it records any of them, as
+    /// [`execute_commands_in_buffer_checked`](Self::execute_commands_in_buffer_checked)'s does
+    /// ([`IndirectCommandCheck`]). Refused as
+    /// [`execute_commands_in_buffer_indirect`](Self::execute_commands_in_buffer_indirect) refuses.
+    pub fn execute_commands_in_buffer_indirect_checked(
+        &mut self,
+        icb: &IndirectCommandBuffer,
+        range_buffer: &Buffer,
+        offset: u64,
+        check: IndirectCommandCheck,
+    ) -> Result<(), Error> {
+        self.execute_indirect_range(icb, range_buffer, offset, Some(check))
+    }
+
+    /// [`execute_commands_in_buffer_indirect`](Self::execute_commands_in_buffer_indirect), with
+    /// `check` for its host step where one is given.
+    fn execute_indirect_range(
+        &mut self,
+        icb: &IndirectCommandBuffer,
+        range_buffer: &Buffer,
+        offset: u64,
+        check: Option<IndirectCommandCheck>,
+    ) -> Result<(), Error> {
         self.log(|_| RenderCall::ExecuteIndirect(icb.clone(), range_buffer.clone(), offset));
         const CALL_INDIRECT: &str = indirect_execute::CALL_INDIRECT;
         self.core.check_device(CALL_INDIRECT, icb.device())?;
@@ -437,7 +496,7 @@ impl RenderCommandEncoder {
             offset,
             indirect_execute::RANGE_BYTES,
         )?;
-        self.defer_execution(icb, ExecutionRange::Indirect(copy), pipeline)
+        self.defer_execution(icb, ExecutionRange::Indirect(copy), pipeline, check)
     }
 
     /// The pipeline state an execution of `icb` here runs with (`Inherited`). Where the
@@ -491,6 +550,7 @@ impl RenderCommandEncoder {
         icb: &IndirectCommandBuffer,
         range: ExecutionRange,
         pipeline: Option<RenderPipelineState>,
+        check: Option<IndirectCommandCheck>,
     ) -> Result<(), Error> {
         self.sync_heaps();
         // An execution rewrites an extended-range or padded attachment as a draw does, of reset
@@ -694,6 +754,7 @@ impl RenderCommandEncoder {
             snapshot,
             shadows,
             lent,
+            check: check.map(Mutex::new),
         });
         // Its commands may name any pipeline state, reading handles in any stage.
         self.command_encoded(every_render_stage());
@@ -744,6 +805,9 @@ pub(crate) struct RenderExecution {
     /// The query its commands' draws count in, where a visibility result mode was set at the
     /// call.
     lent: Option<Lent>,
+    /// The caller's check of the commands the host step records
+    /// (`execute_commands_in_buffer_checked`), which the step calls before it records them.
+    check: Option<Mutex<IndirectCommandCheck>>,
 }
 
 /// The encoder's state an execution's draws take: as the call found it, its tables only where
@@ -2222,6 +2286,11 @@ impl RenderExecution {
             ));
         }
         let written = self.icb.written_records(range.clone())?;
+        // The caller's check sees each command the step will record, before it records any.
+        if let Some(check) = &self.check {
+            self.icb
+                .check_recorded(check, range.clone(), &written.records)?;
+        }
         let states = RenderPipelineState::indirect_states(device);
         // A record naming the ID of the state the CPU set runs its program, else the state of its
         // ID among `states` (`IndirectCommandBuffer::step_render_states`); the commands it runs

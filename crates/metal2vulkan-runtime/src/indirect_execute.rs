@@ -75,7 +75,9 @@ use super::device::lock;
 use super::encoder::{EncoderCore, RecordedSegment};
 use super::error::{internal, invalid, Error, Problem};
 use super::executed_commands::{ExecutedCommand, RecordsRead};
-use super::indirect_command_buffer::{IndirectCommandBuffer, IndirectCommandBufferProblem, Reader};
+use super::indirect_command_buffer::{
+    IndirectCommandBuffer, IndirectCommandBufferProblem, IndirectCommandCheck, Reader,
+};
 use super::pipeline::{BufferForms, ComputePipelineState, IndirectStates, Variant};
 use super::predication::HostGate;
 use super::residency::Residency;
@@ -136,6 +138,10 @@ pub(super) struct Execute {
     /// The check of the block of command predication it was encoded in, if any
     /// (`predication.rs`): a host step records it, and nothing where the counter skips.
     pub(super) gate: Option<HostGate>,
+    /// The caller's check of the commands its host step records
+    /// (`execute_commands_in_buffer_checked`): the step calls it before it records them, and it
+    /// keeps the execution off the GPU-alone path (`generated_execute.rs`).
+    pub(super) check: Option<Mutex<IndirectCommandCheck>>,
 }
 
 /// The commands an execution runs.
@@ -438,6 +444,11 @@ impl Execute {
             return Ok((commands.into_iter().map(Some).collect(), faults));
         };
         let written = self.icb.written_records(range.clone())?;
+        // The caller's check sees each command the step will record, before it records any.
+        if let Some(check) = &self.check {
+            self.icb
+                .check_recorded(check, range.clone(), &written.records)?;
+        }
         // A record naming the ID of the state the CPU set runs its program, else the state of its
         // ID among `states` (`IndirectCommandBuffer::step_states`).
         let (named, released) = self.icb.step_states(range.start, &written.records, states);

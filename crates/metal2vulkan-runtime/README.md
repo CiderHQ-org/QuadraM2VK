@@ -229,6 +229,10 @@ Calls Metal does not have, for a consumer that emulates a Metal device:
   its sampler's.
 - Resource ID reservations, placements and counts (`Device::reserve_resource_ids`,
   `IdPlacement`, `Device::sampler_ids_live`), and the private getters of indirect commands.
+- `execute_commands_in_buffer_checked` and `execute_commands_in_buffer_indirect_checked` (render and
+  compute encoders) take an `IndirectCommandCheck`, which the host step that records an execution
+  from records the GPU may have written calls with each command it will record, before it records
+  any.
 - `HostMemory::with_dma_buf` and its `DmaBufSource`: dma-bufs of a no-copy object's pages, for a
   device that refuses their pointer.
 

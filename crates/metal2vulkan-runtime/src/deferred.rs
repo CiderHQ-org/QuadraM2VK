@@ -124,8 +124,9 @@ impl Deferred {
         let device = command_buffer.device();
         match self {
             Deferred::Execute(execute) if step => {
-                // Inside a block of command predication its host step reads the counter first.
-                let recorded = match execute.predicated() {
+                // Inside a block of command predication its host step reads the counter first; a
+                // checked execution's step reads its records for the caller's check.
+                let recorded = match execute.predicated() || execute.check.is_some() {
                     true => None,
                     false => generated_execute::record(command_buffer, execute)?,
                 };

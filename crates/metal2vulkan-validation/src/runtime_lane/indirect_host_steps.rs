@@ -50,6 +50,7 @@ use metal2vulkan_runtime::{
     ResourceOptions, Size,
 };
 use std::ptr::NonNull;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::Instant;
 
@@ -413,6 +414,85 @@ fn commands_a_kernel_writes_run_after_it() {
         complete(&executing);
         wait(&writing);
         assert_eq!(setup.output(), expected(), "in a later command buffer");
+    });
+}
+
+/// A checked execution (`execute_commands_in_buffer_checked`) of commands a kernel writes: its host
+/// step calls the check once for each command it records, in order, with the command as
+/// `IndirectCommandBuffer::commands` reads it (each a dispatch), before it records any: the
+/// commands' windows of `out` are all still zero at every call. An execution of the CPU's records
+/// in a buffer no encoder made resident for writing, which `commit` records, never calls it, and
+/// both run as their plain forms run. The commands the check reads answer the runtime's unique
+/// identifiers of their states, which the device announces as the getter does.
+#[test]
+fn a_checked_execution_checks_each_written_command_before_its_step_records_it() {
+    on_device_forcing(&[Degradation::UnmeasuredUniqueIdentifier], |device| {
+        let queue = device.new_command_queue().unwrap();
+        let setup = Setup::new(device, 2);
+        let seen: Arc<Mutex<Vec<(u64, bool, bool)>>> = Arc::default();
+        let command_buffer = queue.command_buffer().unwrap();
+        let mut encoder = command_buffer.compute_command_encoder().unwrap();
+        setup.write(&mut encoder);
+        encoder
+            .use_resource(setup.params.as_resource(), ResourceUsage::READ)
+            .unwrap();
+        encoder
+            .use_resource(setup.out.as_resource(), ResourceUsage::WRITE)
+            .unwrap();
+        let (out, log) = (setup.out.clone(), Arc::clone(&seen));
+        encoder
+            .execute_commands_in_buffer_checked(
+                &setup.icb,
+                0..COMMANDS,
+                Box::new(move |index, command| {
+                    let untouched = words(&read_buffer(&out, 0, out.length()).unwrap())
+                        .iter()
+                        .all(|word| *word == 0);
+                    let dispatches = matches!(
+                        command,
+                        IndirectCommand::Compute(command) if command.dispatch.is_some()
+                    );
+                    log.lock().unwrap().push((index, dispatches, untouched));
+                }),
+            )
+            .unwrap();
+        encoder.end_encoding().unwrap();
+        complete(&command_buffer);
+        assert_eq!(setup.output(), expected(), "the checked commands run");
+        let every: Vec<(u64, bool, bool)> =
+            (0..COMMANDS).map(|index| (index, true, true)).collect();
+        assert_eq!(
+            *seen.lock().unwrap(),
+            every,
+            "each command, before any runs"
+        );
+        // The CPU's records, recorded at the commit: no call.
+        let setup = Setup::new(device, 2);
+        setup.write_on_the_cpu();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&calls);
+        let command_buffer = queue.command_buffer().unwrap();
+        let mut encoder = command_buffer.compute_command_encoder().unwrap();
+        encoder
+            .use_resource(setup.params.as_resource(), ResourceUsage::READ)
+            .unwrap();
+        encoder
+            .use_resource(setup.out.as_resource(), ResourceUsage::WRITE)
+            .unwrap();
+        encoder
+            .execute_commands_in_buffer_checked(
+                &setup.icb,
+                0..COMMANDS,
+                Box::new(move |_, _| {
+                    counted.fetch_add(1, Ordering::SeqCst);
+                }),
+            )
+            .unwrap();
+        encoder.end_encoding().unwrap();
+        complete(&command_buffer);
+        assert!(!setup.icb.gpu_written());
+        assert_eq!(setup.output(), expected(), "the CPU's records run");
+        assert_eq!(calls.load(Ordering::SeqCst), 0, "no host step, no check");
     });
 }
 

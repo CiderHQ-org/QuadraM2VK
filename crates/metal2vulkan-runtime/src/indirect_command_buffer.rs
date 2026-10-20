@@ -1561,6 +1561,31 @@ impl IndirectCommandBuffer {
         Ok(commands)
     }
 
+    /// Call `check` on each command of `range` (inside the size) whose record `recorded` holds,
+    /// in order, as [`commands`](Self::commands) reads them now: the host step's check of the
+    /// commands it will record, before it records any ([`IndirectCommandCheck`]). `recorded` is
+    /// the step's records of the range, `None` for one that faulted; an empty list (a faulted
+    /// header) checks nothing.
+    pub(super) fn check_recorded<T>(
+        &self,
+        check: &Mutex<IndirectCommandCheck>,
+        range: Range<u32>,
+        recorded: &[Option<T>],
+    ) -> Result<(), Error> {
+        if range.is_empty() || recorded.iter().all(Option::is_none) {
+            return Ok(());
+        }
+        let first = u64::from(range.start);
+        let commands = self.commands(first..u64::from(range.end))?;
+        let mut check = lock(check);
+        for ((index, command), record) in (first..).zip(&commands).zip(recorded) {
+            if record.is_some() {
+                check(index, command);
+            }
+        }
+        Ok(())
+    }
+
     /// Announce the kinds of the states' identifiers `commands` answer, none of which is measured
     /// to be Metal's number (`unique_identifier.rs`); a command that names no state answers 0, as
     /// Metal's does.
@@ -2665,6 +2690,17 @@ impl IndirectComputeCommand {
 fn low_bits(size: Size) -> [u32; 3] {
     [size.width, size.height, size.depth].map(|axis| axis as u32)
 }
+
+/// A check of the commands an execution's host step runs (a runtime extension; Metal has none),
+/// given to `execute_commands_in_buffer_checked` or `execute_commands_in_buffer_indirect_checked`
+/// of a render or a compute encoder. Where a host step records the execution from the records as
+/// the GPU and the CPU left them, it calls the check once for each command it will record, in
+/// order, before it records any command of the range, on the thread that runs the step: with the
+/// command's index in the buffer and the command as [`IndirectCommandBuffer::commands`] reads it
+/// then. A command whose record faulted runs nothing and is not checked; nor is any where the
+/// buffer's header faulted. The check may end the process, and must not unwind; returning lets the
+/// commands run. A command buffer dropped before its host step never calls it.
+pub type IndirectCommandCheck = Box<dyn FnMut(u64, &IndirectCommand) + Send + 'static>;
 
 /// One command of an indirect command buffer, as [`IndirectCommandBuffer::commands`] reads it: a
 /// runtime extension standing for Metal's private getters.
