@@ -353,6 +353,15 @@ impl Gpu for Runtime {
         None
     }
 
+    fn times(&self, command_buffer: &rt::CommandBuffer) -> [f64; 4] {
+        [
+            command_buffer.kernel_start_time(),
+            command_buffer.kernel_end_time(),
+            command_buffer.gpu_start_time().unwrap_or(0.0),
+            command_buffer.gpu_end_time().unwrap_or(0.0),
+        ]
+    }
+
     fn pool<R>(&self, f: impl FnOnce() -> R) -> R {
         f()
     }

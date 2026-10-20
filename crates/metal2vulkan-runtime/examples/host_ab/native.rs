@@ -394,6 +394,15 @@ impl Gpu for Native {
         Some(command_buffer.GPUEndTime() - command_buffer.GPUStartTime())
     }
 
+    fn times(&self, command_buffer: &Self::CommandBuffer) -> [f64; 4] {
+        [
+            command_buffer.kernelStartTime(),
+            command_buffer.kernelEndTime(),
+            command_buffer.GPUStartTime(),
+            command_buffer.GPUEndTime(),
+        ]
+    }
+
     fn pool<R>(&self, f: impl FnOnce() -> R) -> R {
         autoreleasepool(|_| f())
     }

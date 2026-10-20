@@ -70,6 +70,18 @@ const HEAVY_TEXTURE_SIDE: usize = 1024;
 const KERNEL_TEXTURE_SIDE: usize = 256;
 /// The heavy kernel's grid: threadgroups of 256 threads.
 const HEAVY_GROUPS: usize = 4096;
+/// The feature kernels (`host_ab.metal`).
+const FEATURES: [&str; 9] = [
+    "k_fma",
+    "k_sin",
+    "k_half",
+    "k_constant",
+    "k_device",
+    "k_texture",
+    "k_texture_float",
+    "k_threadgroup_float",
+    "k_threadgroup_half",
+];
 const HEAVY_THREADS: usize = 256;
 
 /// What the workloads draw and dispatch with, made once per process.
@@ -79,6 +91,8 @@ pub struct Scene<G: Gpu> {
     /// `quad_vertex` + `heavy_fragment` into `RGBA16Float`.
     pub heavy_fragment: G::RenderPipeline,
     pub heavy_kernel: G::ComputePipeline,
+    /// The feature kernels (`host_ab.metal`), by name.
+    pub features: Vec<(&'static str, G::ComputePipeline)>,
     /// `tiny_kernel` and `tiny_kernel_b`.
     pub tiny: [G::ComputePipeline; 2],
     pub textures: Vec<G::Texture>,
@@ -96,6 +110,8 @@ pub struct Scene<G: Gpu> {
     pub tiny_out: G::Buffer,
     pub tiny_values: G::Buffer,
     pub heavy_out: G::Buffer,
+    /// The feature kernels' `src`.
+    pub heavy_in: G::Buffer,
     pub fill: G::Buffer,
 }
 
@@ -156,6 +172,10 @@ impl<G: Gpu> Scene<G> {
             false,
         );
         let heavy_kernel = g.compute_pipeline(library, "heavy_kernel");
+        let features = FEATURES
+            .iter()
+            .map(|&name| (name, g.compute_pipeline(library, name)))
+            .collect();
         let tiny = [
             g.compute_pipeline(library, "tiny_kernel"),
             g.compute_pipeline(library, "tiny_kernel_b"),
@@ -187,6 +207,7 @@ impl<G: Gpu> Scene<G> {
             textured,
             heavy_fragment,
             heavy_kernel,
+            features,
             tiny,
             textures,
             heavy_texture: shader_texture(HEAVY_TEXTURE_SIDE, 7),
@@ -206,6 +227,7 @@ impl<G: Gpu> Scene<G> {
             tiny_out: g.buffer(RECTS * RECT_STRIDE),
             tiny_values: g.buffer_with(&vec![1u8; RECTS * RECT_STRIDE]),
             heavy_out: g.buffer(HEAVY_GROUPS * HEAVY_THREADS * 16),
+            heavy_in: g.buffer_with(&vec![0x3c; HEAVY_GROUPS * HEAVY_THREADS * 16]),
             fill: g.buffer(4096),
         }
     }
@@ -287,9 +309,13 @@ fn encode_dispatches<G: Gpu>(
 /// The CPU cost of encoding: per draw and per dispatch, on the encoding thread (wall) and in the
 /// whole process (CPU time of every thread, from the command buffer's creation until its wait
 /// returned, which takes in work moved off the encoding thread to commit or to other threads).
-pub fn encode<G: Gpu>(g: &G, s: &Scene<G>, sizes: &Sizes) {
+pub fn encode<G: Gpu>(g: &G, s: &Scene<G>, sizes: &Sizes, variants: &[String]) {
     let n = sizes.draws;
+    let runs = |name: String| variants.is_empty() || variants.contains(&name);
     for churn in [Churn::Static, Churn::Bind, Churn::Pipeline] {
+        if !runs(format!("draw_{}", churn.name())) {
+            continue;
+        }
         let (mut wall, mut cpu, mut commit, mut total) = (vec![], vec![], vec![], vec![]);
         for run in 0..sizes.timed + 3 {
             g.pool(|| {
@@ -333,6 +359,12 @@ pub fn encode<G: Gpu>(g: &G, s: &Scene<G>, sizes: &Sizes) {
         emit("encode", &format!("draw_{name}_cb_total"), "ms", &mut total);
     }
     for churn in [false, true] {
+        if !runs(format!(
+            "dispatch_{}",
+            if churn { "churn" } else { "static" }
+        )) {
+            continue;
+        }
         let (mut wall, mut cpu, mut total) = (vec![], vec![], vec![]);
         for run in 0..sizes.timed + 3 {
             g.pool(|| {
@@ -458,20 +490,42 @@ pub fn latency<G: Gpu>(g: &G, s: &Scene<G>, sizes: &Sizes) {
         ("draw", Tiny::Draw),
     ] {
         let (mut wait, mut commit) = (vec![], vec![]);
+        // The host-clock timeline: commit to kernel start, kernel start to end, kernel end to
+        // GPU start, GPU start to end, GPU end to the wait's return.
+        let mut split: [Vec<f64>; 5] = Default::default();
         for run in 0..sizes.latency + 10 {
             g.pool(|| {
                 let command_buffer = g.command_buffer();
                 encode_tiny(g, s, &command_buffer, tiny);
+                let h0 = crate::host_seconds();
                 let t0 = Instant::now();
                 g.commit(&command_buffer);
                 let t1 = Instant::now();
                 g.wait(&command_buffer);
                 let t2 = Instant::now();
+                let h2 = crate::host_seconds();
                 if run >= 10 {
                     commit.push(us(t1 - t0));
                     wait.push(us(t2 - t0));
+                    let [ks, ke, gs, ge] = g.times(&command_buffer);
+                    let points = [h0, ks, ke, gs, ge, h2];
+                    for (k, part) in split.iter_mut().enumerate() {
+                        part.push((points[k + 1] - points[k]) * 1e6);
+                    }
                 }
             });
+        }
+        for (part, values) in [
+            "commit_to_kernel_start",
+            "kernel_start_to_end",
+            "kernel_end_to_gpu_start",
+            "gpu_start_to_end",
+            "gpu_end_to_wait_return",
+        ]
+        .iter()
+        .zip(&mut split)
+        {
+            emit("latency_split", &format!("{name}_{part}"), "us", values);
         }
         emit(
             "latency",
@@ -509,8 +563,9 @@ pub fn latency<G: Gpu>(g: &G, s: &Scene<G>, sizes: &Sizes) {
     }
 }
 
-/// GPU time of the heavy shaders, one command buffer in flight: from the commit until the wait
-/// returned, and `GPUEndTime - GPUStartTime` where the side measures it on the GPU.
+/// GPU time of the heavy shaders and the feature kernels, one command buffer in flight: from the
+/// commit until the wait returned, and `GPUEndTime - GPUStartTime` where the side measures it on
+/// the GPU.
 pub fn gpu<G: Gpu>(g: &G, s: &Scene<G>, sizes: &Sizes) {
     let run = |name: &str, encode: &dyn Fn(&G::CommandBuffer)| {
         let (mut wall, mut times) = (vec![], vec![]);
@@ -554,6 +609,18 @@ pub fn gpu<G: Gpu>(g: &G, s: &Scene<G>, sizes: &Sizes) {
         g.dispatch(&mut encoder, HEAVY_GROUPS, HEAVY_THREADS);
         g.end_compute(encoder);
     });
+    for (name, state) in &s.features {
+        run(name, &|command_buffer| {
+            let mut encoder = g.compute_encoder(command_buffer);
+            g.set_compute_pipeline(&mut encoder, state);
+            g.set_buffer(&mut encoder, &s.heavy_out, 0, 0);
+            g.set_buffer(&mut encoder, &s.kernel_params, 0, 1);
+            g.set_buffer(&mut encoder, &s.heavy_in, 0, 2);
+            g.set_texture(&mut encoder, &s.kernel_texture, 0);
+            g.dispatch(&mut encoder, HEAVY_GROUPS, HEAVY_THREADS);
+            g.end_compute(encoder);
+        });
+    }
 }
 
 /// Pipeline creation, in a process whose caches are as the caller left them: the library, each

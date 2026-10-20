@@ -86,6 +86,107 @@ kernel void heavy_kernel(device float4 *out [[buffer(0)]],
     out[tid] = float4(acc * p.scale, float(hacc), 0.0, 1.0);
 }
 
+// The feature kernels: each one Metal feature of the heavy kernel in the same loop, so their
+// ratios say which feature its cost comes from. Each takes the heavy kernel's bindings
+// (`out`, `p`, `tex`) and `src`, a device buffer as large as `out`.
+kernel void k_fma(device float4 *out [[buffer(0)]], constant HeavyParams &p [[buffer(1)]],
+                  uint tid [[thread_position_in_grid]]) {
+    float a = float(tid) * 1.0e-6 + float(NONCE) * 1.0e-12;
+    float b = 1.0;
+    for (uint i = 0; i < p.iterations; i++) {
+        a = fma(a, 0.999, b);
+        b = fma(b, 1.0001, -a * 0.5);
+    }
+    out[tid] = float4(a, b, 0.0, 1.0);
+}
+
+kernel void k_sin(device float4 *out [[buffer(0)]], constant HeavyParams &p [[buffer(1)]],
+                  uint tid [[thread_position_in_grid]]) {
+    float a = float(tid) * 1.0e-6 + float(NONCE) * 1.0e-12;
+    for (uint i = 0; i < p.iterations; i++) {
+        a = sin(a * 1.3 + 0.7);
+    }
+    out[tid] = float4(a, 0.0, 0.0, 1.0);
+}
+
+kernel void k_half(device float4 *out [[buffer(0)]], constant HeavyParams &p [[buffer(1)]],
+                   uint tid [[thread_position_in_grid]]) {
+    half a = half(tid & 255u) * 0.01h + half(float(NONCE) * 1.0e-12);
+    half b = 0.5h;
+    for (uint i = 0; i < p.iterations; i++) {
+        a = fma(a, 0.999h, b);
+        b = b * 0.75h + a * 0.125h;
+    }
+    out[tid] = float4(float(a), float(b), 0.0, 1.0);
+}
+
+kernel void k_constant(device float4 *out [[buffer(0)]], constant HeavyParams &p [[buffer(1)]],
+                       uint tid [[thread_position_in_grid]]) {
+    float4 acc = float4(float(NONCE) * 1.0e-12);
+    for (uint i = 0; i < p.iterations; i++) {
+        acc = fma(acc, float4(0.5), p.coeffs[(i + tid) & 63u]);
+    }
+    out[tid] = acc;
+}
+
+kernel void k_device(device float4 *out [[buffer(0)]], constant HeavyParams &p [[buffer(1)]],
+                     device const float4 *src [[buffer(2)]],
+                     uint tid [[thread_position_in_grid]]) {
+    float4 acc = float4(float(NONCE) * 1.0e-12);
+    for (uint i = 0; i < p.iterations; i++) {
+        acc = fma(acc, float4(0.5), src[(tid + i * 4099u) & 1048575u]);
+    }
+    out[tid] = acc;
+}
+
+kernel void k_texture(device float4 *out [[buffer(0)]], constant HeavyParams &p [[buffer(1)]],
+                      texture2d<half> tex [[texture(0)]],
+                      uint tid [[thread_position_in_grid]]) {
+    half4 acc = half4(half(float(NONCE) * 1.0e-12));
+    for (uint i = 0; i < p.iterations; i++) {
+        acc = fma(acc, half4(0.5h), tex.read(uint2((tid + i * 7u) & 255u, ((tid >> 8) + i) & 255u)));
+    }
+    out[tid] = float4(acc);
+}
+
+kernel void k_texture_float(device float4 *out [[buffer(0)]], constant HeavyParams &p [[buffer(1)]],
+                            texture2d<float> tex [[texture(0)]],
+                            uint tid [[thread_position_in_grid]]) {
+    float4 acc = float4(float(NONCE) * 1.0e-12);
+    for (uint i = 0; i < p.iterations; i++) {
+        acc = fma(acc, float4(0.5), tex.read(uint2((tid + i * 7u) & 255u, ((tid >> 8) + i) & 255u)));
+    }
+    out[tid] = acc;
+}
+
+kernel void k_threadgroup_float(device float4 *out [[buffer(0)]], constant HeavyParams &p [[buffer(1)]],
+                                uint tid [[thread_position_in_grid]],
+                                uint lid [[thread_index_in_threadgroup]]) {
+    threadgroup float shared_f[256];
+    float acc = float(tid) * 1.0e-6 + float(NONCE) * 1.0e-12;
+    for (uint i = 0; i < p.iterations; i++) {
+        shared_f[lid] = acc;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        acc = fma(shared_f[(lid + 1u) & 255u], 0.5, acc);
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    out[tid] = float4(acc, 0.0, 0.0, 1.0);
+}
+
+kernel void k_threadgroup_half(device float4 *out [[buffer(0)]], constant HeavyParams &p [[buffer(1)]],
+                               uint tid [[thread_position_in_grid]],
+                               uint lid [[thread_index_in_threadgroup]]) {
+    threadgroup half shared_h[256];
+    half acc = half(tid & 255u) * 0.01h + half(float(NONCE) * 1.0e-12);
+    for (uint i = 0; i < p.iterations; i++) {
+        shared_h[lid] = acc;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        acc = fma(shared_h[(lid + 7u) & 255u], 0.5h, acc);
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    out[tid] = float4(float(acc), 0.0, 0.0, 1.0);
+}
+
 // The small dispatches' kernels: two, so a dispatch can change the pipeline state.
 kernel void tiny_kernel(device uint *out [[buffer(0)]],
                         constant uint &value [[buffer(1)]],

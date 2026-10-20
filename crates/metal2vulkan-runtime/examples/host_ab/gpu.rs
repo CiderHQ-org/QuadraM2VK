@@ -149,6 +149,9 @@ pub trait Gpu {
     fn on_completed(&self, command_buffer: &Self::CommandBuffer, handler: Box<dyn FnOnce() + Send>);
     /// `GPUEndTime - GPUStartTime`, in seconds, where the side measures it on the GPU.
     fn gpu_seconds(&self, command_buffer: &Self::CommandBuffer) -> Option<f64>;
+    /// `kernelStartTime`, `kernelEndTime`, `GPUStartTime` and `GPUEndTime`, in seconds of the
+    /// host clock [`crate::host_seconds`] reads.
+    fn times(&self, command_buffer: &Self::CommandBuffer) -> [f64; 4];
 
     /// Run `f` inside an autorelease pool (native), as a Metal program's frame runs.
     fn pool<R>(&self, f: impl FnOnce() -> R) -> R;

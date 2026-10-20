@@ -29,7 +29,14 @@
 //! - `gpu`: a full-screen heavy fragment (`heavy_fragment`, 2048x2048 `RGBA16Float`) and a heavy
 //!   kernel (`heavy_kernel`, 4096 threadgroups of 256), one command buffer in flight: commit to
 //!   the wait's return, and native's `GPUEndTime - GPUStartTime`. `--heavy-iterations` sets
-//!   the fragment's loop, and 16 times it the kernel's.
+//!   the fragment's loop, and 16 times it the kernel's. Then each feature kernel (`k_*`, one
+//!   feature of the heavy kernel each: fma, sin, half, constant buffer, device buffer, texture
+//!   read as `half` and as `float`, threadgroup float, threadgroup half) on the kernel's grid
+//!   and loop.
+//! - `latency_split` (with `latency`): the same command buffers' host-clock timeline, commit to
+//!   `kernelStartTime` to `kernelEndTime` to `GPUStartTime` to `GPUEndTime` to the wait's return.
+//!   The runtime's GPU times on MoltenVK are the host's (its docs): its GPU start is its kernel
+//!   end and its GPU end the moment it saw the command buffer complete.
 //! - `pipeline`: the library, then each of four states' creation and first use, then each made
 //!   again in the process. Each round runs it in two processes per side over a metallib of a
 //!   fresh `NONCE` (`host_ab.metal`): `cold_*` (no cache holds its functions) and `warm_*` (a
@@ -43,7 +50,9 @@
 //! `--heavy-iterations N` (64), `--heavy-runs N` (15), `--scratch DIR` (metallibs and the
 //! runtime's shader caches; a directory under the OS's temporary directory by default, removed at
 //! the end), `--metallib PATH` (skip the compile; not with `pipeline`), `--cache DIR` (the
-//! runtime's shader cache, with `--side`).
+//! runtime's shader cache, with `--side`), `--variants a,b,...` (the encode workload's variants
+//! alone: `draw_static`, `draw_bind`, `draw_pipeline`, `dispatch_static`, `dispatch_churn`; for a
+//! profile of one).
 //!
 //! On a Mac, the runtime's device opens the Vulkan loader (`/opt/homebrew/lib` among the places
 //! it looks) and MoltenVK's `MVK_CONFIG_*` variables apply. Run timings on an otherwise idle GPU.
@@ -71,6 +80,8 @@ struct Options {
     scratch: Option<PathBuf>,
     metallib: Option<PathBuf>,
     cache: Option<PathBuf>,
+    /// The encode workload's variants to run (`--variants`); all when empty.
+    variants: Vec<String>,
     /// Arguments passed on to each child.
     passed: Vec<String>,
 }
@@ -90,6 +101,7 @@ fn options() -> Options {
         scratch: None,
         metallib: None,
         cache: None,
+        variants: vec![],
         passed: vec![],
     };
     let mut args = std::env::args().skip(1);
@@ -118,6 +130,11 @@ fn options() -> Options {
             "--scratch" => options.scratch = Some(PathBuf::from(value())),
             "--metallib" => options.metallib = Some(PathBuf::from(value())),
             "--cache" => options.cache = Some(PathBuf::from(value())),
+            "--variants" => {
+                let v = value();
+                options.variants = v.split(',').map(str::to_owned).collect();
+                options.passed.extend(["--variants".to_owned(), v]);
+            }
             "--help" | "-h" => {
                 eprintln!("see the module docs of examples/host_ab/main.rs");
                 std::process::exit(0);
@@ -210,7 +227,7 @@ fn run<G: Gpu>(g: &G, opened: Instant, metallib: &Path, options: &Options) {
     );
     for workload in rest {
         match workload {
-            "encode" => workloads::encode(g, &scene, sizes),
+            "encode" => workloads::encode(g, &scene, sizes, &options.variants),
             "fixed" => workloads::fixed(g, &scene, sizes),
             "latency" => workloads::latency(g, &scene, sizes),
             "gpu" => workloads::gpu(g, &scene, sizes),
@@ -218,6 +235,12 @@ fn run<G: Gpu>(g: &G, opened: Instant, metallib: &Path, options: &Options) {
             _ => unreachable!(),
         }
     }
+}
+
+/// The host clock Metal's and the runtime's command buffer times count: `CLOCK_UPTIME_RAW`
+/// (`mach_absolute_time`) on macOS.
+pub fn host_seconds() -> f64 {
+    metal2vulkan_runtime::host_time()
 }
 
 fn scratch_default() -> PathBuf {
