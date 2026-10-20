@@ -727,6 +727,11 @@ impl ShadowMerge {
             .map(|cut| cut.area)
     }
 
+    /// Whether the keep, the changed copy and the merge are cut to a rectangle.
+    pub(super) fn cuts(&self) -> bool {
+        self.cut.is_some()
+    }
+
     /// The texels each keep copies (`WorkCounts::shadow_texels_kept`).
     pub(super) fn texels_kept(&self) -> u64 {
         self.texels

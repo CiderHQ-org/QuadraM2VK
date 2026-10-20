@@ -25,6 +25,8 @@ const LARGE_SURFACE_TEXELS: u64 = 1 << 20;
 /// A device's counters (`DeviceShared::counts`), each only ever added to.
 #[derive(Default)]
 pub(crate) struct Counters {
+    /// Released objects and shadow keeps by kind (`churn_counts.rs`).
+    pub(crate) churn: super::churn_counts::ChurnCounters,
     command_pools_made: AtomicU64,
     command_buffers_deferred: AtomicU64,
     spare_command_pools_taken: AtomicU64,
@@ -2040,6 +2042,10 @@ pub struct WorkCounts {
     /// The commands their replays called, by kind, on whichever thread replayed them
     /// (`recorder`): one per call made into a `VkCommandBuffer`, the begins and ends among them.
     pub commands_replayed: CommandsReplayed,
+    /// Released objects MoltenVK commits its residency set for, by kind (`churn_counts.rs`).
+    pub object_churn: super::churn_counts::ObjectChurn,
+    /// Merged-back shadows' keeps by who planned them (`churn_counts.rs`).
+    pub shadow_keeps: super::churn_counts::ShadowKeeps,
     /// The places in the runtime that recorded `vkCmdCopyBuffer`, `vkCmdCopyBufferToImage`,
     /// `vkCmdCopyImageToBuffer` and `vkCmdCopyImage` through the device's functions, as encoders
     /// and the runtime's own work recorded them (whichever thread replays them later): the first
@@ -3338,6 +3344,7 @@ impl Device {
     #[doc(hidden)]
     pub fn work_counts(&self) -> WorkCounts {
         let counters = &self.shared().counts;
+        let churn = counters.churn.snapshot();
         let group_end = |end: GroupEnd| counters.group_ends[end as usize].load(Ordering::Relaxed);
         let pending = |bucket: usize| counters.batches_by_pending[bucket].load(Ordering::Relaxed);
         let not_inline =
@@ -3380,6 +3387,8 @@ impl Device {
             command_buffers_replayed: replays.by_recorder,
             command_buffers_replayed_inline: replays.by_submitter,
             commands_replayed: replays.commands,
+            object_churn: churn.0,
+            shadow_keeps: churn.1,
             copy_sites: self.shared().vk().copy_sites(),
             copy_regions_split: self.shared().vk().copy_regions_split(),
             spare_command_pools_taken: counters.spare_command_pools_taken.load(Ordering::Relaxed),

@@ -29,6 +29,7 @@
 
 use super::binding::{self, LastSetZero, Write};
 use super::buffer::Buffer;
+use super::churn_counts::KeepBy;
 use super::command_buffer::CommandBuffer;
 use super::deferred::{Deferred, StepInputs};
 use super::error::{internal, invalid, vulkan, CommandBufferError, Error, Problem};
@@ -60,6 +61,7 @@ use metal2vulkan::bind::{ReplayFaults, ResidentRange};
 use std::any::Any;
 use std::collections::BTreeSet;
 use std::marker::PhantomData;
+use std::panic::Location;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -1005,6 +1007,7 @@ impl EncoderCore {
     /// `shadow_merge.rs`) retained until the command buffer completes. Refused, changing
     /// nothing, as the scratch is. Call it once every other check of the command passed, and
     /// record the copies with [`shadow_copies`](Self::shadow_copies), then the command.
+    #[track_caller]
     pub(super) fn plan_shadows(
         &mut self,
         shadows: &[ShadowUse],
@@ -1033,8 +1036,15 @@ impl EncoderCore {
             }
         };
         self.count_shadow_copies(&copies);
+        let by = match Location::caller().file() {
+            file if file.ends_with("compute.rs") => KeepBy::Compute,
+            file if file.ends_with("blit.rs") => KeepBy::Blit,
+            _ => KeepBy::Render,
+        };
         for copy in &copies {
             if let Step::Keep(merge) = &copy.step {
+                let churn = &device.shared().counts.churn;
+                churn.kept(by, merge.cuts(), merge.texels_kept());
                 self.retain(Arc::clone(merge));
             }
             if copy.cause == Some(CopyCause::First) {

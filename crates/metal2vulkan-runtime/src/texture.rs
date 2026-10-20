@@ -61,6 +61,7 @@ use super::attributes::PurgeableState;
 use super::binding_view::{binding_view, texture_facts, views_as, VkView};
 use super::buffer::{Buffer, CallerMemory, HostPages, MemoryHold, NotedTexture};
 use super::buffer_texture::{Texels, TexelsHome};
+use super::churn_counts::Owned;
 use super::clear_value;
 use super::color_resolve::KeptResolves;
 use super::command_buffer::CommandBuffer;
@@ -395,6 +396,14 @@ impl Drop for TextureShared {
     /// Then the texture object is gone, as Metal frees it: the caller's range token drops with the
     /// last object over its image or texels (`ObjectsToken`).
     fn drop(&mut self) {
+        let (owned, device) = match (&self.storage, &self.heap) {
+            (Storage::Image(image), Some(_)) => (Owned::TextureInHeap, &image.device),
+            (Storage::Image(image), None) => (Owned::TextureImage, &image.device),
+            (Storage::Shadow { image, .. }, _) => (Owned::TextureShadow, &image.device),
+            (Storage::Alias { image, .. }, _) => (Owned::TextureAlias, &image.device),
+            (Storage::Texels(texels), _) => (Owned::TextureTexels, texels.buffer.device()),
+        };
+        device.shared().counts.churn.released(owned);
         let id = self.id.id().0;
         if id != 0 {
             let (device, keeper): (&Device, Option<Box<dyn Any + Send + Sync>>) =
@@ -1150,6 +1159,13 @@ impl Drop for Image {
         let shared = self.device.shared();
         // A held image's scheduler state goes with it (`texture/held_depth.rs`).
         shared.textures.held.remove(self.identity.key);
+        let owned = match &self.owner {
+            Owner::Runtime { .. } => Owned::ImageOwnMemory,
+            Owner::Buffer { .. } => Owned::ImageInBuffer,
+            Owner::Heap(_) | Owner::HeapTwin => Owned::ImageInHeap,
+            _ => Owned::ImageOther,
+        };
+        shared.counts.churn.released(owned);
         let (image, memory) = self.owner.releases();
         // An image that took its storage form is in the form's memory: the memory it was made in
         // goes with its first `VkImage`, which the switch's command buffer holds until it

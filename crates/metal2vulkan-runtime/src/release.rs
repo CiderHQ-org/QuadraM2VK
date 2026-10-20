@@ -10,6 +10,7 @@
 //! of their own). No other file of the runtime calls such an entry point: a source test fails
 //! when one does (`tests/exit_guard.rs`).
 
+use crate::churn_counts::{self, VkRelease};
 use crate::exit_guard::{self, Call};
 use crate::generated_commands::{Commands, Handle};
 use ash::vk;
@@ -47,6 +48,16 @@ pub(crate) unsafe fn object<T: Released>(device: &ash::Device, object: T) -> boo
     // SAFETY: the caller's.
     unsafe { object.destroy(device, Door(())) };
     exit_guard::called(T::CALL);
+    let counted = match T::CALL {
+        Call::DestroyImage => Some(VkRelease::Image),
+        Call::DestroyBuffer => Some(VkRelease::Buffer),
+        Call::DestroyBufferView => Some(VkRelease::BufferView),
+        Call::FreeMemory => Some(VkRelease::Memory),
+        _ => None,
+    };
+    if let Some(what) = counted {
+        churn_counts::vk_released(what);
+    }
     true
 }
 
