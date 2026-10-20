@@ -972,10 +972,21 @@ const DRAG_PASS_DRAWS: usize = 3;
 const DRAG_DISPATCHES: usize = 22;
 const DRAG_SURFACES: usize = 8;
 
+/// The bytes a window surface's rows lie apart in the `drag` workload's surfaces over host pages:
+/// its packed row padded, as a surface's rows are.
+const DRAG_SURFACE_ROW: usize = FRAME_SIDE * 4 + 256;
+
 /// One frame of the `drag` workload: [`DRAG_COMMAND_BUFFERS`] command buffers, pass `p` in
 /// command buffer `p` and a dispatch in each of the first [`DRAG_DISPATCHES`], each committed;
-/// the last waited for. Its times into `times` (`[encode, frame, thread CPU, process CPU]`).
-fn drag_once<G: Gpu>(g: &G, s: &Scene<G>, surfaces: &[G::Texture], times: &mut [Vec<f64>; 4]) {
+/// the last waited for. A pass's draws sample the scene's textures, or, where `composites`, the
+/// other surfaces, as a compositor's do. Its times into `times` (`[encode, frame, thread CPU,
+/// process CPU]`).
+fn drag_once<G: Gpu>(
+    g: &G,
+    s: &Scene<G>,
+    (surfaces, composites): (&[G::Texture], bool),
+    times: &mut [Vec<f64>; 4],
+) {
     g.pool(|| {
         let cpu = process_cpu();
         let thread = thread_cpu();
@@ -991,7 +1002,10 @@ fn drag_once<G: Gpu>(g: &G, s: &Scene<G>, surfaces: &[G::Texture], times: &mut [
                 for draw in 0..DRAG_PASS_DRAWS {
                     let rect = (at * DRAG_PASS_DRAWS + draw) % RECTS;
                     g.set_vertex_buffer(&mut encoder, &s.rects[0], rect * RECT_STRIDE, 0);
-                    let texture = &s.textures[(at + draw) % TEXTURES];
+                    let texture = match composites {
+                        true => &surfaces[(at + draw + 1) % DRAG_SURFACES],
+                        false => &s.textures[(at + draw) % TEXTURES],
+                    };
                     g.set_fragment_texture(&mut encoder, texture, 0);
                     g.draw_strip(&mut encoder, 4);
                 }
@@ -1018,17 +1032,15 @@ fn drag_once<G: Gpu>(g: &G, s: &Scene<G>, surfaces: &[G::Texture], times: &mut [
 }
 
 /// A frame shaped as the guest's window drag (module docs of `main.rs`), its window surfaces in
-/// a heap of the device, and the runtime's in a heap over host pages too.
+/// a heap of the device, and the runtime's in a heap over host pages too; then its surfaces as
+/// textures over host pages, one buffer each, the draws sampling the other surfaces.
 pub fn drag<G: Gpu>(g: &G, s: &Scene<G>, sizes: &Sizes) {
     let size = DRAG_SURFACES * FRAME_STRIDE;
-    let run = |name: &str, heap: &G::Heap| {
-        let surfaces: Vec<G::Texture> = (0..DRAG_SURFACES)
-            .map(|i| g.heap_texture(heap, FRAME_SIDE, FRAME_SIDE, i * FRAME_STRIDE))
-            .collect();
+    let run = |name: &str, surfaces: &[G::Texture], composites: bool| {
         let mut times: [Vec<f64>; 4] = Default::default();
         for frame in 0..sizes.timed + 3 {
             let mut taken: [Vec<f64>; 4] = Default::default();
-            drag_once(g, s, &surfaces, &mut taken);
+            drag_once(g, s, (surfaces, composites), &mut taken);
             if frame >= 3 {
                 for (all, one) in times.iter_mut().zip(taken) {
                     all.extend(one);
@@ -1041,9 +1053,46 @@ pub fn drag<G: Gpu>(g: &G, s: &Scene<G>, sizes: &Sizes) {
         emit("drag", &format!("{name}_thread_cpu"), "ms", thread);
         emit("drag", &format!("{name}_process_cpu"), "ms", cpu);
     };
-    run("drag", &g.heap(size));
+    let in_heap = |heap: &G::Heap| -> Vec<G::Texture> {
+        (0..DRAG_SURFACES)
+            .map(|i| g.heap_texture(heap, FRAME_SIDE, FRAME_SIDE, i * FRAME_STRIDE))
+            .collect()
+    };
+    run("drag", &in_heap(&g.heap(size)), false);
     // SAFETY: an anonymous private mapping of `size` bytes, never unmapped: the process's to its
     // end, past the heap and every texture placed in it.
+    let pointer = unsafe { host_pages(size) };
+    // SAFETY: page-aligned read-write memory of `size` bytes that outlives the heap.
+    if let Some(heap) = unsafe { g.heap_no_copy(pointer, size) } {
+        run("drag_no_copy", &in_heap(&heap), false);
+    }
+    // SAFETY: as above, a mapping of its own.
+    let pointer = unsafe { host_pages(size) };
+    // SAFETY: page-aligned read-write memory of `size` bytes that outlives the heap.
+    if let Some(heap) = unsafe { g.heap_no_copy(pointer, size) } {
+        let surfaces: Vec<G::Texture> = (0..DRAG_SURFACES)
+            .map(|i| g.heap_render_texture(&heap, Format::Bgra8, FRAME_SIDE, i * FRAME_STRIDE))
+            .collect();
+        run("drag_heap_surfaces", &surfaces, true);
+    }
+    let surfaces: Vec<G::Texture> = (0..DRAG_SURFACES)
+        .map(|_| {
+            // SAFETY: as above, a mapping of its own for each surface.
+            let buffer = unsafe { g.buffer_no_copy(host_pages(FRAME_STRIDE), FRAME_STRIDE) };
+            let side = (FRAME_SIDE, FRAME_SIDE);
+            g.buffer_texture(&buffer, side, 0, DRAG_SURFACE_ROW)
+        })
+        .collect();
+    run("drag_surfaces", &surfaces, true);
+}
+
+/// An anonymous private mapping of `size` bytes, read-write.
+///
+/// # Safety
+///
+/// Never unmapped: the caller keeps it for the process's life.
+unsafe fn host_pages(size: usize) -> *mut u8 {
+    // SAFETY: a new anonymous mapping, which nothing else holds.
     let pointer = unsafe {
         libc::mmap(
             std::ptr::null_mut(),
@@ -1055,10 +1104,7 @@ pub fn drag<G: Gpu>(g: &G, s: &Scene<G>, sizes: &Sizes) {
         )
     };
     assert_ne!(pointer, libc::MAP_FAILED);
-    // SAFETY: page-aligned read-write memory of `size` bytes that outlives the heap.
-    if let Some(heap) = unsafe { g.heap_no_copy(pointer as *mut u8, size) } {
-        run("drag_no_copy", &heap);
-    }
+    pointer as *mut u8
 }
 
 /// The many-draws workload's target (1080p `BGRA8Unorm`, with a `Depth32Float` attachment), its

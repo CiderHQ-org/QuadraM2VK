@@ -69,7 +69,11 @@
 //!   `Placement` heap, and the first 22 a dispatch of the tiny kernel; the last waited for. Per
 //!   frame: the encoding thread's wall time through the last commit, the whole frame's, the
 //!   encoding thread's CPU time and the process's. The runtime's alone (`drag_no_copy_*`): the
-//!   same over a heap of host pages, as a guest's heap is.
+//!   same over a heap of host pages, as a guest's heap is, and (`drag_heap_surfaces_*`) again
+//!   with textures Metal may optimize, each pass's draws sampling three other surfaces, as a
+//!   compositor's do. Then (`drag_surfaces_*`) the surfaces as textures over host pages, a
+//!   no-copy buffer each, their rows padded, as a guest's window surfaces are, the draws
+//!   sampling the other surfaces too.
 //! - `memory`: `newBufferWithLength:` and `newBufferWithBytes:` of 4 KiB, 1 MiB and 64 MiB,
 //!   `newBufferWithBytesNoCopy:` of 1 MiB and 64 MiB, and a 1024x1024 `RGBA8Unorm` `Shared`
 //!   texture's `replaceRegion` and `getBytes`.

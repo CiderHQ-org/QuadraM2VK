@@ -226,6 +226,29 @@ impl Gpu for Native {
             .expect("newTextureWithDescriptor:offset:")
     }
 
+    fn buffer_texture(
+        &self,
+        buffer: &Self::Buffer,
+        (width, height): (usize, usize),
+        offset: usize,
+        bytes_per_row: usize,
+    ) -> Self::Texture {
+        // SAFETY: plain sizes.
+        let descriptor = unsafe {
+            MTLTextureDescriptor::texture2DDescriptorWithPixelFormat_width_height_mipmapped(
+                MTLPixelFormat::BGRA8Unorm,
+                width,
+                height,
+                false,
+            )
+        };
+        descriptor.setUsage(MTLTextureUsage::RenderTarget | MTLTextureUsage::ShaderRead);
+        descriptor.setStorageMode(MTLStorageMode::Shared);
+        buffer
+            .newTextureWithDescriptor_offset_bytesPerRow(&descriptor, offset, bytes_per_row)
+            .expect("newTextureWithDescriptor:offset:bytesPerRow:")
+    }
+
     fn texture(&self, format: Format, width: usize, height: usize, target: bool) -> Self::Texture {
         // SAFETY: plain sizes.
         let descriptor = unsafe {

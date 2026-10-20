@@ -223,6 +223,26 @@ impl Gpu for Runtime {
             .expect("new_texture_at_offset")
     }
 
+    fn buffer_texture(
+        &self,
+        buffer: &rt::Buffer,
+        (width, height): (usize, usize),
+        offset: usize,
+        bytes_per_row: usize,
+    ) -> rt::Texture {
+        let mut descriptor = rt::TextureDescriptor::texture_2d(
+            PixelFormat::BGRA8Unorm,
+            width as u64,
+            height as u64,
+            false,
+        );
+        descriptor.usage = TextureUsage::RENDER_TARGET | TextureUsage::SHADER_READ;
+        descriptor.resource_options = rt::ResourceOptions::shared();
+        buffer
+            .new_texture(&descriptor, offset as u64, bytes_per_row as u64)
+            .expect("new_texture over a buffer")
+    }
+
     fn texture(&self, format: Format, width: usize, height: usize, target: bool) -> rt::Texture {
         let mut descriptor = rt::TextureDescriptor::texture_2d(
             pixel_format(format),

@@ -89,6 +89,16 @@ pub trait Gpu {
         height: usize,
         offset: usize,
     ) -> Self::Texture;
+    /// `newTextureWithDescriptor:offset:bytesPerRow:` of `buffer`: a 2D `BGRA8Unorm` texture of
+    /// one level that passes render to and the shaders read, its rows `bytes_per_row` apart from
+    /// `offset`, as a window surface's texture over its memory.
+    fn buffer_texture(
+        &self,
+        buffer: &Self::Buffer,
+        size: (usize, usize),
+        offset: usize,
+        bytes_per_row: usize,
+    ) -> Self::Texture;
     /// A 2D texture of one level: a render target of `Private` storage, or a `Shared` one the
     /// shaders read.
     fn texture(&self, format: Format, width: usize, height: usize, target: bool) -> Self::Texture;
