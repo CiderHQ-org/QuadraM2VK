@@ -9,10 +9,12 @@ use metal2vulkan::bind::SamplerDescriptor;
 use metal2vulkan::device::{CompletionPolicy, HeapCompressionPolicy};
 use metal2vulkan::metal::state::DepthStencilDescriptor;
 use metal2vulkan::metal::{
-    BlendFactor, CompareFunction, CullMode, IndexType, PixelFormat, PrimitiveType,
-    SamplerMinMagFilter, TextureUsage, Winding,
+    BlendFactor, CompareFunction, CullMode, DispatchType, IndexType, IndirectCommandType,
+    PixelFormat, PrimitiveType, ResourceUsage, SamplerMinMagFilter, TextureUsage, Winding,
 };
-use metal2vulkan::pipeline::{ColorAttachmentDescriptor, RenderPipelineDescriptor, StageSource};
+use metal2vulkan::pipeline::{
+    ColorAttachmentDescriptor, ComputePipelineDescriptor, RenderPipelineDescriptor, StageSource,
+};
 use metal2vulkan_runtime as rt;
 use std::path::Path;
 use std::ptr::NonNull;
@@ -61,6 +63,7 @@ impl Gpu for Runtime {
     type ComputeEncoder = rt::ComputeCommandEncoder;
     type Heap = rt::Heap;
     type DepthStencil = rt::DepthStencilState;
+    type IndirectCommands = rt::IndirectCommandBuffer;
 
     fn label(&self) -> String {
         format!("runtime on {}", self.device.name())
@@ -147,6 +150,41 @@ impl Gpu for Runtime {
         self.device
             .new_compute_pipeline_state_with_function(&function, &rt::PipelineOptions::default())
             .expect("new_compute_pipeline_state_with_function")
+    }
+
+    fn indirect_compute_pipeline(
+        &self,
+        library: &rt::Library,
+        kernel: &str,
+    ) -> rt::ComputePipelineState {
+        let function = library
+            .new_function_with_name(kernel)
+            .expect("new_function_with_name");
+        let mut descriptor =
+            ComputePipelineDescriptor::new(StageSource::Function(function.function_descriptor()));
+        descriptor.support_indirect_command_buffers = true;
+        self.device
+            .new_compute_pipeline_state(&descriptor, &rt::PipelineOptions::default())
+            .expect("new_compute_pipeline_state")
+    }
+
+    fn indirect_commands(&self, count: usize) -> rt::IndirectCommandBuffer {
+        let mut descriptor = rt::IndirectCommandBufferDescriptor::new();
+        descriptor.command_types = IndirectCommandType::CONCURRENT_DISPATCH;
+        descriptor.inherit_pipeline_state = false;
+        descriptor.inherit_buffers = false;
+        descriptor.max_kernel_buffer_bind_count = 1;
+        self.device
+            .new_indirect_command_buffer(&descriptor, count as u64, rt::ResourceOptions::private())
+            .expect("new_indirect_command_buffer")
+    }
+
+    fn commands_id(&self, commands: &rt::IndirectCommandBuffer) -> u64 {
+        commands.gpu_resource_id().0
+    }
+
+    fn pipeline_id(&self, state: &rt::ComputePipelineState) -> u64 {
+        state.gpu_resource_id().0
     }
 
     fn buffer(&self, length: usize) -> rt::Buffer {
@@ -500,6 +538,15 @@ impl Gpu for Runtime {
             .expect("compute_command_encoder")
     }
 
+    fn concurrent_compute_encoder(
+        &self,
+        command_buffer: &rt::CommandBuffer,
+    ) -> rt::ComputeCommandEncoder {
+        command_buffer
+            .compute_command_encoder_with_dispatch_type(DispatchType::Concurrent)
+            .expect("compute_command_encoder_with_dispatch_type")
+    }
+
     fn set_compute_pipeline(
         &self,
         encoder: &mut rt::ComputeCommandEncoder,
@@ -540,6 +587,36 @@ impl Gpu for Runtime {
                 rt::Size::new(threads as u64, 1, 1),
             )
             .expect("dispatch_threadgroups");
+    }
+
+    fn use_commands(
+        &self,
+        encoder: &mut rt::ComputeCommandEncoder,
+        commands: &rt::IndirectCommandBuffer,
+    ) {
+        encoder
+            .use_resource(commands.as_resource(), ResourceUsage::WRITE)
+            .expect("use_resource");
+    }
+
+    fn use_buffer(&self, encoder: &mut rt::ComputeCommandEncoder, buffer: &rt::Buffer) {
+        encoder
+            .use_resource(
+                buffer.as_resource(),
+                ResourceUsage::READ.union(ResourceUsage::WRITE),
+            )
+            .expect("use_resource");
+    }
+
+    fn execute_commands(
+        &self,
+        encoder: &mut rt::ComputeCommandEncoder,
+        commands: &rt::IndirectCommandBuffer,
+        count: usize,
+    ) {
+        encoder
+            .execute_commands_in_buffer(commands, 0..count as u64)
+            .expect("execute_commands_in_buffer");
     }
 
     fn end_compute(&self, encoder: rt::ComputeCommandEncoder) {
@@ -670,6 +747,8 @@ impl Gpu for Runtime {
             ("requirement_images_made", c.requirement_images_made),
             ("arena_pools_made", c.arena_pools_made),
             ("command_pools_made", c.command_pools_made),
+            ("dispatches", replayed.cmd_dispatch),
+            ("dispatches_indirect", replayed.cmd_dispatch_indirect),
         ]
         .into_iter()
         .map(|(name, count)| (name, count as f64))

@@ -8,13 +8,15 @@ use objc2_foundation::{NSString, NSURL};
 use objc2_metal::{
     MTLBlendFactor, MTLBlitCommandEncoder, MTLBuffer, MTLClearColor, MTLCommandBuffer,
     MTLCommandBufferStatus, MTLCommandEncoder, MTLCommandQueue, MTLCompareFunction,
-    MTLComputeCommandEncoder, MTLComputePipelineState, MTLCreateSystemDefaultDevice, MTLCullMode,
-    MTLDepthStencilDescriptor, MTLDepthStencilState, MTLDevice, MTLHazardTrackingMode, MTLHeap,
-    MTLHeapDescriptor, MTLHeapType, MTLIndexType, MTLLibrary, MTLLoadAction, MTLOrigin,
+    MTLComputeCommandEncoder, MTLComputePipelineDescriptor, MTLComputePipelineState,
+    MTLCreateSystemDefaultDevice, MTLCullMode, MTLDepthStencilDescriptor, MTLDepthStencilState,
+    MTLDevice, MTLDispatchType, MTLHazardTrackingMode, MTLHeap, MTLHeapDescriptor, MTLHeapType,
+    MTLIndexType, MTLIndirectCommandBuffer, MTLIndirectCommandBufferDescriptor,
+    MTLIndirectCommandType, MTLLibrary, MTLLoadAction, MTLOrigin, MTLPipelineOption,
     MTLPixelFormat, MTLPrimitiveType, MTLRegion, MTLRenderCommandEncoder, MTLRenderPassDescriptor,
-    MTLRenderPipelineDescriptor, MTLRenderPipelineState, MTLResourceOptions, MTLSamplerDescriptor,
-    MTLSamplerMinMagFilter, MTLSamplerState, MTLSize, MTLStorageMode, MTLStoreAction, MTLTexture,
-    MTLTextureDescriptor, MTLTextureUsage, MTLWinding,
+    MTLRenderPipelineDescriptor, MTLRenderPipelineState, MTLResourceOptions, MTLResourceUsage,
+    MTLSamplerDescriptor, MTLSamplerMinMagFilter, MTLSamplerState, MTLSize, MTLStorageMode,
+    MTLStoreAction, MTLTexture, MTLTextureDescriptor, MTLTextureUsage, MTLWinding,
 };
 use std::ffi::c_void;
 use std::path::Path;
@@ -77,6 +79,7 @@ impl Gpu for Native {
     type ComputeEncoder = Object<dyn MTLComputeCommandEncoder>;
     type Heap = Object<dyn MTLHeap>;
     type DepthStencil = Object<dyn MTLDepthStencilState>;
+    type IndirectCommands = Object<dyn MTLIndirectCommandBuffer>;
 
     fn label(&self) -> String {
         format!("native Metal on {}", self.device.name())
@@ -152,6 +155,49 @@ impl Gpu for Native {
         self.device
             .newComputePipelineStateWithFunction_error(&function(library, kernel))
             .expect("newComputePipelineStateWithFunction")
+    }
+
+    fn indirect_compute_pipeline(
+        &self,
+        library: &Self::Library,
+        kernel: &str,
+    ) -> Self::ComputePipeline {
+        let descriptor = MTLComputePipelineDescriptor::new();
+        descriptor.setComputeFunction(Some(&function(library, kernel)));
+        descriptor.setSupportIndirectCommandBuffers(true);
+        self.device
+            .newComputePipelineStateWithDescriptor_options_reflection_error(
+                &descriptor,
+                MTLPipelineOption::None,
+                None,
+            )
+            .expect("newComputePipelineStateWithDescriptor")
+    }
+
+    fn indirect_commands(&self, count: usize) -> Self::IndirectCommands {
+        let descriptor = MTLIndirectCommandBufferDescriptor::new();
+        descriptor.setCommandTypes(MTLIndirectCommandType::ConcurrentDispatch);
+        descriptor.setInheritPipelineState(false);
+        descriptor.setInheritBuffers(false);
+        descriptor.setMaxKernelBufferBindCount(1);
+        // SAFETY: `count` is within Metal's most commands (16,384), which the workload keeps.
+        unsafe {
+            self.device
+                .newIndirectCommandBufferWithDescriptor_maxCommandCount_options(
+                    &descriptor,
+                    count,
+                    MTLResourceOptions::StorageModePrivate,
+                )
+        }
+        .expect("newIndirectCommandBufferWithDescriptor")
+    }
+
+    fn commands_id(&self, commands: &Self::IndirectCommands) -> u64 {
+        commands.gpuResourceID().to_raw()
+    }
+
+    fn pipeline_id(&self, state: &Self::ComputePipeline) -> u64 {
+        state.gpuResourceID().to_raw()
     }
 
     fn buffer(&self, length: usize) -> Self::Buffer {
@@ -524,6 +570,15 @@ impl Gpu for Native {
             .expect("computeCommandEncoder")
     }
 
+    fn concurrent_compute_encoder(
+        &self,
+        command_buffer: &Self::CommandBuffer,
+    ) -> Self::ComputeEncoder {
+        command_buffer
+            .computeCommandEncoderWithDispatchType(MTLDispatchType::Concurrent)
+            .expect("computeCommandEncoderWithDispatchType")
+    }
+
     fn set_compute_pipeline(
         &self,
         encoder: &mut Self::ComputeEncoder,
@@ -560,6 +615,35 @@ impl Gpu for Native {
             depth: 1,
         };
         encoder.dispatchThreadgroups_threadsPerThreadgroup(size(groups), size(threads));
+    }
+
+    fn use_commands(&self, encoder: &mut Self::ComputeEncoder, commands: &Self::IndirectCommands) {
+        encoder.useResource_usage(
+            ProtocolObject::from_ref(&**commands),
+            MTLResourceUsage::Write,
+        );
+    }
+
+    fn use_buffer(&self, encoder: &mut Self::ComputeEncoder, buffer: &Self::Buffer) {
+        encoder.useResource_usage(
+            ProtocolObject::from_ref(&**buffer),
+            MTLResourceUsage::Read | MTLResourceUsage::Write,
+        );
+    }
+
+    fn execute_commands(
+        &self,
+        encoder: &mut Self::ComputeEncoder,
+        commands: &Self::IndirectCommands,
+        count: usize,
+    ) {
+        let range = objc2_foundation::NSRange {
+            location: 0,
+            length: count,
+        };
+        // SAFETY: the encoder's command buffer holds `commands` until it completes, and the range
+        // lies within its commands.
+        unsafe { encoder.executeCommandsInBuffer_withRange(commands, range) };
     }
 
     fn end_compute(&self, encoder: Self::ComputeEncoder) {

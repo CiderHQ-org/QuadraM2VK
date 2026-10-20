@@ -103,6 +103,15 @@
 //!   interval from a frame's start to the next one's (its median, its 99th percentile, and those
 //!   over 16.7 and 25 ms), the encoding thread's time to encode and commit, the process's CPU
 //!   time, and on the runtime's side its work counts per frame (`rt_*`).
+//! - `icb`: indirect command buffers a kernel writes. Per frame, a kernel encodes 16, 64, 256 or
+//!   4096 compute commands into an indirect command buffer (one a thread: one of 1 or 4 states
+//!   made with `supportIndirectCommandBuffers`, its own 64-word window of a buffer, one
+//!   threadgroup of 64 threads, no barrier), and a second compute encoder, serial or concurrent,
+//!   executes them (`executeCommandsInBuffer:withRange:`), as a GPU culling pass hands its kept
+//!   work on. Per frame: the wall time from the command buffer's creation to the wait's return,
+//!   the encoding thread's through the commit, the process's CPU time, and on the runtime's side
+//!   its queue submissions, barriers, dispatches and indirect dispatches (`rt_*`). The first
+//!   frame's output is checked (`workloads::icb`).
 //!
 //! Options: `--rounds N` (3), `--draws N` (2000), `--timed N` (30), `--latency N` (200),
 //! `--heavy-iterations N` (64), `--heavy-runs N` (15), `--many-draws N` (6000), `--frames N`
@@ -129,7 +138,7 @@ use std::process::{Command, Stdio};
 use std::time::Instant;
 use workloads::Sizes;
 
-const WORKLOADS: [&str; 12] = [
+const WORKLOADS: [&str; 13] = [
     "encode",
     "fixed",
     "latency",
@@ -142,6 +151,7 @@ const WORKLOADS: [&str; 12] = [
     "compositing",
     "drag",
     "burst",
+    "icb",
 ];
 
 struct Options {
@@ -347,6 +357,7 @@ fn run<G: Gpu>(g: &G, opened: Instant, metallib: &Path, options: &Options) {
             "compositing" => workloads::compositing(g, &scene, sizes),
             "drag" => workloads::drag(g, &scene, sizes),
             "burst" => workloads::burst(g, &scene),
+            "icb" => workloads::icb(g, &library, sizes),
             _ => unreachable!(),
         }
     }

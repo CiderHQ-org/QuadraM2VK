@@ -258,3 +258,54 @@ fragment float4 draws_fragment3(DrawOut in [[stage_in]],
                                 constant DrawUniforms &u [[buffer(0)]]) {
     return float4(in.uv, fract(u.misc.y), 1.0) * t0.sample(s, in.uv.yx);
 }
+
+// The icb workload's functions (workloads::icb): a kernel that encodes one compute command a
+// thread into an indirect command buffer, and the four states the commands run, each on its own
+// 64-word window of `data`. Command `tid` runs state `tid % states` over one threadgroup of 64
+// threads, with no barrier, as a culling kernel encodes the work it keeps. The states add by
+// relaxed atomics: a kernel that reads and then writes a word by its grid position alone leaves
+// the order of a simdgroup's accesses to Apple's lockstep, which the runtime makes explicit with a
+// barrier that observes the threadgroup partition, so its commands could not run on the GPU
+// alone.
+struct IcbEncoder {
+    command_buffer commands;
+    compute_pipeline_state step0;
+    compute_pipeline_state step1;
+    compute_pipeline_state step2;
+    compute_pipeline_state step3;
+};
+
+kernel void icb_encode(device const IcbEncoder &encoder [[buffer(0)]],
+                       device uint *data [[buffer(1)]],
+                       constant uint &states [[buffer(2)]],
+                       uint tid [[thread_position_in_grid]]) {
+    compute_command command(encoder.commands, tid);
+    switch (tid % states) {
+    case 0: command.set_compute_pipeline_state(encoder.step0); break;
+    case 1: command.set_compute_pipeline_state(encoder.step1); break;
+    case 2: command.set_compute_pipeline_state(encoder.step2); break;
+    default: command.set_compute_pipeline_state(encoder.step3); break;
+    }
+    command.set_kernel_buffer(data + tid * 64, 0);
+    command.concurrent_dispatch_threadgroups(uint3(1, 1, 1), uint3(64, 1, 1));
+}
+
+kernel void icb_step0(device atomic_uint *data [[buffer(0)]],
+                      uint tid [[thread_position_in_grid]]) {
+    atomic_fetch_add_explicit(&data[tid], 1u + uint(NONCE), memory_order_relaxed);
+}
+
+kernel void icb_step1(device atomic_uint *data [[buffer(0)]],
+                      uint tid [[thread_position_in_grid]]) {
+    atomic_fetch_add_explicit(&data[tid], 2u + uint(NONCE), memory_order_relaxed);
+}
+
+kernel void icb_step2(device atomic_uint *data [[buffer(0)]],
+                      uint tid [[thread_position_in_grid]]) {
+    atomic_fetch_add_explicit(&data[tid], 3u + uint(NONCE), memory_order_relaxed);
+}
+
+kernel void icb_step3(device atomic_uint *data [[buffer(0)]],
+                      uint tid [[thread_position_in_grid]]) {
+    atomic_fetch_add_explicit(&data[tid], 4u + uint(NONCE), memory_order_relaxed);
+}

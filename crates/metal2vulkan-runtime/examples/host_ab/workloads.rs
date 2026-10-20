@@ -1751,3 +1751,114 @@ pub fn burst<G: Gpu>(g: &G, s: &Scene<G>) {
         }
     }
 }
+
+/// The icb workload's command counts per execution.
+const ICB_COMMANDS: [usize; 4] = [16, 64, 256, 4096];
+/// The words of one command's window of the icb workload's data.
+const ICB_WINDOW: usize = 64;
+/// Untimed frames before the icb workload's timed ones.
+const ICB_WARM: usize = 3;
+
+/// The icb workload (main.rs): per frame, one command buffer of a compute encoder whose kernel
+/// (`icb_encode`) encodes `commands` compute commands into an indirect command buffer, one a
+/// thread, and a second compute encoder that executes them, each command one threadgroup of 64
+/// threads of one of `states` states made with `supportIndirectCommandBuffers` (the only such
+/// states alive), in turn; committed and waited for. For a serial and a concurrent executing
+/// encoder, 1 and 4 states and each count of [`ICB_COMMANDS`]: the frame's wall time (the command buffer's creation to the wait's return),
+/// the encoding thread's (through the commit's return) and the process's CPU time, and on the
+/// runtime's side its work counts per frame (`rt_*`). The first frame's output is checked: each
+/// command's window holds its state's step of zero.
+pub fn icb<G: Gpu>(g: &G, library: &G::Library, sizes: &Sizes) {
+    let encode = g.compute_pipeline(library, "icb_encode");
+    for states in [1usize, 4] {
+        let steps: Vec<G::ComputePipeline> = (0..states)
+            .map(|k| g.indirect_compute_pipeline(library, &format!("icb_step{k}")))
+            .collect();
+        for (concurrent, commands) in [false, true]
+            .into_iter()
+            .flat_map(|c| ICB_COMMANDS.map(|n| (c, n)))
+        {
+            let icb = g.indirect_commands(commands);
+            let mut arguments = g.commands_id(&icb).to_le_bytes().to_vec();
+            for k in 0..4 {
+                arguments.extend(g.pipeline_id(&steps[k.min(states - 1)]).to_le_bytes());
+            }
+            let arguments = g.buffer_with(&arguments);
+            let count = g.buffer_with(&(states as u32).to_le_bytes());
+            let data = g.buffer_with(&vec![0u8; commands * ICB_WINDOW * 4]);
+            let threads = commands.min(64);
+            let (mut wall, mut encoding, mut cpu) = (vec![], vec![], vec![]);
+            let mut counts = Vec::new();
+            for frame in 0..ICB_WARM + sizes.timed {
+                if frame == ICB_WARM {
+                    counts = g.work_counts();
+                }
+                g.pool(|| {
+                    let cpu0 = process_cpu();
+                    let t0 = Instant::now();
+                    let command_buffer = g.command_buffer();
+                    let mut encoder = g.compute_encoder(&command_buffer);
+                    g.set_compute_pipeline(&mut encoder, &encode);
+                    g.set_buffer(&mut encoder, &arguments, 0, 0);
+                    g.set_buffer(&mut encoder, &data, 0, 1);
+                    g.set_buffer(&mut encoder, &count, 0, 2);
+                    g.use_commands(&mut encoder, &icb);
+                    g.dispatch(&mut encoder, commands / threads, threads);
+                    g.end_compute(encoder);
+                    let mut encoder = match concurrent {
+                        true => g.concurrent_compute_encoder(&command_buffer),
+                        false => g.compute_encoder(&command_buffer),
+                    };
+                    g.use_buffer(&mut encoder, &data);
+                    g.execute_commands(&mut encoder, &icb, commands);
+                    g.end_compute(encoder);
+                    g.commit(&command_buffer);
+                    let t1 = Instant::now();
+                    g.wait(&command_buffer);
+                    let t2 = Instant::now();
+                    if frame >= ICB_WARM {
+                        wall.push(ms(t2 - t0));
+                        encoding.push(ms(t1 - t0));
+                        cpu.push(ms(process_cpu() - cpu0));
+                    }
+                });
+                if frame == 0 {
+                    let mut bytes = vec![0u8; commands * ICB_WINDOW * 4];
+                    g.read_buffer(&data, &mut bytes);
+                    for (word, value) in bytes.as_chunks::<4>().0.iter().enumerate() {
+                        let expected = (word / ICB_WINDOW % states) as u32 + 1;
+                        assert_eq!(
+                            u32::from_le_bytes(*value),
+                            expected,
+                            "icb: word {word} of {commands} commands of {states} states"
+                        );
+                    }
+                }
+            }
+            let kind = if concurrent { "concurrent" } else { "serial" };
+            let at = format!("{kind}_s{states}_c{commands}");
+            emit("icb", &format!("frame_{at}"), "ms", &mut wall);
+            emit("icb", &format!("encode_{at}"), "ms", &mut encoding);
+            emit("icb", &format!("process_cpu_{at}"), "ms", &mut cpu);
+            let after = g.work_counts();
+            for ((name, before), (_, now)) in counts.iter().zip(&after) {
+                if [
+                    "queue_submissions",
+                    "pipeline_barriers",
+                    "dispatches",
+                    "dispatches_indirect",
+                ]
+                .contains(name)
+                {
+                    let per_frame = (now - before) / sizes.timed as f64;
+                    emit(
+                        "icb",
+                        &format!("rt_{name}_{at}"),
+                        "per frame",
+                        &mut [per_frame],
+                    );
+                }
+            }
+        }
+    }
+}

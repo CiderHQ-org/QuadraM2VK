@@ -27,6 +27,7 @@ pub trait Gpu {
     type ComputeEncoder;
     type Heap;
     type DepthStencil;
+    type IndirectCommands;
 
     /// The side and the device's name.
     fn label(&self) -> String;
@@ -56,6 +57,20 @@ pub trait Gpu {
     fn depth_stencil(&self, writes: bool) -> Self::DepthStencil;
     /// `newComputePipelineStateWithFunction:error:`.
     fn compute_pipeline(&self, library: &Self::Library, kernel: &str) -> Self::ComputePipeline;
+    /// `newComputePipelineStateWithDescriptor:options:reflection:error:` of `kernel`, with
+    /// `supportIndirectCommandBuffers`.
+    fn indirect_compute_pipeline(
+        &self,
+        library: &Self::Library,
+        kernel: &str,
+    ) -> Self::ComputePipeline;
+    /// `newIndirectCommandBufferWithDescriptor:maxCommandCount:options:` of `count` concurrent
+    /// dispatches, each binding one kernel buffer and inheriting nothing, of `Private` storage.
+    fn indirect_commands(&self, count: usize) -> Self::IndirectCommands;
+    /// The `gpuResourceID` of `commands`, as a kernel reads it from an argument buffer.
+    fn commands_id(&self, commands: &Self::IndirectCommands) -> u64;
+    /// The `gpuResourceID` of `state`, made with `supportIndirectCommandBuffers`.
+    fn pipeline_id(&self, state: &Self::ComputePipeline) -> u64;
 
     /// `newBufferWithLength:options:` of `Shared` storage.
     fn buffer(&self, length: usize) -> Self::Buffer;
@@ -196,6 +211,11 @@ pub trait Gpu {
 
     /// `computeCommandEncoder`.
     fn compute_encoder(&self, command_buffer: &Self::CommandBuffer) -> Self::ComputeEncoder;
+    /// `computeCommandEncoderWithDispatchType:` of `MTLDispatchTypeConcurrent`.
+    fn concurrent_compute_encoder(
+        &self,
+        command_buffer: &Self::CommandBuffer,
+    ) -> Self::ComputeEncoder;
     fn set_compute_pipeline(
         &self,
         encoder: &mut Self::ComputeEncoder,
@@ -216,6 +236,18 @@ pub trait Gpu {
     );
     /// `dispatchThreadgroups:threadsPerThreadgroup:` of a 1D grid.
     fn dispatch(&self, encoder: &mut Self::ComputeEncoder, groups: usize, threads: usize);
+    /// `useResource:usage:` of `commands`, `MTLResourceUsageWrite`: the encoder's kernels write
+    /// them.
+    fn use_commands(&self, encoder: &mut Self::ComputeEncoder, commands: &Self::IndirectCommands);
+    /// `useResource:usage:` of `buffer`, read and write: the executed commands bind it.
+    fn use_buffer(&self, encoder: &mut Self::ComputeEncoder, buffer: &Self::Buffer);
+    /// `executeCommandsInBuffer:withRange:` of commands `0..count`.
+    fn execute_commands(
+        &self,
+        encoder: &mut Self::ComputeEncoder,
+        commands: &Self::IndirectCommands,
+        count: usize,
+    );
     fn end_compute(&self, encoder: Self::ComputeEncoder);
 
     /// A blit encoder of one `fillBuffer:range:value:` over the buffer's first `length` bytes.
