@@ -47,4 +47,13 @@ impl DeviceDescription {
             .find(|(vendor, ids)| *vendor == self.vendor_id && ids.contains(&self.device_id))
             .map_or(self.device_id, |(_, ids)| ids[0])
     }
+
+    /// The GPU the tables keyed on a measured GPU look this device up by: its
+    /// [`canonical_device_id`](DeviceDescription::canonical_device_id), or `None` where the
+    /// description is taken as an unmeasured identity
+    /// ([`assumed_unmeasured`](DeviceDescription::assumed_unmeasured)), which no row keyed on a GPU
+    /// names.
+    pub fn measured_gpu(&self) -> Option<u32> {
+        (!self.assumed_unmeasured).then(|| self.canonical_device_id())
+    }
 }

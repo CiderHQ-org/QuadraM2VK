@@ -171,6 +171,16 @@ pub struct DeviceOptions {
     /// No Metal counterpart.
     #[doc(hidden)]
     pub record_executions: bool,
+    /// Take each device as an identity no measurement names
+    /// ([`DeviceDescription::assumed_unmeasured`]), whatever its driver, GPU and release are: as
+    /// another GPU of its driver at its release. The device then takes the paths an unmeasured
+    /// identity of its driver takes, in translation and in the runtime: no deviation or defect
+    /// measured on one GPU alone, every exact path in place of an answer fact, every defect its
+    /// driver is measured with assumed, and the informational message
+    /// `metal2vulkan-unmeasured-driver` naming them as the device is made. Off by default. A
+    /// diagnostic, for running a measured device as an unmeasured one of its driver runs (a
+    /// report from a GPU no venue measured). No Metal counterpart.
+    pub assume_unmeasured_identity: bool,
 }
 
 /// One setting of an instance layer (`VkLayerSettingEXT`).
@@ -1060,6 +1070,16 @@ pub(super) fn argument_buffers_kept(description: &DeviceDescription) -> Result<(
     check(Facts::of(description).argument_buffers())
 }
 
+/// `description` as `options` take its identity: an identity no measurement names where they
+/// assume one ([`DeviceOptions::assume_unmeasured_identity`]), else as the device reports it.
+pub(crate) fn identity_as_options(
+    mut description: DeviceDescription,
+    options: &DeviceOptions,
+) -> DeviceDescription {
+    description.assumed_unmeasured = options.assume_unmeasured_identity;
+    description
+}
+
 /// A device on `physical`, made from `instance`, answering at `level`.
 fn create_on(
     instance: &Arc<InstanceShared>,
@@ -1072,6 +1092,7 @@ fn create_on(
     let description =
         unsafe { DeviceDescription::query(&instance.raw, physical, instance.api_version) }
             .map_err(device_error)?;
+    let description = identity_as_options(description, options);
     // SAFETY: as above.
     unsafe { timeline_conformant(&instance.raw, physical) }?;
     argument_buffers_kept(&description)?;
@@ -1370,6 +1391,7 @@ fn same_options(a: &DeviceOptions, b: &DeviceOptions) -> bool {
         announce_each,
         metal_level,
         record_executions,
+        assume_unmeasured_identity,
     } = a;
     *policy == b.policy
         && *layers == b.layers
@@ -1388,6 +1410,7 @@ fn same_options(a: &DeviceOptions, b: &DeviceOptions) -> bool {
         && *announce_each == b.announce_each
         && *metal_level == b.metal_level
         && *record_executions == b.record_executions
+        && *assume_unmeasured_identity == b.assume_unmeasured_identity
 }
 
 /// The group of `made` for `options`: the live one, or a new one on a new instance. Its index.

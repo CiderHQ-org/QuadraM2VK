@@ -78,18 +78,19 @@ pub(crate) enum Standing {
 }
 
 /// The facts of `table` that the driver `driver` on GPU `device` of `vendor` has at release
-/// `version`, each with its standing; an unmeasured fact is absent.
+/// `version`, each with its standing; an unmeasured fact is absent. A `device` of `None` is a GPU
+/// no row names (`DeviceDescription::measured_gpu`): only the rows of every GPU hold for it.
 pub(crate) fn among<F: Copy + Ord>(
     table: &[Measured<F>],
     driver: Option<DriverId>,
-    (vendor, device): (u32, u32),
+    (vendor, device): (u32, Option<u32>),
     version: u32,
 ) -> BTreeMap<F, Standing> {
     let mut facts = BTreeMap::new();
     for row in table {
         let ours = Some(row.driver) == driver
             && row.vendor.is_none_or(|v| v == vendor)
-            && row.device.is_none_or(|d| d == device);
+            && row.device.is_none_or(|d| Some(d) == device);
         if !ours || version < row.first {
             continue;
         }
@@ -1018,7 +1019,7 @@ pub(crate) fn defects(description: &DeviceDescription) -> BTreeSet<DriverWorkaro
     among(
         DEFECTS,
         description.driver_id,
-        (description.vendor_id, description.canonical_device_id()),
+        (description.vendor_id, description.measured_gpu()),
         description.driver_version,
     )
     .into_keys()
@@ -1030,7 +1031,7 @@ pub(crate) fn deviations(description: &DeviceDescription) -> BTreeMap<DriverDevi
     among(
         DEVIATIONS,
         description.driver_id,
-        (description.vendor_id, description.canonical_device_id()),
+        (description.vendor_id, description.measured_gpu()),
         description.driver_version,
     )
 }
@@ -2604,7 +2605,7 @@ impl DeviceDescription {
     /// the driver has it, and elsewhere takes the exact path that needs none.
     pub fn driver_facts(&self) -> BTreeSet<DriverFact> {
         let measured = self.measured_identity();
-        let gpu = self.canonical_device_id();
+        let gpu = self.measured_gpu();
         MEASURED
             .iter()
             .filter(|row| Some(row.driver) == self.driver_id)
@@ -2612,7 +2613,7 @@ impl DeviceDescription {
                 true => {
                     (row.first..=row.last).contains(&self.driver_version)
                         && row.vendor.is_none_or(|v| v == self.vendor_id)
-                        && row.device.is_none_or(|d| d == gpu)
+                        && row.device.is_none_or(|d| Some(d) == gpu)
                 }
                 false => row.fact.assumed_where_unmeasured(),
             })
@@ -2626,13 +2627,14 @@ impl DeviceDescription {
     /// ([`canonical_device_id`](DeviceDescription::canonical_device_id)). Another release of a
     /// measured driver, another GPU of it, or another driver is not: the runtime takes no answer
     /// fact there, assumes its driver's measured defects, and says so once in the informational
-    /// message `metal2vulkan-unmeasured-driver`.
+    /// message `metal2vulkan-unmeasured-driver`. A description taken as unmeasured
+    /// ([`DeviceDescription::assumed_unmeasured`]) is none.
     pub fn measured_identity(&self) -> bool {
-        let gpu = self.canonical_device_id();
+        let gpu = self.measured_gpu();
         MEASURED_DEVICES.iter().any(|m| {
             Some(m.driver) == self.driver_id
                 && m.vendor == self.vendor_id
-                && m.device == gpu
+                && Some(m.device) == gpu
                 && m.release == self.driver_version
         })
     }

@@ -142,10 +142,12 @@ pub(crate) const METAL: u64 = 192 * KIB;
 /// The Function storage a thread of `desc`'s device holds correctly: the measured value of its
 /// identity, or [`FLOOR`] for a device not measured.
 pub(crate) fn of(desc: &DeviceDescription) -> FunctionStorage {
-    let gpu = desc.canonical_device_id();
+    let gpu = desc.measured_gpu();
     MEASURED
         .iter()
-        .find(|d| desc.driver_id == Some(d.driver) && desc.vendor_id == d.vendor && gpu == d.device)
+        .find(|d| {
+            desc.driver_id == Some(d.driver) && desc.vendor_id == d.vendor && gpu == Some(d.device)
+        })
         .map_or(FunctionStorage::Assumed(FLOOR), |d| {
             FunctionStorage::Measured(d.bytes)
         })

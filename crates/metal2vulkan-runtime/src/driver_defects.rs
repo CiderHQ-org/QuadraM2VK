@@ -381,28 +381,29 @@ pub(super) const AFFECTED: &[Affected] = &[
 ];
 
 /// The defects of the driver and device `description` names, its GPU read by the `deviceID` it
-/// was measured under (`DeviceDescription::canonical_device_id`).
+/// was measured under (`DeviceDescription::measured_gpu`).
 pub(super) fn of(description: &DeviceDescription) -> BTreeSet<RuntimeDriverDefect> {
     among(
         AFFECTED,
         description.driver_id,
-        description.canonical_device_id(),
+        description.measured_gpu(),
         description.driver_version,
     )
 }
 
 /// The defects of `table` that the driver `driver` has on the device `device` at release
-/// `version`: each of the driver's but those a probe found clean on that GPU at that release.
+/// `version`: each of the driver's but those a probe found clean on that GPU at that release. A
+/// `device` of `None` is a GPU no probe ran (`DeviceDescription::measured_gpu`): it has them all.
 pub(super) fn among(
     table: &[Affected],
     driver: Option<DriverId>,
-    device: u32,
+    device: Option<u32>,
     version: u32,
 ) -> BTreeSet<RuntimeDriverDefect> {
     table
         .iter()
         .filter(|affected| Some(affected.driver) == driver)
-        .filter(|affected| !affected.clean.contains(&(device, version)))
+        .filter(|affected| !device.is_some_and(|d| affected.clean.contains(&(d, version))))
         .map(|affected| affected.defect)
         .collect()
 }

@@ -76,6 +76,19 @@ pub struct DeviceDescription {
     /// `maxBufferLength` and the runtime's heap sizes read them from the `Device`.
     #[cfg_attr(feature = "serde", serde(default))]
     pub allocation: AllocationLimits,
+    /// Take the device as an identity no measurement names, whatever its `driverID`, `vendorID`,
+    /// `deviceID` and `driverVersion` are: as another GPU of its driver at its release
+    /// ([`DeviceDescription::measured_gpu`] answers `None`). Every table keyed on a measured GPU
+    /// then names none of its rows for it: translation takes no deviation or defect measured on
+    /// one GPU alone (those measured on every GPU of the driver or vendor still hold), the Function
+    /// storage a thread holds is the unmeasured floor, and the runtime takes no answer fact,
+    /// assumes its driver's measured defects and says so in its `metal2vulkan-unmeasured-driver`
+    /// message, as on any unmeasured identity ([`DeviceDescription::measured_identity`] is false).
+    /// False by default. A diagnostic, for running a measured device on the paths an unmeasured
+    /// one of its driver takes; no translation reads it but through those tables. No Metal
+    /// counterpart.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub assumed_unmeasured: bool,
 }
 
 /// A device's allocation sizes, [`DeviceDescription::allocation`]: device facts that size
@@ -179,6 +192,7 @@ impl DeviceDescription {
             khr_format_feature_flags2: false,
             generated_commands: None,
             allocation: AllocationLimits::default(),
+            assumed_unmeasured: false,
         }
     }
 

@@ -113,12 +113,12 @@ fn a_clean_identity_alone_lacks_the_defect() {
         clean: &[(0, (26 << 22) | (3 << 12))],
     }];
     let lavapipe = Some(DriverId::MESA_LLVMPIPE);
-    assert!(among(&table, lavapipe, 0, mesa(2, 9)).contains(&COPIES));
-    assert!(among(&table, lavapipe, 0, mesa(3, 0)).is_empty());
-    assert!(among(&table, lavapipe, 0, mesa(3, 1)).contains(&COPIES));
-    assert!(among(&table, lavapipe, 1, mesa(3, 0)).contains(&COPIES));
-    assert!(among(&table, Some(DriverId::MESA_RADV), 0, mesa(2, 9)).is_empty());
-    assert!(among(&table, None, 0, mesa(2, 9)).is_empty());
+    assert!(among(&table, lavapipe, Some(0), mesa(2, 9)).contains(&COPIES));
+    assert!(among(&table, lavapipe, Some(0), mesa(3, 0)).is_empty());
+    assert!(among(&table, lavapipe, Some(0), mesa(3, 1)).contains(&COPIES));
+    assert!(among(&table, lavapipe, Some(1), mesa(3, 0)).contains(&COPIES));
+    assert!(among(&table, Some(DriverId::MESA_RADV), Some(0), mesa(2, 9)).is_empty());
+    assert!(among(&table, None, Some(0), mesa(2, 9)).is_empty());
 }
 
 /// NVIDIA's stencil colour-copy defect, measured on the RTX 3090 (`deviceID` 0x2204) at 615.71.09,
@@ -128,7 +128,7 @@ fn a_clean_identity_alone_lacks_the_defect() {
 #[test]
 fn nvidia_s_colour_copies_are_clean_on_the_identity_measured_alone() {
     let nvidia = Some(DriverId::NVIDIA_PROPRIETARY);
-    let of = |device, release| among(AFFECTED, nvidia, device, release);
+    let of = |device, release| among(AFFECTED, nvidia, Some(device), release);
     for (device, release) in [
         (0x2204, NVIDIA_615_71_09),
         (0x2484, NVIDIA_615_71_09),
@@ -145,7 +145,7 @@ fn nvidia_s_colour_copies_are_clean_on_the_identity_measured_alone() {
     let radv = among(
         AFFECTED,
         Some(DriverId::MESA_RADV),
-        0x2204,
+        Some(0x2204),
         NVIDIA_615_71_09,
     );
     assert!(!radv.contains(&COPIES) && !radv.contains(&STENCIL_COPIES));
@@ -158,7 +158,7 @@ fn nvidia_s_colour_copies_are_clean_on_the_identity_measured_alone() {
 #[test]
 fn radv_s_preprocessing_is_clean_on_the_identity_measured_alone() {
     let radv = Some(DriverId::MESA_RADV);
-    let of = |device, release| among(AFFECTED, radv, device, release);
+    let of = |device, release| among(AFFECTED, radv, Some(device), release);
     let mesa_26_0_8 = (26 << 22) | 8;
     for (device, release) in [
         (0x15bf, mesa_26_0_8),
@@ -175,7 +175,7 @@ fn radv_s_preprocessing_is_clean_on_the_identity_measured_alone() {
     let nvidia = among(
         AFFECTED,
         Some(DriverId::NVIDIA_PROPRIETARY),
-        0x15bf,
+        Some(0x15bf),
         mesa_26_0_8,
     );
     assert!(!nvidia.contains(&PREPROCESS));
@@ -187,12 +187,12 @@ fn radv_s_preprocessing_is_clean_on_the_identity_measured_alone() {
 #[test]
 fn lavapipe_s_baked_samplers_are_every_release_s() {
     let lavapipe = Some(DriverId::MESA_LLVMPIPE);
-    let of = |release| among(AFFECTED, lavapipe, 0, release);
+    let of = |release| among(AFFECTED, lavapipe, Some(0), release);
     let mesa_26_0_8 = (26 << 22) | 8;
     for release in [mesa_26_0_8, MESA_26_2_4 - 1, MESA_26_2_4, MESA_26_2_4 + 1] {
         assert!(of(release).contains(&BAKED_SAMPLERS), "{release:#x}");
     }
-    let radv = among(AFFECTED, Some(DriverId::MESA_RADV), 0, mesa_26_0_8);
+    let radv = among(AFFECTED, Some(DriverId::MESA_RADV), Some(0), mesa_26_0_8);
     assert!(!radv.contains(&BAKED_SAMPLERS));
 }
 
@@ -290,5 +290,53 @@ fn an_unmeasured_identity_says_so_in_an_informational_message() {
     assert!(text.ends_with(&format!("[{UNMEASURED_DRIVER}]")), "{text}");
     assert!(text.contains("DepthImageKeepsDenormals"), "{text}");
     assert!(text.contains("DepthStencilImagesLieApart"), "{text}");
+    assert!(!text.contains("metal2vulkan-degrade-"), "{text}");
+}
+
+/// `DeviceOptions::assume_unmeasured_identity` takes a device as an identity no measurement names:
+/// the description it hands the device ([`identity_as_options`]) answers as another GPU of its
+/// driver at its release, so on every committed profile the device's facts, withheld answers and
+/// defects are such a GPU's, and it says so in the `metal2vulkan-unmeasured-driver` message where
+/// such a GPU does. On the RTX 5080 Laptop GPU's measured identity the message appears only under
+/// the option. Off, the description is the device's.
+#[test]
+fn the_unmeasured_identity_option_runs_another_gpu_s_paths() {
+    use crate::device::create::identity_as_options;
+    use crate::driver_facts::{unmeasured_driver, UNMEASURED_DRIVER};
+    use crate::DeviceOptions;
+    let assume = DeviceOptions {
+        assume_unmeasured_identity: true,
+        ..DeviceOptions::default()
+    };
+    for (stem, desc) in super::capabilities::committed_descriptions() {
+        assert_eq!(
+            identity_as_options(desc.clone(), &DeviceOptions::default()),
+            desc,
+            "{stem}"
+        );
+        let assumed = identity_as_options(desc.clone(), &assume);
+        assert!(assumed.assumed_unmeasured, "{stem}");
+        let mut other = desc.clone();
+        other.device_id ^= 0x8000_0000;
+        let (_, a) = super::capabilities::created(&stem, &assumed);
+        let (_, o) = super::capabilities::created(&stem, &other);
+        assert_eq!(a.driver_facts, o.driver_facts, "{stem}");
+        assert_eq!(a.driver_facts_withheld, o.driver_facts_withheld, "{stem}");
+        assert_eq!(a.driver_defects, o.driver_defects, "{stem}");
+        assert_eq!(
+            unmeasured_driver(&a).is_some(),
+            unmeasured_driver(&o).is_some(),
+            "{stem}"
+        );
+    }
+    let (stem, laptop) = super::capabilities::committed_descriptions()
+        .into_iter()
+        .find(|(stem, _)| stem == "nvidia-rtx5080-laptop")
+        .expect("nvidia-rtx5080-laptop");
+    let (_, measured) = super::capabilities::created(&stem, &laptop);
+    assert!(unmeasured_driver(&measured).is_none());
+    let (_, assumed) = super::capabilities::created(&stem, &identity_as_options(laptop, &assume));
+    let text = unmeasured_driver(&assumed).expect("the option's message");
+    assert!(text.ends_with(&format!("[{UNMEASURED_DRIVER}]")), "{text}");
     assert!(!text.contains("metal2vulkan-degrade-"), "{text}");
 }

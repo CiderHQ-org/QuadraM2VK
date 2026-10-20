@@ -139,6 +139,7 @@ Vulkan-side choices Metal has no counterpart for:
 | `announce_each` | Degradation kinds to announce at every occurrence instead of once. |
 | `metal_level` | The macOS release whose Metal the device answers as (the host's by default). |
 | `record_executions` | Keep, per command buffer, which pipeline each dispatch and draw ran (`CommandBuffer::executions`). Off by default. |
+| `assume_unmeasured_identity` | A diagnostic: take the device as another GPU of its driver at its release, one no measurement names, so it runs the paths an unmeasured device of that driver runs (every exact path, every assumed defect, no deviation measured on one GPU alone) and says so in its `metal2vulkan-unmeasured-driver` message. Off by default. |
 
 While a handle lives, equal options give the same device for a physical device, as Metal has one
 `MTLDevice` per GPU. Nothing is read from the environment but the platform's default cache

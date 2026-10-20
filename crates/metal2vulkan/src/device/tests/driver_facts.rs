@@ -28,7 +28,7 @@ fn a_fact_holds_from_the_first_release_measured_and_past_the_last_as_beyond() {
         last: mesa(26, 2, 6),
     };
     let at = |table: &[Measured<u8>], driver, vendor, version| {
-        among(table, driver, (vendor, 0x1A06_0209), version)
+        among(table, driver, (vendor, Some(0x1A06_0209)), version)
             .get(&1)
             .copied()
     };
@@ -78,7 +78,7 @@ fn a_fact_holds_from_the_first_release_measured_and_past_the_last_as_beyond() {
     };
     assert_eq!(at(&[one_gpu], mvk, APPLE, 10401), Some(Standing::Measured));
     assert_eq!(
-        among(&[one_gpu], mvk, (APPLE, 0x1B00_0209), 10401).get(&1),
+        among(&[one_gpu], mvk, (APPLE, Some(0x1B00_0209)), 10401).get(&1),
         None
     );
     // Two rows: the later measurement covers what the earlier left beyond.
@@ -918,7 +918,7 @@ fn a_driver_that_lays_depth_images_apart_holds_no_depth_twin() {
         "no driver is measured to lay depth images apart"
     );
     for row in apart {
-        let gpu = (row.vendor.unwrap_or(APPLE), row.device.unwrap_or(0));
+        let gpu = (row.vendor.unwrap_or(APPLE), Some(row.device.unwrap_or(0)));
         let facts = among(MEASURED, Some(row.driver), gpu, row.first);
         assert!(
             facts.contains_key(&DENORMALS) && facts.contains_key(&OUTSIDE),
@@ -1068,4 +1068,67 @@ fn moltenvks_linear_attachment_features_are_left_out() {
         }
     }
     assert!(moltenvk >= 2, "the MoltenVK profiles are read");
+}
+
+/// A description taken as unmeasured (`DeviceDescription::assumed_unmeasured`) is another GPU of
+/// its driver at its release: on every committed profile its deviations, defects, Function storage
+/// and runtime facts are those of the same description with a `deviceID` no table names, and it is
+/// no measured identity. On the RTX 5080 Laptop GPU's measured identity that drops the deviations
+/// measured on that GPU and the RTX 3090 alone (`MetalHalfTexelWrites` among them), as the RTX 4080
+/// (`deviceID` 0x2704) at the same release takes none of them.
+#[test]
+fn an_assumed_unmeasured_identity_is_another_gpu_of_its_driver() {
+    use crate::device::driver_facts::{defects, deviations};
+    use crate::device::function_storage;
+    use crate::error::DriverDeviation;
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../metal2vulkan-validation/profiles");
+    let mut measured = 0;
+    for entry in std::fs::read_dir(&dir).expect("profiles") {
+        let path = entry.expect("entry").path();
+        if path.extension().is_none_or(|x| x != "json") {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path).expect("profile");
+        let desc = DeviceDescription::from_khronos_json(&text, None).expect("profile parses");
+        let stem = path.display();
+        let mut assumed = desc.clone();
+        assumed.assumed_unmeasured = true;
+        let mut other = desc.clone();
+        other.device_id ^= 0x8000_0000;
+        assert_eq!(assumed.measured_gpu(), None, "{stem}");
+        assert_eq!(
+            desc.measured_gpu(),
+            Some(desc.canonical_device_id()),
+            "{stem}"
+        );
+        assert!(!assumed.measured_identity(), "{stem}");
+        assert!(!other.measured_identity(), "{stem}");
+        assert_eq!(deviations(&assumed), deviations(&other), "{stem}");
+        assert_eq!(defects(&assumed), defects(&other), "{stem}");
+        assert_eq!(
+            function_storage::of(&assumed),
+            function_storage::of(&other),
+            "{stem}"
+        );
+        assert_eq!(assumed.driver_facts(), other.driver_facts(), "{stem}");
+        assert_eq!(
+            assumed.driver_facts_withheld(),
+            other.driver_facts_withheld(),
+            "{stem}"
+        );
+        measured += usize::from(desc.measured_identity());
+    }
+    assert!(measured > 0, "no committed profile is a measured identity");
+    let text = std::fs::read_to_string(dir.join("nvidia-rtx5080-laptop.json")).expect("5080");
+    let laptop = DeviceDescription::from_khronos_json(&text, None).expect("profile parses");
+    assert!(laptop.measured_identity());
+    assert!(deviations(&laptop).contains_key(&DriverDeviation::MetalHalfTexelWrites));
+    let mut assumed = laptop.clone();
+    assumed.assumed_unmeasured = true;
+    assert!(!deviations(&assumed).contains_key(&DriverDeviation::MetalHalfTexelWrites));
+    let mut ada = laptop.clone();
+    ada.device_id = 0x2704;
+    assert_eq!(deviations(&assumed), deviations(&ada));
+    assert_eq!(defects(&assumed), defects(&ada));
+    assert_eq!(assumed.driver_facts(), ada.driver_facts());
 }
