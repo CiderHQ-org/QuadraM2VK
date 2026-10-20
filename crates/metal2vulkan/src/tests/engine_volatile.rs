@@ -2,7 +2,7 @@
 //!
 //! A volatile access is the plain access whose every word load and store carries SPIR-V's
 //! `Volatile` memory operand: through buffer slots (word and sub-word leaves), the threadgroup
-//! arena, a typed alloca, the private arena, volatile `memcpy`, `memmove`, and `memset` (buffer
+//! arena, a typed threadgroup object, a typed alloca, the private arena, volatile `memcpy`, `memmove`, and `memset` (buffer
 //! and arena endpoints), a heap texture handle's resource id, and next to a coherent access under
 //! the Vulkan memory model. Each kernel passes L3 on every profile, keeps the function's memory
 //! model (`GLSL450` unless a coherent access selects Vulkan), emits exactly the loads and stores
@@ -347,42 +347,37 @@ fn halves(t: u32) -> [u32; 2] {
     [h(0) | (h(1) << 16), h(2) | (h(3) << 16)]
 }
 
-/// The corpus's threadgroup shapes: a `<4 x half>` stored volatile into the threadgroup arena and
+/// The corpus's threadgroup shapes: a `<4 x half>` stored volatile into a threadgroup array and
 /// read back volatile by a neighbour after a barrier, and volatile byte stores into shared words
-/// (the arena's sub-word atomics) read back as whole words.
+/// (the arena's sub-word atomics) read back as whole words. The `half` array is a typed
+/// `Workgroup` object (`memory::plan`), so each of its volatile accesses is one volatile load or
+/// store of the held vector; read back through a punned `<2 x i32>` instead, it stays in the arena,
+/// where each of the vector's words carries `Volatile`. Both forms answer the same words.
 #[test]
 fn volatile_threadgroup_accesses_are_exact() {
-    let text = kernel(
-        "threadgroup",
-        3,
-        "@tg = internal addrspace(3) global [32 x <4 x half>] undef, align 8\n\
-         @tb = internal addrspace(3) global [32 x i8] undef, align 4\n\
-         declare void @air.wg.barrier(i32, i32)",
-        r#"entry:
-  %i = zext i32 %t to i64
-  %s = getelementptr inbounds <4 x half>, ptr addrspace(1) %b1, i64 %i
-  %v = load volatile <4 x half>, ptr addrspace(1) %s, align 8
-  %g = getelementptr inbounds [32 x <4 x half>], ptr addrspace(3) @tg, i64 0, i64 %i
-  store volatile <4 x half> %v, ptr addrspace(3) %g, align 8
-  %c = getelementptr inbounds [32 x i8], ptr addrspace(3) @tb, i64 0, i64 %i
-  %byte = trunc i32 %t to i8
-  store volatile i8 %byte, ptr addrspace(3) %c, align 1
-  call void @air.wg.barrier(i32 2, i32 1)
-  %n = add i32 %t, 1
-  %m = and i32 %n, 31
-  %j = zext i32 %m to i64
-  %h = getelementptr inbounds [32 x <4 x half>], ptr addrspace(3) @tg, i64 0, i64 %j
-  %x = load volatile <4 x half>, ptr addrspace(3) %h, align 8
+    let halves_read = r#"  %x = load volatile <4 x half>, ptr addrspace(3) %h, align 8
   %d = getelementptr inbounds <4 x half>, ptr addrspace(1) %b0, i64 %i
   store <4 x half> %x, ptr addrspace(1) %d, align 8
-  %q = lshr i64 %i, 2
-  %wp = getelementptr inbounds i32, ptr addrspace(3) @tb, i64 %q
-  %w = load volatile i32, ptr addrspace(3) %wp, align 4
-  %o = getelementptr inbounds i32, ptr addrspace(1) %b2, i64 %i
-  store i32 %w, ptr addrspace(1) %o, align 4
-  ret void
-"#,
-    );
+"#;
+    let words_read = r#"  %x = load volatile <2 x i32>, ptr addrspace(3) %h, align 8
+  %d = getelementptr inbounds <2 x i32>, ptr addrspace(1) %b0, i64 %i
+  store <2 x i32> %x, ptr addrspace(1) %d, align 8
+"#;
+    // (name, the neighbour's read, whether the array is typed, the volatile accesses)
+    let forms = [
+        (
+            "threadgroup",
+            halves_read,
+            true,
+            Volatiles::of(&[(SB, 2), (WG, 2)], &[(WG, 1)]),
+        ),
+        (
+            "threadgroup_arena",
+            words_read,
+            false,
+            Volatiles::of(&[(SB, 2), (WG, 3)], &[(WG, 2)]),
+        ),
+    ];
     let inp: Vec<u32> = (0..THREADS).flat_map(halves).collect();
     let want0: Vec<u32> = (0..THREADS)
         .flat_map(|t| halves((t + 1) % THREADS))
@@ -398,12 +393,62 @@ fn volatile_threadgroup_accesses_are_exact() {
         inp,
         vec![0; THREADS as usize],
     ];
-    for (stem, plan, out) in run_everywhere("threadgroup", &text, &bufs, |_: &DeviceProfile| {
-        Volatiles::of(&[(SB, 2), (WG, 3)], &[(WG, 2)])
-    }) {
-        assert!(count(&plan, "access.threadgroup.store") >= 2, "{stem}");
-        assert_eq!(out[0], want0, "{stem}");
-        assert_eq!(out[2], want2, "{stem}");
+    for (name, read, typed, want) in forms {
+        let text = kernel(
+            name,
+            3,
+            "@tg = internal addrspace(3) global [32 x <4 x half>] undef, align 8\n\
+             @tb = internal addrspace(3) global [32 x i8] undef, align 4\n\
+             declare void @air.wg.barrier(i32, i32)",
+            &format!(
+                r#"entry:
+  %i = zext i32 %t to i64
+  %s = getelementptr inbounds <4 x half>, ptr addrspace(1) %b1, i64 %i
+  %v = load volatile <4 x half>, ptr addrspace(1) %s, align 8
+  %g = getelementptr inbounds [32 x <4 x half>], ptr addrspace(3) @tg, i64 0, i64 %i
+  store volatile <4 x half> %v, ptr addrspace(3) %g, align 8
+  %c = getelementptr inbounds [32 x i8], ptr addrspace(3) @tb, i64 0, i64 %i
+  %byte = trunc i32 %t to i8
+  store volatile i8 %byte, ptr addrspace(3) %c, align 1
+  call void @air.wg.barrier(i32 2, i32 1)
+  %n = add i32 %t, 1
+  %m = and i32 %n, 31
+  %j = zext i32 %m to i64
+  %h = getelementptr inbounds [32 x <4 x half>], ptr addrspace(3) @tg, i64 0, i64 %j
+{read}  %q = lshr i64 %i, 2
+  %wp = getelementptr inbounds i32, ptr addrspace(3) @tb, i64 %q
+  %w = load volatile i32, ptr addrspace(3) %wp, align 4
+  %o = getelementptr inbounds i32, ptr addrspace(1) %b2, i64 %i
+  store i32 %w, ptr addrspace(1) %o, align 4
+  ret void
+"#
+            ),
+        );
+        for (stem, plan, out) in
+            run_everywhere(name, &text, &bufs, |_: &DeviceProfile| want.clone())
+        {
+            let local = &plan.families.access.local;
+            assert_eq!(local.typed.len(), usize::from(typed), "{stem} {name}");
+            if typed {
+                assert_eq!(
+                    count(&plan, "access.threadgroup.typed_store"),
+                    1,
+                    "{stem} {name}"
+                );
+                assert_eq!(
+                    count(&plan, "access.threadgroup.typed_load"),
+                    1,
+                    "{stem} {name}"
+                );
+            } else {
+                assert!(
+                    count(&plan, "access.threadgroup.store") >= 2,
+                    "{stem} {name}"
+                );
+            }
+            assert_eq!(out[0], want0, "{stem} {name}");
+            assert_eq!(out[2], want2, "{stem} {name}");
+        }
     }
 }
 
