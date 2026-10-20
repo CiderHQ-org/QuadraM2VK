@@ -352,17 +352,19 @@ impl Spares {
         }
     }
 
-    /// A spare descriptor pool of `device`, reset, with room for one set of `needs`, the newest
-    /// such; `None` when there is none, or this thread is in a section.
+    /// A spare descriptor pool of `device`, reset, with room for one set of `needs` (and of at
+    /// most `most` descriptors, where given), the newest such; `None` when there is none, or this
+    /// thread is in a section.
     pub(super) fn descriptor_pool(
         &self,
         device: &DeviceShared,
         needs: &SetNeeds,
+        most: Option<u64>,
     ) -> Result<Option<DescriptorPool>, Error> {
         if exit_guard::in_section() {
             return Ok(None);
         }
-        let pool = take_descriptor_pool(&mut lock(&self.descriptor_pools), needs);
+        let pool = take_descriptor_pool(&mut lock(&self.descriptor_pools), needs, most);
         let Some(pool) = pool else {
             return Ok(None);
         };
@@ -449,12 +451,15 @@ pub(super) fn keep_command_pool(pools: &mut Vec<CommandPool>, pool: CommandPool)
 }
 
 /// The newest of the spare descriptor pools `pools` (oldest first) with room for one set of
-/// `needs`, taken out.
+/// `needs`, and of at most `most` descriptors where given, taken out.
 pub(super) fn take_descriptor_pool(
     pools: &mut VecDeque<DescriptorPool>,
     needs: &SetNeeds,
+    most: Option<u64>,
 ) -> Option<DescriptorPool> {
-    let at = pools.iter().rposition(|pool| pool.room.fits(needs))?;
+    let at = pools.iter().rposition(|pool| {
+        pool.room.fits(needs) && most.is_none_or(|most| pool.room.descriptors() <= most)
+    })?;
     pools.remove(at)
 }
 

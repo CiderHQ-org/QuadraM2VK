@@ -196,7 +196,8 @@ fn every_command_pool_given_back_is_kept() {
     assert!(pools.is_empty());
 }
 
-/// A set takes the newest spare descriptor pool with room for it, of its flags; past the bounds
+/// A set takes the newest spare descriptor pool with room for it, of its flags (a fitted arena's,
+/// one of at most the descriptors it would open); past the bounds
 /// the oldest spares go first, and a pool that alone holds more descriptors than the bound is not
 /// kept.
 #[test]
@@ -214,9 +215,14 @@ fn spare_descriptor_pools_are_bounded_and_taken_by_room() {
     );
     // Two storage buffers: pool 2 holds one in all (a pool's room is its totals), and pool 3 has
     // other flags.
-    let taken = take_descriptor_pool(&mut pools, &storage(2, plain)).expect("pool 1 fits");
+    // A fitted arena's bound: pool 1 holds 32 descriptors.
+    assert!(take_descriptor_pool(&mut pools, &storage(2, plain), Some(31)).is_none());
+    let taken = take_descriptor_pool(&mut pools, &storage(2, plain), Some(32)).expect("fits");
     assert_eq!(taken.raw, vk::DescriptorPool::from_raw(1));
-    assert!(take_descriptor_pool(&mut pools, &storage(4, plain)).is_none());
+    assert!(keep_descriptor_pool(&mut pools, taken).is_empty());
+    let taken = take_descriptor_pool(&mut pools, &storage(2, plain), None).expect("pool 1 fits");
+    assert_eq!(taken.raw, vk::DescriptorPool::from_raw(1));
+    assert!(take_descriptor_pool(&mut pools, &storage(4, plain), None).is_none());
     assert_eq!(pools.len(), 2);
 
     let mut pools = VecDeque::new();

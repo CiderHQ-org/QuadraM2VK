@@ -22,6 +22,11 @@
 //!   (`spares.rs`), whatever the size it was made with; a command buffer that completed gives its
 //!   pools back to the device's spares, and one that failed or was dropped unsubmitted releases
 //!   them.
+//! - **Fitted arenas.** The sets of the runtime's own kernels (`owned_kernel.rs`) come from an
+//!   arena of their own, which a command buffer or a resource holds as long as it holds the sets
+//!   and then gives back. It takes a spare only where the spare holds no more descriptors than the
+//!   pool it would open ([`DescriptorArena::fitted`]), so a texture that holds its sets for its
+//!   life holds no pool a command buffer of many draws grew.
 
 use super::error::{vulkan, Error};
 use super::spares::{release_in_section, DescriptorPool};
@@ -163,9 +168,22 @@ pub(crate) struct DescriptorArena {
     book: Book,
     pools: Vec<DescriptorPool>,
     device: Option<Device>,
+    /// Whether it takes only spares no larger than the pools it opens (the module docs).
+    fitted: bool,
 }
 
 impl DescriptorArena {
+    /// An arena that takes a spare only where the spare holds no more descriptors than the pool
+    /// it would open for the set (the module docs).
+    pub(crate) fn fitted() -> DescriptorArena {
+        DescriptorArena {
+            book: Book::default(),
+            pools: Vec::new(),
+            device: None,
+            fitted: true,
+        }
+    }
+
     /// One set of `layout`, whose needs are `needs` (not empty), from the newest pool with room
     /// for it, or a pool opened for it: a spare of the device's with room, else a new one.
     pub(crate) fn allocate(
@@ -179,7 +197,8 @@ impl DescriptorArena {
             Ok(at) => at,
             Err(sets) => {
                 let shared = device.shared();
-                let pool = match shared.spares.descriptor_pool(shared, needs)? {
+                let most = self.fitted.then(|| Room::of(needs, sets).descriptors());
+                let pool = match shared.spares.descriptor_pool(shared, needs, most)? {
                     Some(spare) => spare,
                     None => {
                         let sizes = needs.sizes(sets);
@@ -190,6 +209,7 @@ impl DescriptorArena {
                         // SAFETY: `info` is live for the call.
                         let raw_pool =
                             unsafe { raw.create_descriptor_pool(&info, None) }.map_err(vulkan)?;
+                        shared.counts.arena_pool_made();
                         DescriptorPool {
                             raw: raw_pool,
                             room: Room::of(needs, sets),

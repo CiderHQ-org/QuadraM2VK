@@ -40,6 +40,7 @@ use super::host_memory::{not_importable, run, Mapping};
 use super::no_copy_heaps::{shared, HEAP};
 use super::{buffer_with, read_buffer, Messages};
 use crate::air_library::AirLibrary;
+use metal2vulkan::device::VkFeature;
 use metal2vulkan::metal::{PixelFormat, TextureType, TextureUsage};
 use metal2vulkan_devtools::llvm_assemble;
 use metal2vulkan_runtime::{
@@ -409,6 +410,71 @@ fn a_host_heap_s_plain_texture_lies_in_metal_s_tiles() {
             HEAP_LAYOUTS.iter().all(|kind| !counted.contains_key(kind)),
             "{counted:?}"
         );
+    });
+}
+
+/// A texture made again in a heap over host pages, of a descriptor a texture of the device was
+/// made of before, makes no image to ask its plan's memory requirements where the device enables
+/// `maintenance4`, which fixes them by the image's creation parameters
+/// (`WorkCounts::requirement_images_made`), and neither does the size query of that descriptor;
+/// the first texture of another extent asks. Elsewhere each making asks as the first did. Each
+/// texture made again lies in Metal's tiles all the same: a blit reads the bytes it was made
+/// over, its answered size the first's.
+#[test]
+fn a_texture_made_again_asks_the_device_nothing_its_first_making_asked() {
+    on_device(|device, _| {
+        let queue = device.new_command_queue().unwrap();
+        let kept = device.enabled().features.contains(&VkFeature::Maintenance4);
+        let asked = |make: &mut dyn FnMut()| {
+            let before = device.work_counts().requirement_images_made;
+            make();
+            device.work_counts().requirement_images_made - before
+        };
+        let zero = vec![0u8; HEAP];
+        for plain in &plains()[2..4] {
+            let what = format!("{:?} {:?}", plain.format, plain.extent);
+            let mapping = Mapping::anonymous(HEAP);
+            let Some(heap) = heap_over(device, &mapping) else {
+                return;
+            };
+            let descriptor = plain.descriptor();
+            let len = plain.texels() * plain.unit as usize;
+            let mut answers = Vec::new();
+            let mut counts = Vec::new();
+            for seed in 0..3 {
+                let held = named(len, seed);
+                mapping.write(0, &plain.laid(&held, &zero));
+                let mut texture = None;
+                counts.push(asked(&mut || {
+                    texture = Some(heap.new_texture_at_offset(&descriptor, OFFSET).unwrap());
+                }));
+                let texture = texture.unwrap();
+                assert_eq!(
+                    blit_out(&queue, &texture, plain),
+                    held,
+                    "{what} {seed}: the bytes it was made over"
+                );
+                counts.push(asked(&mut || {
+                    answers.push(device.heap_texture_size_and_align(&descriptor).unwrap());
+                }));
+            }
+            drop(heap);
+            drop(mapping);
+            // Each extent's first making asks, the second's too.
+            assert!(counts[0] > 0, "{what}: the first making asks: {counts:?}");
+            match kept {
+                true => assert_eq!(counts[1..], [0; 5], "{what}: {counts:?}"),
+                false => assert!(
+                    counts.iter().step_by(2).all(|&n| n == counts[0]),
+                    "{what}: {counts:?}"
+                ),
+            }
+            assert!(
+                answers.iter().all(|answer| *answer == answers[0]),
+                "{answers:?}"
+            );
+            eprintln!("HEAPLAYOUT {what}: asked {counts:?}, kept {kept}");
+        }
     });
 }
 

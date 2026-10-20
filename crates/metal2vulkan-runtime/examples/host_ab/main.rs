@@ -192,7 +192,8 @@ fn child(side: &str, options: &Options) {
             eprintln!(
                 "runtime work counts: queue_submissions {} command_buffers_submitted {} \
                  pipeline_barriers {} draws {} dispatches {} variant_pipelines_made {} \
-                 device_memory_allocated {} host_pointer_imports_made {}",
+                 device_memory_allocated {} host_pointer_imports_made {} \
+                 requirement_images_made {} arena_pools_made {} owned_descriptor_pools {}",
                 c.queue_submissions,
                 c.command_buffers_submitted,
                 c.commands_replayed.cmd_pipeline_barrier,
@@ -201,6 +202,9 @@ fn child(side: &str, options: &Options) {
                 c.variant_pipelines_made,
                 c.device_memory_allocated,
                 c.host_pointer_imports_made,
+                c.requirement_images_made,
+                c.arena_pools_made,
+                c.owned_descriptor_pools,
             );
         }
         other => panic!("--side native|runtime, not {other}"),

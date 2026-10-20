@@ -10,19 +10,23 @@
 //!   kernel outlives every command that records it. The mipmap filter is one kernel per
 //!   `MipmapFilterKernel` a chain dispatches (a format's few steps; bounded by the formats), and
 //!   the index rewrite one per `RewriteProgram` and `RewritePhase` (closed enums of a few).
-//! - **Descriptor sets** ([`OwnedSets`]): one pool per command, holding one set per dispatch, each
-//!   written with the command's image views and buffer ranges; the command buffer retains it
-//!   until it completes (`WorkCounts::owned_descriptor_pools`). A kernel whose set 0 is a push
-//!   descriptor set's ([`OwnedKernel::pushed`]) takes no pool: each dispatch pushes its
+//! - **Descriptor sets** ([`OwnedSets`]): one set per dispatch of a command, each written with the
+//!   command's image views and buffer ranges, from a fitted arena of their own
+//!   (`descriptor_arena.rs`) that takes pools of the device's spares (`spares.rs`); the command
+//!   buffer, or the resource whose moves they are, holds them until it no longer uses them, and
+//!   their pools then go back to the device's spares, which reset a pool before it serves again
+//!   (`WorkCounts::owned_descriptor_pools`). So a pass's command, or a texture made, opens no pool
+//!   where a spare has room: on MoltenVK a pool made is a Metal buffer made. A kernel whose set 0
+//!   is a push descriptor set's ([`OwnedKernel::pushed`]) takes no pool: each dispatch pushes its
 //!   descriptors as it records ([`OwnedBinds`], which binds either way by that field alone).
 //!   Vulkan forbids a set from such a layout ("Each element of `pSetLayouts` must not have been
 //!   created with `VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT` set",
 //!   `VkDescriptorSetAllocateInfo`), so `OwnedSets` refuses its kernel (internal).
 
 use super::binding::{self, Info, SetWrite};
+use super::descriptor_arena::{DescriptorArena, SetNeeds};
 use super::device::lock;
 use super::error::{internal, vulkan, Error};
-use super::exit_guard;
 use super::release;
 use super::texture::decoded_twin::TwinDecode;
 use super::Device;
@@ -758,22 +762,37 @@ pub(super) struct OwnedSet {
     pub(super) buffers: Vec<(vk::Buffer, u64, u64)>,
 }
 
-/// The descriptor sets of one command's dispatches of one kernel, from a pool of their own.
+/// The descriptor sets of one command's dispatches of its kernels, from pools of the device's
+/// spares (the module docs).
 pub(super) struct OwnedSets {
-    device: Device,
-    pool: vk::DescriptorPool,
+    arena: DescriptorArena,
     pub(super) sets: Vec<vk::DescriptorSet>,
 }
 
 impl Drop for OwnedSets {
     fn drop(&mut self) {
-        // Once the process is exiting, the pool is left to its end (`exit_guard`).
-        let Some(_busy) = exit_guard::enter() else {
-            return;
-        };
-        // SAFETY: no pending command uses the sets (a command buffer retains them until it
-        // completes); the sets are freed with their pool.
-        unsafe { release::object(self.device.shared().vk(), self.pool) };
+        // No pending command uses the sets (a command buffer retains them until it completes):
+        // their pools go back to the device's spares, which reset a pool before it serves again.
+        self.arena.give_back();
+    }
+}
+
+impl OwnedKernel {
+    /// What one set of its set 0 takes from a pool: its sampled images, storage images and
+    /// storage buffers (`SetNeeds`, by raw type ascending, each count above 0).
+    fn set_needs(&self) -> SetNeeds {
+        let counts = [
+            (vk::DescriptorType::SAMPLED_IMAGE, self.images),
+            (vk::DescriptorType::STORAGE_IMAGE, self.storage_images),
+            (vk::DescriptorType::STORAGE_BUFFER, self.buffers),
+        ];
+        SetNeeds {
+            counts: (counts.into_iter())
+                .filter(|&(_, count)| count > 0)
+                .map(|(ty, count)| (ty.as_raw(), count))
+                .collect(),
+            flags: vk::DescriptorPoolCreateFlags::empty(),
+        }
     }
 }
 
@@ -820,45 +839,15 @@ impl OwnedSets {
         if kernels.iter().any(|kernel| kernel.pushed) {
             return Err(internal("owned sets of a kernel whose set 0 is pushed"));
         }
-        let total = |of: fn(&OwnedKernel) -> u32| {
-            kernels
-                .iter()
-                .try_fold(0u32, |n, kernel| n.checked_add(of(kernel)))
-                .ok_or_else(|| internal("too many owned descriptors"))
-        };
-        let (images, storage_images, buffers) = (
-            total(|k| k.images)?,
-            total(|k| k.storage_images)?,
-            total(|k| k.buffers)?,
-        );
-        // A pool size names at least one descriptor.
-        let sizes: Vec<vk::DescriptorPoolSize> = [
-            (vk::DescriptorType::SAMPLED_IMAGE, images),
-            (vk::DescriptorType::STORAGE_IMAGE, storage_images),
-            (vk::DescriptorType::STORAGE_BUFFER, buffers),
-        ]
-        .into_iter()
-        .filter(|&(_, n)| n > 0)
-        .map(|(ty, n)| vk::DescriptorPoolSize::default().ty(ty).descriptor_count(n))
-        .collect();
-        let info = vk::DescriptorPoolCreateInfo::default()
-            .max_sets(count)
-            .pool_sizes(&sizes);
-        // SAFETY: `info` and its array are live for the call.
-        let pool = unsafe { raw.create_descriptor_pool(&info, None) }.map_err(vulkan)?;
         device.shared().counts.owned_descriptor_pool();
         let mut owned = OwnedSets {
-            device: device.clone(),
-            pool,
-            sets: Vec::new(),
+            arena: DescriptorArena::fitted(),
+            sets: Vec::with_capacity(count as usize),
         };
-        let layouts: Vec<vk::DescriptorSetLayout> =
-            kernels.iter().map(|kernel| kernel.set_layout).collect();
-        let info = vk::DescriptorSetAllocateInfo::default()
-            .descriptor_pool(pool)
-            .set_layouts(&layouts);
-        // SAFETY: the pool holds `count` sets, each of its kernel's images and storage buffers.
-        owned.sets = unsafe { raw.allocate_descriptor_sets(&info) }.map_err(vulkan)?;
+        for kernel in kernels {
+            let set = (owned.arena).allocate(device, kernel.set_layout, &kernel.set_needs())?;
+            owned.sets.push(set);
+        }
         let image_info = |view: &vk::ImageView| {
             vk::DescriptorImageInfo::default()
                 .image_view(*view)

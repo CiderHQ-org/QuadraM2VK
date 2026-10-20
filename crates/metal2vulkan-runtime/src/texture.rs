@@ -155,6 +155,7 @@ pub(super) mod heap_two_planes;
 pub(crate) mod held_depth;
 pub(crate) mod host_copy;
 pub(super) mod kept_image;
+pub(super) mod requirements;
 #[cfg(unix)]
 mod rotation;
 mod shared;
@@ -208,6 +209,9 @@ pub(super) struct TextureState {
     /// The memory types a heap's buffer and its textures' images take, worked out at the first
     /// heap's (`texture/heap.rs`).
     pub(super) heap_types: std::sync::OnceLock<heap::HeapTypes>,
+    /// The memory requirements of the images heap textures' plans asked about, by their creation
+    /// parameters (`texture/requirements.rs`).
+    pub(super) requirements: Mutex<requirements::RequirementAnswers>,
     /// The fetched render targets waiting for their storage form (`texture/storage_form.rs`).
     storage_forms: storage_form::StorageForms,
     /// The new resources' first GPU work, which the device's next submission does
@@ -248,6 +252,9 @@ impl TextureState {
             #[cfg(unix)]
             modifier_features: Mutex::new(HashMap::new()),
             heap_types: std::sync::OnceLock::new(),
+            requirements: Mutex::new(requirements::RequirementAnswers::new(
+                description.has(VkFeature::Maintenance4),
+            )),
             storage_forms: storage_form::StorageForms::default(),
             // A batch holds the texture slots' writes in place of each registration waiting for
             // its place where the heap sets take writes while pending, the

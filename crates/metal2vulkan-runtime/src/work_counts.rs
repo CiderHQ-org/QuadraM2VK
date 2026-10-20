@@ -86,6 +86,8 @@ pub(crate) struct Counters {
     heap_slots_rewritten: AtomicU64,
     heap_slot_writes_deferred: AtomicU64,
     heap_textures_tiled: AtomicU64,
+    requirement_images_made: AtomicU64,
+    arena_pools_made: AtomicU64,
     heap_texture_lossless_layouts: AtomicU64,
     heap_texture_block_compressed_layouts: AtomicU64,
     heap_texture_untiled_layouts: AtomicU64,
@@ -1736,7 +1738,7 @@ impl Counters {
             .fetch_add(n as u64, Ordering::Relaxed);
     }
 
-    /// A command made a descriptor pool for its dispatches of one of the runtime's own kernels
+    /// A command allocated descriptor sets for its dispatches of the runtime's own kernels
     /// (`owned_kernel.rs`).
     pub(crate) fn owned_descriptor_pool(&self) {
         self.owned_descriptor_pools.fetch_add(1, Ordering::Relaxed);
@@ -1888,6 +1890,16 @@ impl Counters {
     /// (`texture/heap_tiled.rs`).
     pub(crate) fn heap_texture_tiled(&self) {
         self.heap_textures_tiled.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// An image was made to ask its memory requirements alone (`texture/requirements.rs`).
+    pub(crate) fn requirement_image_made(&self) {
+        self.requirement_images_made.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A descriptor arena made a pool, no spare having room (`descriptor_arena.rs`).
+    pub(crate) fn arena_pool_made(&self) {
+        self.arena_pools_made.fetch_add(1, Ordering::Relaxed);
     }
 
     /// A texture in a heap over host pages was met as laid out otherwise than Metal tiles it, as
@@ -2292,6 +2304,14 @@ pub struct WorkCounts {
     /// Textures made in heaps over host pages laid out as Metal tiles them, each a shadow of its
     /// elements in the heap's bytes (`texture/heap_tiled.rs`).
     pub heap_textures_tiled: u64,
+    /// The images heap textures' plans made only to ask their memory requirements, destroyed at
+    /// once: none for a plan and tiling asked before on a device that enables `maintenance4`,
+    /// which fixes the answer (`texture/requirements.rs`).
+    pub requirement_images_made: u64,
+    /// The descriptor pools the runtime's descriptor arenas made, where no spare of the device's
+    /// had room (`descriptor_arena.rs`): those of commands' set 0 and of the runtime's own
+    /// kernels' sets (`owned_kernel.rs`).
+    pub arena_pools_made: u64,
     /// Textures made in heaps over host pages that Metal keeps losslessly compressed
     /// (`Degradation::HeapTextureLosslessLayout`).
     pub heap_texture_lossless_layouts: u64,
@@ -3176,9 +3196,10 @@ pub struct WorkCounts {
     /// texture over the same bytes, or a view's shadow of the same image), counted as each
     /// encoder ends (not an indirect command buffer's segment): each copies its texels in apart.
     pub shadows_sharing_truth: u64,
-    /// The descriptor pools commands made for their dispatches of the runtime's own kernels
-    /// (`owned_kernel.rs`), one per command: none for a kernel whose set 0 is pushed, on a device
-    /// that pushes descriptor sets (`vkCmdPushDescriptorSet`): the rows copy's, and a shadowed
+    /// The commands that allocated descriptor sets for their dispatches of the runtime's own
+    /// kernels (`owned_kernel.rs`), one each, from pools of the device's spares (a pool is made
+    /// only where no spare has room): none for a kernel whose set 0 is pushed, on a device that
+    /// pushes descriptor sets (`vkCmdPushDescriptorSet`): the rows copy's, and a shadowed
     /// texture's copy back's and merges'.
     pub owned_descriptor_pools: u64,
     /// The texels the keeps among `shadow_copies` copy from a shadow into their merge's scratch:
@@ -3424,6 +3445,8 @@ impl Device {
             heap_slot_writes_deferred: counters.heap_slot_writes_deferred.load(Ordering::Relaxed),
             host_range_lookups: self.shared().aliases.range_lookups(),
             heap_textures_tiled: counters.heap_textures_tiled.load(Ordering::Relaxed),
+            requirement_images_made: counters.requirement_images_made.load(Ordering::Relaxed),
+            arena_pools_made: counters.arena_pools_made.load(Ordering::Relaxed),
             heap_texture_lossless_layouts: counters
                 .heap_texture_lossless_layouts
                 .load(Ordering::Relaxed),

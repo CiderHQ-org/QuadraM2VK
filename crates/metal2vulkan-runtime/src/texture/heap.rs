@@ -1613,7 +1613,9 @@ impl Device {
 
     /// The memory requirements of an image of `plan` (of Metal's `texture_type`) and `tiling`;
     /// `Unsupported` where the device makes no such image: for a linear one,
-    /// `HeapTextureTiling`, naming what the device's linear images lack.
+    /// `HeapTextureTiling`, naming what the device's linear images lack. The answer for an image
+    /// of the same plan and tiling asked before where Vulkan fixes it (`texture/requirements.rs`),
+    /// else that of an image made for the query (`WorkCounts::requirement_images_made`).
     fn planned_requirements(
         &self,
         plan: &ImagePlan,
@@ -1632,17 +1634,24 @@ impl Device {
         } else {
             check_image_limits(plan, texture_type, &limits).map_err(Error::Unsupported)?;
         }
+        let answers = &self.shared().textures.requirements;
+        if let Some(requirements) = lock(answers).answer(plan, tiling) {
+            return Ok(requirements);
+        }
         let raw_device = self.shared().vk();
         // SAFETY: the device is live and `info` (with its format list) valid and within the
         // device's limits for it.
         let raw = unsafe { crate::creation::image(raw_device, &info) }?;
+        self.shared().counts.requirement_image_made();
         // SAFETY: `raw` is a live image of this device, which nothing else uses: it is destroyed
         // right after the query, with no memory bound.
-        Ok(unsafe {
+        let requirements = unsafe {
             let requirements = raw_device.get_image_memory_requirements(raw);
             release::object(raw_device, raw);
             requirements
-        })
+        };
+        lock(answers).keep(plan, tiling, requirements);
+        Ok(requirements)
     }
 
     /// A texture of `descriptor` in `heap`: at `offset` of a placement heap, or where an
