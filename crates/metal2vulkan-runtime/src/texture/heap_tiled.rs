@@ -1157,6 +1157,12 @@ pub(crate) struct HeapTiledCopies {
 }
 
 impl HeapTiledCopies {
+    /// The tight buffer's copies to and from the image, one a level, each in the image's
+    /// aspects, level and slices.
+    pub(crate) fn regions(&self) -> &[vk::BufferImageCopy] {
+        &self.regions
+    }
+
     /// The kernel's levels of a texture of `layout` whose image's elements lie in the tight
     /// buffer as `planes` say (`heap_plane_layout`, one plane a level); `None` where a byte the
     /// moves name lies past `u32`, or the planes are not the levels'.

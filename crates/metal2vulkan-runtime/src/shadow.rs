@@ -466,6 +466,46 @@ impl ShadowCopies {
         self.cuts() && self.target().is_some()
     }
 
+    /// Whether a command that writes every texel of the boxes `covered` writes every texel the
+    /// shadow holds: a one-level, one-slice 2D texture's image over a buffer's bytes, laid out
+    /// in rows or in Metal's tiles of a heap's bytes (`heap_tiled.rs`), its one region inside one
+    /// of the boxes, of every aspect it holds. Such a shadow's copy back moves its texels alone,
+    /// never the bytes between them (the module's rules; a tiled one's staging starts as the
+    /// heap's bytes), so the copy back of what the command wrote moves only texels it wrote.
+    /// `false` for every other shadow.
+    pub(super) fn covered_by(&self, covered: &[Covered]) -> bool {
+        let (image, regions) = match &self.source {
+            ShadowSource::Bytes {
+                target: ShadowTarget::Image { image, regions, .. },
+                ..
+            } => (image, regions.as_slice()),
+            ShadowSource::Bytes {
+                target: ShadowTarget::Tiled { image, tiles, .. },
+                ..
+            } => (image, tiles.regions()),
+            _ => return false,
+        };
+        let ([region], UseRange::Image { levels, layers, .. }) = (regions, &self.shadow_range)
+        else {
+            return false;
+        };
+        let held = region.image_subresource;
+        let one = levels.len() == 1 && layers.len() == 1 && held.layer_count == 1;
+        one && covered.iter().any(|written| {
+            let at = written.subresource;
+            written.image == *image
+                && at.aspect_mask.contains(held.aspect_mask)
+                && at.mip_level == held.mip_level
+                && at.base_array_layer <= held.base_array_layer
+                && u64::from(held.base_array_layer)
+                    < u64::from(at.base_array_layer) + u64::from(at.layer_count)
+                && within(
+                    (region.image_offset, region.image_extent),
+                    (written.offset, written.extent),
+                )
+        })
+    }
+
     /// The texels the shadow holds: its every region's, every slice of each.
     pub(super) fn texels(&self) -> u64 {
         match &self.source {
@@ -1508,6 +1548,78 @@ pub(super) fn image_part_of(
     })
 }
 
+/// Whether the box `inner` (an offset and extent of texels) lies inside the box `outer`.
+fn within(
+    (offset, extent): (vk::Offset3D, vk::Extent3D),
+    (at, size): (vk::Offset3D, vk::Extent3D),
+) -> bool {
+    let axes = [
+        (offset.x, extent.width, at.x, size.width),
+        (offset.y, extent.height, at.y, size.height),
+        (offset.z, extent.depth, at.z, size.depth),
+    ];
+    axes.into_iter()
+        .all(|(start, length, outer, outer_length)| {
+            let (start, outer) = (i64::from(start), i64::from(outer));
+            outer <= start && start + i64::from(length) <= outer + i64::from(outer_length)
+        })
+}
+
+/// A box of an image's texels a command writes every texel of: a blit's copy region into the
+/// image, in its aspects, level and slices.
+#[derive(Clone, Copy)]
+pub(super) struct Covered {
+    pub(super) image: vk::Image,
+    pub(super) subresource: vk::ImageSubresourceLayers,
+    pub(super) offset: vk::Offset3D,
+    pub(super) extent: vk::Extent3D,
+}
+
+impl Covered {
+    /// The boxes `regions` of copies into `image` write.
+    pub(super) fn into_image(image: vk::Image, regions: &[vk::BufferImageCopy]) -> Vec<Covered> {
+        (regions.iter())
+            .map(|region| Covered {
+                image,
+                subresource: region.image_subresource,
+                offset: region.image_offset,
+                extent: region.image_extent,
+            })
+            .collect()
+    }
+
+    /// The boxes `regions` of copies into the image `to` write.
+    pub(super) fn into_image_from_image(to: vk::Image, regions: &[vk::ImageCopy]) -> Vec<Covered> {
+        (regions.iter())
+            .map(|region| Covered {
+                image: to,
+                subresource: region.dst_subresource,
+                offset: region.dst_offset,
+                extent: region.extent,
+            })
+            .collect()
+    }
+}
+
+/// Mark the shadows of `shadows` a command with `uses` replaces ([`ShadowUse::overwrites`]): it
+/// writes through the shadow, reads none of its texels, and writes every texel it holds inside
+/// the boxes `covered` ([`ShadowCopies::covered_by`]), so it takes no copy in and no keep, and
+/// its copy back moves the texels it wrote.
+pub(super) fn overwritten(
+    shadows: &mut [ShadowUse],
+    uses: &[Use<ResourceKey>],
+    covered: &[Covered],
+) {
+    if covered.is_empty() {
+        return;
+    }
+    for shadow in shadows {
+        let key = shadow.copies.shadow_key;
+        let reads = (uses.iter()).any(|used| used.key == key && !used.read.is_empty());
+        shadow.overwrites = shadow.writes && !reads && shadow.copies.covered_by(covered);
+    }
+}
+
 /// Whether a command writes through `shadow` without replacing every texel, where it merges back
 /// ([`ShadowCopies::merges_back`]): kept and merged back (the module's rules), as a command that
 /// writes them two ways too ([`two_ways`]) is.
@@ -1720,10 +1832,11 @@ pub(super) struct ShadowUse {
     pub(super) writes: bool,
     /// The command replaces every texel of the texture before it reads any (a render pass's
     /// attachment that clears each of its aspects over the whole of a one-level, one-slice
-    /// texture): it takes no copy in. A render encoder's one pass is its only command with
-    /// attachments, so nothing earlier in the encoder wrote through the texture; where the pass
-    /// does not store it either, nothing is copied back, and the buffer keeps its bytes, Metal's
-    /// answer (a Metal probe on the M3 Max and an M4).
+    /// texture; a blit's copy into every texel of such a texture over a buffer's bytes,
+    /// [`overwritten`]): it takes no copy in and no keep. A render encoder's one pass is its only
+    /// command with attachments, so nothing earlier in the encoder wrote through the texture;
+    /// where the pass does not store it either, nothing is copied back, and the buffer keeps its
+    /// bytes, Metal's answer (a Metal probe on the M3 Max and an M4).
     pub(super) overwrites: bool,
     /// The command leaves the texture's texels in place, but where it overwrites them: a render
     /// pass that draws nothing, of an attachment it renders. A rotated texture's copy in then

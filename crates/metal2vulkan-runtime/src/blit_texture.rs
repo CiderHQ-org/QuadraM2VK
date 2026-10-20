@@ -79,6 +79,7 @@ use super::row_copies::RowCopies;
 use super::sample_copy;
 use super::sample_interleave;
 use super::sample_planes;
+use super::shadow::Covered;
 use super::sparse::emulated::{Scrub, Written};
 use super::texture::{buffer_image_copy, texture_aspects, texture_region, twin_copy, Texture};
 use super::tracker::Access;
@@ -628,7 +629,7 @@ impl BlitCommandEncoder {
                     self.command_in_reading(
                         copy.stages,
                         &copy.uses,
-                        &fresh_reads,
+                        (&fresh_reads, &[]),
                         |device, raw| {
                             // SAFETY: as in `copy_from_buffer_to_texture`'s emulation.
                             unsafe { copy.record(device, raw) };
@@ -795,9 +796,15 @@ impl BlitCommandEncoder {
         } else {
             writes(buffer, plan.span.clone())
         };
+        // A copy into the texture writes every texel of its regions.
+        let covered = match into_texture {
+            true => Covered::into_image(image, &regions),
+            false => Vec::new(),
+        };
         match plan.staging {
             None => {
-                self.command_reading(&[buffer_use, image_use], &fresh_reads, |device, raw| {
+                let boxes = (&fresh_reads[..], &covered[..]);
+                self.command_reading(&[buffer_use, image_use], boxes, |device, raw| {
                     // SAFETY: the encoder's command buffer is recording; the buffer and the image
                     // are live and retained until it completes, the image is in the `GENERAL`
                     // layout, and the regions lie in both (checked by the plan).
@@ -904,10 +911,11 @@ impl BlitCommandEncoder {
                         writes_by(&scratch, whole.clone(), rows.write()),
                     ];
                     self.command_in(rows.stages(), &uses, move_rows)?;
-                    self.command(&[reads(&scratch, whole), image_use], copy_image)?;
+                    let uses = [reads(&scratch, whole), image_use];
+                    self.command_reading(&uses, (&[], &covered), copy_image)?;
                 } else {
                     let uses = [image_use, writes(&scratch, whole.clone())];
-                    self.command_reading(&uses, &fresh_reads, copy_image)?;
+                    self.command_reading(&uses, (&fresh_reads, &[]), copy_image)?;
                     let uses = [
                         reads_by(&scratch, whole, rows.read()),
                         writes_by(buffer, span, rows.write()),
@@ -1331,7 +1339,7 @@ impl BlitCommandEncoder {
             self.command_in_reading(
                 sample_planes::BITS_COPY_STAGES,
                 &copy.uses,
-                &fresh_reads,
+                (&fresh_reads, &[]),
                 |device, raw| {
                     // SAFETY: the encoder's command buffer is recording outside a render pass; the
                     // images and the copy's planes and objects are live until it completes
@@ -1376,7 +1384,7 @@ impl BlitCommandEncoder {
                 destination.degrade_depth_denormals(call, to.aspect, false, true);
                 planned.push(copy);
             }
-            self.command_in_reading(stages, &uses, &fresh_reads, |device, raw| {
+            self.command_in_reading(stages, &uses, (&fresh_reads, &[]), |device, raw| {
                 for (from, to, regions) in &direct {
                     // SAFETY: the encoder's command buffer is recording; the images are live and
                     // retained until it completes, in the `GENERAL` layout, and the regions lie
@@ -1439,7 +1447,7 @@ impl BlitCommandEncoder {
                 }
                 reads_source.push(writes(&scratch, 0..length));
                 let (image, out_of) = (from[0].image, &staging.out_of);
-                self.command_reading(&reads_source, &fresh_reads, |device, raw| {
+                self.command_reading(&reads_source, (&fresh_reads, &[]), |device, raw| {
                     // SAFETY: the encoder's command buffer is recording; the image and the
                     // scratch buffer are live and retained until it completes, the image is in
                     // the `GENERAL` layout, and the regions lie in both.
@@ -1463,7 +1471,15 @@ impl BlitCommandEncoder {
             }
             None => None,
         };
-        self.command_reading(&uses, &fresh_reads, |device, raw| {
+        // The copies write every texel of their regions.
+        let mut covered = Vec::new();
+        for (_, to, regions) in &direct {
+            covered.extend(Covered::into_image_from_image(*to, regions));
+        }
+        for (to, regions) in staging.iter().flat_map(|staging| &staging.into) {
+            covered.extend(Covered::into_image(to.image, regions));
+        }
+        self.command_reading(&uses, (&fresh_reads, &covered), |device, raw| {
             // SAFETY: the encoder's command buffer is recording; the images (and the scratch
             // buffer) are live and retained until it completes, in the `GENERAL` layout, the
             // regions lie in both (checked by the plan), and regions of one image do not overlap.

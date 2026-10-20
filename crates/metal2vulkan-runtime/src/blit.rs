@@ -13,11 +13,13 @@
 //!   value ([`fill_word`]) in a small pattern buffer of the encoder. The words go as
 //!   `word_fill.rs` records them: `vkCmdFillBuffer`, or transfers on a driver measured to compile
 //!   its fill per command pool.
-//! - **Heap shadows** (`shadow.rs`). A heap's depth or stencil texture held as a shadow of the
-//!   heap's bytes is an image to a blit: a command that uses its image copies it in from the bytes
-//!   first where the encoder has not, and what a command writes through it is copied back by
-//!   `shadow.rs`'s rules, as the encoder ends at the latest. A blit writes one destination, so none
-//!   writes such a texture's bytes two ways.
+//! - **Heap shadows** (`shadow.rs`). A heap's texture held as a shadow of the heap's bytes (a
+//!   depth or stencil texture, or one of a heap over host pages, `texture/heap.rs`) is an image to
+//!   a blit: a command that uses its image copies it in from the bytes first where the encoder has
+//!   not, and what a command writes through it is copied back by `shadow.rs`'s rules, as the
+//!   encoder ends at the latest. A copy that writes every texel of a one-level, one-slice such
+//!   texture replaces them (`shadow::overwritten`): it takes no copy in and no keep. A blit writes
+//!   one destination, so none writes such a texture's bytes two ways.
 
 use super::buffer::Buffer;
 use super::command_buffer::CommandBuffer;
@@ -27,7 +29,7 @@ use super::error::{invalid, Error, Problem};
 use super::fresh_unwritten::FreshRead;
 use super::replay::{BlitCall, CallLog, Replay, Resource};
 use super::resource::{ResourceKey, ResourceRef};
-use super::shadow::{self, ShadowCopies};
+use super::shadow::{self, Covered, ShadowCopies};
 use super::texture::Texture;
 use super::tracker::{Access, Use, UseRange};
 use super::used_resources::EncoderKind;
@@ -257,31 +259,35 @@ impl BlitCommandEncoder {
         uses: &[Use<ResourceKey>],
         record: impl FnOnce(&Vk, vk::CommandBuffer),
     ) -> Result<(), Error> {
-        self.command_in_reading(stages, uses, &[], record)
+        self.command_in_reading(stages, uses, (&[], &[]), record)
     }
 
     /// [`command`](Self::command) of a blit command that reads the boxes `reads` of its source
     /// texture (`FreshUnwritten::reads`): a new texture's unwritten pattern is announced only
-    /// where a box reaches it (`EncoderCore::command_named`).
+    /// where a box reaches it (`EncoderCore::command_named`); and writes every texel of the
+    /// boxes `covered` of its destination's image: a heap shadow whose every texel they cover
+    /// takes no copy in and no keep, its copy back moving what the command wrote
+    /// (`shadow::overwritten`).
     pub(super) fn command_reading(
         &mut self,
         uses: &[Use<ResourceKey>],
-        reads: &[FreshRead],
+        boxes: (&[FreshRead], &[Covered]),
         record: impl FnOnce(&Vk, vk::CommandBuffer),
     ) -> Result<(), Error> {
-        self.command_in_reading(TRANSFER, uses, reads, record)
+        self.command_in_reading(TRANSFER, uses, boxes, record)
     }
 
-    /// [`command_in`](Self::command_in) reading the boxes `reads`
-    /// ([`command_reading`](Self::command_reading)).
+    /// [`command_in`](Self::command_in) reading the boxes `reads` and writing every texel of
+    /// the boxes `covered` ([`command_reading`](Self::command_reading)).
     pub(super) fn command_in_reading(
         &mut self,
         stages: vk::PipelineStageFlags2,
         uses: &[Use<ResourceKey>],
-        reads: &[FreshRead],
+        (reads, covered): (&[FreshRead], &[Covered]),
         record: impl FnOnce(&Vk, vk::CommandBuffer),
     ) -> Result<(), Error> {
-        let shadows = shadow::copies_used(self.shadows.iter(), uses);
+        let mut shadows = shadow::copies_used(self.shadows.iter(), uses);
+        shadow::overwritten(&mut shadows, uses, covered);
         let copies = self.core.plan_shadows(&shadows, uses)?;
         self.core.shadow_copies(&copies);
         self.core.command_named(stages, uses, reads, record);
