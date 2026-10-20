@@ -37,8 +37,10 @@
 //!   argument buffer there, the two forms measured alike, and the other form cost each state a
 //!   second `VkPipeline` at its first draw. The plans' specializations and the dispatches'
 //!   regions take the residual form before any key is looked up (`RenderVariant::plan`,
-//!   `Variant::keyed_regions`), and no bind offset splits a shape (`argument_table::AtBindViews`):
-//!   a state's creation makes the one pipeline its draws at every bind offset take.
+//!   `Variant::keyed_regions`): a state's creation makes the one pipeline its draws at every bind
+//!   offset take. The shapes and plans stay every device's (`argument_table::AtBindViews`): a bind
+//!   offset the view base alignment divides still makes a shape and a plan of its own, whose key
+//!   alone takes the residual form.
 //! - **Only GPU time moves.** Until the key's making lands, its draws' uniform reads take the
 //!   residual: on ANV, loads where the key's form has pushed constants. `WorkCounts` counts the
 //!   draws and dispatches recorded so (`residual_form_draws`) and the makings begun so
