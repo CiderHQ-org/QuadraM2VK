@@ -65,6 +65,7 @@ use super::memory::Memory;
 use super::memory_log::MemoryLog;
 use super::mipmap_scratch::MipmapScratch;
 use super::owned_kernel::OwnedKernels;
+use super::recycle::{self, BufferMaking, Recycler};
 use super::render_state::{depth_bias_command, DepthBiasCommand, DepthRanges};
 use super::render_target::KeptRenderPasses;
 use super::resource_ids::{ResourceIds, SamplerIdReads};
@@ -203,6 +204,9 @@ pub(super) struct DeviceShared {
     /// nothing of the device (`freed_memory.rs`).
     pub(super) memory: Arc<Mutex<Memory>>,
     pub(super) addresses: Mutex<AddressSpace>,
+    /// Parked buffers of the runtime's own memory, and the makings of the live recyclable ones
+    /// (`recycle.rs`).
+    pub(super) recycled_buffers: Mutex<Recycler<vk::Buffer, BufferMaking>>,
     /// The resource IDs of textures and sampler states (`resource_ids.rs`).
     pub(super) resource_ids: Arc<Mutex<ResourceIds>>,
     /// The `uniqueIdentifier`s the device allocates from 2^36 (`unique_identifier.rs`).
@@ -638,6 +642,7 @@ impl Drop for DeviceShared {
         }
         lock(&self.textures.neutrals).destroy(self.vk(), &mut lock(&self.memory));
         lock(&self.textures.recycled).destroy(self.vk(), &mut lock(&self.memory));
+        lock(&self.recycled_buffers).destroy(self.vk(), &mut lock(&self.memory));
         // No framebuffer is left to hold a placeholder (`storage_placeholder.rs`).
         lock(&self.textures.storage_placeholders).destroy(self.vk(), &mut lock(&self.memory));
         // The zeros new resources' first work copied from (`texture/first_move.rs`).
@@ -1548,6 +1553,7 @@ impl Device {
             upload_alignment,
             memory: Arc::new(Mutex::new(memory)),
             addresses: Mutex::new(AddressSpace::new()),
+            recycled_buffers: Mutex::new(Recycler::new(recycle::BUFFERS)),
             resource_ids,
             identifiers: Arc::default(),
             sampler_ids,

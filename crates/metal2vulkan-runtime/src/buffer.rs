@@ -23,6 +23,7 @@
 use super::address::{AddressPlacement, GpuAddress, Held, KeptToken, Place, RangeToken};
 use super::attributes::ResourceAttributes;
 use super::buffer_texture::TexelViews;
+use super::churn_counts::Recycled;
 use super::degradation::Degradation;
 use super::device::{lock, DeviceShared};
 use super::error::{internal, invalid, nil, vulkan, Error, Problem};
@@ -36,6 +37,7 @@ use super::host_residency::{Again, Residency};
 use super::memory::{Mapped, MemoryClass, Placement, BLOCK_BYTES};
 use super::program_objects::ProgramObject;
 use super::rebind::{ImportHold, Unexact};
+use super::recycle::{self, BufferMaking};
 use super::resource::{Identity, ObjectId, ResourceKey};
 use super::texture::first_move::Filled;
 use super::values::{CpuCacheMode, HazardTrackingMode, ResourceOptions, StorageMode};
@@ -49,6 +51,7 @@ use std::ops::Range;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, Weak};
+use std::time::Instant;
 
 /// A Metal buffer (`MTLBuffer`). Cheap to clone (a retain); `Send + Sync`. Two handles are equal
 /// when they are the same buffer.
@@ -479,8 +482,9 @@ pub(super) enum MemoryHold {
 
 /// The pages a buffer of its own lies in for good: its `VkBuffer` and its placement. Held by the
 /// buffer, and by each command buffer whose resident set lists them until it completed
-/// (`live_buffers.rs`): the last lets go, which destroys the `VkBuffer` (unless it is the
-/// caller's, `Owner::Vulkan`) and frees the placement.
+/// (`live_buffers.rs`): the last lets go, which parks the `VkBuffer` and its placement for the
+/// next buffer of the same making where the recycler noted them (`recycle.rs`), else destroys the
+/// `VkBuffer` (unless it is the caller's, `Owner::Vulkan`) and frees the placement.
 pub(super) struct FixedPages {
     device: Device,
     pages: Pages,
@@ -496,14 +500,29 @@ impl Drop for FixedPages {
             return;
         };
         let shared = self.device.shared();
-        if self.owned {
-            // SAFETY: no pending command buffer uses the pages: one whose commands used the
-            // buffer holds it, and one whose resident set lists them holds them, until it
-            // completed.
-            unsafe { release::object(shared.vk(), self.pages.raw) };
+        // No pending command buffer uses the pages: one whose commands used the buffer holds it,
+        // and one whose resident set lists them holds them, until it completed.
+        let placement = &self.pages.memory.placement;
+        let parked = match self.owned {
+            true => (lock(&shared.recycled_buffers))
+                .park(self.pages.raw, placement.handed_over(), Instant::now())
+                .ok(),
+            false => None,
+        };
+        match parked {
+            Some(gone) => {
+                shared.counts.churn.parked(Recycled::Buffer);
+                self.device.let_go_parked_buffers(gone);
+            }
+            None => {
+                if self.owned {
+                    // SAFETY: as above.
+                    unsafe { release::object(shared.vk(), self.pages.raw) };
+                }
+                // The caller's `VkBuffer`'s placement returns nothing.
+                lock(&shared.memory).free(shared.vk(), placement);
+            }
         }
-        // The caller's `VkBuffer`'s placement returns nothing.
-        lock(&shared.memory).free(shared.vk(), &self.pages.memory.placement);
         drop(busy);
     }
 }
@@ -1891,7 +1910,8 @@ impl Device {
     }
 
     /// [`zeroed_buffer`](Device::zeroed_buffer)'s buffer before its bytes are set to zero: its
-    /// bytes are its memory's as placed.
+    /// bytes are its memory's as placed. A buffer not of a heap is a parked one of the same making
+    /// where the recycler holds one, and is noted as one it may park as it goes (`recycle.rs`).
     fn placed_new_buffer(
         &self,
         call: &'static str,
@@ -1926,24 +1946,46 @@ impl Device {
                 .size(size)
                 .usage(usage(false)),
         );
-        let made = (|| {
-            // SAFETY: the device is live and `info` valid.
-            let raw = unsafe { raw_device.create_buffer(&info, None) }.map_err(vulkan)?;
-            shared.counts.buffer_made(info.usage);
-            let placed = if of_heap {
-                self.place_heap_buffer(raw, length, class, placement)
-            } else {
-                self.place_buffer(raw, length, class, placement)
-            };
-            match placed {
-                Ok(placed) => Ok((raw, placed)),
-                Err(error) => {
-                    // SAFETY: the buffer is unused.
-                    unsafe { release::object(raw_device, raw) };
-                    Err(error)
+        // A heap's own buffer lies where its textures can too, and is never parked.
+        let making = (!of_heap).then_some(BufferMaking { size, class });
+        let taken = making.and_then(|making| self.recycled_buffer(&making));
+        let made = match taken {
+            Some((raw, memory)) => {
+                // Its range of the address space is a new one, as a new buffer's.
+                let address = lock(&shared.addresses).place(placement, length);
+                match address {
+                    Ok(address) => Ok((raw, (memory, address))),
+                    Err(error) => {
+                        lock(&shared.recycled_buffers).forget(raw);
+                        recycle::destroy(raw_device, &mut lock(&shared.memory), [(raw, memory)]);
+                        Err(error)
+                    }
                 }
             }
-        })();
+            None => (|| {
+                // SAFETY: the device is live and `info` valid.
+                let raw = unsafe { raw_device.create_buffer(&info, None) }.map_err(vulkan)?;
+                shared.counts.buffer_made(info.usage);
+                let placed = if of_heap {
+                    self.place_heap_buffer(raw, length, class, placement)
+                } else {
+                    self.place_buffer(raw, length, class, placement)
+                };
+                match placed {
+                    Ok(placed) => {
+                        if let Some(making) = making {
+                            lock(&shared.recycled_buffers).made(raw, making);
+                        }
+                        Ok((raw, placed))
+                    }
+                    Err(error) => {
+                        // SAFETY: the buffer is unused.
+                        unsafe { release::object(raw_device, raw) };
+                        Err(error)
+                    }
+                }
+            })(),
+        };
         // On failure the host copy, unused, goes with `mirror` (`Mirror`'s drop).
         let (raw, (placement, (address, reserved))) = made?;
         Ok(self.buffer_of(BufferParts {
@@ -1963,6 +2005,27 @@ impl Device {
             #[cfg(unix)]
             again: None,
         }))
+    }
+
+    /// A parked buffer of `making` (`recycle.rs`), now live, where the recycler holds one.
+    fn recycled_buffer(&self, making: &BufferMaking) -> Option<(vk::Buffer, Placement)> {
+        let shared = self.shared();
+        let (taken, gone) = lock(&shared.recycled_buffers).take(making, Instant::now());
+        self.let_go_parked_buffers(gone);
+        if taken.is_some() {
+            shared.counts.churn.taken(Recycled::Buffer);
+        }
+        taken
+    }
+
+    /// Destroy the parked buffers the recycler let go of, `gone`, and free their memory.
+    fn let_go_parked_buffers(&self, gone: recycle::Gone<vk::Buffer>) {
+        if gone.is_empty() {
+            return;
+        }
+        let shared = self.shared();
+        shared.counts.churn.evicted(Recycled::Buffer, gone.len());
+        recycle::destroy(shared.vk(), &mut lock(&shared.memory), gone);
     }
 
     /// A `Managed` buffer's host copy of `size` bytes (its padded length) on a device without

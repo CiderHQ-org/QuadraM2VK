@@ -1,4 +1,4 @@
-//! Recycled images (`texture/recycle.rs`), on the device the GPU cfg selects.
+//! Recycled images and buffers (`recycle.rs`), on the device the GPU cfg selects.
 //!
 //! - **A new texture reads what a new one reads.** A `Private` `BGRA8Unorm` render target, cleared
 //!   to a colour and released, then a texture of the same descriptor: it takes the parked image
@@ -10,17 +10,26 @@
 //! - **Each frame's textures, recycled.** Eight such textures made, cleared and released each of
 //!   sixty frames take parked images from the second frame on: no image made after the first
 //!   frame's, and none parked past the bounds.
+//! - **A recycled buffer reads zero.** A `Private` and a `Shared` buffer, filled with a byte and
+//!   released, then a buffer of the same length and options: it takes the parked buffer
+//!   (`buffers_recycled`) and reads zero, as every new Metal buffer does (native Metal on the M3
+//!   Max under macOS 27.0.1 read zero from `Shared` and `Private` buffers made right after one of
+//!   the same length was filled and released: the inplace-surface probe's `fresh` mode).
+//! - **Each frame's buffers, recycled.** Eight `Private` buffers made, filled and released each of
+//!   sixty frames take parked buffers from the second frame on.
 
 use super::blit_holds::{Scratch, WAIT};
 use crate::{
-    BlitOption, ClearColor, CommandBufferStatus, CommandQueue, Device, DeviceKind, DeviceOptions,
-    LoadAction, Origin, RenderPassDescriptor, ResourceOptions, ShaderCacheOptions, Size,
-    StoreAction, Texture, TextureDescriptor,
+    BlitOption, Buffer, ClearColor, CommandBufferStatus, CommandQueue, Device, DeviceKind,
+    DeviceOptions, LoadAction, Origin, RenderPassDescriptor, ResourceOptions, ShaderCacheOptions,
+    Size, StoreAction, Texture, TextureDescriptor,
 };
 use metal2vulkan::metal::{PixelFormat, TextureUsage};
 use std::path::Path;
 
 const SIDE: u64 = 64;
+/// A recycled buffer's length: not a multiple of 16, so its padding is recycled too.
+const LENGTH: u64 = 4100;
 
 /// The device the cfg selects, its shader cache in `cache`.
 fn device(cache: &Path) -> Device {
@@ -165,6 +174,123 @@ fn each_frames_textures_take_parked_images() {
     assert_eq!(
         recycled,
         (FRAMES - 1) * TEXTURES,
+        "every frame after the first recycles"
+    );
+}
+
+/// Fill `buffer` with `value`, waited for.
+fn fill(queue: &CommandQueue, buffer: &Buffer, value: u8) {
+    let command_buffer = queue.command_buffer().unwrap();
+    let mut blit = command_buffer.blit_command_encoder().unwrap();
+    blit.fill_buffer(buffer, 0..buffer.length(), value).unwrap();
+    blit.end_encoding().unwrap();
+    command_buffer.commit().unwrap();
+    assert!(command_buffer.wait_until_completed_for(WAIT).is_ok());
+    assert_eq!(command_buffer.status(), CommandBufferStatus::Completed);
+}
+
+/// The bytes of `buffer`, copied into `out` (`Shared`, at least as long), waited for.
+fn read_buffer(queue: &CommandQueue, buffer: &Buffer, out: &Buffer) -> Vec<u8> {
+    let length = buffer.length();
+    let command_buffer = queue.command_buffer().unwrap();
+    let mut blit = command_buffer.blit_command_encoder().unwrap();
+    blit.copy_from_buffer_to_buffer(buffer, 0, out, 0, length)
+        .unwrap();
+    blit.end_encoding().unwrap();
+    command_buffer.commit().unwrap();
+    assert!(command_buffer.wait_until_completed_for(WAIT).is_ok());
+    // SAFETY: the shared buffer's bytes, which no command uses now.
+    unsafe { std::slice::from_raw_parts(out.contents().unwrap().as_ptr(), length as usize) }
+        .to_vec()
+}
+
+/// Wait until the device parked `count` buffers in all.
+fn buffers_parked_at_least(device: &Device, count: u64) {
+    let until = std::time::Instant::now() + WAIT;
+    while device.work_counts().object_churn.buffers_parked < count {
+        assert!(std::time::Instant::now() < until, "the buffers were parked");
+        std::thread::yield_now();
+    }
+}
+
+#[test]
+fn a_recycled_buffer_reads_zero() {
+    let scratch = Scratch::new("recycle-buffer");
+    let device = device(&scratch.0);
+    let queue = device.new_command_queue().unwrap();
+    // Live for the whole test, and longer than the recycled buffers: never parked here.
+    let out = device
+        .new_buffer(2 * LENGTH, ResourceOptions::shared())
+        .unwrap();
+    // Each recycled buffer, kept: one parked as the next options' first goes would answer that
+    // wait.
+    let mut kept = Vec::new();
+    for options in [ResourceOptions::private(), ResourceOptions::shared()] {
+        let first = device.new_buffer(LENGTH, options).unwrap();
+        fill(&queue, &first, 0xab);
+        assert!(
+            read_buffer(&queue, &first, &out).iter().all(|&b| b == 0xab),
+            "the fill wrote every byte"
+        );
+        let before = device.work_counts().object_churn;
+        drop(first);
+        buffers_parked_at_least(&device, before.buffers_parked + 1);
+        let second = device.new_buffer(LENGTH, options).unwrap();
+        let after = device.work_counts().object_churn;
+        assert_eq!(
+            after.buffers_recycled - before.buffers_recycled,
+            1,
+            "the second buffer took the first one's parked buffer ({options:?})"
+        );
+        if let Some(contents) = second.contents() {
+            // SAFETY: the shared buffer's bytes, which no command uses yet.
+            let bytes = unsafe { std::slice::from_raw_parts(contents.as_ptr(), LENGTH as usize) };
+            assert!(bytes.iter().all(|&b| b == 0), "its contents read zero");
+        }
+        assert!(
+            read_buffer(&queue, &second, &out).iter().all(|&b| b == 0),
+            "the recycled buffer reads zero, not the old bytes ({options:?})"
+        );
+        kept.push(second);
+    }
+}
+
+#[test]
+fn each_frames_buffers_take_parked_buffers() {
+    let scratch = Scratch::new("recycle-buffer-frames");
+    let device = device(&scratch.0);
+    let queue = device.new_command_queue().unwrap();
+    const FRAMES: u64 = 60;
+    const BUFFERS: u64 = 8;
+    let start = device.work_counts().object_churn;
+    for frame in 1..=FRAMES {
+        let buffers: Vec<Buffer> = (0..BUFFERS)
+            .map(|_| {
+                device
+                    .new_buffer(64 << 10, ResourceOptions::private())
+                    .unwrap()
+            })
+            .collect();
+        for buffer in &buffers {
+            fill(&queue, buffer, 0x5a);
+        }
+        drop(buffers);
+        // The buffers go as their command buffers' holds do, which a completion may let go of
+        // after the wait returned.
+        buffers_parked_at_least(&device, start.buffers_parked + frame * BUFFERS);
+    }
+    let end = device.work_counts().object_churn;
+    let recycled = end.buffers_recycled - start.buffers_recycled;
+    eprintln!(
+        "RECYCLE: {FRAMES} frames of {BUFFERS} buffers: {recycled} buffers recycled, {} parked, \
+         {} evicted, {} destroyed in the process",
+        end.buffers_parked - start.buffers_parked,
+        end.buffers_evicted - start.buffers_evicted,
+        end.vk_buffers_destroyed - start.vk_buffers_destroyed
+    );
+    assert_eq!(
+        recycled,
+        (FRAMES - 1) * BUFFERS,
         "every frame after the first recycles"
     );
 }

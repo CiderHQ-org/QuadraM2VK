@@ -61,7 +61,7 @@ use super::attributes::PurgeableState;
 use super::binding_view::{binding_view, texture_facts, views_as, VkView};
 use super::buffer::{Buffer, CallerMemory, HostPages, MemoryHold, NotedTexture};
 use super::buffer_texture::{Texels, TexelsHome};
-use super::churn_counts::Owned;
+use super::churn_counts::{Owned, Recycled};
 use super::clear_value;
 use super::color_resolve::KeptResolves;
 use super::command_buffer::CommandBuffer;
@@ -93,6 +93,7 @@ use super::neutral::Neutrals;
 use super::pvrtc::{
     cpu_order_of_rows, holds_blocks, image_block_extent, image_region, is_pvrtc, rows_of_cpu_order,
 };
+use super::recycle::{self, ImageMaking, Recycler};
 use super::resource::{Identity, ObjectId, ResourceKey};
 use super::resource_ids::{Holder, IdHold, IdPlacement, IdSpace, ResourceId};
 use super::shadow::ShadowCopies;
@@ -159,7 +160,6 @@ pub(crate) mod host_copy;
 pub(super) mod kept_image;
 pub(super) mod requirements;
 #[cfg(unix)]
-pub(crate) mod recycle;
 mod rotation;
 mod shared;
 pub(super) mod signed_depth;
@@ -195,8 +195,8 @@ pub(super) struct TextureState {
     pub(super) mipmaps: Mutex<MipmapChecks>,
     /// The neutral images and samplers bindings take where nothing is bound (`neutral.rs`).
     pub(super) neutrals: Mutex<Neutrals>,
-    /// Parked images, and the makings of the live recyclable ones (`texture/recycle.rs`).
-    pub(super) recycled: Mutex<recycle::Recycler>,
+    /// Parked images, and the makings of the live recyclable ones (`recycle.rs`).
+    pub(super) recycled: Mutex<Recycler<vk::Image, ImageMaking>>,
     /// The placeholder images of the colors a render pass instance leaves out of its subpass for
     /// the pixel interlock (`storage_placeholder.rs`).
     pub(super) storage_placeholders: Mutex<Placeholders>,
@@ -251,7 +251,7 @@ impl TextureState {
             ),
             mipmaps: Mutex::new(MipmapChecks::new()),
             neutrals: Mutex::new(Neutrals::default()),
-            recycled: Mutex::new(recycle::Recycler::default()),
+            recycled: Mutex::new(Recycler::new(recycle::IMAGES)),
             storage_placeholders: Mutex::new(Placeholders::default()),
             usage_answers: Mutex::new(UsageAnswers::default()),
             format_answers: Mutex::new(HashMap::new()),
@@ -1197,7 +1197,7 @@ impl Drop for Image {
             }
         }
         // An image the recycler noted goes to it, its memory with it, unless it is no longer the
-        // image of its making alone (`texture/recycle.rs`).
+        // image of its making alone (`recycle.rs`).
         let shareable = matches!(
             self.owner,
             Owner::Runtime {
@@ -1229,7 +1229,7 @@ impl Drop for Image {
         };
         match parked {
             Some(gone) => {
-                shared.counts.churn.image_parked();
+                shared.counts.churn.parked(Recycled::Image);
                 self.device.let_go_parked(gone);
             }
             None => {
@@ -2745,7 +2745,7 @@ impl Device {
     }
 
     /// [`placed_image`](Self::placed_image)'s image, or a parked image of the same making
-    /// (`texture/recycle.rs`), noted as one the recycler may park as it goes.
+    /// (`recycle.rs`), noted as one the recycler may park as it goes.
     fn recycled_image(
         &self,
         plan: &ImagePlan,
@@ -2754,7 +2754,7 @@ impl Device {
         sharing: Sharing<'_>,
     ) -> Result<(vk::Image, Placement), Error> {
         let shared = self.shared();
-        let making = recycle::Making {
+        let making = ImageMaking {
             plan: plan.clone(),
             texture_type,
             class,
@@ -2763,7 +2763,7 @@ impl Device {
         let (taken, gone) = lock(&shared.textures.recycled).take(&making, Instant::now());
         self.let_go_parked(gone);
         if let Some(taken) = taken {
-            shared.counts.churn.image_recycled();
+            shared.counts.churn.taken(Recycled::Image);
             return Ok(taken);
         }
         let (raw, placement) = self.placed_image(plan, texture_type, class, sharing)?;
@@ -2772,12 +2772,12 @@ impl Device {
     }
 
     /// Destroy the parked images the recycler let go of, `gone`.
-    fn let_go_parked(&self, gone: recycle::Gone) {
+    fn let_go_parked(&self, gone: recycle::Gone<vk::Image>) {
         if gone.is_empty() {
             return;
         }
         let shared = self.shared();
-        shared.counts.churn.images_evicted(gone.len());
+        shared.counts.churn.evicted(Recycled::Image, gone.len());
         recycle::destroy(shared.vk(), &mut lock(&shared.memory), gone);
     }
 

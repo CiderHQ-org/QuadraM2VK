@@ -160,6 +160,7 @@ mod rate_mapped_pass;
 mod reader_sizes;
 mod rebind;
 mod recorder;
+mod recycle;
 mod release;
 mod render;
 mod render_pass;

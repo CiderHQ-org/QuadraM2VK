@@ -66,8 +66,8 @@
 //!   `newBufferWithBytesNoCopy:` of 1 MiB and 64 MiB, and a 1024x1024 `RGBA8Unorm` `Shared`
 //!   texture's `replaceRegion` and `getBytes`.
 //! - `churn`: each frame makes eight 1280x800 `Private` render targets, clears and releases them,
-//!   the same size each frame (`same`) or one of 64 widths in turn (`varied`)
-//!   (`workloads::churn`).
+//!   the same size each frame (`same`) or one of 64 widths in turn (`varied`); and sixteen 64-KiB
+//!   buffers, filled and released (`buffers`) (`workloads::churn`).
 //!
 //! Options: `--rounds N` (3), `--draws N` (2000), `--timed N` (30), `--latency N` (200),
 //! `--heavy-iterations N` (64), `--heavy-runs N` (15), `--many-draws N` (6000), `--scratch DIR`

@@ -1122,12 +1122,17 @@ pub fn many_draws<G: Gpu>(g: &G, library: &G::Library, sizes: &Sizes) {
 
 /// The textures each frame of the `churn` workload makes.
 const CHURNED: usize = 8;
+/// The buffers each frame of the `churn` workload's `buffers` makes, and their length.
+const CHURNED_BUFFERS: usize = 16;
+const CHURNED_LENGTH: usize = 64 << 10;
 
 /// Churn: each frame makes eight 1280x800 `BGRA8Unorm` `Private` render targets, clears each in a
 /// render pass of one command buffer, waits for it and releases them, as a window server's frame
 /// makes and releases its textures. `same`: every frame's textures are of the same size; `varied`:
 /// each frame's are a pixel wider than the frame before's, over 64 widths, so no texture's making
-/// meets one of its shape released within the last 64 frames. Per frame: the time from the first
+/// meets one of its shape released within the last 64 frames. `buffers`: each frame makes sixteen
+/// 64-KiB buffers, fills each in a blit of one command buffer, waits for it and releases them, as
+/// the staging and scratch buffers a frame's copies make. Per frame: the time from the first
 /// making to the wait's return, and the process's CPU time.
 pub fn churn<G: Gpu>(g: &G, sizes: &Sizes) {
     let frames = sizes.timed.max(60);
@@ -1158,4 +1163,27 @@ pub fn churn<G: Gpu>(g: &G, sizes: &Sizes) {
         emit("churn", &format!("{name}_frame"), "ms", &mut frame);
         emit("churn", &format!("{name}_cpu"), "ms", &mut cpu);
     }
+    let (mut frame, mut cpu) = (vec![], vec![]);
+    for i in 0..frames + 5 {
+        g.pool(|| {
+            let (t, c) = (Instant::now(), process_cpu());
+            let buffers: Vec<G::Buffer> = (0..CHURNED_BUFFERS)
+                .map(|_| g.buffer(CHURNED_LENGTH))
+                .collect();
+            let command_buffer = g.command_buffer();
+            for buffer in &buffers {
+                g.fill(&command_buffer, buffer, CHURNED_LENGTH);
+            }
+            g.commit(&command_buffer);
+            g.wait(&command_buffer);
+            drop(command_buffer);
+            drop(buffers);
+            if i >= 5 {
+                frame.push(ms(t.elapsed()));
+                cpu.push(ms(process_cpu() - c));
+            }
+        });
+    }
+    emit("churn", "buffers_frame", "ms", &mut frame);
+    emit("churn", "buffers_cpu", "ms", &mut cpu);
 }

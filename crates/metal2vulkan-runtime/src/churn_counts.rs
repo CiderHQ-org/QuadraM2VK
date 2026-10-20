@@ -69,6 +69,13 @@ pub(crate) enum Owned {
     TextureTexels = 8,
 }
 
+/// What a recycler parks (`recycle.rs`).
+#[derive(Clone, Copy)]
+pub(crate) enum Recycled {
+    Image = 0,
+    Buffer = 1,
+}
+
 /// Who planned a keep ([`ShadowKeeps`]).
 #[derive(Clone, Copy)]
 pub(crate) enum KeepBy {
@@ -81,9 +88,9 @@ pub(crate) enum KeepBy {
 #[derive(Default)]
 pub(crate) struct ChurnCounters {
     owned: [AtomicU64; 9],
-    /// Images a making took from the recycler, parked there, and let go of past its bounds
-    /// (`texture/recycle.rs`).
-    recycled: [AtomicU64; 3],
+    /// By [`Recycled`]: the objects a making took from a recycler, parked there, and let go of
+    /// past its bounds (`recycle.rs`).
+    recycled: [[AtomicU64; 3]; 2],
     /// No-copy buffers that imported their pages where a live import holds them all.
     imports_inside_live: AtomicU64,
     /// By [`KeepBy`], then cut or whole: the keeps, then their texels.
@@ -101,19 +108,19 @@ impl ChurnCounters {
         self.imports_inside_live.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// A making took a parked image.
-    pub(crate) fn image_recycled(&self) {
-        self.recycled[0].fetch_add(1, Ordering::Relaxed);
+    /// A making took a parked object of `what`.
+    pub(crate) fn taken(&self, what: Recycled) {
+        self.recycled[what as usize][0].fetch_add(1, Ordering::Relaxed);
     }
 
-    /// An image went to the recycler.
-    pub(crate) fn image_parked(&self) {
-        self.recycled[1].fetch_add(1, Ordering::Relaxed);
+    /// An object of `what` went to its recycler.
+    pub(crate) fn parked(&self, what: Recycled) {
+        self.recycled[what as usize][1].fetch_add(1, Ordering::Relaxed);
     }
 
-    /// `count` parked images went, past the recycler's bounds.
-    pub(crate) fn images_evicted(&self, count: usize) {
-        self.recycled[2].fetch_add(count as u64, Ordering::Relaxed);
+    /// `count` parked objects of `what` went, past their recycler's bounds.
+    pub(crate) fn evicted(&self, what: Recycled, count: usize) {
+        self.recycled[what as usize][2].fetch_add(count as u64, Ordering::Relaxed);
     }
 
     /// A keep planned `by`, cut to a rectangle or not, of `texels`.
@@ -129,6 +136,8 @@ impl ChurnCounters {
         let owned = |o: Owned| self.owned[o as usize].load(Ordering::Relaxed);
         let vk = |r: VkRelease| VK_RELEASES[r as usize].load(Ordering::Relaxed);
         let keep = |by: KeepBy, at: usize| self.keeps[by as usize][at].load(Ordering::Relaxed);
+        let recycled =
+            |what: Recycled, at: usize| self.recycled[what as usize][at].load(Ordering::Relaxed);
         (
             ObjectChurn {
                 vk_images_destroyed: vk(VkRelease::Image),
@@ -144,9 +153,12 @@ impl ChurnCounters {
                 textures_shadow: owned(Owned::TextureShadow),
                 textures_alias: owned(Owned::TextureAlias),
                 textures_texels: owned(Owned::TextureTexels),
-                images_recycled: self.recycled[0].load(Ordering::Relaxed),
-                images_parked: self.recycled[1].load(Ordering::Relaxed),
-                images_evicted: self.recycled[2].load(Ordering::Relaxed),
+                images_recycled: recycled(Recycled::Image, 0),
+                images_parked: recycled(Recycled::Image, 1),
+                images_evicted: recycled(Recycled::Image, 2),
+                buffers_recycled: recycled(Recycled::Buffer, 0),
+                buffers_parked: recycled(Recycled::Buffer, 1),
+                buffers_evicted: recycled(Recycled::Buffer, 2),
                 imports_inside_live: self.imports_inside_live.load(Ordering::Relaxed),
                 release_sites: RELEASE_SITES.read(),
             },
@@ -199,12 +211,18 @@ pub struct ObjectChurn {
     pub textures_alias: u64,
     /// Textures over buffers' bytes as texels.
     pub textures_texels: u64,
-    /// Images a making took from the recycler, rather than making one (`texture/recycle.rs`).
+    /// Images a making took from the recycler, rather than making one (`recycle.rs`).
     pub images_recycled: u64,
     /// Images that went to the recycler as their textures went, rather than being destroyed.
     pub images_parked: u64,
     /// Parked images destroyed past the recycler's bounds.
     pub images_evicted: u64,
+    /// The runtime's buffers a making took from the recycler, rather than making one.
+    pub buffers_recycled: u64,
+    /// Buffers that went to the recycler as their last holder went, rather than being destroyed.
+    pub buffers_parked: u64,
+    /// Parked buffers destroyed past the recycler's bounds.
+    pub buffers_evicted: u64,
     /// No-copy buffers that imported their pages where a live import of another no-copy buffer
     /// held all of them (`host_aliases.rs`): imports a buffer could have lain in, at an offset.
     pub imports_inside_live: u64,
