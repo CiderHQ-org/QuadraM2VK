@@ -514,7 +514,7 @@ fn compare(device: &Device) -> Vec<Outcome> {
                 for (source, out) in results {
                     let name = format!("{fname}_{source}_{lname}_{aname}");
                     let bytes: Vec<u8> = out.iter().flat_map(|v| v.to_le_bytes()).collect();
-                    let hash = format!("{:x}", Sha256::digest(&bytes));
+                    let hash = crate::hash::hex_encode(Sha256::digest(&bytes));
                     let metal = metal.get(name.as_str()) == Some(&hash.as_str());
                     // The cells that differ from the `norm` control, which Metal answered alike
                     // but where a constexpr sampler clamps to zero.

@@ -1,5 +1,6 @@
 use sha2::{Digest, Sha256};
 use std::fs::File;
+use std::io::Read;
 use std::path::Path;
 
 pub fn sha256_bytes(bytes: &[u8]) -> String {
@@ -11,7 +12,16 @@ pub fn sha256_bytes(bytes: &[u8]) -> String {
 pub fn sha256_file(path: &Path) -> std::io::Result<String> {
     let mut file = File::open(path)?;
     let mut hasher = Sha256::new();
-    std::io::copy(&mut file, &mut hasher)?;
+    // sha2 0.11's hashers implement no `io::Write`: the file in chunks.
+    let mut chunk = vec![0u8; 1 << 16];
+    loop {
+        match file.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(read) => hasher.update(&chunk[..read]),
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(error),
+        }
+    }
     Ok(hex_encode(hasher.finalize()))
 }
 

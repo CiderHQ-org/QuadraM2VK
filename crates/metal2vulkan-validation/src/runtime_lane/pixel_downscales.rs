@@ -490,7 +490,7 @@ fn compare(device: &Device, size: Size) -> Vec<Outcome> {
         )
     };
     let (slot, argument) = (make(false, Through::Runtime), make(true, Through::Argument));
-    let hash = |bytes: &[u8]| format!("{:x}", Sha256::digest(bytes));
+    let hash = |bytes: &[u8]| crate::hash::hex_encode(Sha256::digest(bytes));
     let known = METAL
         .iter()
         .find(|(at, _)| *at == (tw, th))

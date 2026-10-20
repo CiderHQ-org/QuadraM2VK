@@ -1789,7 +1789,7 @@ fn run(args: &[String]) -> Result<(), Failure> {
         match draw_once(&setup, &inputs) {
             Ok(Drawn { bytes, images }) => {
                 write(&dir.join(format!("run-{r}.bin")), &bytes)?;
-                let digest = format!("{:x}", Sha256::digest(&bytes));
+                let digest = metal2vulkan_validation::hash::hex_encode(Sha256::digest(&bytes));
                 let column = images_column(&images);
                 if images.iter().any(|(_, flags)| !flags.is_empty()) {
                     eprintln!(

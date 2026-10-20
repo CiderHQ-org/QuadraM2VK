@@ -1819,7 +1819,7 @@ entry:
                 .collect::<Vec<_>>();
             let mut hash = Sha256::new();
             crate::build_support::hash_files(&mut hash, validation, &files);
-            format!("{:x}", hash.finalize())
+            crate::hash::hex_encode(hash.finalize())
         };
         assert_eq!(
             product(&crate_root.join("..")),

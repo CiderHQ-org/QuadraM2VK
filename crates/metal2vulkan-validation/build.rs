@@ -24,8 +24,8 @@ fn main() {
     let mut validation_hash = Sha256::new();
     hash_files(&mut validation_hash, &validation, &crate_files(&validation));
     println!(
-        "cargo:rustc-env=METAL2VULKAN_VALIDATION_FINGERPRINT={:x}",
-        validation_hash.finalize()
+        "cargo:rustc-env=METAL2VULKAN_VALIDATION_FINGERPRINT={}",
+        hex(&validation_hash.finalize())
     );
 
     // Authoring-capability classification (`triage::ANALYZER_ABI`) reads exactly these files of
@@ -84,8 +84,8 @@ fn main() {
         classifier_inputs.join(":")
     );
     println!(
-        "cargo:rustc-env=METAL2VULKAN_CLASSIFIER_FINGERPRINT={:x}",
-        classifier_hash.finalize()
+        "cargo:rustc-env=METAL2VULKAN_CLASSIFIER_FINGERPRINT={}",
+        hex(&classifier_hash.finalize())
     );
 
     // The product's runtime: the modules that act on a compiled pipeline after the compile, whose
@@ -198,8 +198,8 @@ fn main() {
         runtime_inputs.join(":")
     );
     println!(
-        "cargo:rustc-env=METAL2VULKAN_RUNTIME_FINGERPRINT={:x}",
-        runtime_hash.finalize()
+        "cargo:rustc-env=METAL2VULKAN_RUNTIME_FINGERPRINT={}",
+        hex(&runtime_hash.finalize())
     );
 }
 
@@ -254,4 +254,9 @@ fn runtime_files(product: &Path, relative: &Path, walk: Walk, output: &mut Vec<S
             output.push(path.to_string_lossy().replace('\\', "/"));
         }
     }
+}
+
+/// `bytes` as lowercase hex, two digits a byte: the form of every digest string here.
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }

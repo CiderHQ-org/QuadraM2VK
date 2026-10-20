@@ -24,8 +24,8 @@ fn main() {
     }
     println!("cargo:rerun-if-changed=src");
     println!(
-        "cargo:rustc-env=M2V_RUNTIME_SOURCE_ID={:x}",
-        hash.finalize()
+        "cargo:rustc-env=M2V_RUNTIME_SOURCE_ID={}",
+        hex(&hash.finalize())
     );
 }
 
@@ -40,4 +40,9 @@ fn collect(directory: &Path, output: &mut Vec<PathBuf>) {
             output.push(path);
         }
     }
+}
+
+/// `bytes` as lowercase hex, two digits a byte: the form of every digest string here.
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }

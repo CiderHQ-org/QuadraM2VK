@@ -8,5 +8,13 @@ fn main() {
     // (`build_support::product_inputs`).
     use sha2::Digest;
     let hash = build_support::product_hash(std::path::Path::new("."));
-    println!("cargo:rustc-env=M2V_SOURCE_DIGEST={:x}", hash.finalize());
+    println!(
+        "cargo:rustc-env=M2V_SOURCE_DIGEST={}",
+        hex(&hash.finalize())
+    );
+}
+
+/// `bytes` as lowercase hex, two digits a byte: the form of every digest string here.
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }

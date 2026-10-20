@@ -21,7 +21,7 @@ pub fn product_fingerprint(crates: &Path) -> String {
     let mut hash = product_hash(&crates.join("metal2vulkan"));
     hash_files(&mut hash, crates, &runtime_crate_files(crates));
     hash_files(&mut hash, crates, &devtools_files(crates));
-    format!("{:x}", hash.finalize())
+    hex(&hash.finalize())
 }
 
 /// The runtime crate's manifest, build script, and the files its module tree compiles or reads
@@ -59,4 +59,9 @@ pub fn collect_files(directory: &Path, output: &mut Vec<PathBuf>) {
             output.push(path);
         }
     }
+}
+
+/// `bytes` as lowercase hex, two digits a byte: the form of every digest string here.
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }

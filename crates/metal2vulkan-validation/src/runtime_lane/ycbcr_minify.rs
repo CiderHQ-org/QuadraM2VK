@@ -439,7 +439,7 @@ fn draw(device: &Device, texture: &Texture, state: &SamplerState) -> Vec<u8> {
 
 /// `bytes`' SHA-256, in hex.
 fn hash(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    crate::hash::hex_encode(Sha256::digest(bytes))
 }
 
 /// Each output's verdict against Metal's hash: `None` where Metal's is not recorded.

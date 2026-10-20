@@ -17,7 +17,7 @@ fn write(root: &Path, path: &str, text: &str) {
 }
 
 fn fingerprint(root: &Path) -> String {
-    format!("{:x}", product_hash(root).finalize())
+    crate::hash::hex_encode(product_hash(root).finalize())
 }
 
 fn files(root: &Path) -> BTreeSet<PathBuf> {

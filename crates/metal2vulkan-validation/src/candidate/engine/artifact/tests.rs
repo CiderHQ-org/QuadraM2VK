@@ -115,7 +115,7 @@ fn the_runtime_sources_are_the_committed_ones() {
         .collect::<Vec<_>>();
     let mut hash = Sha256::new();
     crate::build_support::hash_files(&mut hash, &product, &files);
-    let now = format!("{:x}", hash.finalize());
+    let now = crate::hash::hex_encode(hash.finalize());
     assert_eq!(
         now,
         env!("METAL2VULKAN_RUNTIME_FINGERPRINT"),
