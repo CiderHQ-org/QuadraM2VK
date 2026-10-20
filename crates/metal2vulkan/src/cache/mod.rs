@@ -70,7 +70,7 @@ pub const SEMANTICS_VERSION: u32 = 1805;
 /// re-typed in an encoded type, its `codec` body or its `envelope`. A variant removed while its tag
 /// stays unused needs no bump: an entry holding it fails to decode, which is a miss. The commit that
 /// bumps it says what changed; this comment keeps no history.
-pub const ARTIFACT_FORMAT_VERSION: u32 = 433;
+pub const ARTIFACT_FORMAT_VERSION: u32 = 434;
 
 /// The version of what this crate's runtime does with a compiled pipeline: instantiating a binding
 /// plan (`BindingPlan::instantiate_*`: descriptor ranges, push bytes, root, argument, and handle
@@ -231,11 +231,13 @@ pub struct VariantKey {
     /// `PushField::ReplayRegionAddress`. The plan of a pipeline compiled under it states it.
     #[cfg_attr(feature = "serde", serde(default))]
     pub flat_grid: bool,
-    /// The kernel is a device-replay variant (`LoweringInputs::replay_bindings`): every buffer it
-    /// reads is at its device address in the slot table a replay's preprocess writes for its
-    /// command, so `BindingPlan::instantiate_replay` instantiates its plan, which does not state
-    /// the key. The runtime compiles one with `flat_grid` per pipeline state an execution of
-    /// commands a kernel writes may name, to run it on the GPU alone.
+    /// The kernel, or the render pipeline's vertex and fragment functions, are a device-replay
+    /// variant (`LoweringInputs::replay_bindings`): every buffer they read is at its device
+    /// address in the slot table a replay's preprocess writes for its command, so
+    /// `BindingPlan::instantiate_replay` instantiates a compute plan, which does not state the
+    /// key. The runtime compiles a kernel's with `flat_grid` per pipeline state an execution of
+    /// commands a kernel writes may name, to run it on the GPU alone; and a render pipeline's for
+    /// the state an execution of GPU-written draws inherits, its draws' buffers the records'.
     #[cfg_attr(feature = "serde", serde(default))]
     pub replay_bindings: bool,
     /// The render pipeline draws each vertex amplification as a draw of its own
@@ -580,7 +582,13 @@ impl VariantKey {
             self.emulated_simdgroups && stage == crate::pipeline::sym::Stage::Kernel;
         out.flat_grid = self.flat_grid && stage == crate::pipeline::sym::Stage::Kernel;
         out.folded_groups = self.folded_groups && stage == crate::pipeline::sym::Stage::Kernel;
-        out.replay_bindings = self.replay_bindings && stage == crate::pipeline::sym::Stage::Kernel;
+        out.replay_bindings = self.replay_bindings
+            && matches!(
+                stage,
+                crate::pipeline::sym::Stage::Kernel
+                    | crate::pipeline::sym::Stage::Vertex
+                    | crate::pipeline::sym::Stage::Fragment
+            );
         out.dropped_vertex_layer =
             self.dropped_vertex_layer && stage == crate::pipeline::sym::Stage::Vertex;
         out.amplification_draws = self

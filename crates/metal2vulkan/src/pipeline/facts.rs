@@ -412,6 +412,11 @@ pub enum RuntimeFact {
     /// `PushField::ReplayRegionAddress`, which a preprocess writes beside the dispatch's group
     /// counts, folded within the device's limits. Its plans state the variant.
     FoldedGroups,
+    /// The vertex or fragment function was compiled under `VariantKey::replay_bindings`
+    /// (`LoweringInputs::replay_bindings`): every buffer it reads is in the slot table at its
+    /// stage's `PushField::RootTableAddress`, which a draw replay's preprocess writes per
+    /// replayed command (`bind::draw_replay_preprocess`). Its plans state the variant.
+    ReplayBindings,
     /// The `stage` function may read an argument its pipeline's function constants removed (a
     /// texture's read, sample, gather, query, or atomic, or a sample through a removed sampler),
     /// a read Metal gives no value. Where one runs, the function takes zero for it and sets

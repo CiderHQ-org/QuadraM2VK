@@ -254,6 +254,10 @@ pub use rate_map::{
     RateMapRegion, RateMapRegions, RegionError, RegionLimits, UnpinnedCompile, MAX_SCREEN_EXTENT,
 };
 pub use replay::{
+    draw_replay_module, draw_replay_preprocess, DrawReplay, DrawReplayLayout, DrawReplayModule,
+    DrawReplayPreprocess, DRAW_ARGUMENT_BYTES, MAX_DRAW_REPLAY_TYPES,
+};
+pub use replay::{
     flat_dispatch_module, replay_preprocess, replay_preprocess_generated, replay_preprocess_module,
     FlatArguments, FlatDispatchModule, FlatIndirect, GeneratedLayout, GeneratedRefusal,
     GeneratedReplay, GeneratedVariant, ReplayExecution, ReplayLayout, ReplayPreprocess,

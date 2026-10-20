@@ -2430,6 +2430,11 @@ fn plan(p: &RenderPipeline, device: &Device, shape: &BindShape) -> Result<Bindin
     variant.dropped_vertex_layer = dropped_vertex_layer;
     variant.amplification_draws = amplification_draws;
     variant.viewport_compensation = viewport_compensation;
+    // A pipeline compiled for a draw replay's bindings states its variant.
+    variant.replay_bindings = p
+        .dependencies
+        .iter()
+        .any(|d| d.fact == RuntimeFact::ReplayBindings);
     // The pipeline compiled under other zeroed or dropped colors (or none) is the other variant.
     let other_colors = compiled_zeroed != zeroed_colors
         || compiled_dropped != dropped_colors

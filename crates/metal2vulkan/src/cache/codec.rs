@@ -1179,6 +1179,7 @@ codec_enum! {
         AmplificationDraws { layered, viewports },
         ViewportCompensation { depth, point_guard, mirrors, vertex_clamp },
         FoldedGroups,
+        ReplayBindings,
         AbsentArgumentRead { stage },
         SrgbDeviceDecode { slot },
         ZeroedColor { color, format },

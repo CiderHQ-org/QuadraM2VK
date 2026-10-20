@@ -570,6 +570,14 @@ surface! {
         enum GeneratedRefusal N;
         struct GeneratedReplay N;
         struct GeneratedVariant N;
+        fn draw_replay_module;
+        fn draw_replay_preprocess;
+        struct DrawReplay N;
+        struct DrawReplayLayout N;
+        struct DrawReplayModule N;
+        struct DrawReplayPreprocess N;
+        const DRAW_ARGUMENT_BYTES;
+        const MAX_DRAW_REPLAY_TYPES;
         fn flat_dispatch_module;
         enum FlatArguments N;
         struct FlatDispatchModule N;

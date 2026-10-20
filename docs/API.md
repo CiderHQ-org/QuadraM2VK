@@ -751,9 +751,12 @@ An indirect command buffer's commands are records in ordinary buffer storage
 (`bind::indirect_commands`): one format whatever the descriptor, written by the CPU or by a kernel.
 The binder replays records into dispatches and draws: on the host, or on the device through a
 preprocessing kernel (`replay_preprocess`), and through `VK_EXT_device_generated_commands` where
-the device has it (`replay_preprocess_generated`). A kernel that encodes commands writes the
-records at `bind::indirect_commands::records_address` of the buffer's ID, outside every Metal
-address.
+the device has it (`replay_preprocess_generated`). Draws of primitives under the encoder's
+pipeline replay on the device through `draw_replay_preprocess`: one indirect draw per command
+and primitive type the execution names, the pipeline compiled as its replay variant
+(`VariantKey::replay_bindings`), whose vertex and fragment functions read each command's buffers
+from the slot tables the preprocess writes. A kernel that encodes commands writes the records at
+`bind::indirect_commands::records_address` of the buffer's ID, outside every Metal address.
 
 ## 7. Caching
 

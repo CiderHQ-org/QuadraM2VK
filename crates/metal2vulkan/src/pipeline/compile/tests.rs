@@ -3044,3 +3044,83 @@ fn a_fragment_reads_the_viewport_index_its_vertex_function_wrote() {
         );
     }
 }
+
+/// A render pipeline compiled as a device-replay variant (`VariantKey::replay_bindings`) reads
+/// every buffer its vertex function reaches through its root entry (`BufferForm::Psb`), from the
+/// slot table at the stage's own `RootTableAddress`, and needs no `SlotGuestBase`
+/// (`icb_render_replay_template`); its plan states the variant. A vertex function that fetches
+/// a `[[stage_in]]` attribute (`icb_render_stride_template`) is refused: no fetch reads the slot
+/// table.
+#[test]
+fn a_replayed_draw_reads_its_buffers_through_the_slot_table() {
+    use crate::cache::VariantKey;
+    use crate::pipeline::interface::{BufferForm, SlotInterface};
+    use crate::pipeline::sym::PushField;
+    let dev = device("moltenvk-m3");
+    let mut key = VariantKey::new();
+    key.replay_bindings = true;
+    let Some(bc) = fixture("icb_render_replay_template") else {
+        return;
+    };
+    let vertex = Library::from_air(&bc)
+        .expect("library")
+        .function("icb_render_replay_template")
+        .expect("vertex");
+    let mut d =
+        RenderPipelineDescriptor::new(StageSource::Function(FunctionDescriptor::new(vertex)));
+    d.rasterization_enabled = false;
+    let plain = dev
+        .compile_render_variant(&d, &VariantKey::new(), &Budget::standard())
+        .expect("plain");
+    let replayed = dev
+        .compile_render_variant(&d, &key, &Budget::standard())
+        .expect("replayed");
+    let forms = |p: &crate::pipeline::artifact::RenderPipeline| -> Vec<BufferForm> {
+        p.interface
+            .slots
+            .values()
+            .filter_map(|s| match s {
+                SlotInterface::Buffer(b) => Some(b.form),
+                _ => None,
+            })
+            .collect()
+    };
+    assert_eq!(forms(&replayed).len(), 2);
+    assert!(forms(&replayed).iter().all(|f| *f == BufferForm::Psb));
+    assert!(forms(&plain).iter().any(|f| *f != BufferForm::Psb));
+    let fields: Vec<PushField> = replayed
+        .interface
+        .push
+        .iter()
+        .flat_map(|p| p.fields.iter().map(|f| f.field))
+        .collect();
+    assert!(fields.contains(&PushField::RootTableAddress));
+    assert!(!fields
+        .iter()
+        .any(|f| matches!(f, PushField::SlotGuestBase(_))));
+    let plan = replayed
+        .plan(&dev, &crate::bind::BindShape::default())
+        .expect("plan");
+    assert!(plan.variant.replay_bindings);
+
+    let Some(bc) = fixture("icb_render_stride_template") else {
+        return;
+    };
+    let vertex = Library::from_air(&bc)
+        .expect("library")
+        .function("icb_render_stride_template")
+        .expect("vertex");
+    let mut d =
+        RenderPipelineDescriptor::new(StageSource::Function(FunctionDescriptor::new(vertex)));
+    d.rasterization_enabled = false;
+    d.vertex_descriptor = Some(vertex_descriptor(&[(0, metal::VertexFormat::UInt)]));
+    dev.compile_render_variant(&d, &VariantKey::new(), &Budget::standard())
+        .expect("fetched");
+    let refused = dev
+        .compile_render_variant(&d, &key, &Budget::standard())
+        .expect_err("a fetch under replay bindings");
+    assert!(
+        format!("{refused:?}").contains("GpuEncodedIndirectCommands"),
+        "{refused:?}"
+    );
+}

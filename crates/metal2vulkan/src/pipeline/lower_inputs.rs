@@ -104,11 +104,13 @@ pub struct LoweringInputs {
     /// or a `memmove`'s) is its entry's `guest + bind_offset`, never a `SlotGuestBase` push field.
     /// So everything the function reads of its buffers is in the root table, which the device
     /// replay's preprocess writes per replayed command from the command's record (`bind::replay`).
-    /// It needs device addresses (`bufferDeviceAddress` and `shaderInt64`:
-    /// `GpuEncodedIndirectCommands` names them otherwise); a vertex, fragment, or tile function, or
-    /// a kernel with a stage-input descriptor, is `Unsupported{GpuEncodedIndirectCommands,
-    /// NotImplemented}` under it (a replayed command is a compute dispatch with no stage-in
-    /// region).
+    /// A vertex or fragment function compiles so too, for a replayed draw: its buffers are the
+    /// command's, in the slot table at its own stage's `RootTableAddress`. It needs device
+    /// addresses (`bufferDeviceAddress` and `shaderInt64`: `GpuEncodedIndirectCommands` names
+    /// them otherwise); a tile, object or mesh function, a kernel with a stage-input descriptor,
+    /// and a vertex function that fetches attributes of a vertex descriptor are
+    /// `Unsupported{GpuEncodedIndirectCommands, NotImplemented}` under it (a replayed command is a
+    /// compute dispatch with no stage-in region, or a draw whose buffers no fetch reads).
     #[cfg_attr(feature = "serde", serde(default))]
     pub replay_bindings: bool,
     /// The render pipeline state a fragment function's framebuffer fetch takes its form from, on

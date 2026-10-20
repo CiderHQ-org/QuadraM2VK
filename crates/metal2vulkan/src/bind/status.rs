@@ -262,7 +262,9 @@ impl ReplayFaults {
     /// The record storage's header holds the producer's sticky encoding fault: an encoder
     /// operation the descriptor policy refused.
     pub const ENCODING: ReplayFaults = ReplayFaults(1 << 0);
-    /// The command is a draw: the device replay runs compute commands only.
+    /// The command's action is not one the replay runs: a draw in a replay of compute commands,
+    /// or a draw of a primitive type a replay of draws does not record
+    /// (`DrawReplay::primitive_types`).
     pub const ACTION: ReplayFaults = ReplayFaults(1 << 1);
     /// The command has no pipeline from its state source, or sets one while it inherits it.
     pub const PIPELINE: ReplayFaults = ReplayFaults(1 << 2);
@@ -296,6 +298,9 @@ impl ReplayFaults {
     /// a thread dispatch's edges) than the execution records per command
     /// (`ReplayExecution::regions`).
     pub const REGIONS: ReplayFaults = ReplayFaults(1 << 10);
+    /// The command of a replay of draws sets its barrier: the replay draws every command in one
+    /// render pass instance, which no barrier splits on the GPU.
+    pub const BARRIER: ReplayFaults = ReplayFaults(1 << 11);
 
     /// Every bit in `other` is set in `self`.
     pub const fn contains(self, other: ReplayFaults) -> bool {

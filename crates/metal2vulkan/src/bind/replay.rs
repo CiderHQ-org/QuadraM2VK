@@ -142,6 +142,11 @@ pub use generated::{
     GeneratedLayout, GeneratedRefusal, GeneratedReplay, GeneratedVariant, NO_HOLE,
     TEMPLATE_HEAD_BYTES,
 };
+mod draws;
+pub use draws::{
+    draw_replay_module, draw_replay_preprocess, DrawReplay, DrawReplayLayout, DrawReplayModule,
+    DrawReplayPreprocess, DRAW_ARGUMENT_BYTES, MAX_DRAW_REPLAY_TYPES,
+};
 mod flat;
 pub use flat::{flat_dispatch_module, FlatArguments, FlatDispatchModule, FlatIndirect};
 mod predication;
@@ -371,6 +376,12 @@ pub enum ReplayRefusal {
     /// The generated-commands path cannot run the replay on this device; K14c's path
     /// ([`replay_preprocess`]) remains.
     GeneratedCommands { reason: GeneratedRefusal },
+    /// A draw replay ([`draw_replay_preprocess`]) of commands that name their own pipeline
+    /// states: it draws under the encoder's.
+    OwnPipelines,
+    /// A draw replay's primitive types are not one of Metal's five, or a list type and its strip:
+    /// draws one pipeline's topology class holds ([`DrawReplay::primitive_types`]).
+    DrawPrimitiveTypes,
 }
 
 /// Where each part of a device replay's scratch lies, in bytes from its start.
