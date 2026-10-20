@@ -502,11 +502,11 @@ pub(super) struct State {
     pub(super) capture_tallies: Vec<CaptureTally>,
     /// The index pool of the commands' index bounds and rewrite passes (`index_bounds.rs`,
     /// `index_rewrite.rs`), once a draw needs it: its counter in the arena, starting at 0, and
-    /// the block of the device's its indices lie in (`gpu_pools.rs`).
+    /// its lease of its queue's block, which its indices lie in (`gpu_pools.rs`).
     index_pool: Option<(Upload, PoolLease)>,
     /// The records pool of the commands' scanned emulated mesh draws (`render/mesh.rs`), once a
-    /// draw needs it: a block of the device's (`gpu_pools.rs`); the scans' cursor is a status
-    /// word.
+    /// draw needs it: its lease of its queue's block (`gpu_pools.rs`); the scans' cursor is a
+    /// status word.
     mesh_pool: Option<PoolLease>,
     /// The emulated mesh draws numbered so far, each by its order.
     mesh_draws: u32,
@@ -1290,9 +1290,10 @@ impl State {
     /// The command buffer's index pool (`index_bounds.rs`, `index_rewrite.rs`), taken when a
     /// draw first needs it: its counter, `IndexBoundsPass::POOL_HEADER_BYTES` of the arena, zero;
     /// and the block its indices lie in, from the block's
-    /// `IndexBoundsPass::POOL_HEADER_BYTES` on, leased from the device (`gpu_pools.rs`): the
-    /// block's `VkBuffer` and bytes, the header's included.
-    pub(super) fn index_pool(&mut self, device: &Device) -> Result<IndexPool, Error> {
+    /// `IndexBoundsPass::POOL_HEADER_BYTES` on, its queue's (`queue`, the command buffer's
+    /// `CommandQueue::id`), leased from the device (`gpu_pools.rs`): the block's `VkBuffer` and
+    /// bytes, the header's included.
+    pub(super) fn index_pool(&mut self, device: &Device, queue: u64) -> Result<IndexPool, Error> {
         if let Some((counter, block)) = &self.index_pool {
             return Ok(IndexPool::of(counter, block));
         }
@@ -1300,7 +1301,7 @@ impl State {
         let counter = self
             .uploads
             .upload(device, &vec![0; header as usize], header)?;
-        let block = device.lease_pool(PoolKind::Index)?;
+        let block = device.lease_pool(PoolKind::Index, queue)?;
         let pool = IndexPool::of(&counter, &block);
         self.index_pool = Some((counter, block));
         Ok(pool)
@@ -1310,11 +1311,15 @@ impl State {
     /// budget, leased when a scanned emulated mesh draw first needs it, a host step's replay of
     /// one among them (`gpu_pools.rs`): its `VkBuffer` and bytes. Its words need no value before
     /// the scans reserve them.
-    pub(super) fn mesh_pool(&mut self, device: &Device) -> Result<(vk::Buffer, u64), Error> {
+    pub(super) fn mesh_pool(
+        &mut self,
+        device: &Device,
+        queue: u64,
+    ) -> Result<(vk::Buffer, u64), Error> {
         if let Some(pool) = &self.mesh_pool {
             return Ok((pool.raw(), pool.bytes()));
         }
-        let pool = device.lease_pool(PoolKind::MeshRecords)?;
+        let pool = device.lease_pool(PoolKind::MeshRecords, queue)?;
         let leased = (pool.raw(), pool.bytes());
         self.mesh_pool = Some(pool);
         Ok(leased)

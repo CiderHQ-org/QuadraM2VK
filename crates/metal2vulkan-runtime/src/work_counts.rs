@@ -776,20 +776,21 @@ impl Counters {
             .fetch_add(count, Ordering::Relaxed);
     }
 
-    /// A command buffer's lease made a block of a GPU pool: no spare was idle (`gpu_pools.rs`).
+    /// A command buffer's lease made its queue's block of a GPU pool: the queue held none
+    /// (`gpu_pools.rs`).
     pub(crate) fn gpu_pool_block_made(&self) {
         self.gpu_pool_blocks_made.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// A lease of a GPU pool's block began, `leased` of its kind leased now, this one's included
-    /// (`gpu_pools.rs`).
+    /// A lease of a queue's block of a GPU pool began, `leased` leases holding it now, this one's
+    /// included (`gpu_pools.rs`).
     pub(crate) fn gpu_pool_leased(&self, leased: u64) {
         self.gpu_pool_leases_peak
             .fetch_max(leased, Ordering::Relaxed);
     }
 
-    /// A spare block of a GPU pool was released as a lease ended: it stayed idle too long
-    /// (`gpu_pools.rs`).
+    /// A queue's block of a GPU pool was released before the device's teardown: no lease held it
+    /// for too long, or its queue went (`gpu_pools.rs`).
     pub(crate) fn gpu_pool_block_released(&self) {
         self.gpu_pool_blocks_released
             .fetch_add(1, Ordering::Relaxed);
@@ -2480,19 +2481,19 @@ pub struct WorkCounts {
     /// `IndirectCommandCheck`) or `IndirectCommandBuffer::commands` reads it; a setter's own
     /// read of the command it changes is not counted.
     pub indirect_records_read: u64,
-    /// Blocks of a command buffer's GPU pools made: its index pool's (an index bounds pass, an
-    /// index rewrite) and its mesh records pool's, a block of each kind taken by the first pass
-    /// that needs it, made where none of the device's spares of that kind is idle. Each block is
-    /// a sixty-fourth of the device's largest device-local heap. The device keeps the blocks given
-    /// back, so command buffers that keep as many pools in flight at once make none.
+    /// Blocks of the GPU pools made: a queue's index pool block (for its index bounds passes and
+    /// index rewrites) or its mesh records pool block, made by the first command buffer of the
+    /// queue that needs one where the queue holds none. A queue's command buffers share its block
+    /// of each kind, so a queue makes one while it keeps using them. Each block is a sixty-fourth
+    /// of the device's largest device-local heap. Those made less those released are the blocks
+    /// the device holds.
     pub gpu_pool_blocks_made: u64,
-    /// Spare blocks of the GPU pools released before the device's teardown: a spare that stayed
-    /// idle for two seconds, released as another lease of its kind ended.
+    /// Blocks of the GPU pools released before the device's teardown: a queue's block no command
+    /// buffer held for two seconds, released as another lease of its kind ended, or the block of
+    /// a queue that went.
     pub gpu_pool_blocks_released: u64,
-    /// The most blocks of one kind of GPU pool leased at once: as many command buffers held an
-    /// index pool's block (or a mesh records pool's) between their first pass that needs one and
-    /// their completion. The device holds that many blocks of the kind (each a sixty-fourth of
-    /// its largest device-local heap) while they keep coming, and two seconds after.
+    /// The most command buffers that held one queue's block of a GPU pool at once: between each
+    /// one's first pass that needs it and its completion.
     pub gpu_pool_leases_peak: u64,
     /// Internal submissions made (`device/submit.rs`), each one a host call waits for: a host
     /// copy through the GPU, a clear of a live buffer, a neutral's making.

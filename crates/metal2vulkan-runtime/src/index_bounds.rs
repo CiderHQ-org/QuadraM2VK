@@ -20,8 +20,9 @@
 //!   buffer as the draw binds it, the second over the pool. Exactly one draws the primitives.
 //! - **The pool** (decision (a) made it 1 MiB on every device): its counter is a region of the
 //!   command buffer's upload arena, zero, so every plan of the command buffer reserves after the
-//!   ones before; its indices lie in a block the command buffer leases from the device, a
-//!   sixty-fourth of the device's largest device-local heap within one binding (`gpu_pools.rs`).
+//!   ones before; its indices lie in its queue's block, which the command buffer leases from the
+//!   device, a sixty-fourth of the device's largest device-local heap within one binding
+//!   (`gpu_pools.rs`).
 //!   The plan binds the counter as the pool, the fill the block (whose header bytes nothing reads),
 //!   and the second draw the block's indices. A draw it cannot hold draws nothing and sets
 //!   `INDEX_POOL_OVERFLOW`, and the command buffer fails with
@@ -102,13 +103,14 @@ impl BoundsPass {
         .ok_or_else(refused)?;
         let plan = device.owned_kernel(OwnedModule::IndexBoundsPlan)?;
         let fill = device.owned_kernel(OwnedModule::IndexBoundsFill)?;
+        let queue = core.command_buffer().command_queue().id();
         let (words, pool, status) = {
             let mut state = core.command_buffer().state();
             let words =
                 state
                     .uploads
                     .upload(&device, &pass.parameter_bytes(), IndexBoundsPass::BYTES)?;
-            let pool = state.index_pool(&device)?;
+            let pool = state.index_pool(&device, queue)?;
             (words, pool, state.status_words(&device)?)
         };
         let region = |upload: &Upload, len: u64| (upload.raw(), upload.offset(), len);

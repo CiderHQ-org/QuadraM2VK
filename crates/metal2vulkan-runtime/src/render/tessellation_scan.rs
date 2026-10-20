@@ -69,6 +69,7 @@ impl TessellationWork {
         dispatch: &TessellationDispatch,
     ) -> Result<TessellationWork, Error> {
         let device = core.device().clone();
+        let queue = core.command_buffer().command_queue().id();
         let mut state = core.command_buffer().state();
         let (records, pool) = match dispatch.records {
             TessellationRecords::Exact { .. } => {
@@ -78,7 +79,7 @@ impl TessellationWork {
                 ((region.raw(), region.offset(), region.len()), None)
             }
             TessellationRecords::Pool => {
-                let (raw, bytes) = state.mesh_pool(&device)?;
+                let (raw, bytes) = state.mesh_pool(&device, queue)?;
                 ((raw, 0, bytes), Some(bytes))
             }
             _ => return Err(internal("tessellation records of another kind")),

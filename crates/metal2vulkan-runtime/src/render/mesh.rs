@@ -57,8 +57,8 @@
 //!   grid), reserves their records in the command buffer's records pool, and writes the mesh
 //!   dispatch's and the draw's indirect arguments; between barriers, the mesh dispatch and the draw
 //!   read them. The pool is a sixty-fourth of the device's largest device-local heap, within one
-//!   binding and one allocation, a block the command buffer leases from the device's spare
-//!   (`gpu_pools.rs`; made for each command buffer before); a draw whose records the rest of it
+//!   binding and one allocation, its queue's block, which the command buffer leases from the
+//!   device (`gpu_pools.rs`); a draw whose records the rest of it
 //!   cannot hold draws nothing and fails the command buffer
 //!   (`CommandBufferError::MeshRecordsOverflow`, naming the first such draw's number, its object
 //!   threadgroups and its mesh threadgroups). The dispatches record before the pass, as a draw's
@@ -596,6 +596,7 @@ impl MeshWork {
     /// and buffers are.
     pub(crate) fn new(core: &EncoderCore, dispatch: &MeshDispatch) -> Result<MeshWork, Error> {
         let device = core.device().clone();
+        let queue = core.command_buffer().command_queue().id();
         let mut state = core.command_buffer().state();
         let mut words = dispatch.work.clone();
         let mut set = |at: usize, value: u32| match words.get_mut(at) {
@@ -612,7 +613,7 @@ impl MeshWork {
                 (region.raw(), region.offset(), region.len())
             }
             MeshRecordsRegion::Pool => {
-                let (raw, bytes) = state.mesh_pool(&device)?;
+                let (raw, bytes) = state.mesh_pool(&device, queue)?;
                 let words = u32::try_from(bytes / 4)
                     .map_err(|_| internal("a mesh records pool past a u32's words"))?;
                 set(MeshDispatch::POOL_WORDS, words)?;

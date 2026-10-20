@@ -17,7 +17,7 @@
 //! - **The list** of a direct draw lies in a buffer of its own, of the program's capacity of the
 //!   draw's count, made for the draw; an indirect draw's, whose count only the GPU knows, in the
 //!   command buffer's index pool, which the index bounds pass shares (its counter in the arena,
-//!   its indices in a block the command buffer leases from the device, `gpu_pools.rs`): the count
+//!   its indices in its queue's block, which the command buffer leases, `gpu_pools.rs`): the count
 //!   and place dispatches bind the counter as the output, the write dispatch the block. A list the
 //!   pool cannot hold draws nothing and fails the command buffer with
 //!   `CommandBufferError::IndexPoolOverflow`.
@@ -172,7 +172,10 @@ impl RewritePass {
         // device's, made without a submission.
         let output = match owned {
             Some((_, bytes)) => Output::Owned(device.scratch_buffer(bytes)?),
-            None => Output::Pooled(core.command_buffer().state().index_pool(&device)?),
+            None => {
+                let queue = core.command_buffer().command_queue().id();
+                Output::Pooled(core.command_buffer().state().index_pool(&device, queue)?)
+            }
         };
         let (words, status) = {
             let mut state = core.command_buffer().state();

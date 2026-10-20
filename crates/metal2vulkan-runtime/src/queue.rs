@@ -251,6 +251,14 @@ impl Device {
     }
 }
 
+impl Drop for QueueShared {
+    fn drop(&mut self) {
+        // Every command buffer of the queue holds it, so none is left: no lease holds its pools'
+        // blocks (`gpu_pools.rs`).
+        self.device.forget_queue_pools(self.id);
+    }
+}
+
 impl CommandQueue {
     /// `device`.
     pub fn device(&self) -> &Device {
