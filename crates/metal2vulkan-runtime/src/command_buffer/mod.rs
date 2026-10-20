@@ -3279,11 +3279,11 @@ impl CommandBufferShared {
     }
 
     /// Finish the command buffer with `result` (or the failure of a batch): take the device's
-    /// trail mark (`trails.rs`), set its status, decode its status words, release its uploads,
-    /// run its completed handlers on this thread, give its queue's slot back, release what it
-    /// retained and its encoders' logs, then open its gate, which releases its waiters once the
-    /// transition's [`Hold`] (and every other) is gone, and they wait for the trails below the
-    /// mark. Waits from inside these steps answer as [`own`] says.
+    /// trail mark (`trails.rs`), set its status, decode its status words, run its completed
+    /// handlers on this thread, give its queue's slot back, release its uploads, pools and heap
+    /// versions, what it retained and its encoders' logs, then open its gate, which releases its
+    /// waiters once the transition's [`Hold`] (and every other) is gone, and they wait for the
+    /// trails below the mark. Waits from inside these steps answer as [`own`] says.
     fn complete(self: &Arc<Self>, result: Result<(), CommandBufferError>) {
         // A capture replay found a primitive whose reach was not measured: its pass rewrote
         // every tile, announced once the lock is let go (below).
@@ -3293,6 +3293,8 @@ impl CommandBufferShared {
         // Its command pool, where it settled, whose primary the device's spares begin ahead once
         // its completed handlers ran (below).
         let mut settled_pool = None;
+        // The heap versions its commands bound, let go of once its completed handlers ran.
+        let released_versions;
         {
             let mut state = lock(&self.state);
             // Every trail of the work it waited for (a pipeline's making, a twin's decode) was
@@ -3400,17 +3402,15 @@ impl CommandBufferShared {
             self.answer(&state);
             state.status_words = None;
             state.capture_tallies.clear();
-            state.index_pool = None;
-            state.mesh_pool = None;
-            state.uploads.clear();
-            state.heaps.clear();
+            // Its heap versions, uploads, pools and descriptor pools go once its completed
+            // handlers ran (below).
+            released_versions = state.heaps.clear();
             // Its work ended: a detach waiting for it goes on (`detach.rs`).
             state.submitted_holds.clear();
             // Its work ended (its fences were signaled, or its queues drained after a failed
             // wait), so nothing of its pools is pending: its command pool goes to the device's
-            // spares whatever its status, never released on this thread (`spares.rs`); a command
-            // buffer that completed gives back its descriptor pools too, one that failed releases
-            // them here.
+            // spares whatever its status, never released on this thread (`spares.rs`); its
+            // descriptor pools go once its completed handlers ran (below).
             if let Some(pool) = state.pool.take() {
                 // None of the pool's command buffers is recording where it completed and ended
                 // every one the pool handed out: a recording it left unused leaves one so.
@@ -3431,11 +3431,6 @@ impl CommandBufferShared {
                     let shared = self.device.shared();
                     shared.spares.give_command_pool(shared, pool, settled);
                 }
-            }
-            if state.status == CommandBufferStatus::Completed {
-                state.descriptors.give_back();
-            } else {
-                state.descriptors.release();
             }
             state.unplaced();
             parked = state.parked > 0;
@@ -3517,6 +3512,31 @@ impl CommandBufferShared {
             drop(residencies);
             let check = lock(&self.state).check.take();
             drop(check);
+            // Then the runtime's own: its uploads, its index and mesh records pools' blocks, its
+            // heap versions and its descriptor pools, none of them the program's, last. Each may
+            // take a driver's lock as it goes (MoltenVK's `vkDestroyBuffer`, `vkFreeMemory` and
+            // `vkDestroyDescriptorPool` take the lock of its device's residency set, which its
+            // `vkBindBufferMemory` holds across a commit that took 24 to 39 ms for a 1 GiB block
+            // on the M3 Max, `gpu_pools.rs`), so they go after the completed handlers, which wait
+            // for none of them, and after what the program's commands used.
+            let (uploads, index_pool, mesh_pool, mut descriptors, completed) = {
+                let mut state = lock(&self.state);
+                (
+                    state.uploads.take(),
+                    state.index_pool.take(),
+                    state.mesh_pool.take(),
+                    state.descriptors.take(),
+                    state.status == CommandBufferStatus::Completed,
+                )
+            };
+            drop((uploads, index_pool, mesh_pool, released_versions));
+            // A command buffer that completed gives its descriptor pools back to the device's
+            // spares; one that failed releases them.
+            if completed {
+                descriptors.give_back();
+            } else {
+                descriptors.release();
+            }
         }
         self.gate.finish();
         // Its pool's primary begun ahead, where no command buffer took the pool since

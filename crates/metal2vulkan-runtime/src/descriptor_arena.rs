@@ -238,6 +238,16 @@ impl DescriptorArena {
         Ok(set)
     }
 
+    /// Every pool, taken out, for the caller to give back or release where it holds no lock.
+    pub(crate) fn take(&mut self) -> DescriptorArena {
+        self.book.rooms.clear();
+        DescriptorArena {
+            book: Book::default(),
+            pools: std::mem::take(&mut self.pools),
+            device: self.device.clone(),
+        }
+    }
+
     /// Give every pool to the device's spares: the command buffer completed, so no command uses
     /// their sets any more.
     pub(crate) fn give_back(&mut self) {

@@ -83,10 +83,15 @@ impl Uploads {
         }
     }
 
-    /// Release every chunk: no command reads the arena any more.
-    pub(super) fn clear(&mut self) {
-        self.chunks.clear();
+    /// Every chunk, taken out: no command reads the arena any more, and the chunks go as the
+    /// arena returned drops.
+    pub(super) fn take(&mut self) -> Uploads {
+        let opened = self.opened;
         self.opened = 0;
+        Uploads {
+            chunks: std::mem::take(&mut self.chunks),
+            opened,
+        }
     }
 
     /// A region of `len` bytes (at least `bytes.len()`) holding `bytes` and then zeros.

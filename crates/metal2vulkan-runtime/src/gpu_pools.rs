@@ -11,12 +11,24 @@
 //!   twice the memory has pools of twice the bytes. Before, the index pool was 1 MiB on every
 //!   device.
 //! - **Leased per command buffer, made lazily.** The first pass of a command buffer that needs a
-//!   pool takes the device's spare block of its kind, or makes one; the command buffer holds the
-//!   [`PoolLease`] until it completes, or until it is dropped unsubmitted, and then the block is
+//!   pool takes the device's spare block of its kind given back last, or makes one where none is
+//!   idle; the command buffer holds the [`PoolLease`] until it completes (its completed handlers
+//!   ran, `command_buffer/mod.rs`), or until it is dropped unsubmitted, and then the block is
 //!   given back. No other command buffer gets a block while it is leased, so command buffers in
-//!   flight at once each have their own. The device keeps at most one spare of each kind (the
-//!   blocks are all one size, so the spare is any given back while none is idle); a block given
-//!   back beside a spare is released. A command buffer that reaches no pass of a pool takes none.
+//!   flight at once each have their own. A command buffer that reaches no pass of a pool takes
+//!   none.
+//! - **Kept while in use** ([`Spares`]). The device keeps every block given back as a spare of its
+//!   kind, so it holds at most as many blocks of a kind as were leased at once (one is made only
+//!   where none is idle; Metal bounds the command buffers in flight by each queue's
+//!   `maxCommandBufferCount`), and steady work makes and releases none. A spare given back
+//!   [`QUIET`] or longer before another lease of its kind ends is released then, the oldest
+//!   first, so the spares follow the leases in use. Before, the device kept one spare and
+//!   released a block given back beside it, so two command buffers in flight at once made and
+//!   released a block each round; a block of 1 GiB (a sixty-fourth of a 64 GiB heap) took 24 to
+//!   29 ms to make on the M3 Max (MoltenVK 1.4.1, macOS 27.0.1), 35 to 39 ms while the GPU ran,
+//!   all of it MoltenVK's commit of the block to its device's residency set inside
+//!   `vkBindBufferMemory`, under the lock its `vkDestroyBuffer` and `vkFreeMemory` take too, and
+//!   wired its 1 GiB of host memory whatever the GPU wrote of it.
 //! - **Raw.** A block is a `VkBuffer` bound to private memory, outside the Metal address space,
 //!   not a `Buffer`, which would hold the device from the device's own spare (as the mipmap
 //!   scratch's, `mipmap_scratch.rs`). The device releases its spares as it is destroyed.
@@ -33,14 +45,19 @@
 use super::device::lock;
 use super::error::Error;
 use super::memory::Memory;
-use super::mipmap_scratch::{Block, Spare, Take};
+use super::mipmap_scratch::Block;
 use super::upload::Upload;
 use super::Device;
 use ash::vk;
 use metal2vulkan::bind::IndexBoundsPass;
+use std::time::{Duration, Instant};
 
 /// The share of the largest device-local heap a pool takes: one part in this many.
 const POOL_SHARE: u64 = 64;
+
+/// How long a spare stays idle before the end of another lease of its kind releases it (the
+/// module docs).
+pub(super) const QUIET: Duration = Duration::from_secs(2);
 
 /// The bytes of a pool of a device with `properties`' heaps, whose storage bindings reach
 /// `max_range` bytes and whose allocations `max_allocation`, behind `header` bytes the block
@@ -88,15 +105,61 @@ impl PoolKind {
     }
 }
 
-/// A device's pools: each kind's bytes and its spare block (the module docs).
+/// The blocks of one kind the device keeps between leases, the spare decisions pure so that the
+/// CPU tests cover them (the module docs).
+#[derive(Debug)]
+pub(super) struct Spares<T> {
+    /// The idle blocks, the one given back last at the end, each with when it was given back:
+    /// from the front, the oldest.
+    idle: Vec<(T, Instant)>,
+}
+
+impl<T> Default for Spares<T> {
+    fn default() -> Spares<T> {
+        Spares { idle: Vec::new() }
+    }
+}
+
+impl<T> Spares<T> {
+    /// A block for a lease: the spare given back last, taken out until it is given back; `None`
+    /// where none is idle, and the lease makes one.
+    pub(super) fn take(&mut self) -> Option<T> {
+        self.idle.pop().map(|(block, _)| block)
+    }
+
+    /// Give back `block` as its lease ends at `now`: the spares to release, those given back
+    /// [`QUIET`] or longer before, the oldest first.
+    pub(super) fn give(&mut self, block: T, now: Instant) -> Vec<T> {
+        self.idle.push((block, now));
+        let stale = self
+            .idle
+            .iter()
+            .take_while(|(_, given)| now.saturating_duration_since(*given) >= QUIET)
+            .count();
+        self.idle.drain(..stale).map(|(block, _)| block).collect()
+    }
+
+    /// Every spare, as the device is destroyed.
+    pub(super) fn drain(&mut self) -> Vec<T> {
+        self.idle.drain(..).map(|(block, _)| block).collect()
+    }
+
+    /// The idle blocks.
+    #[cfg(test)]
+    pub(super) fn idle(&self) -> usize {
+        self.idle.len()
+    }
+}
+
+/// A device's pools: each kind's bytes and its spare blocks (the module docs).
 #[derive(Default)]
 pub(super) struct GpuPools {
     /// The index pool's bytes of indices, behind its header.
     pub(super) index_bytes: u64,
     /// The mesh records pool's bytes.
     pub(super) mesh_bytes: u64,
-    index: std::sync::Mutex<Spare<Block>>,
-    mesh: std::sync::Mutex<Spare<Block>>,
+    index: std::sync::Mutex<Spares<Block>>,
+    mesh: std::sync::Mutex<Spares<Block>>,
 }
 
 impl GpuPools {
@@ -110,7 +173,7 @@ impl GpuPools {
         }
     }
 
-    fn spare(&self, kind: PoolKind) -> &std::sync::Mutex<Spare<Block>> {
+    fn spares(&self, kind: PoolKind) -> &std::sync::Mutex<Spares<Block>> {
         match kind {
             PoolKind::Index => &self.index,
             PoolKind::MeshRecords => &self.mesh,
@@ -128,7 +191,10 @@ impl GpuPools {
     /// Release the spares as the device is destroyed.
     pub(super) fn destroy(&self, device: &ash::Device, memory: &mut Memory) {
         for kind in [PoolKind::Index, PoolKind::MeshRecords] {
-            lock(self.spare(kind)).destroy(device, memory);
+            for block in lock(self.spares(kind)).drain() {
+                // SAFETY: the device is idle, so no command uses the block.
+                unsafe { block.release(device, memory) };
+            }
         }
     }
 }
@@ -169,11 +235,15 @@ impl Drop for PoolLease {
             return;
         };
         let shared = self.device.shared();
-        let released = lock(shared.gpu_pools.spare(self.kind)).give(block, self.bytes);
-        if let Some(block) = released {
+        let released = {
+            let mut spares = lock(shared.gpu_pools.spares(self.kind));
+            spares.give(block, Instant::now())
+        };
+        for block in released {
             // SAFETY: a lease ends when its command buffer completes or is dropped unsubmitted,
-            // and the spare is leased to none, so no command uses either block.
+            // and a spare is leased to none, so no command uses either block.
             unsafe { block.release(shared.vk(), &mut lock(&shared.memory)) };
+            shared.counts.gpu_pool_block_released();
         }
     }
 }
@@ -210,20 +280,18 @@ impl IndexPool {
 }
 
 impl Device {
-    /// A lease of a block of `kind` for a command buffer: the device's spare, or a new block
-    /// (the module docs). Refused as memory is.
+    /// A lease of a block of `kind` for a command buffer: the device's spare given back last, or
+    /// a new block (the module docs). Refused as memory is.
     pub(super) fn lease_pool(&self, kind: PoolKind) -> Result<PoolLease, Error> {
         let shared = self.shared();
         let bytes = shared.gpu_pools.block_bytes(kind);
-        let taken = lock(shared.gpu_pools.spare(kind)).take(bytes);
+        let taken = lock(shared.gpu_pools.spares(kind)).take();
         let block = match taken {
-            Take::Reuse(block, _) => block,
-            Take::Make(stale) => {
-                if let Some(block) = stale {
-                    // SAFETY: the spare was leased to none, so no command uses it.
-                    unsafe { block.release(shared.vk(), &mut lock(&shared.memory)) };
-                }
-                self.make_block(bytes, kind.usage())?
+            Some(block) => block,
+            None => {
+                let block = self.make_block(bytes, kind.usage())?;
+                shared.counts.gpu_pool_block_made();
+                block
             }
         };
         Ok(PoolLease {

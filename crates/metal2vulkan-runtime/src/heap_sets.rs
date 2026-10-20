@@ -1339,14 +1339,16 @@ impl HeapUse {
         })
     }
 
-    /// Release what the command buffer held: it completed.
-    pub(super) fn clear(&mut self) {
-        self.versions.clear();
+    /// The command buffer completed: its listing goes, and the versions its commands bound come
+    /// out, for the caller to let go of once its completed handlers ran (each version's last
+    /// hold releases its descriptor pool).
+    pub(super) fn clear(&mut self) -> Vec<Arc<SetVersion>> {
         self.listed = None;
         self.lists_samplers = false;
         self.committed = false;
         self.wants_ticket = false;
         self.ticketed = false;
+        std::mem::take(&mut self.versions)
     }
 }
 

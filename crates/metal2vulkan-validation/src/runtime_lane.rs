@@ -499,6 +499,8 @@ mod host_memory;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
 mod index_fetches;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
+mod index_pools;
+#[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
 mod indirect_command_buffers;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
 mod indirect_dispatches;
