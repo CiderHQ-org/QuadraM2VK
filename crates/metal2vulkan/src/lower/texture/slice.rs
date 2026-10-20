@@ -25,9 +25,12 @@
 //!
 //! The copy is one counted loop over the block's cells in the writing invocation (a builder
 //! loop), each iteration a contained arena leaf load
-//! (`access::imageblock::load`) and a texture write. A block past the imageblock's extent in
-//! either axis is clipped to it (the cells past it are not the imageblock's; Metal leaves them
-//! undefined).
+//! (`access::imageblock::load`) and a texture write. A `half` element written to a slot that
+//! stores each channel's half bits (`StorageImageClass::HalfBits`) loads the cells' bits as 16-bit
+//! integers and writes them as they are: the texel the widening and `narrow::to_bits` would give,
+//! since the two are inverse on every bit pattern (a NaN's sign and payload included). A block
+//! past the imageblock's extent in either axis is clipped to it (the cells past it are not the
+//! imageblock's; Metal leaves them undefined).
 //!
 //! Only these are pinned (else `Unsupported{Imageblocks, NotImplemented}`): the origin operand the
 //! constant zero, the trailing flag the constant `false`, the flag a constant, a field pointer
@@ -102,6 +105,10 @@ pub struct Slice {
     /// Every invocation of the workgroup writes a strided share of the cells, then a workgroup
     /// barrier (`super::cooperative`); else the writing invocation writes them all.
     pub cooperative: bool,
+    /// A `half` element written to a slot that stores each channel's half bits
+    /// (`StorageImageClass::HalfBits`): the cells loaded as this leaf of 16-bit integers, each
+    /// lane the channel's bits as they are.
+    pub bits: Option<Leaf>,
 }
 
 impl Slice {
@@ -339,6 +346,28 @@ pub(super) fn select(
         true => super::half_nans(cx, image, (false, heap_bits))?,
         false => super::HalfNans::Held,
     };
+    // A `half` element to a slot of half bits, its NaNs as held: the cells' bits as they are.
+    let bits = match conv == TexelConv::F16
+        && class == StorageImageClass::HalfBits
+        && !image.heap()
+        && matches!(half_nans, super::HalfNans::Held | super::HalfNans::Kept)
+    {
+        true => Some(Leaf {
+            form: Form {
+                held: held_on(
+                    cx.profile,
+                    Held::Int {
+                        bits: 16,
+                        container: 32,
+                    },
+                )?,
+                lanes,
+            },
+            bytes,
+            path,
+        }),
+        false => None,
+    };
     mark(cx, image, |u| u.write = true);
     // Every invocation shares the write where its guard selects local id 0 at a uniform point.
     let cooperative = match super::cooperative::guard(cx, call, m)? {
@@ -369,5 +398,6 @@ pub(super) fn select(
         half_nans,
         heap_bits,
         cooperative,
+        bits,
     })))
 }

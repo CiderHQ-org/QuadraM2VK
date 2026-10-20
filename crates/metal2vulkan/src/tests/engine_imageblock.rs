@@ -998,3 +998,136 @@ fn a_slice_outside_the_shared_shape_keeps_its_writer() {
         assert!(shared.iter().all(|s| !*s), "{name}: {shared:?}");
     }
 }
+
+/// A kernel whose 4x4 threads each store the `half4` at their linear index in buffer 0 in their
+/// cell, then, after the imageblock barrier and under the guard `guard` (which defines `%g`),
+/// write the imageblock's `half4` slice to texture 0 at (0, 0).
+fn half_slice_kernel(guard: &str) -> String {
+    format!(
+        r#"%"struct.metal::_imageblock_base" = type {{ ptr addrspace(4) }}
+
+define void @half_slice(%"struct.metal::_imageblock_base" %block, ptr addrspace(1) %out, <2 x i16> %lid, ptr addrspace(1) %src) {{
+entry:
+  %cell = call ptr addrspace(4) @air.imageblock_data(<2 x i16> %lid, i32 0, i16 0)
+  %x = extractelement <2 x i16> %lid, i64 0
+  %y = extractelement <2 x i16> %lid, i64 1
+  %row = shl i16 %y, 2
+  %i = add i16 %row, %x
+  %ii = zext i16 %i to i64
+  %p = getelementptr inbounds <4 x half>, ptr addrspace(1) %src, i64 %ii
+  %h = load <4 x half>, ptr addrspace(1) %p, align 8
+  store <4 x half> %h, ptr addrspace(4) %cell, align 8
+  call void @air.wg.barrier(i32 8, i32 1)
+{guard}  br i1 %g, label %write, label %done
+
+write:
+  %first = call ptr addrspace(4) @air.imageblock_data(<2 x i16> zeroinitializer, i32 0, i16 0)
+  call void @air.write_imageblock_slice_to_texture_2d.i16.v4f16(ptr addrspace(1) %out, ptr addrspace(4) %first, i1 false, <2 x i16> zeroinitializer, <2 x i16> undef, <2 x i16> zeroinitializer, i16 0, i1 false, i32 2)
+  br label %done
+
+done:
+  ret void
+}}
+
+declare ptr addrspace(4) @air.imageblock_data(<2 x i16>, i32, i16)
+declare void @air.wg.barrier(i32, i32)
+declare void @air.write_imageblock_slice_to_texture_2d.i16.v4f16(ptr addrspace(1), ptr addrspace(4), i1, <2 x i16>, <2 x i16>, <2 x i16>, i16, i1, i32)
+
+!air.kernel = !{{!0}}
+!0 = !{{ptr @half_slice, !1, !2}}
+!1 = !{{}}
+!2 = !{{!3, !5, !6, !7}}
+!3 = !{{i32 0, !"air.imageblock", !"explicit", !"air.imageblock_data_size", i32 8, !"air.struct_type_info", !4, !"air.arg_type_align_size", i32 8, !"air.arg_type_name", !"imageblock<Cell, layout_explicit>", !"air.arg_name", !"block"}}
+!4 = !{{i32 0, i32 8, i32 0, !"half4", !"colour"}}
+!5 = !{{i32 1, !"air.texture", !"air.location_index", i32 0, i32 1, !"air.write", !"air.arg_type_name", !"texture2d<half, write>", !"air.arg_name", !"out"}}
+!6 = !{{i32 2, !"air.thread_position_in_threadgroup", !"air.arg_type_name", !"ushort2", !"air.arg_name", !"lid"}}
+!7 = !{{i32 3, !"air.buffer", !"air.location_index", i32 0, i32 1, !"air.read", !"air.address_space", i32 1, !"air.arg_type_size", i32 8, !"air.arg_type_align_size", i32 8, !"air.arg_type_name", !"half4", !"air.arg_name", !"src"}}
+"#
+    )
+}
+
+/// Half bit patterns a widening or a narrowing could change: NaNs of each sign, quiet and
+/// signaling, with payloads; infinities; zeros; denormals; the largest finite values; and
+/// ordinary values.
+const HALF_PATTERNS: [u16; 20] = [
+    0x7C01, 0xFE55, 0x7E00, 0x7FFF, 0xFC01, 0x7C00, 0xFC00, 0x0000, 0x8000, 0x0001, 0x83FF, 0x03FF,
+    0x0400, 0x7BFF, 0xFBFF, 0x3C00, 0xC000, 0x5555, 0x1234, 0xBEEF,
+];
+
+/// A `half` slice written to an `RGBA16Float` texture through its unsigned integer alias
+/// (`StorageImageClass::HalfBits`) copies each cell's half bits as they are, in the shared form
+/// (the guard local id 0 after the barrier) and the writing invocation's (another invocation's
+/// guard): each texel's channels are the cell's halves, NaN payloads, signaling NaNs and
+/// denormals included, and nothing above their 16 bits.
+#[test]
+fn a_half_slice_to_half_bits_copies_the_cells_bits() {
+    use crate::lower::strategy::Strategy;
+    use crate::lower::texture::TextureStrategy;
+    let lane = |i: usize, l: usize| HALF_PATTERNS[(i * 4 + l) % HALF_PATTERNS.len()];
+    let mut src = Vec::new();
+    for i in 0..16 {
+        for l in 0..4 {
+            src.extend_from_slice(&lane(i, l).to_le_bytes());
+        }
+    }
+    let mut ran = 0;
+    for (name, guard) in [
+        ("shared", ORIGIN_GUARD),
+        ("writer", "  %g = icmp eq i16 %x, 1\n"),
+    ] {
+        let Some(bc) = assemble_text(name, &half_slice_kernel(guard)) else {
+            return;
+        };
+        for (stem, p) in committed_profiles().expect("profiles") {
+            let Some(inputs) = choices(&p, &[(0, PixelFormat::RGBA16Float)]) else {
+                continue;
+            };
+            let class = inputs.storage_images[&kernel_texture(0)].class;
+            let (plan, m) = match typed_module_with(&bc, "half_slice", &p, &inputs) {
+                Ok(x) => x,
+                Err(Error::NeedsInput(_) | Error::Unsupported(_)) => continue,
+                Err(e) => panic!("{name} {stem}: {e}"),
+            };
+            let bits: Vec<bool> = plan
+                .strategy
+                .iter()
+                .flatten()
+                .filter_map(|s| match s {
+                    Strategy::Texture(TextureStrategy::ImageblockSlice(s)) => {
+                        Some(s.bits.is_some())
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                bits,
+                [class == StorageImageClass::HalfBits],
+                "{name} {stem}: {class:?}"
+            );
+            if class != StorageImageClass::HalfBits {
+                continue;
+            }
+            assert_eq!(
+                plan.families.texture.cooperative.is_empty(),
+                name == "writer",
+                "{name} {stem}"
+            );
+            let d = Dispatch {
+                local: [4, 4],
+                block: [4, 4],
+                buffers: &[src.clone()],
+                threadgroup: &[],
+            };
+            let (_, imgs) = run(&plan, &m, &d, &[poisoned(0, [4, 4], 1)]);
+            for y in 0..4u32 {
+                for x in 0..4u32 {
+                    let i = (y * 4 + x) as usize;
+                    let want = [0, 1, 2, 3].map(|l| u32::from(lane(i, l)));
+                    assert_eq!(texel(&imgs[0], 0, x, y), want, "{name} {stem} ({x}, {y})");
+                }
+            }
+            ran += 1;
+        }
+    }
+    assert!(ran > 0, "no profile writes half bits");
+}

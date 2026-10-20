@@ -4006,31 +4006,39 @@ fn slice<'c>(cx: &mut EmitCx<'c>, fb: &mut FunctionBuilder<'_>, s: &Slice) -> BR
         let cell = imageblock::cell_offset(cx, fb, x, y, s.cell_bytes)?;
         let field = u32s(fb, 1, s.field)?;
         let off = fb.binary(BinOp::IAdd, cell, field)?;
-        let v = imageblock::load(cx, fb, s.leaf, s.contained, off)?;
-        let held = slice_texel(fb, s.texel, v)?;
-        let form = TexelForm {
-            conv: s.texel.conv,
-            lanes: 4,
+        let (texel, twin) = match s.bits {
+            Some(leaf) => {
+                let v = imageblock::load(cx, fb, leaf, s.contained, off)?;
+                (cell_bits(fb, &decl, s.texel.lanes, v)?, None)
+            }
+            None => {
+                let v = imageblock::load(cx, fb, s.leaf, s.contained, off)?;
+                let held = slice_texel(fb, s.texel, v)?;
+                let form = TexelForm {
+                    conv: s.texel.conv,
+                    lanes: 4,
+                };
+                let test = NanTest::for_modes(&cx.plan.families.arith.modes);
+                let texel = to_image(fb, &decl, form, held, cx.decl.families.arith.srgb, test)?;
+                let twin = match twin {
+                    Some((is_bits, img)) => Some(TwinWrite {
+                        is_bits,
+                        img,
+                        bits: half_bits(fb, form, held)?,
+                    }),
+                    None => None,
+                };
+                let texel = match is_half {
+                    Some(half) => heap_halves(fb, half, form, texel)?,
+                    None => texel,
+                };
+                let texel = match is_small {
+                    Some(small) => heap_halves(fb, small, form, texel)?,
+                    None => texel,
+                };
+                (half_nan_texel(fb, (s.half_nans, kept), form, texel)?, twin)
+            }
         };
-        let test = NanTest::for_modes(&cx.plan.families.arith.modes);
-        let texel = to_image(fb, &decl, form, held, cx.decl.families.arith.srgb, test)?;
-        let twin = match twin {
-            Some((is_bits, img)) => Some(TwinWrite {
-                is_bits,
-                img,
-                bits: half_bits(fb, form, held)?,
-            }),
-            None => None,
-        };
-        let texel = match is_half {
-            Some(half) => heap_halves(fb, half, form, texel)?,
-            None => texel,
-        };
-        let texel = match is_small {
-            Some(small) => heap_halves(fb, small, form, texel)?,
-            None => texel,
-        };
-        let texel = half_nan_texel(fb, (s.half_nans, kept), form, texel)?;
         let ty = vec(fb, u, dims)?;
         let delta = if dims == 2 {
             fb.composite_construct(ty, &[x, y])?
@@ -4078,6 +4086,27 @@ fn slice<'c>(cx: &mut EmitCx<'c>, fb: &mut FunctionBuilder<'_>, s: &Slice) -> BR
         fb.control_barrier(Scope::Workgroup, Scope::Workgroup, sem)?;
     }
     Ok(())
+}
+
+/// The `HalfBits` image texel of a `half` slice's cell bits `v` (`lanes` 16-bit lanes, each
+/// zero-extended in a `u32`): the lanes, a 0 (the half `+0.0`) for each lane the element lacks,
+/// and RGBX's green in the fourth channel, the texel [`to_image`] makes of the cell's widened
+/// halves.
+fn cell_bits(
+    fb: &mut FunctionBuilder<'_>,
+    decl: &ImageDecl,
+    lanes: u8,
+    v: SValue,
+) -> BResult<SValue> {
+    let form = TexelForm {
+        conv: TexelConv::I16 { signed: false },
+        lanes,
+    };
+    let x = slice_texel(fb, form, v)?;
+    match decl.x_channel {
+        true => x_channel_write(fb, x),
+        false => Ok(x),
+    }
 }
 
 /// A cooperative slice's first cell and step: the invocation's index in the threadgroup and the
