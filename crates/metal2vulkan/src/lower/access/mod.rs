@@ -754,6 +754,10 @@ pub struct AccessPlan {
     /// The handle loads of indirect-command objects whose every use is an encoder operand
     /// ([`encode::plan_objects`]): each is its field's word, a `u64`.
     pub objects: BTreeSet<InstId>,
+    /// The typed loads and stores whose access chain takes its defining `getelementptr`'s own
+    /// index operands ([`local`]'s line-up rule), each with those operands: the access reads them
+    /// where it stands, beside its pointer (`FamilyPlans::reads`).
+    pub typed_indices: BTreeMap<InstId, Vec<Value>>,
     /// The kernel is a device-replay variant (`LoweringInputs::replay_bindings`): every accessed
     /// slot is a device-address slot, and a slot's Metal address is its root entry's `guest +
     /// bind_offset` ([`replay_guest_base`]), never a `SlotGuestBase` push field.
@@ -1834,6 +1838,43 @@ fn gep_offset_wide(
     src_ty: crate::air::ir::TypeId,
     indices: &[Value],
 ) -> Result<(u64, WideGepTerms), Error> {
+    let (konst, terms) = gep_offset_indexed(cx, src_ty, indices)?;
+    Ok((
+        konst,
+        terms
+            .into_iter()
+            .map(|t| (t.index, t.stride, t.form))
+            .collect(),
+    ))
+}
+
+/// What a GEP's dynamic index steps over: the elements of its pointer (its first index), the
+/// `len` elements of an array, or a vector's lanes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Indexed {
+    Pointer,
+    Array(u64),
+    Vector,
+}
+
+/// A dynamic term of a GEP offset ([`gep_offset_indexed`]): the GEP's index operand, that index
+/// read through the index-extension rule, its byte stride mod 2^64, and what it steps over.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct IndexedTerm {
+    operand: Value,
+    index: ValueId,
+    form: IndexForm,
+    stride: u64,
+    over: Indexed,
+}
+
+/// [`gep_offset_wide`]'s constant part and dynamic terms, each with what its index steps over, in
+/// the GEP's index order.
+fn gep_offset_indexed(
+    cx: &mut SelectCx<'_>,
+    src_ty: crate::air::ir::TypeId,
+    indices: &[Value],
+) -> Result<(u64, Vec<IndexedTerm>), Error> {
     let layouts = &cx.memory.layouts;
     let types = cx.entry.module.types();
     let mut dynamic = Vec::new();
@@ -1841,8 +1882,8 @@ fn gep_offset_wide(
     let mut terms = Vec::new();
     let mut cur = src_ty;
     for (n, &i) in indices.iter().enumerate() {
-        let scale = if n == 0 {
-            layouts.alloc_size(src_ty)
+        let (scale, over) = if n == 0 {
+            (layouts.alloc_size(src_ty), Indexed::Pointer)
         } else {
             match types.get(cur) {
                 Some(Type::Struct { fields, .. }) => {
@@ -1856,27 +1897,37 @@ fn gep_offset_wide(
                     cur = *fields.get(k).ok_or_else(refuse)?;
                     continue;
                 }
-                Some(Type::Array { elem, .. } | Type::Vector { elem, .. }) => {
+                Some(Type::Array { elem, len }) => {
                     cur = *elem;
-                    layouts.alloc_size(*elem)
+                    (layouts.alloc_size(*elem), Indexed::Array(*len))
                 }
-                _ => None,
+                Some(Type::Vector { elem, .. }) => {
+                    cur = *elem;
+                    (layouts.alloc_size(*elem), Indexed::Vector)
+                }
+                _ => (None, Indexed::Vector),
             }
-        }
-        .ok_or_else(refuse)?;
+        };
+        let scale = scale.ok_or_else(refuse)?;
         match const_index(cx, i) {
             Some(k) => konst = konst.wrapping_add((k as u64).wrapping_mul(scale)),
             None if scale == 0 => {}
-            None => dynamic.push((i, scale)),
+            None => dynamic.push((i, scale, over)),
         }
     }
-    for (i, scale) in dynamic {
+    for (i, stride, over) in dynamic {
         // An index extension is read as its narrow operand; any other index as itself.
         let (v, form) = match index::narrowed(cx, i) {
             Some(n) => n,
             None => (i, index_form(cx, i)?),
         };
-        terms.push((operand(cx, v)?, scale, form));
+        terms.push(IndexedTerm {
+            operand: i,
+            index: operand(cx, v)?,
+            form,
+            stride,
+            over,
+        });
     }
     Ok((konst, terms))
 }

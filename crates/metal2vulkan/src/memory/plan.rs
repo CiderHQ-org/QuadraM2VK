@@ -19,12 +19,12 @@
 //! - **Threadgroup arena**: static threadgroup globals first, each at its own alignment, then the
 //!   `[[threadgroup(n)]]` parameter regions, whose lengths are specialization inputs. The static
 //!   size is exactly the sum of the allocations plus alignment padding: no sink word.
-//! - **Typed threadgroup objects**: a kernel's static threadgroup global of `half`, `bfloat` or
-//!   16-bit integer leaves whose every access is a plain load or store of exactly the subobject at
-//!   its offset shape, and whose pointers merge with no other root, escape or are stored, is a
-//!   `Workgroup` variable of its own type out of the arena, its leaves in their held forms, where
-//!   the kernel has no regions or imageblock, no threadgroup pointer of unknown root, and the
-//!   held objects fit the device's limit (`Planner::typed_threadgroup`).
+//! - **Typed threadgroup objects**: a kernel's static threadgroup global whose every access is a
+//!   plain load or store of exactly the subobject at its offset shape, and whose pointers merge
+//!   with no other root, escape or are stored, is a `Workgroup` variable of its own type out of the
+//!   arena, its leaves in their held forms, where the kernel has no regions or imageblock, no
+//!   threadgroup pointer of unknown root, and the held objects fit the device's limit
+//!   (`Planner::typed_threadgroup`).
 //! - **Private arena and typed allocas**: an alloca whose every access is a plain load or store of
 //!   exactly the subobject at its offset shape, whose pointers never merge with another root or
 //!   escape, and whose type holds no pointer, is typed, while the function's typed objects stay
@@ -1371,14 +1371,17 @@ impl Planner<'_> {
     /// The static threadgroup globals held as typed objects, and the arena of the rest (`full`
     /// when none is typed).
     ///
-    /// A global of a type with a `half`, `bfloat` or 16-bit integer leaf is a `Workgroup` variable
-    /// of its own type, each leaf in its held form (`memory::alloca`: a `half` in an `f32` that is
-    /// always a `half` value), where every access of it is a plain load or store of exactly the
-    /// subobject at its offset shape, its pointers merge with no other root, escape, are stored
-    /// or compared with another root's, and no atomic reaches it ([`RootUse`]). Its loads and
-    /// stores are then those of the held value, with no conversion to and from the `half` bits and
-    /// no sub-word merge of a word's other bytes, which the arena's two word atomics do: the value
-    /// a load returns is the one the last store stored, as in Metal's memory, NaN bits included.
+    /// A global is a `Workgroup` variable of its own type, each leaf in its held form
+    /// (`memory::alloca`: a `half` in an `f32` that is always a `half` value, a `float` as itself),
+    /// where every access of it is a plain load or store of exactly the subobject at its offset
+    /// shape, its pointers merge with no other root, escape, are stored or compared with another
+    /// root's, and no atomic reaches it ([`RootUse`]). Its loads and stores are then those of the
+    /// held value through an access chain, contained by clamping each dynamic index to its level
+    /// (`lower::access::local`), with no conversion to and from a `half`'s bits and no sub-word
+    /// merge of a word's other bytes, which the arena's two word atomics do: the value a load
+    /// returns is the one the last store stored, as in Metal's memory, NaN bits included. A
+    /// 32-bit array's element is one typed load or store whose clamped indices hoist out of a
+    /// loop, where the arena checks each word's byte offset.
     ///
     /// Only a kernel's static objects, without `[[threadgroup(n)]]` regions or an imageblock: Metal
     /// reports its static length (`tg_metal_static`), and the encoder's lengths must fit beside
@@ -1405,8 +1408,6 @@ impl Planner<'_> {
         let available = limit.available.saturating_sub(limit.wrapper);
         let mut total = full.static_size;
         let mut typed: Vec<SharedPlan> = Vec::new();
-        let mut narrow = BTreeMap::new();
-        let mut charged = 0usize;
         let chosen = (|| -> Result<(), Error> {
             for e in &full.entries {
                 m.tick(1)?;
@@ -1423,10 +1424,7 @@ impl Planner<'_> {
                 let plain = u.dereferenced
                     && u.typed
                     && !(u.atomic || u.merged || u.escapes || u.stored || u.cross_compare);
-                if !plain
-                    || self.e.module.types().holds_pointer(ty)
-                    || !self.holds_narrow(ty, &mut narrow, &mut charged, m)?
-                {
+                if !plain || self.e.module.types().holds_pointer(ty) {
                     continue;
                 }
                 let Some(shape) = super::alloca::typed_ty(self.e, self.p, ty, false, m)?.ok()
@@ -1458,7 +1456,6 @@ impl Planner<'_> {
             }
             Ok(())
         })();
-        m.release(charged);
         chosen?;
         if typed.is_empty() {
             return Ok((full, typed));
@@ -1520,60 +1517,6 @@ impl Planner<'_> {
             }
         }
         Ok(true)
-    }
-
-    /// Whether AIR type `ty` holds a `half`, `bfloat` or 16-bit integer scalar: a walk that looks
-    /// at each distinct type it reaches once, however often the types share members (its record
-    /// charged while it lives). The answer for `ty` is kept in `seen` (its entries charged to
-    /// `charged`).
-    fn holds_narrow(
-        &self,
-        ty: TypeId,
-        seen: &mut BTreeMap<TypeId, bool>,
-        charged: &mut usize,
-        m: &mut Meter,
-    ) -> Result<bool, Error> {
-        if let Some(&known) = seen.get(&ty) {
-            return Ok(known);
-        }
-        let types = self.e.module.types();
-        let entry = provenance::map_entry_bytes::<TypeId, ()>();
-        let mut walk: Vec<TypeId> = Vec::new();
-        let mut visited: BTreeSet<TypeId> = BTreeSet::new();
-        let mut working = 0usize;
-        let found = (|| -> Result<bool, Error> {
-            provenance::grow_working(&mut walk, 1, &mut working, m)?;
-            walk.push(ty);
-            while let Some(t) = walk.pop() {
-                m.tick(1)?;
-                if visited.contains(&t) {
-                    continue;
-                }
-                m.charge(entry)?;
-                working = working.saturating_add(entry);
-                visited.insert(t);
-                match types.get(t) {
-                    Some(Type::Half | Type::BFloat | Type::Int(16)) => return Ok(true),
-                    Some(Type::Vector { elem, .. } | Type::Array { elem, .. }) => {
-                        provenance::grow_working(&mut walk, 1, &mut working, m)?;
-                        walk.push(*elem);
-                    }
-                    Some(Type::Struct { fields, .. }) => {
-                        provenance::grow_working(&mut walk, fields.len(), &mut working, m)?;
-                        walk.extend(fields.iter().copied());
-                    }
-                    _ => {}
-                }
-            }
-            Ok(false)
-        })();
-        m.release(working);
-        let found = found?;
-        let kept = provenance::map_entry_bytes::<TypeId, bool>();
-        m.charge(kept)?;
-        *charged = charged.saturating_add(kept);
-        seen.insert(ty, found);
-        Ok(found)
     }
 
     /// The entry's static threadgroup objects in the order Metal places them, and whether that

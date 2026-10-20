@@ -155,6 +155,7 @@ mod engine_texture_ulong;
 mod engine_texture_unk;
 mod engine_tile;
 mod engine_tiny_products;
+mod engine_typed_clamp;
 mod engine_typed_threadgroup;
 mod engine_uniform_varyings;
 mod engine_unmeasured_speculation;

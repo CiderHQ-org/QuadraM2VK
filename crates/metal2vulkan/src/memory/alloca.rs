@@ -23,10 +23,18 @@
 //! object) and `rem` the offset inside that element; a negative or wrapped index is a huge unsigned
 //! one.
 //!
-//! **Clamps** (`GuestIsolation::On`): a load reads each dynamic level's element `select(idx < len,
-//! idx, 0)` and yields `select(ok, v, 0)`, `ok` being every level's `idx < len`; a store sits in
-//! `if_(ok)`. By construction, not a pass. Without isolation the indices are used as is (an
-//! out-of-range index is undefined in Metal).
+//! **Clamps** (`GuestIsolation::On`): a load or store reaches each dynamic level's element
+//! `min(idx, len - 1)`, so it never leaves its object. By construction, not a pass. An index within
+//! its level is used as is, so an in-range access is the access Metal makes; an index past its
+//! level's length (a negative or wrapped one is a huge unsigned one), which Metal leaves
+//! undefined, reaches the level's last element: a load reads that element and a store writes it.
+//! Metal's own answer there is whatever its memory holds at the address. Without isolation the
+//! indices are used as is.
+//!
+//! Where the access's `getelementptr` indexes the levels itself, its own index operands are the
+//! levels' indices (`lower::access::local::lined_up`): within their levels they are the indices
+//! the offset recovers, and a loop-invariant one stays loop-invariant, so its clamp hoists out of
+//! the loop.
 
 use std::collections::BTreeMap;
 
@@ -669,7 +677,10 @@ pub enum Step {
 /// from the pointer's offset level by level: with `rem` the offset (the object's start is 0),
 /// a level's index is `(rem - start) / stride` and the next level's `rem` is `(rem - start) %
 /// stride`, the offset inside the element. For in-range indices that is exact: a level's
-/// constant displacement and every inner level's contribution stay inside its element.
+/// constant displacement and every inner level's contribution stay inside its element. Every
+/// array level that encloses a dynamic one is dynamic too ([`path`]), so an offset that a
+/// flattened index carries past an inner array's end, still inside the object, recovers the
+/// element it addresses.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct TypedPath {
     pub steps: Vec<Step>,
@@ -751,7 +762,10 @@ fn walk<R>(
 /// constant part `base` takes: the object itself (an array of `count` elements of `obj`), then
 /// each array level inside it whose element size is the next stride. Every stride must match a
 /// level; the constant indices between levels, and below the last, locate `base` inside each
-/// element (the displacement a dynamic index of 0 leaves).
+/// element (the displacement a dynamic index of 0 leaves). An array level whose element is larger
+/// than the next stride, the object itself among them where it holds more than one element, is
+/// dynamic as well, its index recovered from the offset: a flattened index (a `float *` into a
+/// `float[8][8]`) may carry the offset across its elements, as Metal's byte address does.
 pub fn path(
     e: &Entry,
     layouts: &TypeLayouts,
@@ -830,8 +844,12 @@ fn path_to<R>(
     // The object level: a dynamic index over its `count` elements, or element `base / size`.
     // `start` is the byte offset, inside the innermost dynamic level's element (or the object),
     // of the type `ty` being walked; `off` is `base`'s offset inside `ty`.
-    let mut start = if pending.peek() == Some(&size) {
-        pending.next();
+    let deeper = |p: Option<&u64>, size: u64| p.is_some_and(|&s| s < size);
+    let mut start = if pending.peek() == Some(&size) || (count > 1 && deeper(pending.peek(), size))
+    {
+        if pending.peek() == Some(&size) {
+            pending.next();
+        }
         steps.push(Step::Dyn(DynLevel {
             start: 0,
             stride: u32::try_from(size).ok()?,
@@ -853,14 +871,18 @@ fn path_to<R>(
             return Some((TypedPath { steps }, r));
         };
         if let Some(Type::Array { elem, len }) = e.module.types().get(ty) {
-            if layouts.alloc_size(*elem) == Some(stride) {
-                pending.next();
+            let es = layouts.alloc_size(*elem).filter(|&s| s > 0)?;
+            if es >= stride {
+                // The stride's own level, or an array enclosing a deeper dynamic level.
+                if es == stride {
+                    pending.next();
+                }
                 steps.push(Step::Dyn(DynLevel {
                     start: u32::try_from(start).ok()?,
-                    stride: u32::try_from(stride).ok()?,
+                    stride: u32::try_from(es).ok()?,
                     len: u32::try_from(*len).ok()?,
                 }));
-                (ty, off, start) = (*elem, off % stride, 0);
+                (ty, off, start) = (*elem, off % es, 0);
                 continue;
             }
         }

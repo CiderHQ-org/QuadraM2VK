@@ -31,7 +31,10 @@
 //! robustness feature covers arenas): with `inb` the normative check against the arena's exact byte
 //! size, a load reads at `select(inb, off, 0)` and yields `select(inb, v, 0)`, and a store sits in
 //! a builder-closed `if_(inb)`. A typed access's dynamic indices are **clamped** under
-//! `GuestIsolation::On` (`memory::alloca`); a constant index is in range by construction.
+//! `GuestIsolation::On` (`memory::alloca`): each to its level's last element, so the access never
+//! leaves its object; a constant index is in range by construction. Each dynamic index is the
+//! defining `getelementptr`'s own operand where the GEP's dynamic indices line up one to one with
+//! the path's dynamic levels (`lined_up`), and is recovered from the pointer's offset otherwise.
 //!
 //! The offset shape of a typed access is read from its pointer's definitions: an alloca or a global
 //! address is `Exact(0)`, a GEP adds its constant and a dynamic multiple of each of its strides
@@ -91,11 +94,13 @@ use crate::spirv::builder::constructs::{ArmEnd, ArmFn};
 use crate::spirv::builder::{FunctionBuilder, ModuleBuilder};
 use crate::spirv::error::BResult;
 use crate::spirv::ids::{DemoteTy, GlobalId, Value as SValue};
-use crate::spirv::ir::{BinOp, ConstBits, Constant, MemAccess, StorageClass, Type as SType};
+use crate::spirv::ir::{
+    BinOp, ConstBits, Constant, GlslOp, MemAccess, StorageClass, Type as SType,
+};
 
 use super::emit::index_u32;
 use super::tile::{KeptCells, KeptMem};
-use super::{is_ptr_ty, not_lowered, operand, refuse, GepTerms};
+use super::{is_ptr_ty, not_lowered, operand, refuse, GepTerms, IndexForm, Indexed};
 
 /// Where a pointer points: an arena, or a typed object (by its index in the memory plan's
 /// `typed_allocas`, `const_globals` or `typed_shared`).
@@ -146,7 +151,11 @@ pub struct TypedAccess {
     /// The stored value (stores only).
     pub value: Option<ValueId>,
     pub path: TypedPath,
-    /// The dynamic index is clamped (`GuestIsolation::On`).
+    /// Each dynamic level's index as the defining `getelementptr`'s operand, in level order,
+    /// where its dynamic indices line up one to one with the path's dynamic levels
+    /// (`lined_up`); `None` recovers each from the pointer's offset.
+    pub indices: Option<Vec<(ValueId, IndexForm)>>,
+    /// Each dynamic index is clamped to its level's last element (`GuestIsolation::On`).
     pub clamped: bool,
     /// A volatile access: its load or store carries `Volatile`.
     pub volatile: bool,
@@ -1267,11 +1276,92 @@ fn shape_of(cx: &mut SelectCx<'_>, v: Value, m: &mut Meter) -> Result<Sh, Error>
     }
 }
 
-/// A load or store of type `ty` through `ptr` into typed object `home`.
+/// The dynamic indices of the `getelementptr` that defines typed access pointer `ptr`, one per
+/// dynamic level of `path` in order, where they line up one to one with those levels; `None` where
+/// they do not (or `ptr` is no `getelementptr`), and the access recovers each index from its
+/// offset. Only `ptr`'s own definition is read, so each access costs the same however its pointer
+/// was made.
+///
+/// They line up where the GEP's base is at a constant offset into the object (no dynamic part
+/// before the GEP), the GEP has exactly one dynamic index per dynamic level, and each, in order,
+/// has the level's stride and steps over the same elements: an array index over an array of the
+/// level's length, or the GEP's first (pointer) index over the object's outermost level from the
+/// object's start, which spans the whole object (`count` elements of `obj`). Within its level, each
+/// such index is the one the offset recovers; a vector index, or a level the GEP does not index,
+/// falls back.
+///
+/// Where they line up, `at` (the access) reads the operands where it stands
+/// (`AccessPlan::typed_indices`), so each is carried to its block as the access's other operands
+/// are.
+fn lined_up(
+    cx: &mut SelectCx<'_>,
+    at: InstId,
+    ptr: Value,
+    path: &TypedPath,
+    (obj, count): (TypeId, u64),
+    m: &mut Meter,
+) -> Result<Option<Vec<(ValueId, IndexForm)>>, Error> {
+    let levels: Vec<alloca::DynLevel> = path.dynamic().collect();
+    if levels.is_empty() {
+        return Ok(None);
+    }
+    m.tick(1)?;
+    let Value::Inst(i) = ptr else {
+        return Ok(None);
+    };
+    let Some(inst) = cx.body.insts.get(i) else {
+        return Err(cx.invariant("a pointer without a definition"));
+    };
+    let InstKind::Gep {
+        base,
+        src_ty,
+        indices,
+        ..
+    } = &inst.kind
+    else {
+        return Ok(None);
+    };
+    let (base, src_ty) = (*base, *src_ty);
+    let Sh::Is(Shape::Exact(start)) = shape_of(cx, base, m)? else {
+        return Ok(None);
+    };
+    let (_, terms) = super::gep_offset_indexed(cx, src_ty, indices)?;
+    if terms.len() != levels.len() {
+        return Ok(None);
+    }
+    let whole = cx
+        .memory
+        .layouts
+        .alloc_size(obj)
+        .and_then(|s| s.checked_mul(count));
+    let mut out = Vec::with_capacity(terms.len());
+    for (j, (t, d)) in terms.iter().zip(&levels).enumerate() {
+        let steps_over = match t.over {
+            Indexed::Array(len) => len == u64::from(d.len),
+            Indexed::Pointer => {
+                j == 0
+                    && start == 0
+                    && d.start == 0
+                    && whole == Some(u64::from(d.stride) * u64::from(d.len))
+            }
+            Indexed::Vector => false,
+        };
+        if t.stride != u64::from(d.stride) || !steps_over {
+            return Ok(None);
+        }
+        out.push((t.index, t.form));
+    }
+    let reads: Vec<Value> = terms.iter().map(|t| t.operand).collect();
+    cx.families.access.typed_indices.insert(at, reads);
+    Ok(Some(out))
+}
+
+/// A load or store of type `ty` through `ptr` into typed object `home`, by instruction `reader`
+/// where it is one (an intrinsic's store has none, and recovers its indices from the offset).
 fn typed_access(
     cx: &mut SelectCx<'_>,
     home: Home,
-    ptr: Value,
+    (ptr, reader): (Value, Option<InstId>),
     value: Option<Value>,
     ty: TypeId,
     m: &mut Meter,
@@ -1339,6 +1429,10 @@ fn typed_access(
     };
     let clamped =
         path.dynamic().next().is_some() && cx.profile.fields().isolation == GuestIsolation::On;
+    let indices = match reader {
+        Some(at) => lined_up(cx, at, ptr, &path, (obj, count), m)?,
+        None => None,
+    };
     let ptr = local_ptr(cx, ptr, home)?;
     let value = stored_value(cx, value)?;
     Ok(TypedAccess {
@@ -1346,6 +1440,7 @@ fn typed_access(
         ptr,
         value,
         path,
+        indices,
         clamped,
         volatile: false,
         fragment,
@@ -1392,7 +1487,12 @@ pub fn intrinsic_store(
             cx, arena, ptr, None, ty, align,
         )?)),
         Some(home @ Home::Alloca(_)) => Ok(IntrinsicStore::Typed(typed_access(
-            cx, home, ptr, None, ty, m,
+            cx,
+            home,
+            (ptr, None),
+            None,
+            ty,
+            m,
         )?)),
         Some(Home::Constant(_) | Home::Shared(_)) | None => Err(refuse()),
     }
@@ -1518,7 +1618,14 @@ pub fn select(
             Some(Home::Arena(arena)) => {
                 LocalStrategy::Load(access(cx, arena, *ptr, None, inst.ty, *align)?)
             }
-            Some(home) => LocalStrategy::TypedLoad(typed_access(cx, home, *ptr, None, inst.ty, m)?),
+            Some(home) => LocalStrategy::TypedLoad(typed_access(
+                cx,
+                home,
+                (*ptr, Some(at)),
+                None,
+                inst.ty,
+                m,
+            )?),
         },
         InstKind::Store {
             val,
@@ -1542,9 +1649,14 @@ pub fn select(
                 }
                 // A constant global in `Private` form is never written.
                 Home::Constant(_) => return Err(refuse()),
-                Home::Alloca(_) | Home::Shared(_) => {
-                    LocalStrategy::TypedStore(typed_access(cx, home, *ptr, Some(*val), ty, m)?)
-                }
+                Home::Alloca(_) | Home::Shared(_) => LocalStrategy::TypedStore(typed_access(
+                    cx,
+                    home,
+                    (*ptr, Some(at)),
+                    Some(*val),
+                    ty,
+                    m,
+                )?),
             }
         }
         _ => return Ok(None),
@@ -1758,23 +1870,22 @@ pub(super) fn emit_access_at(
     }
 }
 
-/// The access-chain indices of `a`'s path, each dynamic one recovered from the pointer's offset
-/// level by level (`(rem - start) / stride`, the next level's `rem` being `(rem - start) %
-/// stride`, `memory::alloca`), and the clamp condition when `a.clamped`: every level's `idx <
-/// len`, a clamped load reading each level at `select(idx < len, idx, 0)`.
+/// The access-chain indices of `a`'s path. Each dynamic one is the defining GEP's operand where
+/// they line up (`TypedAccess::indices`), or is recovered from the pointer's offset level by level
+/// (`(rem - start) / stride`, the next level's `rem` being `(rem - start) % stride`,
+/// `memory::alloca`); when `a.clamped`, each is clamped to its level's last element,
+/// `min(idx, len - 1)`, so the chain never leaves the object.
 fn chain_indices(
     cx: &mut EmitCx<'_>,
     fb: &mut FunctionBuilder<'_>,
     a: &TypedAccess,
-    load: bool,
-) -> BResult<(Vec<SValue>, Option<SValue>)> {
+) -> BResult<Vec<SValue>> {
     let levels = a.path.dynamic().count();
-    let mut rem = match levels {
-        0 => None,
+    let mut rem = match (levels, &a.indices) {
+        (0, _) | (_, Some(_)) => None,
         _ => Some(ptr_value(cx, fb, a.ptr)?),
     };
     let mut seen = 0;
-    let mut ok: Option<SValue> = None;
     let mut out = Vec::with_capacity(a.path.steps.len());
     for step in &a.path.steps {
         let d = match step {
@@ -1784,55 +1895,58 @@ fn chain_indices(
             }
             Step::Dyn(d) => *d,
         };
-        let Some(off) = rem else {
-            return Err(cx.fail("a dynamic level without an offset"));
-        };
-        seen += 1;
-        let rel = if d.start == 0 {
-            off
-        } else {
-            let s = k32(fb, d.start)?;
-            fb.binary(BinOp::ISub, off, s)?
-        };
-        let idx = match (d.stride.is_power_of_two(), d.stride.trailing_zeros()) {
-            (true, 0) => rel,
-            (true, sh) => {
-                let sh = k32(fb, sh)?;
-                fb.binary(BinOp::ShiftRightLogical, rel, sh)?
+        let idx = match &a.indices {
+            Some(indices) => {
+                let Some(&(v, form)) = indices.get(seen) else {
+                    return Err(cx.fail("a dynamic level without its GEP index"));
+                };
+                seen += 1;
+                let x = cx.operand(fb, v)?;
+                index_u32(fb, x, form)?
             }
-            (false, _) => {
-                let s = k32(fb, d.stride)?;
-                fb.binary(BinOp::UDiv, rel, s)?
+            None => {
+                let Some(off) = rem else {
+                    return Err(cx.fail("a dynamic level without an offset"));
+                };
+                seen += 1;
+                let rel = if d.start == 0 {
+                    off
+                } else {
+                    let s = k32(fb, d.start)?;
+                    fb.binary(BinOp::ISub, off, s)?
+                };
+                let idx = match (d.stride.is_power_of_two(), d.stride.trailing_zeros()) {
+                    (true, 0) => rel,
+                    (true, sh) => {
+                        let sh = k32(fb, sh)?;
+                        fb.binary(BinOp::ShiftRightLogical, rel, sh)?
+                    }
+                    (false, _) => {
+                        let s = k32(fb, d.stride)?;
+                        fb.binary(BinOp::UDiv, rel, s)?
+                    }
+                };
+                // The offset inside the element, for the next level.
+                rem = if seen == levels {
+                    None
+                } else if d.stride.is_power_of_two() {
+                    let m = k32(fb, d.stride - 1)?;
+                    Some(fb.binary(BinOp::BitwiseAnd, rel, m)?)
+                } else {
+                    let s = k32(fb, d.stride)?;
+                    Some(fb.binary(BinOp::UMod, rel, s)?)
+                };
+                idx
             }
-        };
-        // The offset inside the element, for the next level.
-        rem = if seen == levels {
-            None
-        } else if d.stride.is_power_of_two() {
-            let m = k32(fb, d.stride - 1)?;
-            Some(fb.binary(BinOp::BitwiseAnd, rel, m)?)
-        } else {
-            let s = k32(fb, d.stride)?;
-            Some(fb.binary(BinOp::UMod, rel, s)?)
         };
         if !a.clamped {
             out.push(idx);
             continue;
         }
-        let len = k32(fb, d.len)?;
-        let in_range = fb.binary(BinOp::ULessThan, idx, len)?;
-        ok = Some(match ok {
-            None => in_range,
-            Some(all) => fb.binary(BinOp::LogicalAnd, all, in_range)?,
-        });
-        out.push(if load {
-            let zero = k32(fb, 0)?;
-            fb.select(in_range, idx, zero)?
-        } else {
-            idx
-        });
+        let last = k32(fb, d.len.saturating_sub(1))?;
+        out.push(fb.glsl(GlslOp::UMin, &[idx, last])?);
     }
-    Ok((out, ok))
+    Ok(out)
 }
 
 /// Load or store (`stored`) typed access `a` through an access chain of its path, clamped when
@@ -1855,7 +1969,7 @@ fn emit_typed(
     let Some(g) = found else {
         return Err(cx.fail(format!("typed object {:?} is not declared", a.home)));
     };
-    let (mut idx, ok) = chain_indices(cx, fb, a, stored.is_none())?;
+    let mut idx = chain_indices(cx, fb, a)?;
     // One held element of a matrix's fragment is that lane of it.
     if let Some(alloca::FragmentPart::Lane(i)) = a.part {
         idx.push(k32(fb, i)?);
@@ -1888,36 +2002,17 @@ fn emit_typed(
         }
         (stored, _) => stored,
     };
-    match (stored, ok) {
-        (None, ok) => {
-            let p = fb.access_chain(base, &idx)?;
+    let p = fb.access_chain(base, &idx)?;
+    match stored {
+        None => {
             let v = fb.load(p, load_access)?;
-            let v = match ok {
-                None => v,
-                Some(ok) => {
-                    let ty = fb.value_ty(v)?;
-                    let z = fb.module().constant(Constant::Null { ty })?;
-                    let z = fb.module().const_value(z)?;
-                    fb.select(ok, v, z)?
-                }
-            };
             match &a.fragment {
                 Some(d) => rebuild(cx, fb, d, v).map(Some),
                 None => Ok(Some(v)),
             }
         }
-        (Some(v), None) => {
-            let p = fb.access_chain(base, &idx)?;
+        Some(v) => {
             fb.store(p, v, store_access)?;
-            Ok(None)
-        }
-        (Some(v), Some(ok)) => {
-            let then: ArmFn<'_, ()> = Box::new(move |fb, _| {
-                let p = fb.access_chain(base, &idx)?;
-                fb.store(p, v, store_access)?;
-                Ok(ArmEnd::FallThrough(Vec::new()))
-            });
-            fb.if_(&mut (), ok, then, None)?;
             Ok(None)
         }
     }

@@ -243,8 +243,9 @@ impl FamilyPlans {
     /// `extractvalue` forwards, instead of its aggregate; none for a multiply folded into the
     /// additions that use it, and a fused addition's two factors and addend instead of its product;
     /// and otherwise each operand, a use of an index extension reading the extension's narrow
-    /// operand. A phi reads nothing where it stands: its copies read at the end of each incoming
-    /// block ([`FamilyPlans::incoming_reads`]).
+    /// operand. A typed access whose chain takes its `getelementptr`'s index operands reads those
+    /// too. A phi reads nothing where it stands: its copies read at the end of each incoming block
+    /// ([`FamilyPlans::incoming_reads`]).
     ///
     /// This is the one hook for what an instruction reads: the block-crossing values (`select`),
     /// each block's imports and the predicated walk's reloads (`lower::emit`), and the predicated
@@ -290,6 +291,9 @@ impl FamilyPlans {
         for &id in contract.folded.iter().chain(contract.fused.keys()) {
             mark(id, ReadIndex::CONTRACTED);
         }
+        for &id in self.access.typed_indices.keys() {
+            mark(id, ReadIndex::TYPED_INDICES);
+        }
         ReadIndex { flags }
     }
 
@@ -324,6 +328,12 @@ impl FamilyPlans {
                 {
                     kind.for_each_value(|v| f(read(v)));
                 }
+            }
+        }
+        // A typed access whose chain takes its GEP's index operands reads them too.
+        if named(id, ReadIndex::TYPED_INDICES) {
+            for &v in self.access.typed_indices.get(&id).into_iter().flatten() {
+                f(read(v));
             }
         }
     }
@@ -367,6 +377,8 @@ impl ReadIndex {
     const FORWARDED: u8 = 2;
     /// A folded multiply or a fused addition (`arith::contract::Plan::reads`).
     const CONTRACTED: u8 = 4;
+    /// A typed access that reads its GEP's index operands (`access::AccessPlan::typed_indices`).
+    const TYPED_INDICES: u8 = 8;
 
     /// Whether a plan of kind `bit` may name instruction `id`.
     fn names(&self, id: InstId, bit: u8) -> bool {

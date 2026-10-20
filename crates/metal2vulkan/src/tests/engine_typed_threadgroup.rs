@@ -242,10 +242,10 @@ fn a_half_threadgroup_array_is_a_typed_workgroup_object() {
     }
 }
 
-/// A `float` array beside the `half` one stays in the arena (its accesses already take whole
-/// words), the `half` one is typed, and the reported static length is Metal's layout of both.
+/// A `float` array beside the `half` one is a typed object too (an element is one typed access,
+/// not a contained word), and the reported static length is Metal's layout of both.
 #[test]
-fn only_the_narrow_array_leaves_the_arena() {
+fn a_float_array_beside_the_half_one_is_typed_too() {
     let extra = r#"  %pf = getelementptr inbounds [64 x float], ptr addrspace(3) @f, i32 0, i32 %t
   store float 1.5, ptr addrspace(3) %pf, align 4
   %lf = load float, ptr addrspace(3) %pf, align 4
@@ -265,9 +265,8 @@ fn only_the_narrow_array_leaves_the_arena() {
         l3(&bc, "mixed", &prof, stem);
         let (plan, m) = typed_module(&bc, "mixed", &prof).expect("module");
         let local = &plan.families.access.local;
-        let tg = local.tg.as_ref().expect("an arena");
-        assert_eq!(tg.static_size, 256, "{stem}: the float array alone");
-        assert_eq!(local.typed.len(), 1, "{stem}");
+        assert_eq!(local.tg, None, "{stem}: no arena");
+        assert_eq!(local.typed.len(), 2, "{stem}");
         assert_eq!(workgroup_variables(&m), 2, "{stem}");
         let want: Vec<u32> = (0..64u32).map(|t| pattern(63 - t)).collect();
         assert_bits(stem, &run_both(&m, &resources(&plan)), &want, stem);

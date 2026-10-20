@@ -569,8 +569,13 @@ define void @oob(ptr addrspace(1) %out, i32 %t) {
   store i32 %t, ptr addrspace(3) %p, align 4
   tail call void @air.wg.barrier(i32 2, i32 1)
   %v = load i32, ptr addrspace(3) %p, align 4
+  %pb = getelementptr inbounds i8, ptr addrspace(3) @g, i32 1
+  %b = load i8, ptr addrspace(3) %pb, align 1
+  %bz = zext i8 %b to i32
+  %b0 = and i32 %bz, 0
+  %vb = or i32 %v, %b0
   %o = getelementptr inbounds i32, ptr addrspace(1) %out, i32 %t
-  store i32 %v, ptr addrspace(1) %o, align 4
+  store i32 %vb, ptr addrspace(1) %o, align 4
   ret void
 }
 
@@ -584,8 +589,9 @@ declare void @air.wg.barrier(i32, i32)
 !4 = !{i32 1, !"air.thread_index_in_threadgroup", !"air.arg_type_name", !"uint", !"air.arg_name", !"t"}
 "#;
 
-/// Indices past a 64-byte threadgroup array are contained (stores dropped, loads 0), and with
-/// containment off (`UnsafeOff`, isolation off) no check is emitted.
+/// Indices past a 64-byte threadgroup array in the arena (a byte read of its words keeps it there)
+/// are contained (stores dropped, loads 0), and with containment off (`UnsafeOff`, isolation off)
+/// no check is emitted.
 #[test]
 fn out_of_bounds_threadgroup_indices_are_contained() {
     let Some(bc) = assemble("oob", OOB) else {
@@ -595,6 +601,7 @@ fn out_of_bounds_threadgroup_indices_are_contained() {
         let prof = p(stem);
         l3(&bc, "oob", &prof, stem);
         let (plan, m) = typed_module(&bc, "oob", &prof).expect("module");
+        assert!(plan.families.access.local.typed.is_empty(), "{stem}");
         let census = plan.census();
         assert!(census.contains_key("access.threadgroup.store.checked"));
         assert!(census.contains_key("access.threadgroup.load.checked"));
@@ -689,8 +696,9 @@ fn typed_alloca_body() -> String {
 }
 
 /// A typed alloca is a `Private` array indexed by access chains; its dynamic indices are clamped
-/// under isolation (an out-of-range load is 0, an out-of-range store is dropped) and exact in
-/// range, including a 12-byte (non-power-of-two) stride. Without isolation no clamp is emitted.
+/// under isolation (an out-of-range index reaches the level's last element, on a load and a
+/// store) and exact in range, including a 12-byte (non-power-of-two) stride. Without isolation no
+/// clamp is emitted.
 #[test]
 fn typed_alloca_indices_are_clamped_under_isolation() {
     let Some(bc) = assemble("typed", &two_word_kernel("typed", "", &typed_alloca_body())) else {
@@ -715,12 +723,10 @@ fn typed_alloca_indices_are_clamped_under_isolation() {
         let want: Vec<u32> = (0..32u32)
             .flat_map(|t| {
                 let mut a: Vec<u32> = (10..18).collect();
-                if t + 4 < 8 {
-                    a[(t + 4) as usize] = 999;
-                }
+                a[(t + 4).min(7) as usize] = 999;
                 a[(t & 7) as usize] = t * 100;
                 let v0 = a[((t & 7) ^ 5) as usize];
-                let x = if t < 8 { a[t as usize] } else { 0 };
+                let x = a[t.min(7) as usize];
                 [v0, x + 3 * (t & 3) + 2]
             })
             .collect();
@@ -813,10 +819,10 @@ fn nested_levels_body() -> String {
 }
 
 /// An alloca indexed dynamically at several nested array levels (non-power-of-two strides, a struct
-/// member between the levels, vector leaves) is typed: an access chain whose indices are recovered
-/// from the offset level by level, exact in range, and clamped at every level under isolation (an
-/// out-of-range load is 0, an out-of-range store is dropped). Without isolation no clamp is
-/// emitted.
+/// member between the levels, vector leaves) is typed: an access chain whose indices are the
+/// accesses' own GEP indices, exact in range, and clamped at every level under isolation (an
+/// out-of-range index reaches its level's last element, on a load and a store). Without isolation
+/// no clamp is emitted.
 #[test]
 fn typed_allocas_index_nested_levels_dynamically() {
     let Some(bc) = assemble(
@@ -843,11 +849,9 @@ fn typed_allocas_index_nested_levels_dynamically() {
                     .map(|i| (0..5).map(|j| 100 + 5 * i + j).collect())
                     .collect();
                 c[(t % 3) as usize][((7 * t) % 5) as usize] = 900 + t;
-                if t < 3 {
-                    c[t as usize][0] = 777;
-                }
+                c[t.min(2) as usize][0] = 777;
                 let x = c[((t + 1) % 3) as usize][((3 * t) % 5) as usize];
-                let z = if t < 3 { c[t as usize][t as usize] } else { 0 };
+                let z = c[t.min(2) as usize][t.min(4) as usize];
                 let (di, dj, ej) = (t & 1, t % 3, (t >> 1) & 1);
                 [x + z, 60 + 3 * di + dj + 10 + 2 * di + ej]
             })
@@ -922,7 +926,8 @@ const TABLES: &str = r#"@tab = internal addrspace(2) constant [4 x i32] [i32 7, 
 "#;
 
 /// A closed constant global is a `Private` variable with its initializer; a dynamic index into it
-/// is clamped under isolation (out of range reads 0), including a member below the dynamic level.
+/// is clamped under isolation (out of range reads the level's last element), including a member
+/// below the dynamic level.
 #[test]
 fn constant_private_arrays_are_clamped_under_isolation() {
     let body = r#"  %p = getelementptr inbounds [4 x i32], ptr addrspace(2) @tab, i32 0, i32 %t
@@ -946,12 +951,7 @@ fn constant_private_arrays_are_clamped_under_isolation() {
         let tab = [7u32, 11, 13, 17];
         let pairs = [2u32, 4, 6];
         let want: Vec<u32> = (0..16usize)
-            .flat_map(|t| {
-                [
-                    tab.get(t).copied().unwrap_or(0),
-                    pairs.get(t).copied().unwrap_or(0),
-                ]
-            })
+            .flat_map(|t| [tab[t.min(3)], pairs[t.min(2)]])
             .collect();
         assert_eq!(run_both(&m, &res).expect("run"), want, "{stem}");
     }
@@ -1070,8 +1070,9 @@ fn a_select_of_threadgroup_globals_selects_their_offsets() {
 }
 
 /// Constant `getelementptr`s address their exact displacement from their global: into a threadgroup
-/// global placed before a second one, through a nested aggregate, with a negative index, and into a
-/// closed constant global in its `Private` form.
+/// global placed before a second one (in the arena, where a byte read of its words keeps it),
+/// through a nested aggregate, with a negative index, and into a closed constant global in its
+/// `Private` form.
 #[test]
 fn constant_geps_address_their_displacement() {
     let globals = r#"@pad = internal addrspace(3) global [3 x i32] undef, align 4
@@ -1105,7 +1106,11 @@ wait:
   %d = load i32, ptr addrspace(2) getelementptr inbounds (i32, ptr addrspace(2) getelementptr inbounds ([4 x <2 x i32>], ptr addrspace(2) @tab, i32 0, i32 3), i32 -1), align 4
   %c1 = extractelement <2 x i32> %c, i32 1
   %cd = shl i32 %c1, 8
-  %v1 = or i32 %cd, %d"#;
+  %v1p = or i32 %cd, %d
+  %gb = load i8, ptr addrspace(3) @g, align 4
+  %gz = zext i8 %gb to i32
+  %g0 = and i32 %gz, 0
+  %v1 = or i32 %v1p, %g0"#;
     let Some(bc) = assemble("const_geps", &two_word_kernel("const_geps", globals, body)) else {
         return;
     };
@@ -1215,29 +1220,25 @@ fn a_typed_access_shape_walk_is_metered_by_the_definitions_it_reads() {
 }
 
 /// Each definition's shape is read once per function. 32 more stores through the end of a 100-level
-/// chain cost what 32 more stores through its start do (within a unit each): every access after the
-/// first finds the pointer's shape read. Read per access, each would charge the 200-definition walk
-/// again.
+/// chain cost what 32 more stores through the end of a 1-level chain do (within a unit each): every
+/// access after the first finds the pointer's shape read. Read per access, each would charge the
+/// 200-definition walk again. (Both ends are `getelementptr i8` steps, so both chains' accesses
+/// are emitted alike.)
 #[test]
 fn a_pointer_shape_is_read_once_per_function() {
-    const DEPTH: u32 = 100;
-    let work = |stores, through_end| {
-        levels_work(Levels::Chain, DEPTH, stores, through_end, WORK_UNITS)
-            .map(|w| w.expect("translates"))
+    let work = |depth, stores| {
+        levels_work(Levels::Chain, depth, stores, true, WORK_UNITS).map(|w| w.expect("translates"))
     };
-    let (Some(end1), Some(end33), Some(start1), Some(start33)) = (
-        work(1, true),
-        work(33, true),
-        work(1, false),
-        work(33, false),
-    ) else {
+    let (Some(deep1), Some(deep33), Some(short1), Some(short33)) =
+        (work(100, 1), work(100, 33), work(1, 1), work(1, 33))
+    else {
         return;
     };
-    let (through_end, through_start) = (end33 - end1, start33 - start1);
+    let (deep, short) = (deep33 - deep1, short33 - short1);
     assert!(
-        through_end <= through_start + 32,
-        "32 more stores cost {through_end} work units through the chain's end and \
-         {through_start} through its start: the walk is repeated per access"
+        deep <= short + 32,
+        "32 more stores cost {deep} work units through a 100-level chain's end and {short} \
+         through a 1-level chain's: the walk is repeated per access"
     );
 }
 

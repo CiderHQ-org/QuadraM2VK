@@ -678,12 +678,14 @@ fn the_threadgroup_arena_is_exact() {
 /// The order is the last references', not the module's or the first references': `a`, `b`, `c`
 /// named `c`, `a`, `b`, then `b`, `a`, `c` lie `c`, `a`, `b` from 0. An instruction naming two of
 /// them (a `select` of two addresses) orders them by no measured rule, so the layout is not Metal's
-/// ([`ArenaLayout::metal_layout`]) and no integer address reads it.
+/// ([`ArenaLayout::metal_layout`]) and no integer address reads it. Byte loads of their words keep
+/// them in the arena.
 #[test]
 fn threadgroup_globals_lie_in_the_reverse_of_their_last_references() {
     let layout = |merged: bool| {
         let mut k = Kernel::new();
         let i32t = k.mb.int(32);
+        let i8t = k.mb.int(8);
         let words = k.mb.array(i32t, 4);
         let g: Vec<GlobalId> = ["a", "b", "c"]
             .iter()
@@ -694,7 +696,7 @@ fn threadgroup_globals_lie_in_the_reverse_of_their_last_references() {
             let i1 = fb.module().int(1);
             let ptr = fb.module().ptr(AddrSpace::Threadgroup);
             for i in [2, 0, 1, 1, 0, 2] {
-                let _ = load(fb, i32t, addr[i]);
+                let _ = load(fb, i8t, addr[i]);
             }
             if merged {
                 let c = fb.module().const_int(i1, 1);
