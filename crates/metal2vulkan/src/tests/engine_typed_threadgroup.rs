@@ -328,10 +328,9 @@ fn the_array_stays_in_the_arena_where_the_structure_does_not_allow_a_typed_objec
 /// must fit beside the static length Metal reports, which the binder checks.
 #[test]
 fn a_threadgroup_region_keeps_the_array_in_the_arena() {
-    let text = format!(
-        r#"@h = internal addrspace(3) global [64 x half] undef, align 2
+    let text = r#"@h = internal addrspace(3) global [64 x half] undef, align 2
 
-define void @region(ptr addrspace(1) %out, ptr addrspace(3) %a, i32 %t) {{
+define void @region(ptr addrspace(1) %out, ptr addrspace(3) %a, i32 %t) {
   %p = getelementptr inbounds [64 x half], ptr addrspace(3) @h, i32 0, i32 %t
   store half 0xH3C00, ptr addrspace(3) %p, align 2
   %pa = getelementptr inbounds i32, ptr addrspace(3) %a, i32 %t
@@ -343,20 +342,19 @@ define void @region(ptr addrspace(1) %out, ptr addrspace(3) %a, i32 %t) {{
   %o = getelementptr inbounds i32, ptr addrspace(1) %out, i32 %t
   store i32 %w, ptr addrspace(1) %o, align 4
   ret void
-}}
+}
 
 declare void @air.wg.barrier(i32, i32)
 
-!air.kernel = !{{!0}}
-!0 = !{{ptr @region, !1, !2}}
-!1 = !{{}}
-!2 = !{{!3, !4, !5}}
-!3 = !{{i32 0, !"air.buffer", !"air.location_index", i32 0, i32 1, !"air.read_write", !"air.address_space", i32 1, !"air.arg_type_size", i32 4, !"air.arg_type_align_size", i32 4, !"air.arg_type_name", !"uint", !"air.arg_name", !"out"}}
-!4 = !{{i32 1, !"air.buffer", !"air.location_index", i32 0, i32 1, !"air.read_write", !"air.address_space", i32 3, !"air.arg_type_size", i32 4, !"air.arg_type_align_size", i32 4, !"air.arg_type_name", !"uint", !"air.arg_name", !"a"}}
-!5 = !{{i32 2, !"air.thread_index_in_threadgroup", !"air.arg_type_name", !"uint", !"air.arg_name", !"t"}}
-"#
-    );
-    let Some(bc) = assemble("region", &text) else {
+!air.kernel = !{!0}
+!0 = !{ptr @region, !1, !2}
+!1 = !{}
+!2 = !{!3, !4, !5}
+!3 = !{i32 0, !"air.buffer", !"air.location_index", i32 0, i32 1, !"air.read_write", !"air.address_space", i32 1, !"air.arg_type_size", i32 4, !"air.arg_type_align_size", i32 4, !"air.arg_type_name", !"uint", !"air.arg_name", !"out"}
+!4 = !{i32 1, !"air.buffer", !"air.location_index", i32 0, i32 1, !"air.read_write", !"air.address_space", i32 3, !"air.arg_type_size", i32 4, !"air.arg_type_align_size", i32 4, !"air.arg_type_name", !"uint", !"air.arg_name", !"a"}
+!5 = !{i32 2, !"air.thread_index_in_threadgroup", !"air.arg_type_name", !"uint", !"air.arg_name", !"t"}
+"#;
+    let Some(bc) = assemble("region", text) else {
         return;
     };
     for stem in PROFILES {
