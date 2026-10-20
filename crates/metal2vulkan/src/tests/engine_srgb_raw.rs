@@ -1082,6 +1082,10 @@ fn raw_filters_sum_the_steps_as_metal_does() {
         let class = crate::metal::texel_format::texel_format(PixelFormat::RGBA8UnormSRGB);
         res.spec
             .insert(SpecKey::TexelFormat(TEXTURE), u64::from(class.0));
+        res.spec.insert(
+            SpecKey::PlainHalfTexels(TEXTURE),
+            u64::from(class.plain_on_metal_sampler()),
+        );
         let bicubic = crate::metal::bicubic::texels(PixelFormat::RGBA8UnormSRGB).expect("measured");
         res.spec
             .insert(SpecKey::BicubicTexels(TEXTURE), u64::from(bicubic.0));
@@ -1233,6 +1237,10 @@ fn runtime_raw_filters_sum_the_steps_where_the_word_reaches() {
         let class = crate::metal::texel_format::texel_format(PixelFormat::RGBA8UnormSRGB);
         res.spec
             .insert(SpecKey::TexelFormat(TEXTURE), u64::from(class.0));
+        res.spec.insert(
+            SpecKey::PlainHalfTexels(TEXTURE),
+            u64::from(class.plain_on_metal_sampler()),
+        );
         let mut words = 0;
         for k in a.interface.read_keys() {
             if let SpecKey::SamplerState { fields, .. } = k {

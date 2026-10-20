@@ -83,6 +83,15 @@
 //! than over the integer form (about 2 s over a function of 311 such accesses). Where the module's
 //! rounding is the device's own (native half rounding) they keep the integer form.
 //!
+//! **The plain arm.** On such a device a slot's access whose texel an image instruction hands back
+//! ([`TexelOrigin::Image`]) converts it under the slot's `SpecKey::PlainHalfTexels`
+//! specialization, which states that the bound class takes the routine's rounding to nearest even
+//! alone (`TexelFormat::plain_on_metal_sampler`): there by the device's conversion of the texel
+//! itself (`narrow::round_texel_plain`, no barrier, which Metal's compiler may fold into the image
+//! instruction), else by the routine, so specialization leaves one of them. The class stays push
+//! data, so only a slot that sees both kinds of class makes a second pipeline. A computed texel
+//! keeps the routine: its conversion's barrier keeps a fold into the arithmetic out.
+//!
 //! A sample's filtered value is the device's where the device filters it: on MoltenVK, which
 //! samples through Metal's own sampler (`VkProperty::MetalSampler`), that is Metal's `float`
 //! result, on the format's grid (normalized formats) or the sum rounded to `f32` (32-bit float
@@ -100,6 +109,18 @@ use crate::spirv::builder::{FunctionBuilder, ModuleBuilder, QuantizeForm};
 use crate::spirv::error::{BResult, BuildError, OperandRule};
 use crate::spirv::ids::{FuncId, TypeId, Value as SValue};
 use crate::spirv::ir::{BinOp, ConstBits, Constant, ConvOp, GlslOp, Type as SType, UnOp};
+
+/// Where the texel a conversion takes comes from: what Metal's compiler may fold its conversion
+/// to `half` into ([`narrow::round_texel_plain`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum TexelOrigin {
+    /// An image instruction's texel (a read, fetch, sample or gather), or lanes and selections of
+    /// such texels and constants: no arithmetic computes it.
+    Image,
+    /// A value the translation computes from texels (an emulated filter, a comparison, a fetched
+    /// footprint's sum).
+    Computed,
+}
 
 /// Which of Metal's rules a texel access with a `half` result takes (module docs).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -197,6 +218,14 @@ pub enum HalfFamilies {
     /// texel on the grid `8192` (module docs). The routine reads its `channel` for that field
     /// alone.
     MetalSampler,
+}
+
+/// Whether a module whose routine tells apart `families` converts an image instruction's texel of a
+/// class that takes the rounding to nearest even alone by the plain arm (module docs): where the
+/// routine is the Metal-sampler body ([`HalfFamilies::MetalSampler`], in a module that does not
+/// round by the integer sequence).
+pub fn takes_plain_arm(mb: &ModuleBuilder, families: HalfFamilies) -> bool {
+    families == HalfFamilies::MetalSampler && mb.quantize_form() != QuantizeForm::Integer
 }
 
 /// Define the routine `fn(x: vec4, flags: u32, sample: bool, channel: u32) -> vec4` in `mb`

@@ -1097,7 +1097,12 @@ pub(super) fn emit(
         let x = match (h, float) {
             (Some(HalfArm::Class(h)), _) => {
                 let lanes = super::emit::sample_lanes(cx, fb, s)?;
-                h.convert(fb, x, HalfForm::Sample, lanes)?
+                h.convert(
+                    fb,
+                    x,
+                    (HalfForm::Sample, lanes),
+                    crate::lower::texture::half::TexelOrigin::Computed,
+                )?
             }
             // The device's texel rounded to nearest even.
             (Some(HalfArm::Device), _) => {

@@ -1954,6 +1954,21 @@ impl ResourcePlanner<'_> {
         }
     }
 
+    /// The `PlainHalfTexels(slot)` specialization: 1 where the class of the texture or texture
+    /// buffer bound at `slot` ([`texel_format`](Self::texel_format)) converts every texel to
+    /// `half` as its `float` value rounded to nearest even on a device that samples through
+    /// Metal's own texture unit (`TexelFormat::plain_on_metal_sampler`), else 0; 1 for a slot
+    /// bound to nothing and one bound to a placeholder format (its zero texel converts alike
+    /// under every class).
+    pub fn plain_half_texels(&self, slot: SlotRef) -> u64 {
+        match self.texture_shape(slot) {
+            Some(shape) if shape.pixel_format() != crate::metal::PixelFormat::Invalid => {
+                u64::from(TexelFormat(self.texel_format(slot) as u32).plain_on_metal_sampler())
+            }
+            _ => 1,
+        }
+    }
+
     /// The `TextureSwizzle(slot)` specialization: the swizzle of the texture buffer bound at
     /// `slot`, as its word, which the function applies to its reads, or of the texture bound at a
     /// storage slot of the plan's `VariantKey::swizzled_storage`, which it applies to its reads and

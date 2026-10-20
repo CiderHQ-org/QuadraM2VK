@@ -191,6 +191,10 @@ pub(super) fn resources(plan: &Plan, lanes: &[[u32; 4]], bytes: usize, class: u3
     }
     spec.insert(SpecKey::FlatLocalSize, 1);
     spec.insert(SpecKey::TexelFormat(TEXTURE), u64::from(class));
+    spec.insert(
+        SpecKey::PlainHalfTexels(TEXTURE),
+        u64::from(crate::metal::texel_format::TexelFormat(class).plain_on_metal_sampler()),
+    );
     let push = vec![0u8; plan.push.push_range.map_or(0, |(_, end)| end as usize)];
     for f in &plan.push.fields {
         match (f.field, f.loc) {

@@ -1134,6 +1134,10 @@ fn mirrored_axes_and_small_levels() {
                         SpecKey::TexelFormat(TEXTURE),
                         u64::from(texel_format(*pf).0),
                     );
+                    res.spec.insert(
+                        SpecKey::PlainHalfTexels(TEXTURE),
+                        u64::from(texel_format(*pf).plain_on_metal_sampler()),
+                    );
                     let image = tex.image(combined_slot(m), 2, 1);
                     run(m, &res, &image, points.len() as u32)
                 };

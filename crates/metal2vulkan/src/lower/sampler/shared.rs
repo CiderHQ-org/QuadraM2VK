@@ -321,7 +321,13 @@ pub(crate) fn shared_value(
             };
             // The conversion, then the lanes Metal reads as constants by the merged tests, not
             // the named candidate's own.
-            let x = held_value(cx, fb, first, image, x)?;
+            let x = held_value(
+                cx,
+                fb,
+                first,
+                image,
+                (x, crate::lower::texture::half::TexelOrigin::Computed),
+            )?;
             let x = constants(cx, fb, x)?;
             let x = with_word(cx, fb, &first.result, x, None)?;
             let Some(named) = named else {
@@ -540,7 +546,14 @@ fn snapped(
                 } else {
                     x
                 };
-                Ok(vec![texel_value(cx, fb, a, image, x, None)?])
+                Ok(vec![texel_value(
+                    cx,
+                    fb,
+                    a,
+                    image,
+                    (x, crate::lower::texture::half::TexelOrigin::Computed),
+                    None,
+                )?])
             };
             c.each(cx, fb, &read, null)?
         }
@@ -562,7 +575,14 @@ fn snapped(
                     Some(r) => fb.dref_gather(si, coord, r, &ops)?,
                     None => fb.gather(si, coord, component, &ops)?,
                 };
-                Ok(vec![texel_value(cx, fb, a, image, x, None)?])
+                Ok(vec![texel_value(
+                    cx,
+                    fb,
+                    a,
+                    image,
+                    (x, crate::lower::texture::half::TexelOrigin::Computed),
+                    None,
+                )?])
             };
             c.each(cx, fb, &read, null)?
         }

@@ -590,6 +590,10 @@ fn half_reads_convert_by_the_bound_format() {
             let mut res = resources(&plan, &[vec![0; 8]]);
             if let Some(c) = class {
                 res.spec.insert(SpecKey::TexelFormat(slot), u64::from(c));
+                res.spec.insert(
+                    SpecKey::PlainHalfTexels(slot),
+                    u64::from(crate::metal::texel_format::TexelFormat(c).plain_on_metal_sampler()),
+                );
             }
             let (bufs, _) = run_both(&m, &res, &[s, d, h], [2, 2, 1])
                 .unwrap_or_else(|e| panic!("{stem}: {e:?}"));
@@ -752,6 +756,10 @@ fn a_depth_read_converts_by_the_bound_format() {
             let mut res = resources(&plan, &[vec![0; 8]]);
             res.spec
                 .insert(SpecKey::TexelFormat(slot), u64::from(texel_format(pf).0));
+            res.spec.insert(
+                SpecKey::PlainHalfTexels(slot),
+                u64::from(texel_format(pf).plain_on_metal_sampler()),
+            );
             let (bufs, _) = run_both(&m, &res, &[dp, ms], [1, 1, 1])
                 .unwrap_or_else(|e| panic!("{stem}: {e:?}"));
             assert_eq!(words(&bufs[0])[0], fl(want), "{stem} {pf:?} code {code}");

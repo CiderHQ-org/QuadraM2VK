@@ -1,7 +1,7 @@
 //! Emission of the sampling strategies.
 
 use crate::lower::emit::EmitCx;
-use crate::lower::texture::half::HalfForm;
+use crate::lower::texture::half::{HalfForm, TexelOrigin};
 use crate::lower::texture::{
     float_class, half_class, heap_element, held_texel, live_or_zero, resident_access, sparse_spec,
     tile_map, tiled_word, with_word, ImageRef,
@@ -1024,7 +1024,7 @@ pub(super) fn sampled_value(
         let (x, word) = pixel_fetch(cx, fb, s, si, image, offset.as_ref(), arm)?;
         let x = unmapped_value(cx, fb, s, x, word.map(Named::Word))?;
         let x = live_or_zero(fb, live, x)?;
-        return texel_value(cx, fb, s, image, x, word);
+        return texel_value(cx, fb, s, image, (x, TexelOrigin::Image), word);
     }
     if let SampleOp::Bicubic(b) = &s.op {
         // No sparse form: the slot takes no sparse arm, and the word is 0. The routines return the
@@ -1193,7 +1193,7 @@ pub(super) fn sampled_value(
                     fb.composite_extract(x, &[0])
                 })?;
                 let x = live_or_zero(fb, live, x)?;
-                return texel_value(cx, fb, s, image, x, None);
+                return texel_value(cx, fb, s, image, (x, TexelOrigin::Computed), None);
             }
             // A constexpr sampler's blend of two levels' comparisons under a linear mip filter,
             // made in the shader where the slot's format is measured, else the device's. Its level
@@ -1279,7 +1279,7 @@ pub(super) fn sampled_value(
                 if let Some(f) = &c.fetch {
                     let device = device_access(coord, dref, ops, beyond);
                     let x = super::compared::fetched(cx, fb, s, (c, f), image, &device)?;
-                    return texel_value(cx, fb, s, image, x, None);
+                    return texel_value(cx, fb, s, image, (x, TexelOrigin::Computed), None);
                 }
             }
             // A plain nearest sample whose texel the shader fetches, where the bound format is a
@@ -1305,7 +1305,7 @@ pub(super) fn sampled_value(
                     true => fb.composite_extract(x, &[0])?,
                     false => x,
                 };
-                return texel_value(cx, fb, s, image, x, None);
+                return texel_value(cx, fb, s, image, (x, TexelOrigin::Computed), None);
             }
             let (x, word) = observe(cx, fb, si, &sample_access(coord, dref, ops))?;
             // Past the device's limit the sample with the scaled derivatives replaces the
@@ -1387,7 +1387,7 @@ pub(super) fn sampled_value(
                         let x = held_constants(cx, fb, s, x)?;
                         with_word(cx, fb, &s.result, x, None)
                     }
-                    false => texel_value(cx, fb, s, image, x, None),
+                    false => texel_value(cx, fb, s, image, (x, TexelOrigin::Computed), None),
                 };
             }
             let mut ops = ImageOperands::default();
@@ -1403,7 +1403,7 @@ pub(super) fn sampled_value(
                     fb.gather(si, coord, 0, &ops)
                 })?;
                 let x = live_or_zero(fb, live, x)?;
-                return texel_value(cx, fb, s, image, x, None);
+                return texel_value(cx, fb, s, image, (x, TexelOrigin::Computed), None);
             }
             // A comparison gather whose taps the shader fetches, where the bound format is
             // measured; it observes no residency, so the word is 0.
@@ -1412,7 +1412,7 @@ pub(super) fn sampled_value(
                     let x = super::compared::fetched(cx, fb, s, (c, f), image, &|fb, si| {
                         fb.gather(si, coord, component, &ops)
                     })?;
-                    return texel_value(cx, fb, s, image, x, None);
+                    return texel_value(cx, fb, s, image, (x, TexelOrigin::Computed), None);
                 }
             }
             // A plain gather whose taps the shader fetches, where the bound format is a 32-bit
@@ -1431,7 +1431,7 @@ pub(super) fn sampled_value(
                     &|fb, texels| super::fetched::plain_value(fb, s, texels),
                     &|fb, si| fb.gather(si, coord, component, &ops),
                 )?;
-                return texel_value(cx, fb, s, image, x, None);
+                return texel_value(cx, fb, s, image, (x, TexelOrigin::Computed), None);
             }
             let dref = match dref {
                 Some(r) => Some(cx.operand(fb, *r)?),
@@ -1500,11 +1500,11 @@ pub(super) fn sampled_value(
     // A heap texture's linear sample: Metal's filter emulated where the class its handle carries
     // is measured, else the device's sample just made. It observes no residency.
     if let Some(l) = s.linear.as_ref().filter(|l| l.image.slot().is_none()) {
-        let held = held_value(cx, fb, s, image, texel)?;
+        let held = held_value(cx, fb, s, image, (texel, TexelOrigin::Computed))?;
         let x = super::linear::emit_heap(cx, fb, s, image, l, held)?;
         return with_word(cx, fb, &s.result, x, word);
     }
-    texel_value(cx, fb, s, image, texel, word)
+    texel_value(cx, fb, s, image, (texel, TexelOrigin::Image), word)
 }
 
 /// The plane coordinate of `s` and its explicit gradients, read from the AIR operands: a cube's
@@ -2541,10 +2541,10 @@ pub(super) fn texel_value(
     fb: &mut FunctionBuilder<'_>,
     s: &Sampling,
     image: super::CombinedImage,
-    texel: SValue,
+    (texel, origin): (SValue, TexelOrigin),
     word: Option<SValue>,
 ) -> BResult<SValue> {
-    let held = held_value(cx, fb, s, image, texel)?;
+    let held = held_value(cx, fb, s, image, (texel, origin))?;
     let held = held_constants(cx, fb, s, held)?;
     with_word(cx, fb, &s.result, held, word)
 }
@@ -2558,7 +2558,7 @@ pub(super) fn held_value(
     fb: &mut FunctionBuilder<'_>,
     s: &Sampling,
     image: super::CombinedImage,
-    texel: SValue,
+    (texel, origin): (SValue, TexelOrigin),
 ) -> BResult<SValue> {
     let Some(form) = s.texel else {
         return Err(cx.fail("a sample without a texel form"));
@@ -2615,7 +2615,7 @@ pub(super) fn held_value(
                 _ => HalfForm::Sample,
             };
             let lanes = sample_lanes(cx, fb, s)?;
-            h.convert(fb, texel, access, lanes)?
+            h.convert(fb, texel, (access, lanes), origin)?
         }
         (None, Some(f)) => {
             let lanes = sample_lanes(cx, fb, s)?;

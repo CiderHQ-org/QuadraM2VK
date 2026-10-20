@@ -556,7 +556,11 @@ for dependency in &pipeline.dependencies {
   (`Mechanism`: a specialization constant, a push field, a plan-time check, a variant). The plan
   acts on them; you do not have to.
 - The format class of a bound texture is read by the shader as push data, not specialized, so binds
-  that differ only in their textures' formats share one `VkPipeline`. Other bound values (a slot's
+  that differ only in their textures' formats share one `VkPipeline`. On MoltenVK a slot read with a
+  `half` result also specializes one bit of it: whether the class converts its texels to `half` by
+  rounding to nearest even alone (every class but those with 32-bit float channels, 16-bit
+  normalized ones and YCbCr fields on the grid `8192`), so a slot bound to both kinds of format
+  takes two pipelines. Other bound values (a slot's
   presence, a sampler's word, whether a uniform buffer's descriptor range starts at its bind offset)
   are specialization constants. The last lets a driver load the constants ahead of the shader:
   inline bytes take that form, and so does a buffer bound at a multiple of

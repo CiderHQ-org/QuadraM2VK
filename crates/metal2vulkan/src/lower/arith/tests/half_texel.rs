@@ -1192,3 +1192,129 @@ fn the_device_rounding_reads_the_texel_alone() {
         }
     }
 }
+
+/// The plain arm (`narrow::round_texel_plain`, `SpecKey::PlainHalfTexels`) answers as the
+/// Metal-sampler routine does for every class that takes it: for each pixel format whose class
+/// `plain_on_metal_sampler` holds, the routine at that class, read and sample, one texel's lanes, a
+/// filtered value's and gathered channels', is the texel rounded to nearest even with its NaN
+/// kept, as is the plain arm itself, in each form a device sampling through Metal's own texture
+/// unit rounds in.
+#[test]
+fn the_plain_arm_is_the_metal_sampler_routine_for_its_classes() {
+    let mut texels: Vec<u64> = vec![
+        0,
+        0x8000_0000,
+        1,
+        0x8000_0001,
+        0x0080_0000,
+        0x3380_0000,
+        0x3380_0001,
+        0x387F_E000,
+        0x387F_F000,
+        0x3880_0000,
+        0x3F80_0000,
+        0xBF80_0000,
+        0x477F_E000,
+        0x477F_EFFF,
+        0x477F_F000,
+        0x4780_0000,
+        0x7F7F_FFFF,
+        0x7F80_0000,
+        0xFF80_0000,
+        0x7FC0_0000,
+        0x7F80_0001,
+        0xFFC0_2000,
+    ];
+    // Every 8-bit code's value, and a spread of bit patterns.
+    texels.extend((0..=255u32).map(|c| u64::from((c as f32 / 255.0).to_bits())));
+    let mut s = 0x9E37_79B9_u32;
+    for _ in 0..256 {
+        s ^= s << 13;
+        s ^= s >> 17;
+        s ^= s << 5;
+        texels.push(u64::from(s));
+    }
+    let quads = quads(&texels);
+    let rte = |x: u64| -> u64 {
+        let f = f32::from_bits(x as u32);
+        if f.is_nan() {
+            x
+        } else {
+            half_bits(f64::from(f))
+        }
+    };
+    let accesses = [
+        (HalfForm::Read, TexelLanes::Texel),
+        (HalfForm::Sample, TexelLanes::Texel),
+        (HalfForm::Sample, TexelLanes::Filtered),
+        (HalfForm::Read, TexelLanes::Gathered(0)),
+        (HalfForm::Read, TexelLanes::Gathered(3)),
+    ];
+    let roundings = [
+        QuantizeForm::Device,
+        QuantizeForm::Converted,
+        QuantizeForm::Controlled,
+    ];
+    let mut plain_classes = std::collections::BTreeSet::new();
+    for &pf in P::ALL {
+        let class = texel_format(pf);
+        if !class.plain_on_metal_sampler() || !plain_classes.insert(class.0) {
+            continue;
+        }
+        let cases: Vec<Case> = quads
+            .iter()
+            .map(|t| vec![t.to_vec(), vec![u64::from(class.0)]])
+            .collect();
+        for q in roundings {
+            for (form, lanes) in accesses {
+                check(
+                    &format!("{pf:?} {form:?} {lanes:?} {q:?}"),
+                    &[v4(), int(32)],
+                    v4(),
+                    &body_families(form, lanes, q, HalfFamilies::MetalSampler),
+                    &cases,
+                    &|c| Some(c[0].iter().map(|x| rte(*x)).collect()),
+                    false,
+                );
+            }
+        }
+    }
+    assert!(
+        plain_classes.len() > 10,
+        "{} plain classes",
+        plain_classes.len()
+    );
+    let cases: Vec<Case> = quads.iter().map(|t| vec![t.to_vec()]).collect();
+    for q in roundings {
+        check(
+            &format!("the plain arm {q:?}"),
+            &[v4()],
+            v4(),
+            &move |fb: &mut FunctionBuilder<'_>, x: &[Value]| {
+                fb.module().set_quantize_form(q);
+                let half4 = Form {
+                    held: Held::Float(FloatFmt::Half),
+                    lanes: 4,
+                };
+                crate::lower::arith::narrow::round_texel_plain(fb, half4, x[0])
+            },
+            &cases,
+            &|c| Some(c[0].iter().map(|x| rte(*x)).collect()),
+            false,
+        );
+    }
+    // The families the predicate leaves out: a 32-bit float texel (its samples round toward zero),
+    // the 16-bit normalized grids and a YCbCr field on the grid 8192.
+    for (pf, plain) in [
+        (P::RGBA32Float, false),
+        (P::R32Float, false),
+        (P::RGBA16Unorm, false),
+        (P::RG16Snorm, false),
+        (P::RGBA8Unorm, true),
+        (P::BGRA8Unorm, true),
+        (P::RGBA16Float, true),
+        (P::RGB10A2Unorm, true),
+    ] {
+        assert_eq!(texel_format(pf).plain_on_metal_sampler(), plain, "{pf:?}");
+    }
+}

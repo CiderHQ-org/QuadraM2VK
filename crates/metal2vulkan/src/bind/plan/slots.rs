@@ -202,6 +202,7 @@ pub(crate) fn bound_value(
         SpecKey::BicubicTexels(slot) => resources.bicubic_texels(slot)?,
         SpecKey::TexelFormat(slot) => resources.texel_format(slot),
         SpecKey::UnmeasuredTexels(slot) => resources.unmeasured_texels(slot),
+        SpecKey::PlainHalfTexels(slot) => resources.plain_half_texels(slot),
         SpecKey::TextureSwizzle(slot) => resources.texture_swizzle(slot),
         SpecKey::SparseTexture(slot) => sparse_texture(shape, slot),
         SpecKey::ConstantLanes(slot) => constant_lanes(shape, slot),

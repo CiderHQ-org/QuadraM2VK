@@ -223,6 +223,17 @@ impl TexelFormat {
         self.0 & TexelFormat::MEASURED_ON_METAL_SAMPLER == 0
     }
 
+    /// Whether, on a device that samples through Metal's own texture unit, every access's `half`
+    /// result of the class is the device's `float` texel rounded to nearest even
+    /// (`SpecKey::PlainHalfTexels`): the class has no 32-bit float channels
+    /// ([`BicubicTexels::LINEAR`], whose samples round toward zero), no 16-bit normalized grid
+    /// ([`BicubicTexels::WIDE16`]) and no YCbCr field on the grid `8192`
+    /// ([`TexelFormat::YCBCR_8192`], ties away): the arms of the routine's Metal-sampler body
+    /// other than its rounding to nearest even (`lower::texture::half`).
+    pub fn plain_on_metal_sampler(self) -> bool {
+        self.0 & (BicubicTexels::LINEAR | BicubicTexels::WIDE16 | TexelFormat::YCBCR_8192) == 0
+    }
+
     /// The families whose texels decode to no NaN: normalized channels, signed or not
     /// ([`BicubicTexels::UNORM`], [`BicubicTexels::SNORM`]), 8-bit sRGB codes
     /// ([`BicubicTexels::SRGB`]) and Apple's extended-range codes ([`BicubicTexels::EXTENDED`]).

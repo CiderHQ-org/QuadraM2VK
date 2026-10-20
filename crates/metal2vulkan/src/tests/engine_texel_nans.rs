@@ -262,6 +262,10 @@ fn resources(plan: &Plan, class: u32) -> Resources {
     }
     spec.insert(SpecKey::FlatLocalSize, 1);
     spec.insert(SpecKey::TexelFormat(TEXTURE), u64::from(class));
+    spec.insert(
+        SpecKey::PlainHalfTexels(TEXTURE),
+        u64::from(crate::metal::texel_format::TexelFormat(class).plain_on_metal_sampler()),
+    );
     let push = vec![0u8; plan.push.push_range.map_or(0, |(_, end)| end as usize)];
     let out = Buffer {
         slot: Some(ResourceSlot {

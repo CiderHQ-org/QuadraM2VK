@@ -486,6 +486,48 @@ pub fn round_texel(fb: &mut FunctionBuilder<'_>, f: Form, x: Value) -> BResult<V
     }
 }
 
+/// [`round_texel`] of `x`, a texel an image instruction hands back (a read, fetch, sample or
+/// gather, or lanes and selections of such texels and constants: no arithmetic), of a class whose
+/// `half` result Metal's sampler makes the `float` texel rounded to nearest even
+/// (`SpecKey::PlainHalfTexels`), on a device that samples through Metal's own texture unit. Where
+/// the module rounds by the device's conversion behind its barrier ([`QuantizeForm::Converted`],
+/// [`converted`]) the conversion takes `x` itself: the barrier keeps Metal's compiler from folding
+/// the conversion into an arithmetic instruction computing the value, whose folded conversion
+/// rounds toward zero, and an image instruction computes no arithmetic. Metal's compiler then
+/// either converts `x` as its `half(float)` (`DriverDeviation::MetalHalfConversion`, to nearest
+/// even), or folds the conversion into the image instruction, whose `half` result is Metal's own
+/// `half` result of the same access: for these classes the `float` texel rounded to nearest even
+/// again. Either is [`round_texel`]'s value; the NaN keep is [`round_texel`]'s. Another form rounds
+/// as [`round_texel`] does. On MoltenVK the barrier is a call of SPIRV-Cross's `[[clang::optnone]]`
+/// helper at every access, which held a read-bound kernel at 1.83 times native Metal's time
+/// (`half4(read)` without it: native's, its every output word equal).
+pub fn round_texel_plain(fb: &mut FunctionBuilder<'_>, f: Form, x: Value) -> BResult<Value> {
+    let converted = fb.module().quantize_form() == QuantizeForm::Converted;
+    let native = fb.module().native_half() && !fb.module().texel_nans();
+    match f.held {
+        Held::Float(FloatFmt::Half) if converted && !native && !fb.module().native_half_nans() => {
+            let wide = f.with(Held::Float(FloatFmt::F32));
+            let e = fb.module().ty(Type::Float { width: 16 })?;
+            let h = match wide.lanes {
+                1 => e,
+                len => fb.module().ty(Type::Vector { elem: e, len })?,
+            };
+            let w = ty(fb, wide)?;
+            let n = fb.convert(ConvOp::FConvert, x, h)?;
+            let r = fb.convert(ConvOp::FConvert, n, w)?;
+            let u = u32_form(f);
+            let ut = ty(fb, u)?;
+            let b = fb.convert(ConvOp::Bitcast, x, ut)?;
+            let abs = splat(fb, u, 0x7FFF_FFFF)?;
+            let mag = bin(fb, BinOp::BitwiseAnd, b, abs)?;
+            let inf = splat(fb, u, 0x7F80_0000)?;
+            let nan = bin(fb, BinOp::UGreaterThan, mag, inf)?;
+            fb.select(nan, x, r)
+        }
+        _ => round_texel(fb, f, x),
+    }
+}
+
 /// [`round`] of an `x` that is a value of `f`'s narrow format whenever it rounds below the
 /// smallest normal half: the sum or difference of two values of the format, which is exact in `f32`
 /// there (both lie on the `2^-24` grid, and so does a sum below `2^-14`, which `f32` holds exactly

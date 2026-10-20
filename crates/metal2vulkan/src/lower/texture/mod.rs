@@ -1067,6 +1067,9 @@ pub struct Declared {
     /// The module's routine of that conversion ([`half::define`]), defined once where a slot
     /// takes it.
     pub half_routine: Option<FuncId>,
+    /// The `PlainHalfTexels` specialization constant of each slot of those on a device whose
+    /// routine tells apart Metal's sampler's families alone (`half::HalfFamilies::MetalSampler`).
+    pub plain_half: BTreeMap<u32, SValue>,
     /// The module's routine converting one texel to a `float` result by the class
     /// ([`float_texel::define`]), defined once where a slot takes it.
     pub float_routine: Option<FuncId>,
@@ -1303,6 +1306,15 @@ pub fn declare(
         }
         if s.half_format && d.half_routine.is_none() {
             d.half_routine = Some(half::define(mb, plan.families.texture.half_families)?);
+        }
+        if s.half_format && half::takes_plain_arm(mb, plan.families.texture.half_families) {
+            let b = mb.ty(SType::Bool)?;
+            let c = mb.spec(
+                crate::pipeline::sym::SpecKey::PlainHalfTexels(s.slot),
+                b,
+                ConstBits(1),
+            )?;
+            d.plain_half.insert(*index, mb.const_value(c)?);
         }
         if s.float_format && d.float_routine.is_none() {
             d.float_routine = Some(float_texel::define(mb)?);

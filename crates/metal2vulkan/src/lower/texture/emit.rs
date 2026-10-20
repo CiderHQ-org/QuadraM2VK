@@ -16,7 +16,7 @@ use crate::spirv::ir::{
     MemAccess, MemoryOrder, Scope, Semantics, TexelMemory, Type as SType, UnOp,
 };
 
-use super::half::{HalfForm, TexelLanes};
+use super::half::{HalfForm, TexelLanes, TexelOrigin};
 use super::slice::Slice;
 use super::{
     Coord, ImageDecl, ImageRef, QueryKind, QueryOp, Read, TexelClass, TexelConv, TexelForm,
@@ -909,7 +909,7 @@ fn from_image(
     let x = match (half, float) {
         (Some(h), _) => {
             let lanes = TexelLanes::Texel.value(fb)?;
-            h.convert(fb, x, HalfForm::Read, lanes)?
+            h.convert(fb, x, (HalfForm::Read, lanes), TexelOrigin::Image)?
         }
         (None, Some(f)) => {
             let lanes = TexelLanes::Texel.value(fb)?;
@@ -1189,6 +1189,8 @@ pub(crate) const SRGB_FILTERED_WORDS: u32 = SRGB_RAW_WORDS + 400;
 pub(crate) struct HalfClass {
     routine: FuncId,
     class: ClassOf,
+    /// The slot's `PlainHalfTexels` specialization, where it declares one.
+    plain: Option<SValue>,
 }
 
 /// Where a [`HalfClass`]'s class comes from.
@@ -1202,19 +1204,45 @@ enum ClassOf {
 
 impl HalfClass {
     /// The held `half` texel of image texel `x` (a `vec4` of `f32`) under access form `form`,
-    /// its lanes `lanes` (`half::TexelLanes::code`).
+    /// its lanes `lanes` (`half::TexelLanes::code`). An image instruction's texel (`origin`) of a
+    /// slot that declares `PlainHalfTexels` converts by the plain arm where the specialization
+    /// holds and by the routine where it does not, one selection construct on it, so
+    /// specialization keeps one of them (`half` module docs).
     pub(crate) fn convert(
         self,
         fb: &mut FunctionBuilder<'_>,
         x: SValue,
-        form: HalfForm,
-        lanes: SValue,
+        (form, lanes): (HalfForm, SValue),
+        origin: TexelOrigin,
     ) -> BResult<SValue> {
         let class = match self.class {
             ClassOf::Slot(c) => fb.module().const_value(c)?,
             ClassOf::Heap(v) => v,
         };
-        super::half::convert(fb, self.routine, x, class, (form, lanes))
+        use crate::lower::arith::legal::{FloatFmt, Form, Held};
+        use crate::spirv::error::{BuildError, OperandRule};
+        let routine = self.routine;
+        let plain = match (origin, self.plain) {
+            (TexelOrigin::Image, Some(plain)) => plain,
+            _ => return super::half::convert(fb, routine, x, class, (form, lanes)),
+        };
+        let half = Form {
+            held: Held::Float(FloatFmt::Half),
+            lanes: 4,
+        };
+        let then: ArmFn<'_, ()> = Box::new(move |fb, _| {
+            let v = narrow::round_texel_plain(fb, half, x)?;
+            Ok(ArmEnd::FallThrough(vec![v]))
+        });
+        let other: ArmFn<'_, ()> = Box::new(move |fb, _| {
+            let v = super::half::convert(fb, routine, x, class, (form, lanes))?;
+            Ok(ArmEnd::FallThrough(vec![v]))
+        });
+        let Merged(merged) = fb.if_(&mut (), plain, then, Some(other))?;
+        merged.first().copied().ok_or(BuildError::Operand {
+            op: crate::spv::Op::Phi,
+            rule: OperandRule::Arity,
+        })
     }
 }
 
@@ -1336,6 +1364,7 @@ pub(crate) fn half_class(cx: &EmitCx<'_>, image: &ImageRef, texel: TexelForm) ->
     Some(HalfClass {
         routine: t.half_routine?,
         class: ClassOf::Slot(t.half_format.get(&index).copied()?),
+        plain: t.plain_half.get(&index).copied(),
     })
 }
 
@@ -1359,6 +1388,7 @@ pub(crate) fn heap_half_class(
     Ok(Some(HalfClass {
         routine,
         class: ClassOf::Heap(class),
+        plain: None,
     }))
 }
 

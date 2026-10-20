@@ -809,6 +809,16 @@ pub enum SpecKey {
     /// (`PrecisionNote::HalfTexelConversion`), so the `TexelFormat` bits that only that note read
     /// leave the pipeline's key.
     UnmeasuredTexels(SlotRef),
+    /// Boolean: on a device that samples through Metal's own texture unit, the texture bound to
+    /// the slot converts every texel an image instruction hands back to a `half` result as that
+    /// `float` texel rounded to nearest even (default true): its class has no 32-bit float
+    /// channels (whose samples round toward zero), no 16-bit normalized grid and no YCbCr field on
+    /// the grid `8192` (`metal::texel_format::TexelFormat::plain_on_metal_sampler`). A slot bound
+    /// to nothing takes true: its zero texel converts alike under every class. Where it holds, such
+    /// an access converts the instruction's own texel by the device's conversion, which Metal's
+    /// compiler may fold into the image instruction (`lower::texture::half`), and specialization
+    /// drops the class's routine; the class itself stays push data (`SpecKey::TexelFormat`).
+    PlainHalfTexels(SlotRef),
     /// The class of the format of the texture bound to the slot (`u32`, as `TexelFormat` states
     /// it: `metal::texel_format::texel_format`), read by a specialized note's test alone
     /// ([`SpecTest`](crate::pipeline::SpecTest)): no stage declares it as a constant and no

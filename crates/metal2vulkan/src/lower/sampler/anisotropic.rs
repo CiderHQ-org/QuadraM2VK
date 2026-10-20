@@ -523,7 +523,14 @@ pub(super) fn sample(
     match a.degree {
         Degree::Const(_) => {
             let x = filter(cx, fb, s, (key, a), &site, offset)?;
-            super::emit::texel_value(cx, fb, s, image, x, None)
+            super::emit::texel_value(
+                cx,
+                fb,
+                s,
+                image,
+                (x, crate::lower::texture::half::TexelOrigin::Computed),
+                None,
+            )
         }
         Degree::Slot(n) => {
             // The plain sample where the bound sampler's word states no anisotropy.
@@ -535,7 +542,14 @@ pub(super) fn sample(
             };
             let emulation: ArmFn<'_, EmitCx<'_>> = Box::new(move |fb, cx| {
                 let x = filter(cx, fb, s, (key, a), &site, offset)?;
-                let x = super::emit::texel_value(cx, fb, s, image, x, None)?;
+                let x = super::emit::texel_value(
+                    cx,
+                    fb,
+                    s,
+                    image,
+                    (x, crate::lower::texture::half::TexelOrigin::Computed),
+                    None,
+                )?;
                 Ok(ArmEnd::FallThrough(vec![x]))
             });
             let device: ArmFn<'_, EmitCx<'_>> = Box::new(move |fb, cx| {

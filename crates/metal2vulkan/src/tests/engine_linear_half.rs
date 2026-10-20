@@ -314,6 +314,10 @@ fn resources(plan: &Plan, init: &[Vec<u8>], class: u32) -> Resources {
     }
     spec.insert(SpecKey::FlatLocalSize, 1);
     spec.insert(SpecKey::TexelFormat(TEXTURE), u64::from(class));
+    spec.insert(
+        SpecKey::PlainHalfTexels(TEXTURE),
+        u64::from(crate::metal::texel_format::TexelFormat(class).plain_on_metal_sampler()),
+    );
     let push = vec![0u8; plan.push.push_range.map_or(0, |(_, end)| end as usize)];
     for f in &plan.push.fields {
         match (f.field, f.loc) {
@@ -3497,8 +3501,10 @@ fn plan_facts(
 }
 
 /// A texture slot's format class is data the function reads from its push field, so no format
-/// splits a pipeline: every format gives one specialization, through any sampler, on MoltenVK as on
-/// lavapipe, and the binder pushes each format's class.
+/// splits a pipeline but by its kind of `half` conversion: on lavapipe every format gives one
+/// specialization, and on MoltenVK every format of the plain arm (`SpecKey::PlainHalfTexels`)
+/// gives one, a 16-bit normalized one another that differs only in that bit; through any sampler,
+/// and the binder pushes each format's class.
 #[test]
 fn formats_share_a_specialization_since_the_class_is_data() {
     use crate::metal::TextureType;
@@ -3527,11 +3533,27 @@ fn formats_share_a_specialization_since_the_class_is_data() {
                 .any(|c| matches!(c.key, SpecKey::TexelFormat(_))),
             "{stem}"
         );
+        // Where the device samples through Metal's own texture unit, the kind of conversion is a
+        // constant of its own.
+        assert_eq!(
+            p.stage
+                .specialization
+                .constants
+                .iter()
+                .any(|c| matches!(c.key, SpecKey::PlainHalfTexels(_))),
+            stem == "moltenvk-m3",
+            "{stem}"
+        );
         let plan = |pf| plan_bound(&p, &dev, (TextureType::Type2D, pf), None);
         let base = plan(formats[0]).specialization;
         for pf in formats {
             let plan = plan(pf);
-            assert_eq!(plan.specialization, base, "{stem} {pf:?}");
+            let plain = texel_format(pf).plain_on_metal_sampler();
+            assert_eq!(
+                plan.specialization == base,
+                plain || stem != "moltenvk-m3",
+                "{stem} {pf:?}"
+            );
             assert!(
                 plan.specialized_value(SpecKey::TexelFormat(TEXTURE))
                     .is_some(),
@@ -3544,10 +3566,12 @@ fn formats_share_a_specialization_since_the_class_is_data() {
 /// On MoltenVK, a device that samples through Metal's own texture unit and rounds to `half` as
 /// Metal does, a `half` sample through a runtime sampler reads of the sampler word only what the
 /// pixel-centre test reads, which the binder keys as 0 for a sampler of normalized coordinates; its
-/// slot's class it reads as data: every measured format specializes alike through any sampler of
-/// normalized coordinates, as through none, and through each pixel sampler; an unmeasured format
-/// apart, through the slot's `UnmeasuredTexels` specialization, under which alone its `half`
-/// conversion is noted. On lavapipe every format specializes alike too, and the samplers apart.
+/// slot's class it reads as data: every measured format of the plain arm (`PlainHalfTexels`)
+/// specializes alike through any sampler of normalized coordinates, as through none, and through
+/// each pixel sampler, and so does every one of the routine's arms among themselves; an unmeasured
+/// format apart, through the slot's `UnmeasuredTexels` specialization, under which alone its
+/// `half` conversion is noted. On lavapipe every format specializes alike too, and the samplers
+/// apart.
 #[test]
 fn metal_s_half_of_its_float_specializes_measured_formats_alike() {
     use crate::bind::SamplerDescriptor;
@@ -3617,7 +3641,10 @@ fn metal_s_half_of_its_float_specializes_measured_formats_alike() {
         spec(F::RGBA8Unorm, pixel_linear),
         spec(F::RGBA8Unorm, pixel)
     );
-    let alike = [
+    // The classes whose `half` is their `float` texel rounded to nearest even take the plain arm
+    // (`SpecKey::PlainHalfTexels`): they key alike; the 16-bit normalized and 32-bit float ones
+    // take the routine, and key alike among themselves.
+    let plain = [
         F::RGBA8Unorm,
         F::BGRA8Unorm,
         F::R8Unorm,
@@ -3628,16 +3655,29 @@ fn metal_s_half_of_its_float_specializes_measured_formats_alike() {
         F::RG11B10Float,
         F::RGBA8Snorm,
         F::RG8Snorm,
-        F::RGBA16Unorm,
-        F::RGBA16Snorm,
-        F::RGBA32Float,
     ];
-    for pf in alike {
+    let routine = [F::RGBA16Unorm, F::RGBA16Snorm, F::RGBA32Float];
+    assert!(
+        constants
+            .iter()
+            .any(|c| matches!(c.key, SpecKey::PlainHalfTexels(_))),
+        "{constants:?}"
+    );
+    for pf in plain {
         for s in [nearest, linear, mipped] {
             assert_eq!(spec(pf, s), base, "{pf:?} {s:?}");
         }
         assert_eq!(spec(pf, pixel), spec(F::RGBA8Unorm, pixel), "{pf:?}");
     }
+    let routine_base = spec(F::RGBA32Float, nearest);
+    assert_ne!(routine_base, base);
+    for pf in routine {
+        for s in [nearest, linear, mipped] {
+            assert_eq!(spec(pf, s), routine_base, "{pf:?} {s:?}");
+        }
+        assert_eq!(spec(pf, pixel), spec(F::RGBA32Float, pixel), "{pf:?}");
+    }
+    let alike = plain.iter().chain(&routine).copied();
     assert_ne!(spec(F::BC7RGBAUnorm, nearest), base);
     let converts = |pf, s| {
         notes_bound(&p, &m3, (TextureType::Type2D, pf), Some(s))
@@ -3645,7 +3685,7 @@ fn metal_s_half_of_its_float_specializes_measured_formats_alike() {
     };
     for s in [nearest, linear] {
         assert!(converts(F::BC7RGBAUnorm, s), "{s:?}");
-        for pf in alike {
+        for pf in alike.clone() {
             assert!(!converts(pf, s), "{pf:?} {s:?}");
         }
     }
