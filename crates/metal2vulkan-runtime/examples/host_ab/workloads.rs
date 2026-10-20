@@ -964,6 +964,103 @@ pub fn frame<G: Gpu>(g: &G, s: &Scene<G>, sizes: &Sizes) {
     }
 }
 
+/// The `drag` workload's frame (module docs of `main.rs`): its command buffers, its render passes
+/// (over [`DRAG_SURFACES`] window surfaces), the draws of each pass, and its dispatches.
+const DRAG_COMMAND_BUFFERS: usize = 40;
+const DRAG_PASSES: usize = 31;
+const DRAG_PASS_DRAWS: usize = 3;
+const DRAG_DISPATCHES: usize = 22;
+const DRAG_SURFACES: usize = 8;
+
+/// One frame of the `drag` workload: [`DRAG_COMMAND_BUFFERS`] command buffers, pass `p` in
+/// command buffer `p` and a dispatch in each of the first [`DRAG_DISPATCHES`], each committed;
+/// the last waited for. Its times into `times` (`[encode, frame, thread CPU, process CPU]`).
+fn drag_once<G: Gpu>(g: &G, s: &Scene<G>, surfaces: &[G::Texture], times: &mut [Vec<f64>; 4]) {
+    g.pool(|| {
+        let cpu = process_cpu();
+        let thread = thread_cpu();
+        let start = Instant::now();
+        let mut last = None;
+        for at in 0..DRAG_COMMAND_BUFFERS {
+            let command_buffer = g.command_buffer();
+            if at < DRAG_PASSES {
+                let target = &surfaces[at % DRAG_SURFACES];
+                let mut encoder = g.render_encoder(&command_buffer, target, at % 4 != 0);
+                g.set_render_pipeline(&mut encoder, &s.textured[at % 2]);
+                g.set_fragment_sampler(&mut encoder, &s.sampler, 0);
+                for draw in 0..DRAG_PASS_DRAWS {
+                    let rect = (at * DRAG_PASS_DRAWS + draw) % RECTS;
+                    g.set_vertex_buffer(&mut encoder, &s.rects[0], rect * RECT_STRIDE, 0);
+                    let texture = &s.textures[(at + draw) % TEXTURES];
+                    g.set_fragment_texture(&mut encoder, texture, 0);
+                    g.draw_strip(&mut encoder, 4);
+                }
+                g.end_render(encoder);
+            }
+            if at < DRAG_DISPATCHES {
+                encode_dispatches(g, s, &command_buffer, 1, false);
+            }
+            g.commit(&command_buffer);
+            last = Some(command_buffer);
+        }
+        let encoded = Instant::now();
+        let thread = thread_cpu() - thread;
+        if let Some(command_buffer) = &last {
+            g.wait(command_buffer);
+        }
+        let done = Instant::now();
+        let cpu = process_cpu() - cpu;
+        times[0].push(ms(encoded - start));
+        times[1].push(ms(done - start));
+        times[2].push(ms(thread));
+        times[3].push(ms(cpu));
+    });
+}
+
+/// A frame shaped as the guest's window drag (module docs of `main.rs`), its window surfaces in
+/// a heap of the device, and the runtime's in a heap over host pages too.
+pub fn drag<G: Gpu>(g: &G, s: &Scene<G>, sizes: &Sizes) {
+    let size = DRAG_SURFACES * FRAME_STRIDE;
+    let run = |name: &str, heap: &G::Heap| {
+        let surfaces: Vec<G::Texture> = (0..DRAG_SURFACES)
+            .map(|i| g.heap_texture(heap, FRAME_SIDE, FRAME_SIDE, i * FRAME_STRIDE))
+            .collect();
+        let mut times: [Vec<f64>; 4] = Default::default();
+        for frame in 0..sizes.timed + 3 {
+            let mut taken: [Vec<f64>; 4] = Default::default();
+            drag_once(g, s, &surfaces, &mut taken);
+            if frame >= 3 {
+                for (all, one) in times.iter_mut().zip(taken) {
+                    all.extend(one);
+                }
+            }
+        }
+        let [encode, frame, thread, cpu] = &mut times;
+        emit("drag", &format!("{name}_encode"), "ms", encode);
+        emit("drag", &format!("{name}_frame"), "ms", frame);
+        emit("drag", &format!("{name}_thread_cpu"), "ms", thread);
+        emit("drag", &format!("{name}_process_cpu"), "ms", cpu);
+    };
+    run("drag", &g.heap(size));
+    // SAFETY: an anonymous private mapping of `size` bytes, never unmapped: the process's to its
+    // end, past the heap and every texture placed in it.
+    let pointer = unsafe {
+        libc::mmap(
+            std::ptr::null_mut(),
+            size,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_ANON | libc::MAP_PRIVATE,
+            -1,
+            0,
+        )
+    };
+    assert_ne!(pointer, libc::MAP_FAILED);
+    // SAFETY: page-aligned read-write memory of `size` bytes that outlives the heap.
+    if let Some(heap) = unsafe { g.heap_no_copy(pointer as *mut u8, size) } {
+        run("drag_no_copy", &heap);
+    }
+}
+
 /// The many-draws workload's target (1080p `BGRA8Unorm`, with a `Depth32Float` attachment), its
 /// textures (16 `RGBA8Unorm` of 128x128) and its uniforms' stride.
 const MANY_TARGET: (usize, usize) = (1920, 1080);

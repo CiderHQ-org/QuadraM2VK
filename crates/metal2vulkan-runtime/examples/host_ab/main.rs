@@ -63,6 +63,13 @@
 //!   through `endEncoding`, the commit call's, from its return to the wait's, the whole frame's,
 //!   the process's CPU time, the encoding thread's CPU time through the commit's return, and
 //!   native's GPU time.
+//! - `drag`: a frame shaped as the guest's window drag (a macOS guest's WindowServer, measured in
+//!   a VM's work counts): 40 command buffers, each committed, of which the first 31 hold a render
+//!   pass of three textured draws into one of eight 256x256 `BGRA8Unorm` window surfaces in a
+//!   `Placement` heap, and the first 22 a dispatch of the tiny kernel; the last waited for. Per
+//!   frame: the encoding thread's wall time through the last commit, the whole frame's, the
+//!   encoding thread's CPU time and the process's. The runtime's alone (`drag_no_copy_*`): the
+//!   same over a heap of host pages, as a guest's heap is.
 //! - `memory`: `newBufferWithLength:` and `newBufferWithBytes:` of 4 KiB, 1 MiB and 64 MiB,
 //!   `newBufferWithBytesNoCopy:` of 1 MiB and 64 MiB, and a 1024x1024 `RGBA8Unorm` `Shared`
 //!   texture's `replaceRegion` and `getBytes`.
@@ -107,7 +114,7 @@ use std::process::{Command, Stdio};
 use std::time::Instant;
 use workloads::Sizes;
 
-const WORKLOADS: [&str; 10] = [
+const WORKLOADS: [&str; 11] = [
     "encode",
     "fixed",
     "latency",
@@ -118,6 +125,7 @@ const WORKLOADS: [&str; 10] = [
     "many_draws",
     "churn",
     "compositing",
+    "drag",
 ];
 
 struct Options {
@@ -309,6 +317,7 @@ fn run<G: Gpu>(g: &G, opened: Instant, metallib: &Path, options: &Options) {
             "many_draws" => workloads::many_draws(g, &library, sizes),
             "churn" => workloads::churn(g, sizes),
             "compositing" => workloads::compositing(g, &scene, sizes),
+            "drag" => workloads::drag(g, &scene, sizes),
             _ => unreachable!(),
         }
     }
