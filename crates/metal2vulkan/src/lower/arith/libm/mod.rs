@@ -949,6 +949,14 @@ impl<'a> Lib<'a> {
         }
     }
 
+    /// Whether the device's instructions are Metal's own functions in its fast mode: MoltenVK in a
+    /// module Metal compiles with fast math ([`module_mode`]), whose `Sin` and `Cos` are Metal's
+    /// `fast::sin` and `fast::cos` themselves, past their flush point too. Not native device maths,
+    /// whose instructions are the device's own.
+    pub fn metal_fast(&self) -> bool {
+        self.answers == Answers::Metal(Mode::Fast)
+    }
+
     /// Whether the device's instruction answers `fun` (no routine is called).
     pub fn device(&self, fun: Fun) -> bool {
         match self.answers {

@@ -805,7 +805,11 @@ pub enum FloatFn {
     /// `air.fast_sin` on `float`: [`FloatFn::Sin`], but `+0` past `float(π/2) · 2^22` and for an
     /// infinity or NaN, as Metal answers (`fast_trig_flush`). The device's `Sin` where its
     /// functions are Metal's, in either mode; elsewhere the device's `Sin` inside `[-π, π]`
-    /// (Apple's `2^-13` bound) and the translation's precise routine past it ([`libm`]).
+    /// (Apple's `2^-13` bound) and the translation's precise routine past it ([`libm`]). Where
+    /// they are Metal's in its fast mode (`Lib::metal_fast`), the device's `Sin` is Metal's
+    /// `fast::sin` itself, which answers the flush, and no flush is added (every exponent's 4,096
+    /// mantissas of both signs and the specials, 2,097,161 inputs, equal on an Apple M3 Max, macOS
+    /// 27.0.1).
     FastSin,
     /// `air.fast_cos` on `float`: [`FloatFn::Cos`], but `+0` past `float(π/2) · 2^22` and for an
     /// infinity or NaN, as Metal answers (`fast_trig_flush`); as [`FloatFn::FastSin`].
@@ -1595,6 +1599,8 @@ fn float_fn_core(
         }
     };
     let g1 = |fb: &mut FunctionBuilder<'_>, o: GlslOp| glsl(fb, o, &[a]);
+    // The device's instruction answers `op` itself (`lib1` calls no routine).
+    let by_device = !matches!(libm::uses(op, f), [r] if !lib.device(*r));
     let times = |fb: &mut FunctionBuilder<'_>, k: f64| -> BResult<Value> {
         let c = wide_splat(fb, f, k)?;
         bin(fb, BinOp::FMul, a, c)
@@ -1762,6 +1768,17 @@ fn float_fn_core(
         }
         F::Sin => lib1(fb, GlslOp::Sin, a),
         F::Cos => lib1(fb, GlslOp::Cos, a),
+        // Where the device's instruction is Metal's own `fast::sin` or `fast::cos` (a fast-math
+        // module on MoltenVK), it answers Metal's `+0` past the flush point and at an infinity or
+        // NaN itself: no flush is added.
+        F::FastSin | F::FastCos if lib.metal_fast() && by_device => {
+            let o = if op == F::FastSin {
+                GlslOp::Sin
+            } else {
+                GlslOp::Cos
+            };
+            g1(fb, o)
+        }
         F::FastSin => {
             let r = lib1(fb, GlslOp::Sin, a)?;
             fast_trig_flush(fb, f, a, r)
@@ -2456,12 +2473,14 @@ pub(super) fn metal_min_max(
 pub(super) const FAST_TRIG_LIMIT: f32 = 6_588_397.5;
 
 /// Metal's `fast::sin(x)` or `fast::cos(x)` from `r`, the device's `GLSL.std.450 Sin` or `Cos` of
-/// `x`: `+0` where `|x|` is past [`FAST_TRIG_LIMIT`] or `x` is NaN (an unordered compare), `r`
-/// elsewhere. Measured on Apple M3 Max: `fast::cos(6588397.5)` tracks `precise::cos` and the next
-/// float answers `0` (the old engine's bisection), every lane of probe case 08bc6611 past the limit
-/// (158, infinities and NaNs among them) answers `+0` for both, whatever the sign, and A1 cases
-/// 179b6aa6, 3c92eb70, and 1f239ba7 read the flush. Below the limit the two are the precise
-/// functions within a few ulp (the device's, `PrecisionNote::DeviceTranscendentals`).
+/// `x` (or its routine), where the device's instruction is not Metal's own fast function
+/// (`Lib::metal_fast`): `+0` where `|x|` is past [`FAST_TRIG_LIMIT`] or `x` is NaN (an unordered
+/// compare), `r` elsewhere. Measured on Apple M3 Max: `fast::cos(6588397.5)` tracks
+/// `precise::cos` and the next float answers `0` (the old engine's bisection), every lane of probe
+/// case 08bc6611 past the limit (158, infinities and NaNs among them) answers `+0` for both,
+/// whatever the sign, and A1 cases 179b6aa6, 3c92eb70, and 1f239ba7 read the flush. Below the
+/// limit the two are the precise functions within a few ulp (the device's,
+/// `PrecisionNote::DeviceTranscendentals`).
 pub(super) fn fast_trig_flush(
     fb: &mut FunctionBuilder<'_>,
     f: Form,

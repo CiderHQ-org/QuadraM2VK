@@ -2409,8 +2409,11 @@ fn a_division_without_arcp_is_metals_precise_division() {
 
 /// `air.fast_sincos` on `float` answers as `air.fast_sin` and `air.fast_cos` do (a probe cases
 /// 9496749c and 3921d3e2, every lane): `+0` for both past `float(π/2) · 2^22` (`0x4AC90FDB`), which
-/// the module compares against, while `air.sincos` keeps the device's functions there. (The
-/// interpreter does not model `Sin`; the shape is the module's.)
+/// the module compares against, while `air.sincos` keeps the device's functions there. On
+/// MoltenVK a module Metal compiles with fast math (no `SignedZeroInfNanPreserve`) takes the
+/// device's `Sin` and `Cos`, which are Metal's `fast::sin` and `fast::cos` and answer the flush
+/// themselves, so it compares against no limit; elsewhere the flush stays. (The interpreter does
+/// not model `Sin`; the shape is the module's.)
 #[test]
 fn fast_sincos_flushes_past_the_last_quadrant() {
     let body = |call: &str| {
@@ -2427,9 +2430,23 @@ fn fast_sincos_flushes_past_the_last_quadrant() {
         needs: &[],
         note: None,
     };
+    // Every operation with every fast-math flag: the module declares no
+    // `SignedZeroInfNanPreserve`, so MoltenVK compiles it with fast math.
+    let fast = Kernel {
+        name: "fast_sincos_in_a_fast_module",
+        body: format!(
+            "  %c = alloca float, align 4\n  %a = fadd fast float 0x{:016X}, -0.0\n  %s = call fast float @air.fast_sincos.f32(float %a, ptr %c)\n  %cv = load float, ptr %c, align 4\n  %r = fadd fast float %s, %cv\n",
+            f64::from(2.0f32).to_bits()
+        ),
+        float: true,
+        want: None,
+        needs: &[],
+        note: None,
+    };
     let ks = [
         kernel("fast_sincos_flushes", "air.fast_sincos.f32"),
         kernel("sincos_keeps_the_device", "air.sincos.f32"),
+        fast,
     ];
     let text = module(&ks).replace(
         DECLS,
@@ -2450,11 +2467,12 @@ fn fast_sincos_flushes_past_the_last_quadrant() {
                     && w.len() == 4
                     && w[3] == 0x4AC9_0FDB
             });
-            assert_eq!(
-                limits > 0,
-                kk.name == "fast_sincos_flushes",
-                "{what}: the flush limit"
-            );
+            let flushes = match kk.name {
+                "fast_sincos_flushes" => true,
+                "fast_sincos_in_a_fast_module" => stem != "moltenvk-m3",
+                _ => false,
+            };
+            assert_eq!(limits > 0, flushes, "{what}: the flush limit");
         }
     }
 }
