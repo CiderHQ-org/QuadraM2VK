@@ -1057,10 +1057,13 @@ fn a_pass_that_draws_nothing_copies_no_shadow() {
 /// the buffer's, none the image kept from before. Without a scissor, both copies move every
 /// texel. The CPU may write the `Shared` buffer's bytes, so its texture's copy back is a merge,
 /// which moves no texel back as a copy and dispatches no copy back; its keep moves the texels
-/// inside the scissor alone (`WorkCounts::shadow_texels_kept`). On a device that takes the copy
-/// back's dispatch (`DriverFact::ShadowCopyBackDispatchFaster`) the merge fetches the changed
-/// texels from the shadow, copying none (`WorkCounts::shadow_merges_fetched`); elsewhere all
-/// three copy. On a device that also takes a copy in with its keep as one dispatch
+/// inside the scissor alone (`WorkCounts::shadow_texels_kept`). The merge fetches the changed
+/// texels from the shadow, copying none (`WorkCounts::shadow_merges_fetched`): through its
+/// unsigned-integer view on a device that takes the copy back's dispatch
+/// (`DriverFact::ShadowCopyBackDispatchFaster`), else through its own view where the texture is
+/// `BGRA8Unorm` or `RGBA8Unorm`, whose bytes the merge rebuilds from their unsigned normalized
+/// values; another format's merge copies them. On a device that also takes a copy in with its
+/// keep as one dispatch
 /// (`DriverFact::ShadowCopyInDispatchFaster`), the copy in and the keep, of the same texels, are
 /// that dispatch (`WorkCounts::shadow_copies_in_dispatched`, one of
 /// `WorkCounts::shadow_merge_copies_dispatched`, printed as `SHADOW-COPY-BACK`); on one that takes
@@ -1114,12 +1117,15 @@ fn a_pass_copies_in_and_back_only_the_texels_its_scissors_reach() {
             encoder.end_encoding().unwrap();
             run(&command_buffer);
         };
-        // Each pass's merge fetches the shadow's texels, where the device runs a copy back faster
-        // as a dispatch (`DriverFact::ShadowCopyBackDispatchFaster`,
-        // `WorkCounts::shadow_merges_fetched`); both copy everywhere else.
+        // Each pass's merge fetches the shadow's texels (`WorkCounts::shadow_merges_fetched`):
+        // through the shadow's unsigned-integer view where the device runs a copy back faster as
+        // a dispatch (`DriverFact::ShadowCopyBackDispatchFaster`), else through its own view where
+        // the texture's format is one whose bytes the merge rebuilds from its unsigned normalized
+        // values (`BGRA8Unorm`, `RGBA8Unorm`); another format's merge copies them.
         let facts = &device.properties().driver_facts;
         let dispatches = facts.contains(&DriverFact::ShadowCopyBackDispatchFaster);
         let copies_in = facts.contains(&DriverFact::ShadowCopyInDispatchFaster);
+        let unorm = matches!(layout.pf, PixelFormat::BGRA8Unorm | PixelFormat::RGBA8Unorm);
         let moved = || {
             let counts = device.work_counts();
             (
@@ -1148,15 +1154,16 @@ fn a_pass_copies_in_and_back_only_the_texels_its_scissors_reach() {
                 now.8 - before.8,
             )
         };
-        // Merged back: no texel goes back as a copy, and no copy back is dispatched; the merge
-        // fetches where the device takes the copy back's dispatch, its keep then the copy in's
-        // dispatch where the device takes that too (`DriverFact::ShadowCopyInDispatchFaster`),
-        // else a copy into a kept image.
+        // Merged back: no texel goes back as a copy, and no copy back is dispatched. Where the
+        // device takes the copy back's dispatch, the merge fetches through the unsigned-integer
+        // view, its keep then the copy in's dispatch where the device takes that too
+        // (`DriverFact::ShadowCopyInDispatchFaster`), else a copy into a kept image; elsewhere a
+        // fetch through the shadow's own view keeps the texels in the merge's scratch.
         let (dispatched, back) = (0, |_: u64| 0);
         let (merged, fetched, kept_in_image) = match (dispatches, copies_in) {
             (true, true) => (1, 1, 0),
             (true, false) => (0, 1, 1),
-            (false, _) => (0, 0, 0),
+            (false, _) => (0, u64::from(unorm), 0),
         };
         // The merge's kernel, and the keep where it is a dispatch, each make a descriptor pool
         // where the device does not push set 0.
