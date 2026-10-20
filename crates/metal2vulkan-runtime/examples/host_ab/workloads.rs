@@ -849,6 +849,40 @@ pub fn memory<G: Gpu>(g: &G, sizes: &Sizes) {
             unsafe { libc::munmap(pointer, length) };
         }
     }
+    // Buffers held, as a program that grows its memory makes them: each takes memory no buffer
+    // of the run used before, so neither side hands back one it made earlier (the runtime's
+    // recycler lets go of what it parked above once a second passed). Each one's creation, then
+    // the first write of all its bytes from the CPU.
+    std::thread::sleep(Duration::from_millis(1100));
+    for (name, length, count) in [("1m", MIB, 48), ("64m", 64 * MIB, 6)] {
+        let (mut make, mut write) = (vec![], vec![]);
+        let buffers: Vec<G::Buffer> = (0..count)
+            .map(|_| {
+                let t = Instant::now();
+                let buffer = g.buffer(length);
+                make.push(us(t.elapsed()));
+                buffer
+            })
+            .collect();
+        for buffer in &buffers {
+            let t = Instant::now();
+            g.write_buffer(buffer, 0x5a);
+            write.push(us(t.elapsed()));
+        }
+        drop(buffers);
+        emit(
+            "memory",
+            &format!("new_buffer_held_{name}"),
+            "us",
+            &mut make,
+        );
+        emit(
+            "memory",
+            &format!("first_write_held_{name}"),
+            "us",
+            &mut write,
+        );
+    }
     let side = HEAVY_TEXTURE_SIDE;
     let texture = g.texture(Format::Rgba8, side, side, false);
     let bytes = texels(side, 3);

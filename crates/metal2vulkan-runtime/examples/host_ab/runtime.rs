@@ -360,6 +360,13 @@ impl Gpu for Runtime {
         };
     }
 
+    fn write_buffer(&self, buffer: &rt::Buffer, value: u8) {
+        let contents = buffer.contents().expect("a Shared buffer's contents");
+        // SAFETY: `contents` holds the buffer's `length` bytes, which no GPU work uses now (the
+        // caller's contract).
+        unsafe { std::ptr::write_bytes(contents.as_ptr(), value, buffer.length() as usize) };
+    }
+
     fn sampler(&self, linear: bool) -> rt::SamplerState {
         let mut descriptor = SamplerDescriptor::new();
         if linear {

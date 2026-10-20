@@ -392,6 +392,18 @@ impl Gpu for Native {
         };
     }
 
+    fn write_buffer(&self, buffer: &Self::Buffer, value: u8) {
+        // SAFETY: a `Shared` buffer's `contents` holds its `length` bytes, which no GPU work
+        // uses now (the caller's contract).
+        unsafe {
+            std::ptr::write_bytes(
+                buffer.contents().as_ptr() as *mut u8,
+                value,
+                buffer.length(),
+            )
+        };
+    }
+
     fn sampler(&self, linear: bool) -> Self::Sampler {
         let descriptor = MTLSamplerDescriptor::new();
         if linear {
