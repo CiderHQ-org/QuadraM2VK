@@ -4,7 +4,7 @@
 
 use crate::tracker::{
     ordered, Access, Barrier, EncoderUses, Footprint, GeometryWrites, IndirectReads, LegacyBarrier,
-    Point, Summary, Tracker, Use, UseRange, Wait, ENTRIES_PER_KEY,
+    Point, Reach, Summary, Tracker, Use, UseRange, Wait, ENTRIES_PER_KEY,
 };
 use ash::vk;
 use std::ops::Range;
@@ -60,7 +60,7 @@ fn barrier(src: Access, dst: Access) -> Option<Barrier> {
 fn encoder(commands: &[&[Use<Key>]]) -> Summary<Key> {
     let mut uses = EncoderUses::new(true);
     for command in commands {
-        let barrier = uses.barrier(command);
+        let barrier = uses.barrier(command, Reach::Unnamed);
         uses.record(vk::PipelineStageFlags2::NONE, command, barrier);
     }
     uses.finish()
@@ -651,17 +651,17 @@ fn ordered_commands_wait_for_earlier_commands_of_the_encoder() {
     let again = [reads(1, bytes(0..64), copy_read())];
     let overwrite = [writes(1, bytes(0..256), copy_write())];
 
-    assert_eq!(uses.barrier(&copy_in), None);
+    assert_eq!(uses.barrier(&copy_in, Reach::Unnamed), None);
     uses.record(TRANSFER, &copy_in, None);
-    let before_out = uses.barrier(&copy_out);
+    let before_out = uses.barrier(&copy_out, Reach::Unnamed);
     assert_eq!(before_out, barrier(copy_write(), copy_read()));
     uses.record(TRANSFER, &copy_out, before_out);
     // Visible already.
-    assert_eq!(uses.barrier(&again), None);
+    assert_eq!(uses.barrier(&again, Reach::Unnamed), None);
     uses.record(TRANSFER, &again, None);
     // After the reads, and the write already visible to transfer reads only.
     assert_eq!(
-        uses.barrier(&overwrite),
+        uses.barrier(&overwrite, Reach::Unnamed),
         barrier(
             Access::new(TRANSFER, vk::AccessFlags2::TRANSFER_WRITE),
             copy_write()
@@ -675,10 +675,10 @@ fn unordered_encoders_order_nothing_inside() {
     let write = [writes(1, bytes(0..256), shader_write())];
     uses.record(COMPUTE, &write, None);
     assert_eq!(
-        uses.barrier(&[reads(1, bytes(0..256), shader_read())]),
+        uses.barrier(&[reads(1, bytes(0..256), shader_read())], Reach::Unnamed),
         None
     );
-    assert_eq!(uses.barrier(&write), None);
+    assert_eq!(uses.barrier(&write, Reach::Unnamed), None);
 }
 
 #[test]
@@ -691,18 +691,79 @@ fn untracked_memory_is_one_class_inside_an_encoder() {
         None,
     );
     assert_eq!(
-        uses.barrier(&[Use::reads(6, false, bytes(1024..2048), copy_read())]),
+        uses.barrier(
+            &[Use::reads(6, false, bytes(1024..2048), copy_read())],
+            Reach::Unnamed
+        ),
         barrier(copy_write(), copy_read())
     );
     // Tracked resources order per identity.
     let mut uses = EncoderUses::<Key>::new(true);
     uses.record(TRANSFER, &[writes(5, bytes(0..16), copy_write())], None);
-    assert_eq!(uses.barrier(&[reads(6, bytes(0..16), copy_read())]), None);
-    // A tracked and an untracked resource are different memory.
     assert_eq!(
-        uses.barrier(&[Use::reads(7, false, bytes(0..16), copy_read())]),
+        uses.barrier(&[reads(6, bytes(0..16), copy_read())], Reach::Unnamed),
         None
     );
+    // A tracked and an untracked resource are different memory.
+    assert_eq!(
+        uses.barrier(
+            &[Use::reads(7, false, bytes(0..16), copy_read())],
+            Reach::Unnamed
+        ),
+        None
+    );
+}
+
+#[test]
+fn named_untracked_memory_orders_per_key_and_range_inside_an_encoder() {
+    let named = |uses: &mut EncoderUses<Key>, command: &[Use<Key>]| {
+        let barrier = uses.barrier(command, Reach::Named);
+        uses.record_reaching(TRANSFER, command, barrier, Reach::Named);
+        barrier
+    };
+    let write = |key, range| [Use::writes(key, false, bytes(range), copy_write())];
+    let read = |key, range| [Use::reads(key, false, bytes(range), copy_read())];
+    // Two blits into disjoint bytes of one heap, and into another's: no order.
+    let mut uses = EncoderUses::<Key>::new(true);
+    assert_eq!(named(&mut uses, &write(5, 0..16)), None);
+    assert_eq!(named(&mut uses, &write(5, 16..32)), None);
+    assert_eq!(named(&mut uses, &write(6, 0..16)), None);
+    // Overlapping bytes of the same key order.
+    assert_eq!(
+        named(&mut uses, &read(5, 8..24)),
+        barrier(copy_write(), copy_read())
+    );
+    // A command whose uses do not name what it touches orders after every untracked access,
+    // and every later command after it.
+    let mut uses = EncoderUses::<Key>::new(true);
+    assert_eq!(named(&mut uses, &write(5, 0..16)), None);
+    let shader = [Use::reads(9, false, bytes(0..4), shader_read())];
+    assert_eq!(
+        uses.barrier(&shader, Reach::Unnamed),
+        barrier(copy_write(), shader_read())
+    );
+    uses.record(
+        COMPUTE,
+        &[Use::writes(9, false, bytes(0..4), shader_write())],
+        None,
+    );
+    assert_eq!(
+        uses.barrier(&write(6, 64..128), Reach::Named),
+        barrier(shader_write(), copy_write())
+    );
+    // A tracked use of a key and a named untracked use of it are the same bytes (an untracked
+    // heap's use carries the key of a tracked buffer over its host pages).
+    let mut uses = EncoderUses::<Key>::new(true);
+    uses.record(
+        TRANSFER,
+        &[Use::writes(5, true, bytes(0..16), copy_write())],
+        None,
+    );
+    assert_eq!(
+        named(&mut uses, &read(5, 8..24)),
+        barrier(copy_write(), copy_read())
+    );
+    assert_eq!(named(&mut uses, &read(5, 16..32)), None);
 }
 
 #[test]
@@ -713,12 +774,12 @@ fn a_command_does_not_order_against_itself() {
         reads(1, bytes(0..64), copy_read()),
         writes(1, bytes(64..128), copy_write()),
     ];
-    assert_eq!(uses.barrier(&copy), None);
+    assert_eq!(uses.barrier(&copy, Reach::Unnamed), None);
     uses.record(TRANSFER, &copy, None);
     // The same copy again: after its write (write after write), and after its read (write after
     // read on 0..64 is not touched; read after write on 64..128 is not read).
     assert_eq!(
-        uses.barrier(&copy),
+        uses.barrier(&copy, Reach::Unnamed),
         barrier(
             Access::new(TRANSFER, vk::AccessFlags2::TRANSFER_WRITE),
             copy_write()
@@ -730,8 +791,14 @@ fn a_command_does_not_order_against_itself() {
 fn uses_that_touch_nothing_are_ignored() {
     let mut uses = EncoderUses::<Key>::new(true);
     uses.record(TRANSFER, &[writes(1, bytes(0..256), copy_write())], None);
-    assert_eq!(uses.barrier(&[reads(1, bytes(16..16), copy_read())]), None);
-    assert_eq!(uses.barrier(&[reads(1, bytes(0..16), Access::NONE)]), None);
+    assert_eq!(
+        uses.barrier(&[reads(1, bytes(16..16), copy_read())], Reach::Unnamed),
+        None
+    );
+    assert_eq!(
+        uses.barrier(&[reads(1, bytes(0..16), Access::NONE)], Reach::Unnamed),
+        None
+    );
     let summary = one(&[writes(1, bytes(8..8), copy_write())]);
     assert!(summary.uses().is_empty());
 }
@@ -939,7 +1006,7 @@ fn random_encoder(next: &mut impl FnMut(u64) -> u64) -> Summary<Key> {
             _ => reads(key, range, shader_read()),
         };
         let command = [used];
-        let barrier = uses.barrier(&command);
+        let barrier = uses.barrier(&command, Reach::Unnamed);
         uses.record(vk::PipelineStageFlags2::NONE, &command, barrier);
     }
     if next(4) == 0 {
@@ -1340,7 +1407,7 @@ fn an_encoder_summary_stays_bounded() {
     let mut uses = EncoderUses::<Key>::new(true);
     for at in 0..1000u64 {
         let command = [reads(1, bytes(at * 4..at * 4 + 4), copy_read())];
-        let barrier = uses.barrier(&command);
+        let barrier = uses.barrier(&command, Reach::Unnamed);
         uses.record(TRANSFER, &command, barrier);
     }
     let summary = uses.finish();
@@ -1596,11 +1663,11 @@ fn a_split_encoder_waits_in_its_first_part_and_updates_in_its_last() {
     let read = [reads(1, bytes(0..256), shader_read())];
     let mut whole = EncoderUses::<Key>::new(true);
     whole.record(COMPUTE, &write, None);
-    assert!(whole.barrier(&read).is_some());
+    assert!(whole.barrier(&read, Reach::Unnamed).is_some());
     let mut split = EncoderUses::<Key>::new(true);
     split.record(COMPUTE, &write, None);
     split.split();
-    assert_eq!(split.barrier(&read), None);
+    assert_eq!(split.barrier(&read, Reach::Unnamed), None);
 
     let (first, second): (Key, Key) = (100, 101);
     let mut a = EncoderUses::<Key>::new(false);

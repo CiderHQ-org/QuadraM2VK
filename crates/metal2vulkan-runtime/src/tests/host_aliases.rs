@@ -496,7 +496,7 @@ fn a_use_takes_the_keys_of_the_ranges_its_bytes_meet_clipped() {
 /// them.
 #[test]
 fn a_sample_through_a_second_key_waits_for_a_render_through_the_first() {
-    use super::super::tracker::{EncoderUses, Point, Tracker, Wait};
+    use super::super::tracker::{EncoderUses, Point, Reach, Tracker, Wait};
     let aliases = Aliases::default();
     let (rendered, sampled) = (ResourceKey::new(), ResourceKey::new());
     let surface = (0x7f00_0000_0000, 0x7e_9000);
@@ -505,7 +505,7 @@ fn a_sample_through_a_second_key_waits_for_a_render_through_the_first() {
     let summary = |uses: &[Use<ResourceKey>]| {
         let mut encoder = EncoderUses::new(true);
         let uses = aliases.augment(uses).unwrap_or_else(|| uses.to_vec());
-        let barrier = encoder.barrier(&uses);
+        let barrier = encoder.barrier(&uses, Reach::Unnamed);
         encoder.record(vk::PipelineStageFlags2::NONE, &uses, barrier);
         encoder.finish()
     };

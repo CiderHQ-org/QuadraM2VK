@@ -145,6 +145,7 @@ pub(crate) struct Counters {
     event_waits_met: AtomicU64,
     bare_starts: AtomicU64,
     prefixed_starts: AtomicU64,
+    command_barriers: AtomicU64,
     unrun_instances_ended: AtomicU64,
     untouched_passes_skipped: AtomicU64,
     inline_passes: AtomicU64,
@@ -1100,6 +1101,12 @@ impl Counters {
     /// encoder's own command buffer (`gpu_time.rs`, `command_buffer/submit.rs`).
     pub(crate) fn prefixed_start(&self) {
         self.prefixed_starts.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A command of an encoder Metal orders (a blit encoder, a serial compute encoder) was
+    /// recorded after a barrier for the encoder's earlier commands (`tracker::EncoderUses`).
+    pub(crate) fn command_barrier(&self) {
+        self.command_barriers.fetch_add(1, Ordering::Relaxed);
     }
 
     /// A render pass's first instance began inline in a primary command buffer of its encoder's
@@ -2712,6 +2719,11 @@ pub struct WorkCounts {
     /// buffer wrote as it opened, with no command buffer of barriers before that encoder for the
     /// timestamp (`gpu_time.rs`): those batches start bare where nothing else is planned.
     pub prefixed_starts: u64,
+    /// Barriers recorded before a command of an encoder Metal orders (a blit encoder, a serial
+    /// compute encoder) for the encoder's earlier commands (`tracker::EncoderUses`): on MoltenVK
+    /// each ends the Metal encoder, and the next waits for the one before (`tracker.rs`,
+    /// **Inside an encoder**, orders a blit's untracked uses by key and range).
+    pub command_barriers: u64,
     /// Render pass instances a pass replaced or gave up before running them (a draw that needed
     /// another shape before any draw recorded, a reroute's instance left behind, a capture that
     /// recorded nothing, a first instance whose draws record inline instead), whose draws
@@ -3738,6 +3750,7 @@ impl Device {
             event_waits_met: counters.event_waits_met.load(Ordering::Relaxed),
             bare_starts: counters.bare_starts.load(Ordering::Relaxed),
             prefixed_starts: counters.prefixed_starts.load(Ordering::Relaxed),
+            command_barriers: counters.command_barriers.load(Ordering::Relaxed),
             unrun_instances_ended: counters.unrun_instances_ended.load(Ordering::Relaxed),
             untouched_passes_skipped: counters.untouched_passes_skipped.load(Ordering::Relaxed),
             inline_passes: counters.inline_passes.load(Ordering::Relaxed),

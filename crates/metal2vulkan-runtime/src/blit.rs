@@ -238,8 +238,9 @@ impl BlitCommandEncoder {
     /// Record one blit command that reads and writes `uses`: the copies into the heap shadows
     /// it uses that the encoder has not copied in, and the barrier the uses need after the
     /// encoder's earlier commands, then the command through `record`. Every blit command goes
-    /// through here once its checks passed. Refused only as `EncoderCore::plan_shadows` is, for
-    /// a merge, which no blit needs (the module docs).
+    /// through here once its checks passed, and its uses name every byte it touches, untracked
+    /// memory's too (`EncoderCore::command_named`). Refused only as `EncoderCore::plan_shadows`
+    /// is, for a merge, which no blit needs (the module docs).
     pub(super) fn command(
         &mut self,
         uses: &[Use<ResourceKey>],
@@ -261,7 +262,7 @@ impl BlitCommandEncoder {
 
     /// [`command`](Self::command) of a blit command that reads the boxes `reads` of its source
     /// texture (`FreshUnwritten::reads`): a new texture's unwritten pattern is announced only
-    /// where a box reaches it (`EncoderCore::command_reading`).
+    /// where a box reaches it (`EncoderCore::command_named`).
     pub(super) fn command_reading(
         &mut self,
         uses: &[Use<ResourceKey>],
@@ -283,7 +284,7 @@ impl BlitCommandEncoder {
         let shadows = shadow::copies_used(self.shadows.iter(), uses);
         let copies = self.core.plan_shadows(&shadows, uses)?;
         self.core.shadow_copies(&copies);
-        self.core.command_reading(stages, uses, reads, record);
+        self.core.command_named(stages, uses, reads, record);
         self.core.shadows_used(&shadows, uses, &[]);
         Ok(())
     }

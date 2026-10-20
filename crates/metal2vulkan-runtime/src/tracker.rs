@@ -8,8 +8,17 @@
 //!   in dispatched order", and a memory barrier on a serial encoder is "allowed, but ignored", so
 //!   the order covers untracked resources too (Metal's headers; documented, not measured). Before
 //!   each command, [`EncoderUses::barrier`] compares its uses with the encoder's earlier commands:
-//!   tracked resources per resource and range, and all untracked memory as one class, since
-//!   untracked heap resources may alias.
+//!   tracked resources per resource and range. Untracked memory may alias across resources, so
+//!   it orders by what a command's uses say of it ([`Reach`]). A command whose uses name every
+//!   byte of untracked memory it touches (a blit's, a shadow's copy) orders per key and range
+//!   against the others like it and against tracked uses, as each byte has one key and range
+//!   wherever it is named: a heap's resources' bytes are the heap's (`Buffer::tracked`), an image
+//!   bound in a heap's memory is a use of the heap's key, a view's uses are its texture's, a
+//!   shadow's image and staging are its own, and the uses of a buffer or heap over host pages
+//!   carry the keys of the others over the same bytes (`host_aliases.rs`). A command that may
+//!   touch untracked memory its uses do not name (a shader's, through addresses, argument
+//!   buffers and resident resources) orders against every untracked access, as one class, and
+//!   every command orders against it.
 //! - **Between encoders, command buffers and queues** ([`Tracker`]). The device's scheduler
 //!   submits batches (a command buffer's encoders between its event waits and signals) in one
 //!   order over all its logical queues, and [`Tracker::plan`] compares each batch's encoder
@@ -150,7 +159,9 @@ pub(super) enum UseRange {
 }
 
 impl UseRange {
-    /// The range every untracked use takes inside an encoder: all untracked memory is one class.
+    /// The range every untracked use of a command that may touch untracked memory its uses do
+    /// not name takes inside an encoder, and every untracked use's in the class all of them
+    /// order against ([`Reach::Unnamed`]): all untracked memory.
     const UNTRACKED: UseRange = UseRange::Bytes(0..u64::MAX);
 
     /// Whether the range holds nothing.
@@ -1009,12 +1020,35 @@ fn merged<S: Copy + Ord + Hash>(uses: impl IntoIterator<Item = Use<S>>) -> Vec<U
     merged
 }
 
-/// The key a use takes inside an encoder: its resource when tracked, else the one class of all
-/// untracked memory.
+/// How far a command's uses say which untracked memory it touches, inside an encoder Metal orders
+/// (the module docs).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Reach {
+    /// Its uses name every byte of untracked memory it touches, each by the key and range that
+    /// byte takes wherever it is named: a blit's command, a shadow's copy. It orders per key and
+    /// range after the earlier commands like it, and after every untracked access of the others.
+    Named,
+    /// It may touch untracked memory its uses do not name (a shader's, through addresses,
+    /// argument buffers and resident resources): it orders after every untracked access, as one
+    /// class, and every later command orders after its untracked accesses.
+    Unnamed,
+}
+
+/// The key a use takes inside an encoder: its key's ([`Class::Key`]) when tracked or of a
+/// [`Reach::Named`] command; otherwise, and for an untracked use besides, a class of untracked
+/// accesses over all untracked memory.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 enum Class<K> {
-    Tracked(K),
+    /// A tracked use, or an untracked use of a [`Reach::Named`] command, at its key and range:
+    /// one key's bytes are the same memory whichever use names them (an untracked heap's use
+    /// carries the key of a tracked buffer over the same host pages, `host_aliases.rs`).
+    Key(K),
+    /// Every untracked access of the encoder's commands, what a [`Reach::Unnamed`] command orders
+    /// after.
     Untracked,
+    /// The untracked accesses of [`Reach::Unnamed`] commands, what a [`Reach::Named`] command
+    /// orders after.
+    Unnamed,
 }
 
 /// The uses of one encoder: the order of its commands, and the summaries its commit reads, one
@@ -1115,24 +1149,42 @@ impl<K: Copy + Ord + Hash> EncoderUses<K> {
         self.ordered
     }
 
-    /// The barrier a command with `uses` needs after the encoder's earlier commands: none in an
-    /// encoder whose commands are not ordered. Nothing changes until [`EncoderUses::record`].
-    pub(super) fn barrier(&self, uses: &[Use<K>]) -> Option<Barrier> {
+    /// The barrier a command with `uses`, which say what untracked memory it touches as `reach`
+    /// does, needs after the encoder's earlier commands: none in an encoder whose commands are
+    /// not ordered. Nothing changes until [`EncoderUses::record`].
+    pub(super) fn barrier(&self, uses: &[Use<K>], reach: Reach) -> Option<Barrier> {
         if !self.ordered {
             return None;
         }
         // One encoder runs on one queue: its commands need barriers, never waits.
-        depend(&self.inside, &inside_uses(uses), (Point::default(), 0))
-            .barrier
-            .needed()
+        depend(
+            &self.inside,
+            &inside_uses(uses, reach, false),
+            (Point::default(), 0),
+        )
+        .barrier
+        .needed()
     }
 
-    /// Note a recorded command: it ran in `stages`, with `uses`, after `barrier`.
+    /// Note a recorded command that may touch untracked memory its uses do not name
+    /// ([`Reach::Unnamed`]): it ran in `stages`, with `uses`, after `barrier`.
     pub(super) fn record(
         &mut self,
         stages: vk::PipelineStageFlags2,
         uses: &[Use<K>],
         barrier: Option<Barrier>,
+    ) {
+        self.record_reaching(stages, uses, barrier, Reach::Unnamed);
+    }
+
+    /// [`record`](Self::record) of a command whose `uses` say what untracked memory it touches
+    /// as `reach` does.
+    pub(super) fn record_reaching(
+        &mut self,
+        stages: vk::PipelineStageFlags2,
+        uses: &[Use<K>],
+        barrier: Option<Barrier>,
+        reach: Reach,
     ) {
         if !self.held.is_empty() {
             let held = &self.held;
@@ -1148,7 +1200,7 @@ impl<K: Copy + Ord + Hash> EncoderUses<K> {
         if self.ordered {
             admit(
                 &mut self.inside,
-                &inside_uses(uses),
+                &inside_uses(uses, reach, true),
                 barrier,
                 &[],
                 Point::default(),
@@ -1579,22 +1631,41 @@ fn coalesce_uses<K>(uses: &mut Vec<Use<K>>) {
     }
 }
 
-/// The uses as the encoder orders them: untracked ones as the one class of untracked memory.
-fn inside_uses<K: Copy + Ord + Hash>(uses: &[Use<K>]) -> Vec<Use<Class<K>>> {
-    merged(uses.iter().map(|used| Use {
-        key: if used.tracked {
-            Class::Tracked(used.key)
-        } else {
-            Class::Untracked
-        },
+/// The uses of a command of `reach` as the encoder orders them ([`Class`]): to compare with the
+/// earlier commands' (`recorded` false), or as it keeps them (`recorded` true). A tracked use is
+/// its key's. An untracked use of a [`Reach::Named`] command compares with its key's and with
+/// the accesses of the commands that do not name theirs, and is kept as its key's and as an
+/// access of all untracked memory; one of a [`Reach::Unnamed`] command compares with every
+/// untracked access, and is kept as an access of all untracked memory, and of the commands that
+/// do not name theirs.
+fn inside_uses<K: Copy + Ord + Hash>(
+    uses: &[Use<K>],
+    reach: Reach,
+    recorded: bool,
+) -> Vec<Use<Class<K>>> {
+    let class = |used: &Use<K>, key: Class<K>, range: UseRange| Use {
+        key,
         tracked: used.tracked,
-        range: if used.tracked {
-            used.range.clone()
-        } else {
-            UseRange::UNTRACKED
-        },
+        range,
         read: used.read,
         write: used.write,
+    };
+    merged(uses.iter().flat_map(|used| {
+        let (first, second) = match (used.tracked, reach, recorded) {
+            (true, _, _) => (Class::Key(used.key), None),
+            (false, Reach::Named, false) => (Class::Key(used.key), Some(Class::Unnamed)),
+            (false, Reach::Named, true) => (Class::Key(used.key), Some(Class::Untracked)),
+            (false, Reach::Unnamed, false) => (Class::Untracked, None),
+            (false, Reach::Unnamed, true) => (Class::Untracked, Some(Class::Unnamed)),
+        };
+        let range = match first {
+            Class::Key(_) => used.range.clone(),
+            Class::Untracked | Class::Unnamed => UseRange::UNTRACKED,
+        };
+        [Some(class(used, first, range))]
+            .into_iter()
+            .chain([second.map(|key| class(used, key, UseRange::UNTRACKED))])
+            .flatten()
     }))
 }
 

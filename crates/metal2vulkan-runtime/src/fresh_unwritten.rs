@@ -522,7 +522,7 @@ impl FreshUnwritten {
     }
 
     /// A blit's reads of `read` of `texture` (each the aspects and a box, in the image's levels
-    /// and layers), for `EncoderCore::command_reading`: none where no texture is noted, nor for a
+    /// and layers), for `EncoderCore::command_named`: none where no texture is noted, nor for a
     /// texture over a buffer's bytes.
     pub(super) fn reads(
         device: &Device,

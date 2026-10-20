@@ -51,7 +51,7 @@ use super::shadow_merge::ShadowMerge;
 use super::sparse::encoder::SparseUpdate;
 use super::texture::decoded_twin::TwinWrite;
 use super::texture::kept_image::KeptLease;
-use super::tracker::{Barrier, EncoderUses, Summary, Use, UseRange};
+use super::tracker::{Barrier, EncoderUses, Reach, Summary, Use, UseRange};
 use super::used_resources::EncoderKind;
 use super::Device;
 use crate::device::functions::Vk;
@@ -685,18 +685,22 @@ impl EncoderCore {
         self.command_reaching(stages, uses, &BTreeSet::new(), record);
     }
 
-    /// [`command`](Self::command) of a command that reads the boxes `reads` of textures' images
-    /// (a blit's sources): a read of a new texture's unwritten pattern there is announced only
-    /// where a box reaches an unwritten texel (`fresh_unwritten.rs`); its other reads as
+    /// [`command`](Self::command) of a command whose uses name every byte of untracked memory it
+    /// touches (`tracker::Reach::Named`): a blit encoder's command, a shadow's copy. In an
+    /// ordered encoder it orders after the earlier such commands per key and range alone, and
+    /// after every untracked access of the others. It reads the boxes `reads` of textures'
+    /// images (a blit's sources): a read of a new texture's unwritten pattern there is announced
+    /// only where a box reaches an unwritten texel (`fresh_unwritten.rs`); its other reads as
     /// `command`'s.
-    pub(super) fn command_reading(
+    pub(super) fn command_named(
         &mut self,
         stages: vk::PipelineStageFlags2,
         uses: &[Use<ResourceKey>],
         reads: &[FreshRead],
         record: impl FnOnce(&Vk, vk::CommandBuffer),
     ) {
-        self.command_observing(stages, uses, &BTreeSet::new(), reads, record);
+        let none = BTreeSet::new();
+        self.command_observing(stages, uses, (&none, Reach::Named), reads, record);
     }
 
     /// `command` of a dispatch or draw whose uses of the keys `resident` reach
@@ -709,20 +713,21 @@ impl EncoderCore {
         resident: &BTreeSet<ResourceKey>,
         record: impl FnOnce(&Vk, vk::CommandBuffer),
     ) {
-        self.command_observing(stages, uses, resident, &[], record);
+        self.command_observing(stages, uses, (resident, Reach::Unnamed), &[], record);
     }
 
     /// [`command_reaching`](Self::command_reaching) reading the boxes `reads`
-    /// ([`command_reading`](Self::command_reading)).
+    /// ([`command_named`](Self::command_named)), whose uses say what untracked memory it touches
+    /// as `reach` does.
     fn command_observing(
         &mut self,
         stages: vk::PipelineStageFlags2,
         uses: &[Use<ResourceKey>],
-        resident: &BTreeSet<ResourceKey>,
+        (resident, reach): (&BTreeSet<ResourceKey>, Reach),
         reads: &[FreshRead],
         record: impl FnOnce(&Vk, vk::CommandBuffer),
     ) {
-        let Some(barrier) = self.track(stages, uses, resident, reads) else {
+        let Some(barrier) = self.track(stages, uses, (resident, reach), reads) else {
             return;
         };
         let Some(raw) = self.recording() else {
@@ -749,7 +754,7 @@ impl EncoderCore {
         uses: &[Use<ResourceKey>],
         resident: &BTreeSet<ResourceKey>,
     ) -> Option<Option<Barrier>> {
-        self.track(stages, uses, resident, &[])
+        self.track(stages, uses, (resident, Reach::Unnamed), &[])
     }
 
     /// Everything of a command [`command_observing`](Self::command_observing) records but its
@@ -759,7 +764,7 @@ impl EncoderCore {
         &mut self,
         stages: vk::PipelineStageFlags2,
         uses: &[Use<ResourceKey>],
-        resident: &BTreeSet<ResourceKey>,
+        (resident, reach): (&BTreeSet<ResourceKey>, Reach),
         reads: &[FreshRead],
     ) -> Option<Option<Barrier>> {
         // A command that names a detached buffer records nothing, nor does any after it.
@@ -778,8 +783,11 @@ impl EncoderCore {
         // held are the uses' own.
         let aliased = self.aliased(uses);
         let tracked = aliased.as_deref().unwrap_or(uses);
-        let barrier = self.uses.barrier(tracked);
-        self.uses.record(stages, tracked, barrier);
+        let barrier = self.uses.barrier(tracked, reach);
+        self.uses.record_reaching(stages, tracked, barrier, reach);
+        if barrier.is_some() {
+            self.device().shared().counts.command_barrier();
+        }
         self.touch_reaching(uses, resident);
         Some(barrier)
     }
@@ -1218,7 +1226,7 @@ impl EncoderCore {
         record: impl FnOnce(&Vk, vk::CommandBuffer),
     ) {
         if self.uses.ordered() {
-            self.command(stages, uses, record);
+            self.command_named(stages, uses, &[], record);
             return;
         }
         if self.skips(uses.iter().map(|used| used.key)) {
