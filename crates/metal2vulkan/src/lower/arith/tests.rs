@@ -4122,6 +4122,7 @@ mod snapshot_codes;
 mod specials;
 mod texel_round;
 mod wide;
+mod widening;
 
 /// `air.convert` from an integer to `bool` is C++'s `x != 0`, lane by lane, at every width and
 /// whatever the source's sign: the values that differ from the low bit (2, 0x80, the top bit) are

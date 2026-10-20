@@ -282,8 +282,12 @@ pub(crate) fn among<F: Copy + Ord>(
 /// values). None differs. The same operations undecorated differ in the fast and relaxed modes,
 /// which fold the narrowings and the widening away (3,468,601,344 pairs for a sum, 4,014,926,892
 /// for a product, 6,140 for a quotient); so does SPIRV-Cross's `NoContraction` `OpFMul`, `spvFMul`,
-/// which answers `+0` for a `-0` product (126,974 pairs). The translation emits none of them. One
-/// row per GPU, as measured. `MetalFragmentSimdgroups`: MoltenVK 1.4.1's SPIRV-Cross writes a
+/// which answers `+0` for a `-0` product (126,974 pairs). The translation emits none of them. The
+/// sums read every `half` through the device's widening (`x + -0` of every `x`), which a load of
+/// `half`s whose uses read no NaN's bits takes (`lower::arith::widening`); Metal's own widening,
+/// read on the M3 Max (macOS 27.0.1) over every bit pattern from threadgroup memory in fast and
+/// safe math, takes every `half` but a NaN to its value, denormals included, and every NaN to
+/// `0x7FC00000`. One row per GPU, as measured. `MetalFragmentSimdgroups`: MoltenVK 1.4.1's SPIRV-Cross writes a
 /// fragment shader's `SubgroupLocalInvocationId` as Metal's `[[thread_index_in_simdgroup]]`, and
 /// Metal runs the fragment, so each fragment subgroup is a Metal simdgroup of the same pixels.
 /// Metal's own lanes were read from MSL of ours on the M3 Max (macOS 26.7) and the M4 (macOS

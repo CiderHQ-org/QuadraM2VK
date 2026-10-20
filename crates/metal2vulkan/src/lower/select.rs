@@ -1618,6 +1618,7 @@ fn finish(
     sync::barrier::finish(&mut cx)?;
     sync::memory_model::finish(&mut cx)?;
     arith::finish(&mut cx)?;
+    cx.families.arith.widened = arith::widening::widened_loads(&cx, &sel.strategy, m)?;
 
     let slots = access::finish_slots(&mut cx, m)?;
     access::absent::finish(&mut cx);

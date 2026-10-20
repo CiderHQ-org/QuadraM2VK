@@ -2378,8 +2378,9 @@ fn compile_kept<K>(
             .properties
             .insert(crate::device::requirements::VkProperty::MetalMinMax);
     }
-    // `half` `+ - * /` left to the device's 16-bit arithmetic because it is Metal's.
-    if plan.families.arith.f16_arith {
+    // `half` `+ - * /` left to the device's 16-bit arithmetic because it is Metal's, and a `half`
+    // load's decode left to the device's widening because that measurement makes it Metal's.
+    if plan.families.arith.f16_arith || !plan.families.arith.widened.is_empty() {
         requirements
             .properties
             .insert(crate::device::requirements::VkProperty::MetalHalfArithmetic);

@@ -43,7 +43,8 @@
 //! format bits with integer sequences and, for a half denormal, one exact scaling by `2^±24`
 //! between an integer and a normal `f32` (denormals, infinities, and NaN payloads included), but
 //! under the float controls, where the profile leaves NaN bits to the device, [`from_bits`] is the
-//! device's widening, exact but for a NaN's bits ([`controlled_from_bits`]); an
+//! device's widening, exact but for a NaN's bits ([`device_from_bits`]), as it is for a load whose
+//! uses read no NaN's bits where that widening is Metal's (`widening`); an
 //! integer converts to `half` through `f32` without double rounding (any integer the `f32` step
 //! rounds is at least `2^24`, far above the largest half) and rounds by integer arithmetic, not
 //! `OpQuantizeToF16` ([`round_integer`]), an integer converts to `bfloat` through a round-to-odd
@@ -1147,10 +1148,14 @@ fn f32_bits_to_half_bits(fb: &mut FunctionBuilder<'_>, u: Form, b: Value) -> BRe
 /// (`FunctionBuilder::offer_outside_loops`): NVIDIA's compiler makes a module faster with the
 /// device's widening outside loops and slower with it inside one. Under the float controls, where
 /// the profile leaves a NaN's bits to the device (`ModuleBuilder::native_half_nans`), a `half` is
-/// the device's widening of its bits wherever it is ([`controlled_from_bits`]).
+/// the device's widening of its bits wherever it is ([`device_from_bits`]); so is the `half` of a
+/// load whose uses read no NaN's bits, where the device's widening is Metal's
+/// (`ModuleBuilder::widens_halves`, [`widening`](super::widening)): exact, a NaN `0x7FC00000` as
+/// Metal widens it, the bits noted as for the integer decode.
 pub fn from_bits(fb: &mut FunctionBuilder<'_>, f: Form, h: Value) -> BResult<Value> {
-    if matches!(f.held, Held::Float(FloatFmt::Half)) && fb.module().native_half_nans() {
-        let x = controlled_from_bits(fb, f, h)?;
+    let device = fb.module().native_half_nans() || fb.module().widens_halves();
+    if matches!(f.held, Held::Float(FloatFmt::Half)) && device {
+        let x = device_from_bits(fb, f, h)?;
         let all = u32::MAX >> (32 - u32::from(f.lanes).clamp(1, 32));
         fb.note_bits(NarrowFmt::Half, x, h, all, true);
         return Ok(x);
@@ -1208,7 +1213,8 @@ fn native_from_bits(fb: &mut FunctionBuilder<'_>, f: Form, h: Value) -> BResult<
 }
 
 /// The `half` values of bits `h` (the low 16 bits of each `u32` lane of form [`u32_form`]`(f)`)
-/// widened by the device under the float controls ([`QuantizeForm::Controlled`],
+/// widened by the device, where that widening is Metal's (`DriverDeviation::MetalHalfArithmetic`,
+/// [`widening`](super::widening)) or under the float controls ([`QuantizeForm::Controlled`],
 /// [`controlled_modes`], which the entry declares where a module widens so, [`widens_bits`]): each
 /// lane's bits reinterpreted as a pair of 16-bit floats (`OpBitcast` maps a lane's lower-ordered
 /// bits to the pair's first component) and that first component converted to 32 bits. Every
@@ -1222,7 +1228,7 @@ fn native_from_bits(fb: &mut FunctionBuilder<'_>, f: Form, h: Value) -> BResult<
 /// every `half` NaN to `0x7FC00000` and every other `half` to its value (the M3 Max, every bit
 /// pattern, loaded from device and constant memory, safe and fast math), which the NaN switch
 /// answers at the widening to `float` (`nan::cast_answer`) on [`half_bits_to_f32_bits`]'s decode.
-fn controlled_from_bits(fb: &mut FunctionBuilder<'_>, f: Form, h: Value) -> BResult<Value> {
+fn device_from_bits(fb: &mut FunctionBuilder<'_>, f: Form, h: Value) -> BResult<Value> {
     let e = fb.module().ty(Type::Float { width: 16 })?;
     let pair = fb.module().ty(Type::Vector { elem: e, len: 2 })?;
     let lane_form = Form {
@@ -1247,8 +1253,9 @@ fn controlled_from_bits(fb: &mut FunctionBuilder<'_>, f: Form, h: Value) -> BRes
     fb.composite_construct(ft, &lanes)
 }
 
-/// Whether module `m` widens a `half` from its bits by [`controlled_from_bits`]: an `OpFConvert` to
-/// 32 bits of a component extracted from an `OpBitcast` to a vector of 16-bit floats. The entry
+/// Whether module `m` widens a `half` from its bits by [`device_from_bits`]: an `OpFConvert` to
+/// 32 bits of a component extracted from an `OpBitcast` to a vector of 16-bit floats. Under the
+/// float controls ([`QuantizeForm::Controlled`]) the entry
 /// then declares [`controlled_modes`], and the module records `PrecisionNote::NativeNanEncoding`
 /// (a NaN's bits the device's). Three passes over the instructions, with two bits per value of
 /// the module charged to `meter` while they run.

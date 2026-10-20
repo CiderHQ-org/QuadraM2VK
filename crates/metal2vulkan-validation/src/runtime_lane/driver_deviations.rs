@@ -69,6 +69,15 @@
 //!   kept apart, and the kernels require `VkProperty::MetalHalfArithmetic`; elsewhere the module
 //!   computes in `float` and rounds to `half` itself. Both give Metal's answer, so every device
 //!   is checked on every word.
+//! - **The `half` widening** (`MetalHalfArithmetic` again, whose measurement reads every `half`
+//!   through the device's widening): the owned fixture `hwd_half_reads` reads back every `half`
+//!   bit pattern, one thread each, through threadgroup words and a buffer, and uses some reads only
+//!   in a sum, a product, a widening to `float` and a compare, and moves another through a select
+//!   to memory. Where the profile takes the deviation the first take the device's widening of their
+//!   bits (`lower::arith::widening`; its unit test reads the fixture's plan) under the default
+//!   policy; elsewhere, under `DevicePolicy::exact_answers`, every read is the integer decode. Both
+//!   give Metal's answer on every one of the 65,536 patterns, a NaN's included, so every device is
+//!   checked on every word.
 //! - **The fragment simdgroups** (`MetalFragmentSimdgroups`): the owned fixture
 //!   `gsm2_fragment_lanes` writes a fragment's `[[thread_index_in_simdgroup]]`, read as a `uint`
 //!   and a `ushort` parameter and as a program-scope `uint`, over three draws into a 32x32 target:
@@ -95,8 +104,8 @@
 
 use super::degrade_notices::{counts as notice_counts, on_device};
 use super::{
-    buffer_with, public_case, read_buffer, run_case, validated_device, CaseResources, Messages,
-    PublicCase, ScratchCache, METAL_ENVIRONMENT, WAIT,
+    buffer_with, public_case, read_buffer, run_case, validated_device, validated_device_with,
+    CaseResources, Messages, PublicCase, ScratchCache, METAL_ENVIRONMENT, WAIT,
 };
 use crate::air_library::AirLibrary;
 use crate::case::{AuthoredCase, OutputSelection, Primitive};
@@ -106,7 +115,7 @@ use crate::observation::MetalObservation;
 use crate::store::CorpusStore;
 use base64::Engine as _;
 use metal2vulkan::cache::VariantKey;
-use metal2vulkan::device::{FloatControl, FloatWidth, VkFeature, VkProperty};
+use metal2vulkan::device::{DevicePolicy, FloatControl, FloatWidth, VkFeature, VkProperty};
 use metal2vulkan::error::{Capability, DriverDeviation, Error as CompileError, Feature, Needs};
 use metal2vulkan::library::Library;
 use metal2vulkan::metal::{PixelFormat, PrimitiveType, TextureUsage};
@@ -1318,6 +1327,204 @@ fn half_arithmetic_answers_as_metal() {
             if !differ.is_empty() {
                 failures.push(format!(
                     "{case_name} on {name}: words differ from Metal (word, device, Metal): {:x?}",
+                    &differ[..differ.len().min(24)]
+                ));
+            }
+        }
+        assert!(failures.is_empty(), "{failures:#?}");
+    }
+    let reported = messages.take();
+    assert!(
+        reported.is_empty(),
+        "the validation layer reported: {reported:#?}"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// The `half` widening.
+
+/// The threads of `hwd_half_reads`: one per `half` bit pattern, in threadgroups of 256.
+const PATTERNS: usize = 1 << 16;
+
+/// Whether `h` is a `half` NaN.
+fn half_nan(h: u16) -> bool {
+    h & 0x7C00 == 0x7C00 && h & 0x3FF != 0
+}
+
+/// The bits of `half` `h` widened to `float` as Metal widens it: its exact value, `0x7FC00000` for
+/// a NaN.
+fn metal_widening(h: u16) -> u32 {
+    if half_nan(h) {
+        return 0x7FC0_0000;
+    }
+    let sign = u32::from(h >> 15) << 31;
+    let exponent = u32::from(h >> 10) & 0x1F;
+    let fraction = u32::from(h & 0x3FF);
+    sign | match exponent {
+        0 => (fraction as f32 * 2f32.powi(-24)).to_bits(),
+        0x1F => 0x7F80_0000,
+        e => ((e + 112) << 23) | (fraction << 13),
+    }
+}
+
+/// The words `hwd_half_reads` writes, one per thread: the `half` sums, the widenings to `float`,
+/// the compares, the moves and the `half` products.
+struct HalfReads {
+    sums: Vec<u16>,
+    wides: Vec<u32>,
+    less: Vec<u32>,
+    moved: Vec<u16>,
+    prods: Vec<u16>,
+}
+
+/// Metal's answers of `hwd_half_reads` (the fixture's docs), by thread `g`: the `half` sum
+/// `y + -0` (`y` the pattern of the thread's mirror in its threadgroup, a NaN `0x7E00`), the
+/// `float` of `y`, whether `y < 1`, the bits of `m` (the next thread's pattern) and the product
+/// `b * 1` (`b` the pattern `g ^ 1`, a NaN `0x7E00`). A `half` sum or product of a non-NaN with
+/// `-0` or `1` is that operand, its zero's sign included.
+fn metal_half_reads() -> HalfReads {
+    let canonical = |h: u16| if half_nan(h) { 0x7E00 } else { h };
+    let pattern = |g: usize| g as u16;
+    let mirror = |g: usize| pattern(g & !255 | (255 - (g & 255)));
+    let next = |g: usize| pattern(g & !255 | ((g + 1) & 255));
+    let less = |h: u16| u32::from(!half_nan(h) && f32::from_bits(metal_widening(h)) < 1.0);
+    HalfReads {
+        sums: (0..PATTERNS).map(|g| canonical(mirror(g))).collect(),
+        wides: (0..PATTERNS).map(|g| metal_widening(mirror(g))).collect(),
+        less: (0..PATTERNS).map(|g| less(mirror(g))).collect(),
+        moved: (0..PATTERNS).map(next).collect(),
+        prods: (0..PATTERNS).map(|g| canonical(pattern(g ^ 1))).collect(),
+    }
+}
+
+/// The outputs of `hwd_half_reads` on `device`: the sums, widenings, compares, moves and products.
+fn half_reads_run(device: &Device) -> HalfReads {
+    let bitcode = llvm_assemble(&fixture("hwd_half_reads.ll")).unwrap();
+    let library = device.new_library_with_air(&bitcode).unwrap();
+    let function = library.new_function_with_name("hwd_half_reads").unwrap();
+    let descriptor =
+        ComputePipelineDescriptor::new(StageSource::Function(function.function_descriptor()));
+    let pipeline = device
+        .new_compute_pipeline_state(&descriptor, &PipelineOptions::default())
+        .unwrap();
+    let src: Vec<u8> = (0..PATTERNS)
+        .flat_map(|h| (h as u16).to_le_bytes())
+        .collect();
+    let half_out = || buffer_with(device, &vec![0xee; 2 * PATTERNS]).unwrap();
+    let word_out = || buffer_with(device, &vec![0xee; 4 * PATTERNS]).unwrap();
+    let (input, sums, wides, less, moved, prods) = (
+        buffer_with(device, &src).unwrap(),
+        half_out(),
+        word_out(),
+        word_out(),
+        half_out(),
+        half_out(),
+    );
+    // `-0`, `1`, `1` as `half`s; the flag 0.
+    let k: Vec<u8> = [0x8000u16, 0x3C00, 0x3C00]
+        .iter()
+        .flat_map(|h| h.to_le_bytes())
+        .collect();
+    let k = buffer_with(device, &k).unwrap();
+    let flag = buffer_with(device, &[0; 4]).unwrap();
+    let queue = device.new_command_queue().unwrap();
+    let command_buffer = queue.command_buffer().unwrap();
+    let mut encoder = command_buffer.compute_command_encoder().unwrap();
+    encoder.set_compute_pipeline_state(&pipeline).unwrap();
+    for (index, buffer) in [&input, &sums, &wides, &less, &moved, &prods, &k, &flag]
+        .into_iter()
+        .enumerate()
+    {
+        let index = u32::try_from(index).unwrap();
+        encoder.set_buffer(Some(buffer), 0, index).unwrap();
+    }
+    encoder
+        .dispatch_threadgroups(Size::new(PATTERNS as u64 / 256, 1, 1), Size::new(256, 1, 1))
+        .unwrap();
+    encoder.end_encoding().unwrap();
+    command_buffer.commit().unwrap();
+    command_buffer.wait_until_completed_for(WAIT).unwrap();
+    assert_eq!(command_buffer.status(), CommandBufferStatus::Completed);
+    let halves = |b: &Buffer| -> Vec<u16> {
+        read_buffer(b, 0, 2 * PATTERNS as u64)
+            .unwrap()
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| u16::from_le_bytes(*c))
+            .collect()
+    };
+    let words = |b: &Buffer| -> Vec<u32> {
+        read_buffer(b, 0, 4 * PATTERNS as u64)
+            .unwrap()
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| u32::from_le_bytes(*c))
+            .collect()
+    };
+    HalfReads {
+        sums: halves(&sums),
+        wides: words(&wides),
+        less: words(&less),
+        moved: halves(&moved),
+        prods: halves(&prods),
+    }
+}
+
+/// The threads whose word of `got` differs from Metal's `metal`, with the two words.
+fn differing_words<T: Copy + PartialEq + Into<u32>>(
+    got: &[T],
+    metal: &[T],
+) -> Vec<(usize, u32, u32)> {
+    got.iter()
+        .zip(metal)
+        .enumerate()
+        .filter(|(_, (a, b))| a != b)
+        .map(|(g, (a, b))| (g, (*a).into(), (*b).into()))
+        .collect()
+}
+
+/// Every word `hwd_half_reads` writes is Metal's on every device, for every `half` bit pattern:
+/// where the profile takes `DriverDeviation::MetalHalfArithmetic`, under the default policy, its
+/// reads used only in a sum, a product, a widening and a compare take the device's widening; on
+/// every other device, under Metal's answers (`DevicePolicy::exact_answers`), every read is the
+/// integer decode.
+#[test]
+fn half_loads_the_device_widens_answer_as_metal() {
+    let messages = Messages::default();
+    let cache = ScratchCache::new().unwrap();
+    {
+        let probe = validated_device(TEST_DEVICE, &messages, cache.path()).unwrap();
+        let widens = takes(&probe, DriverDeviation::MetalHalfArithmetic);
+        let device = if widens {
+            probe
+        } else {
+            drop(probe);
+            validated_device_with(TEST_DEVICE, &messages, cache.path(), |o| {
+                o.policy = DevicePolicy::default().exact_answers();
+            })
+            .unwrap()
+        };
+        let name = device.name().to_owned();
+        let got = half_reads_run(&device);
+        let metal = metal_half_reads();
+        let mut failures = Vec::new();
+        for (what, differ) in [
+            ("sums", differing_words(&got.sums, &metal.sums)),
+            ("widenings", differing_words(&got.wides, &metal.wides)),
+            ("compares", differing_words(&got.less, &metal.less)),
+            ("moves", differing_words(&got.moved, &metal.moved)),
+            ("products", differing_words(&got.prods, &metal.prods)),
+        ] {
+            eprintln!(
+                "half reads {what} on {name} (the device's widening: {widens}): {} of {PATTERNS} \
+                 differ from Metal",
+                differ.len()
+            );
+            if !differ.is_empty() {
+                failures.push(format!(
+                    "{what} on {name}: threads differ from Metal (thread, device, Metal): {:x?}",
                     &differ[..differ.len().min(24)]
                 ));
             }

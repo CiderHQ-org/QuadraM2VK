@@ -86,6 +86,7 @@ pub(crate) mod regroup;
 pub mod srgb;
 pub mod texel_round;
 pub mod wide;
+pub mod widening;
 
 #[cfg(test)]
 mod tests;
@@ -991,6 +992,10 @@ pub struct ArithPlan {
     /// ([`ArithStrategy::F16`]), measured to be Metal's (`DriverDeviation::MetalHalfArithmetic`),
     /// recorded at selection: the module then requires `VkProperty::MetalHalfArithmetic`.
     pub f16_arith: bool,
+    /// The loads of `half`s whose decode from their bits is the device's widening, where it is
+    /// Metal's and no use reads a NaN's bits ([`widening::widened_loads`]), recorded at selection:
+    /// the module then requires `VkProperty::MetalHalfArithmetic`.
+    pub widened: BTreeSet<InstId>,
     /// The precision notes the plan's operations record unless their entry's quotient and
     /// functions are Metal's own ([`ArithPlan::device_quotient`]), recorded at selection
     /// ([`OpNotes::unless_metal_fast`]); [`finish`] records them where they are not.

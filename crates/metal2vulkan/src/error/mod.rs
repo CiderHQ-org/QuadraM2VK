@@ -653,7 +653,10 @@ pub enum DriverDeviation {
     /// `0x7E00`, in every math mode. Where the profile also has `shaderFloat16`, a `half` `fadd`,
     /// `fsub` or `fmul` converts its operands (each a `half`, so exactly) to 16 bits, takes that
     /// kept instruction and widens its result. Unmeasured, it computes the result in `float` and
-    /// rounds it to `half` itself, exact.
+    /// rounds it to `half` itself, exact. The measurement reads every `half` through the device's
+    /// widening (`x + -0` of every `x`), exact but for a NaN: a load of `half`s none of whose uses
+    /// reads a NaN's bits (a `half` sum, difference or product, a compare, a widening to `float`)
+    /// takes that widening of its bits in place of their decode in integer arithmetic.
     MetalHalfArithmetic,
     /// The device stores every `float` but a NaN that a shader writes to a half-float storage
     /// image (`R16Float`, `RG16Float`, `RGBA16Float`; a storage texel buffer of one too) as Metal

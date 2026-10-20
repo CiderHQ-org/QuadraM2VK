@@ -151,6 +151,9 @@ pub struct ModuleBuilder {
     /// Whether a `half`'s NaN bits are the device's conversion's under the float controls
     /// ([`ModuleBuilder::native_half_nans`]).
     native_half_nans: bool,
+    /// Whether the `half`s read from their bits now are the device's widening of them
+    /// ([`ModuleBuilder::widens_halves`]).
+    widens_halves: bool,
     /// The equal values offered for where no loop holds them (`FunctionBuilder::offer_outside_loops`),
     /// in offer order.
     pub(super) loop_free: Vec<Offer>,
@@ -317,6 +320,20 @@ impl ModuleBuilder {
     /// ([`ModuleBuilder::set_native_half_nans`]).
     pub fn native_half_nans(&self) -> bool {
         self.native_half_nans
+    }
+
+    /// Whether the `half`s read from their bits from here on are the device's widening of them
+    /// (`narrow::from_bits`): emission sets it while it emits a load of `half`s the plan leaves to
+    /// that widening (`ArithPlan::widened`), where it is Metal's and no use reads a NaN's bits,
+    /// and clears it after. A builder that never sets it decodes in integer arithmetic.
+    pub fn set_widens_halves(&mut self, widens: bool) {
+        self.widens_halves = widens;
+    }
+
+    /// Whether the `half`s read from their bits now are the device's widening of them
+    /// ([`ModuleBuilder::set_widens_halves`]).
+    pub fn widens_halves(&self) -> bool {
+        self.widens_halves
     }
 
     /// The heap bytes the builder holds, for the byte ledger: every input-scaled container's

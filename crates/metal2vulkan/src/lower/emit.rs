@@ -983,6 +983,13 @@ impl<'a> Emitter<'a> {
         fragment::emit_quad_exit(cx, fb, id)?;
         match s {
             Strategy::Arith(s) => arith::emit(cx, fb, id, s),
+            // A load of `half`s whose decode the plan leaves to the device's widening.
+            Strategy::Access(s) if plan.families.arith.widened.contains(&id) => {
+                fb.module().set_widens_halves(true);
+                let r = access::emit(cx, fb, id, s);
+                fb.module().set_widens_halves(false);
+                r
+            }
             Strategy::Access(s) => access::emit(cx, fb, id, s),
             Strategy::Texture(s) => texture::emit(cx, fb, id, s),
             Strategy::Sampler(s) => sampler::emit(cx, fb, id, s),
