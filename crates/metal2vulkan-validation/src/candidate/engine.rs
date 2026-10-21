@@ -1410,8 +1410,9 @@ pub fn compute_request<'a>(
 /// The verdict of a device replay whose preprocess refused commands for `faults`, `what` naming the
 /// command buffer. The product's typed limits refuse the row (`not_supported{bind}`): no registered
 /// variant has the command's pipeline and lengths and the threadgroup size of one of its regions
-/// (its own, or an edge's), the command has more regions than the execution records, or its grid
-/// exceeds `2^32 - 1` threads, where the host replay of v72 ran the command. Every other reason
+/// (its own, or an edge's), the command has more regions than the execution records, its grid
+/// exceeds `2^32 - 1` threads, or a merged draw replay's commands draw `2^62` vertices or more,
+/// where the host replay of v72 ran the command. Every other reason
 /// fails it, as the host replay failed: the records passed the host contract's decode before the
 /// replay (`validate_records`: no encoding fault, malformed record, draw, missing pipeline, or
 /// state set while inherited), every allocation of the run is resident and the execution's capacity
@@ -1431,6 +1432,8 @@ pub fn replay_fault_verdict(what: &str, faults: metal2vulkan::bind::ReplayFaults
         (F::RECORD, "a malformed record"),
         (F::RANGE, "a command past the storage's capacity"),
         (F::REGIONS, "more regions than the execution records"),
+        (F::BARRIER, "a set barrier between draws"),
+        (F::VERTICES, "a merged draw of 2^62 vertices or more"),
     ];
     let named: Vec<&str> = names
         .iter()
@@ -1438,7 +1441,7 @@ pub fn replay_fault_verdict(what: &str, faults: metal2vulkan::bind::ReplayFaults
         .map(|(_, name)| *name)
         .collect();
     let reasons = format!("{:#x}: {}", faults.0, named.join(", "));
-    let limits = F::VARIANT.0 | F::GROUP_COUNT.0 | F::REGIONS.0;
+    let limits = F::VARIANT.0 | F::GROUP_COUNT.0 | F::REGIONS.0 | F::VERTICES.0;
     if faults.0 != 0 && faults.0 & !limits == 0 {
         NotSupported::Bind(format!(
             "{what}: the device replay dispatched nothing for command(s) the registered variants \
@@ -1590,7 +1593,7 @@ pub fn render_request<'a>(
                 function: own(&case.vertex),
                 template,
                 shape: Some(shape.clone()),
-                large: false,
+                form: variants::DrawForm::Bound,
             };
             Ok((request, with_linked(&[library], linked)))
         }
@@ -1998,7 +2001,9 @@ pub struct ReplayTemplate {
 
 /// What a replayed command runs: a compute command's dispatch, or a render command's draw of
 /// `primitive`; or, for the device replay, the template's replay variant for a threadgroup of
-/// `threads_per_group` threads, which every command selecting it dispatches indirectly.
+/// `threads_per_group` threads, which every command selecting it dispatches indirectly; or, for
+/// the device replay of render commands, the render template's draw replay variant, `merged` into
+/// one draw or drawn once per command, which every command of the execution draws indirectly.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ChildCommand {
     Dispatch(Dispatch),
@@ -2008,6 +2013,9 @@ pub enum ChildCommand {
     },
     ReplayVariant {
         threads_per_group: [u32; 3],
+    },
+    DrawReplay {
+        merged: bool,
     },
 }
 
@@ -2510,16 +2518,18 @@ impl CaseCompile<'_> {
 }
 
 /// Every pipeline a run of `prepared` compiles on `device` before it reads any device output, in
-/// the order the run compiles them, and how many of its executed command buffers the host replay
-/// runs there.
+/// the order the run compiles them, and how many of its executed command buffers compile what no
+/// device-free compile builds there.
 pub struct CaseCompiles<'a> {
     pub compiles: Vec<CaseCompile<'a>>,
-    /// The executed command buffers (with a non-empty execution range) that the host replay runs
-    /// on this device: a render command buffer, and a compute one where the product sets no device
-    /// replay up or the case registers no variant (a case the runtime runs whose templates the
-    /// executor's context does not replay registers none). Each command's pipeline is compiled for
-    /// the bind shape of the records the producer writes on the device, so no device-free compile
-    /// builds it.
+    /// The executed command buffers (with a non-empty execution range) whose commands' pipelines no
+    /// device-free compile builds on this device: a render command buffer, whose host replay
+    /// compiles each command's pipeline for the bind shape of the records the producer writes on
+    /// the device, and whose draw replay (`platform::compute::draw_replay`) compiles its
+    /// template's variant for the bind state of the execution's encoder, as the runtime path's
+    /// record leaves both uncovered; and a compute one the host replay runs, where the product sets
+    /// no device replay up or the case registers no variant (a case the runtime runs whose
+    /// templates the executor's context does not replay registers none).
     pub host_replayed: usize,
 }
 
@@ -2917,7 +2927,9 @@ fn run_on_context(prepared: &PreparedCase, backend: Backend, worker: &CompileWor
 
 /// Record a compiled child in the run's artifact: a device-replay variant by its subject, with the
 /// preprocess module the device replay runs it under; a host replay's pipeline (for a record a
-/// producer wrote on the device) as one the census cannot compile.
+/// producer wrote on the device) and a draw replay's variant (for the bind state of the execution's
+/// encoder) as ones the census cannot compile, as the runtime path records every pipeline its
+/// executed commands ran.
 fn record_child(
     artifact: &mut artifact::CaseArtifact,
     target: &WorkerDevice,
@@ -2946,9 +2958,10 @@ fn record_child(
 }
 
 /// Compile the template of `token` for one command the case executes, in `worker`, for the bind
-/// shape `shape`: a compute template for a dispatch, with the command's dispatch; a render template
-/// for a draw, with the command's draw (its class stays the template's own, as Metal compiles it).
-/// A token without a template, or a template of the other family, fails the run.
+/// shape `shape`: a compute template for a dispatch, with the command's dispatch, or its replay
+/// variant; a render template for a draw, with the command's draw (its class stays the template's
+/// own, as Metal compiles it), or its draw replay variant for an execution's commands. A token
+/// without a template, or a template of the other family, fails the run.
 fn compile_child(
     prepared: &PreparedCase,
     worker: &CompileWorker,
@@ -2961,6 +2974,26 @@ fn compile_child(
         ))
     })?;
     let source = RowSource::of_row(&prepared.checked.pipeline_templates[&template.case_id].source);
+    // A render template's vertex function alone, its variant in `form`.
+    let render_child = |child: graphics::RenderCase, form: variants::DrawForm| {
+        let (mut request, libraries) =
+            render_request(&source, None, &template.linked, &child, shape)?;
+        let PipelineRequest::VertexDraw { form: formed, .. } = &mut request else {
+            return Err(ExecutorError::Failed(
+                "an executed command's render template has a fragment stage".into(),
+            ));
+        };
+        *formed = form;
+        let compiled = compile_render(
+            worker,
+            target,
+            &request,
+            &libraries,
+            &child,
+            &template.linked,
+        )?;
+        Ok(CompiledChild::Render(Box::new(child), Box::new(compiled)))
+    };
     match (&template.mapped, command) {
         (TemplateCase::Compute(mapped), ChildCommand::Dispatch(dispatch)) => {
             let child = ComputeCase {
@@ -2983,31 +3016,22 @@ fn compile_child(
             )
             .map(|c| CompiledChild::Compute(Box::new(c)))
         }
-        // In the large-buffer form, as the runtime's host step draws an executed render command:
-        // the case runner's producer makes every command buffer resident for writing, so the
-        // runtime records each execution at its host step.
-        (TemplateCase::Render(mapped), ChildCommand::Draw { draw, .. }) => {
+        // In the large-buffer form, as the runtime's host step draws an executed render command.
+        (TemplateCase::Render(mapped), &ChildCommand::Draw { draw, .. }) => {
             let child = graphics::RenderCase {
-                draw: *draw,
+                draw,
                 ..(**mapped).clone()
             };
-            let (mut request, libraries) =
-                render_request(&source, None, &template.linked, &child, shape)?;
-            let PipelineRequest::VertexDraw { large, .. } = &mut request else {
-                return Err(ExecutorError::Failed(
-                    "an executed command's render template has a fragment stage".into(),
-                ));
+            render_child(child, variants::DrawForm::Large)
+        }
+        // In a draw replay's form, as the runtime's GPU form draws an execution's commands
+        // (`platform::compute::draw_replay`).
+        (TemplateCase::Render(mapped), &ChildCommand::DrawReplay { merged }) => {
+            let form = match merged {
+                true => variants::DrawForm::Merged,
+                false => variants::DrawForm::Replay,
             };
-            *large = true;
-            let compiled = compile_render(
-                worker,
-                target,
-                &request,
-                &libraries,
-                &child,
-                &template.linked,
-            )?;
-            Ok(CompiledChild::Render(Box::new(child), Box::new(compiled)))
+            render_child((**mapped).clone(), form)
         }
         _ => Err(ExecutorError::Failed(format!(
             "an executed command's pipeline token {token} names a template of the other command \

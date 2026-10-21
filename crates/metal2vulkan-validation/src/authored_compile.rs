@@ -244,8 +244,8 @@ impl CellOutcome {
 }
 
 /// A case's cell on one profile-leg, as the expectation file records it: its outcome, how many
-/// of the case's executed command buffers the host replay runs on the profile-leg, whose
-/// pipelines the census does not compile (uncovered, [`CellResult::host_replayed`]), and, on a
+/// of the case's executed command buffers compile on the profile-leg pipelines the census does
+/// not (uncovered, [`CellResult::host_replayed`]), and, on a
 /// C3 venue's profile-leg, the digest of what a run of the case executes there
 /// ([`CellResult::artifact`]): for a compiled case with nothing uncovered. A cell whose outcome or
 /// uncovered count changed is a [`Difference::Changed`], and so is one whose digest changed at
@@ -416,8 +416,9 @@ impl Cost {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CellResult {
     pub outcome: Result<CellOutcome, CellFailure>,
-    /// The case's executed command buffers the host replay runs on the profile
-    /// (`engine::CaseCompiles::host_replayed`): uncovered.
+    /// The case's executed command buffers whose commands' pipelines no device-free compile builds
+    /// on the profile (`engine::CaseCompiles::host_replayed`: a render one's, and a compute one the
+    /// host replay runs): uncovered.
     pub host_replayed: usize,
     /// The compiles run (a failure stops the cell at its compile, as it stops the executor).
     pub compiles: usize,

@@ -71,9 +71,10 @@
 use super::acceptance::{unmet_requirements, LayoutError, LayoutObjects};
 use super::buffers::{create_host_buffer, HostBuffer};
 use super::compute::{
-    allocate, allocate_in, attempt, check_backend, environment, execute_commands, executed_census,
+    allocate, allocate_in, attempt, check_backend, command_replay, environment, executed_census,
     executor_degrades, incompatible_binding, module_censuses, opened_device, refused_attempt,
-    table_bytes, upload_root_table, Allocation, CompileChild, Live, Replay,
+    replay_commands, table_bytes, upload_root_table, Allocation, CompileChild, Live, OnDevice,
+    Replay, ReplayPath,
 };
 use super::device::{with_validated_context, ExtendedDynamicState, VulkanContext};
 use super::graphics_pipeline::{self, GraphicsError};
@@ -103,8 +104,8 @@ use crate::observation::Backend;
 use crate::worker::compile::WorkerDevice;
 use ash::vk;
 use metal2vulkan::bind::{
-    BindShape, DrawCommands, ExecutionStatus, PushHole, RateMapRegions, SamplerDescriptor,
-    StatusReport,
+    BindShape, BindState, BindingPlan, DrawCommands, ExecutionStatus, PushHole, RateMapRegions,
+    SamplerDescriptor, StatusReport, DRAW_ARGUMENT_BYTES,
 };
 use metal2vulkan::device::Device;
 use metal2vulkan::device::VkFeature;
@@ -230,6 +231,7 @@ fn run(
         status,
         escaped,
         children,
+        replayed,
         depth_upload,
     } = executed?;
     // Every stage module drawn, in the order `spv_sha256` hashes them, then each replayed
@@ -246,6 +248,7 @@ fn run(
         .zip(regions.as_ref())
         .map(|(map, plan)| graphics::rate_map_pass_census(map, plan));
     let mut environment = environment(context, device, "engine-render");
+    command_replay(&mut environment, &replayed);
     executor_degrades(&mut environment, context, device, depth_upload);
     Ok(ComputeRun {
         output,
@@ -609,7 +612,7 @@ fn execute(
         let (table, sink) = upload_root_table(context, table, addressed)?;
         roots.push((vk::ShaderStageFlags::from(*stages), table, sink));
     }
-    let push = push_writes(&commands, &roots, &status)?;
+    let push = push_writes(&commands, &roots, &status, &|_| None)?;
 
     let layout = match LayoutObjects::create(&context.device, &pipeline.layout) {
         Ok(layout) => layout,
@@ -699,6 +702,7 @@ fn execute(
             rasterizer_discard: pipeline.graphics.rasterizer_discard,
             draw: &commands,
             shadow: shadow.as_ref(),
+            replayed: None,
         },
     )?;
 
@@ -753,7 +757,7 @@ fn execute(
     // read again.
     validate_records(case.command_buffers(), &finals.argument_buffer_buffers)
         .map_err(ExecutorError::Failed)?;
-    let children = if case
+    let (children, replayed) = if case
         .command_buffers()
         .any(|(_, command)| command.execute.is_some())
     {
@@ -799,7 +803,10 @@ fn execute(
                 length,
             })
             .collect::<Vec<_>>();
-        let children = execute_commands(
+        // A render command buffer on the device where the runtime's GPU form draws it, from what
+        // the host and this draw's functions may write into its records; every other one by the
+        // host replay. A render case registers no compute replay variant.
+        let replayed = replay_commands(
             context,
             device,
             case.command_buffers(),
@@ -808,6 +815,11 @@ fn execute(
                 records: &finals.argument_buffer_buffers,
                 addresses: &case_address,
                 compile,
+            },
+            OnDevice {
+                registered: &[],
+                storage: &|key| embedded.get(&key).and_then(|allocation| allocation.address),
+                writes: pipeline.interface.command_writes,
             },
         )?;
         for (&(stage, index), allocation) in &buffers {
@@ -824,9 +836,9 @@ fn execute(
                 *bytes = unsafe { allocation.buffer.map()? }.bytes[..len].to_vec();
             }
         }
-        children
+        replayed
     } else {
-        Vec::new()
+        (Vec::new(), Vec::new())
     };
     match (observed, case.output) {
         (Some(key @ TextureKey::Slot(observed)), _) => {
@@ -914,18 +926,20 @@ fn execute(
         status: report,
         escaped,
         children,
+        replayed,
         depth_upload,
     })
 }
 
 /// What [`execute`] read after the draw: the output, the status, the guard and padding bytes
-/// that changed around each guarded out-of-bounds target, by target, and the census of each module
-/// a replayed command executed.
+/// that changed around each guarded out-of-bounds target, by target, the census of each module
+/// a replayed command executed, and which replay ran each executed command buffer.
 struct Drawn {
     output: Vec<u8>,
     status: StatusReport,
     escaped: BTreeMap<OutOfBoundsResource, GuardCount>,
     children: Vec<crate::coverage::ModuleCensus>,
+    replayed: Vec<ReplayPath>,
     /// The draw uploaded 32-bit float depth into a depth image, a texture's or its depth
     /// attachment's.
     depth_upload: bool,
@@ -977,6 +991,103 @@ pub(super) fn submit_draw_child(
         addressed,
         vk::BufferUsageFlags::empty(),
     )?;
+    draw_child(
+        context,
+        device,
+        (case, primitive),
+        (pipeline, &plan, &commands),
+        (state, guest),
+        (&status, &|_| None),
+        None,
+    )?;
+    // SAFETY: the submission completed (the fence signaled), and nothing else maps it.
+    let status_bytes: [u8; ExecutionStatus::BYTES] = unsafe { status.buffer.map()? }.bytes
+        [..ExecutionStatus::BYTES]
+        .try_into()
+        .map_err(|_| "the status buffer is shorter than ExecutionStatus")?;
+    status_verdict(&status_bytes)?;
+    Ok(())
+}
+
+/// What a draw replay records around its variant's draw (`compute::draw_replay`): before the
+/// render pass, each owned kernel's pass in order (the preprocess, then a merged replay's two
+/// merge passes), the first after a barrier from every command earlier in submission order and
+/// each after one from the pass before it; in the pass, in place of the draw's own, each of
+/// `draws` in order.
+pub(super) struct ReplayedDraws<'a> {
+    pub(super) passes: &'a [OwnedPass],
+    /// The scratch the draws read their arguments from.
+    pub(super) scratch: vk::Buffer,
+    pub(super) draws: &'a [ReplayedDraw],
+}
+
+/// The address a draw replay gives a push hole of its variant's draw (a slot table's, its merged
+/// draw's header), where it fills that hole.
+pub(super) type Holes<'a> = &'a dyn Fn(&PushHole) -> Option<u64>;
+
+/// One owned kernel's dispatch: its pipeline and layout, push bytes (`COMPUTE`, offset 0), and
+/// group count.
+pub(super) struct OwnedPass {
+    pub(super) pipeline: vk::Pipeline,
+    pub(super) layout: vk::PipelineLayout,
+    pub(super) push: Vec<u8>,
+    pub(super) group_count: [u32; 3],
+}
+
+/// One draw of a draw replay: `vkCmdDrawIndirect` of one draw at `arguments` in the scratch, after
+/// the push writes that make it its command's (none for the first, whose writes the variant's
+/// draw carries).
+pub(super) struct ReplayedDraw {
+    pub(super) push: Vec<(vk::ShaderStageFlags, u32, Vec<u8>)>,
+    pub(super) arguments: u64,
+}
+
+/// Draw a replayed execution's commands on the device: `pipeline`, the draw replay variant of
+/// `case` (a render template, as [`submit_draw_child`] states it), planned as `plan` and
+/// instantiated as `commands` (one indirect draw) for `state`, over the run's allocations `guest`
+/// (by slot), with `primitive`'s topology, which must be within the template's class; its push
+/// holes the replay fills (`holes`: a slot table's, the merged draw's header) with their
+/// addresses, `status` its `ExecutionStatus`, and `replayed`'s passes and draws in place of the
+/// draw's own. Submitted and waited for; the caller reads the status.
+pub(super) fn submit_replayed_draws(
+    context: &VulkanContext,
+    device: &Device,
+    (case, primitive): (&RenderCase, crate::case::Primitive),
+    instantiated: (&RenderPipeline, &BindingPlan, &DrawCommands),
+    bound: (&BindState, &BTreeMap<SlotRef, vk::Buffer>),
+    filled: (&Allocation, Holes<'_>),
+    replayed: &ReplayedDraws<'_>,
+) -> Result<(), ExecutorError> {
+    graphics::replayed_draw_in_class(&case.assembly, primitive).map_err(ExecutorError::Failed)?;
+    draw_child(
+        context,
+        device,
+        (case, primitive),
+        instantiated,
+        bound,
+        filled,
+        Some(replayed),
+    )
+}
+
+/// Record and submit one replayed command's draw (or a draw replay's, `replayed`) of `pipeline`,
+/// planned as `plan` and instantiated as `commands` for `state`, over the run's allocations
+/// `guest`, in its template's pass (as [`submit_draw_child`] states it) with `primitive`'s
+/// topology, its push holes filled by `holes` first, then from what the draw names (its root
+/// tables, `status`); wait for it. The caller reads the status.
+fn draw_child(
+    context: &VulkanContext,
+    device: &Device,
+    (case, primitive): (&RenderCase, crate::case::Primitive),
+    (pipeline, plan, commands): (&RenderPipeline, &BindingPlan, &DrawCommands),
+    (state, guest): (&BindState, &BTreeMap<SlotRef, vk::Buffer>),
+    (status, holes): (&Allocation, Holes<'_>),
+    replayed: Option<&ReplayedDraws<'_>>,
+) -> Result<(), ExecutorError> {
+    let addressed = context
+        .enabled
+        .features
+        .contains(&VkFeature::BufferDeviceAddress);
     let mut constant_blobs: BTreeMap<Stage, Arc<[u8]>> = BTreeMap::new();
     for module in &pipeline.stages {
         if let Some(blob) = &module.constant_blob {
@@ -1018,7 +1129,7 @@ pub(super) fn submit_draw_child(
         let (table, sink) = upload_root_table(context, table, addressed)?;
         roots.push((vk::ShaderStageFlags::from(*stages), table, sink));
     }
-    let push = push_writes(&commands, &roots, &status)?;
+    let push = push_writes(commands, &roots, status, holes)?;
     let layout = match LayoutObjects::create(&context.device, &pipeline.layout) {
         Ok(layout) => layout,
         Err(LayoutError::Shape(why) | LayoutError::Refused(why)) => {
@@ -1069,16 +1180,11 @@ pub(super) fn submit_draw_child(
             primitive_restart,
             encoder,
             rasterizer_discard: pipeline.graphics.rasterizer_discard,
-            draw: &commands,
+            draw: commands,
             shadow: None,
+            replayed,
         },
     )?;
-    // SAFETY: the submission completed (the fence signaled), and nothing else maps it.
-    let status_bytes: [u8; ExecutionStatus::BYTES] = unsafe { status.buffer.map()? }.bytes
-        [..ExecutionStatus::BYTES]
-        .try_into()
-        .map_err(|_| "the status buffer is shorter than ExecutionStatus")?;
-    status_verdict(&status_bytes)?;
     drop(objects);
     drop(readers);
     drop(targets);
@@ -1202,12 +1308,14 @@ fn imageblock_storage(
     }))
 }
 
-/// Each stage's push-constant writes with the consumer's holes filled: its root table's and the
+/// Each stage's push-constant writes with the consumer's holes filled: the address `filled` gives
+/// a hole (a draw replay's slot table, its merged draw's header), else its root table's and the
 /// status buffer's device addresses.
 fn push_writes(
     commands: &DrawCommands,
     roots: &[(vk::ShaderStageFlags, Allocation, Allocation)],
     status: &Allocation,
+    filled: Holes<'_>,
 ) -> Result<Vec<(vk::ShaderStageFlags, u32, Vec<u8>)>, ExecutorError> {
     let mut writes: Vec<(vk::ShaderStageFlags, u32, Vec<u8>)> = commands
         .push_constants
@@ -1215,8 +1323,13 @@ fn push_writes(
         .map(|w| (w.stages.into(), w.offset, w.bytes.clone()))
         .collect();
     for hole in &commands.push_holes {
-        let (stages, offset, address) = match *hole {
-            PushHole::RootTableAddress { stages, offset } => {
+        let (stages, offset, address) = match (*hole, filled(hole)) {
+            (
+                PushHole::RootTableAddress { stages, offset }
+                | PushHole::MergedDrawAddress { stages, offset },
+                Some(address),
+            ) => (stages.into(), offset, address),
+            (PushHole::RootTableAddress { stages, offset }, None) => {
                 let stages = vk::ShaderStageFlags::from(stages);
                 let root = roots
                     .iter()
@@ -1225,14 +1338,14 @@ fn push_writes(
                     .ok_or("a root-table hole without its stage's root table")?;
                 (stages, offset, root)
             }
-            PushHole::ExecutionStatusAddress { stages, offset } => (
+            (PushHole::ExecutionStatusAddress { stages, offset }, _) => (
                 stages.into(),
                 offset,
                 status
                     .address
                     .ok_or("a status-address hole without device addresses")?,
             ),
-            other => return Err(not_implemented(format!("the push hole {other:?}"))),
+            (other, _) => return Err(not_implemented(format!("the push hole {other:?}"))),
         };
         let write = writes
             .iter_mut()
@@ -2186,6 +2299,9 @@ struct Recording<'r> {
     draw: &'r DrawCommands,
     /// The shader-side stencil's shadow, copied in before the render pass and out after it.
     shadow: Option<&'r shadow::ShadowStencil<'r>>,
+    /// A draw replay's passes before the render pass and draws in place of `draw`'s own, which is
+    /// then one indirect draw.
+    replayed: Option<&'r ReplayedDraws<'r>>,
 }
 
 /// A vertex buffer's `(binding, buffer, offset, stride)`, the stride where the pipeline's
@@ -2438,17 +2554,50 @@ fn record_and_submit(
         offset: vk::Offset2D { x: 0, y: 0 },
         extent,
     };
-    let draw = match (recording.draw.draw, recording.index_buffer) {
-        (metal2vulkan::vk::DrawCommand::Draw { .. }, None)
-        | (metal2vulkan::vk::DrawCommand::DrawIndexed { .. }, Some(_)) => recording.draw.draw,
-        (metal2vulkan::vk::DrawCommand::DrawIndexed { .. }, None) => {
+    let draw = match (
+        recording.draw.draw,
+        recording.index_buffer,
+        recording.replayed,
+    ) {
+        (metal2vulkan::vk::DrawCommand::Draw { .. }, None, None)
+        | (metal2vulkan::vk::DrawCommand::DrawIndexed { .. }, Some(_), None)
+        | (metal2vulkan::vk::DrawCommand::DrawIndirect { .. }, None, Some(_)) => {
+            recording.draw.draw
+        }
+        (_, _, Some(_)) => return Err("a draw replay's draw is not one indirect draw".into()),
+        (metal2vulkan::vk::DrawCommand::DrawIndexed { .. }, None, _) => {
             return Err("an indexed draw without an index buffer".into())
         }
-        (metal2vulkan::vk::DrawCommand::Draw { .. }, Some(_)) => {
+        (metal2vulkan::vk::DrawCommand::Draw { .. }, Some(_), _) => {
             return Err("an index buffer for a draw that is not indexed".into())
         }
         _ => return Err(not_implemented("an indirect draw")),
     };
+    // A draw replay's barriers. Its preprocess reads the records and the buffers they name, which
+    // the producer's command buffer wrote: a pipeline barrier recorded outside a render pass
+    // instance has every command earlier in submission order in its first synchronization scope
+    // (the Vulkan specification's `vkCmdPipelineBarrier`), so one from every command makes those
+    // writes visible. Each pass's writes (the slot tables, the arguments, a merged replay's
+    // sections) before the next pass reads and writes them and the draws read them, as indirect
+    // arguments and in their functions; and the draws' writes, which the host reads after the
+    // wait, made visible to it.
+    let earlier = vk::MemoryBarrier::default()
+        .src_access_mask(vk::AccessFlags::MEMORY_WRITE)
+        .dst_access_mask(vk::AccessFlags::SHADER_READ);
+    let passed = vk::MemoryBarrier::default()
+        .src_access_mask(vk::AccessFlags::SHADER_WRITE)
+        .dst_access_mask(
+            vk::AccessFlags::SHADER_READ
+                | vk::AccessFlags::SHADER_WRITE
+                | vk::AccessFlags::INDIRECT_COMMAND_READ,
+        );
+    let drawn = vk::MemoryBarrier::default()
+        .src_access_mask(vk::AccessFlags::SHADER_WRITE)
+        .dst_access_mask(vk::AccessFlags::HOST_READ);
+    let after_pass = vk::PipelineStageFlags::COMPUTE_SHADER
+        | vk::PipelineStageFlags::DRAW_INDIRECT
+        | vk::PipelineStageFlags::VERTEX_SHADER
+        | vk::PipelineStageFlags::FRAGMENT_SHADER;
     // SAFETY: every handle recorded is live until the fence signals; the buffer is recorded once.
     unsafe {
         device
@@ -2511,6 +2660,38 @@ fn record_and_submit(
         }
         if let (Some(shadow), Some(target)) = (recording.shadow, depth_stencil) {
             shadow.record_copy_in(command, target);
+        }
+        if let Some(replayed) = recording.replayed {
+            device.cmd_pipeline_barrier(
+                command,
+                vk::PipelineStageFlags::ALL_COMMANDS,
+                vk::PipelineStageFlags::COMPUTE_SHADER,
+                vk::DependencyFlags::empty(),
+                &[earlier],
+                &[],
+                &[],
+            );
+            for pass in replayed.passes {
+                device.cmd_bind_pipeline(command, vk::PipelineBindPoint::COMPUTE, pass.pipeline);
+                device.cmd_push_constants(
+                    command,
+                    pass.layout,
+                    vk::ShaderStageFlags::COMPUTE,
+                    0,
+                    &pass.push,
+                );
+                let [x, y, z] = pass.group_count;
+                device.cmd_dispatch(command, x, y, z);
+                device.cmd_pipeline_barrier(
+                    command,
+                    vk::PipelineStageFlags::COMPUTE_SHADER,
+                    after_pass,
+                    vk::DependencyFlags::empty(),
+                    &[passed],
+                    &[],
+                    &[],
+                );
+            }
         }
         let begin = vk::RenderPassBeginInfo::default()
             .render_pass(objects.render_pass)
@@ -2656,11 +2837,48 @@ fn record_and_submit(
                     first_vertex,
                     first_instance,
                 ),
+                // A draw replay's draws, each of one draw at its arguments.
+                (metal2vulkan::vk::DrawCommand::DrawIndirect { .. }, _) => {
+                    let Some(replayed) = recording.replayed else {
+                        continue;
+                    };
+                    for draw in replayed.draws {
+                        for (stages, offset, bytes) in &draw.push {
+                            device.cmd_push_constants(
+                                command,
+                                objects.layout.pipeline_layout,
+                                *stages,
+                                *offset,
+                                bytes,
+                            );
+                        }
+                        device.cmd_draw_indirect(
+                            command,
+                            replayed.scratch,
+                            draw.arguments,
+                            1,
+                            DRAW_ARGUMENT_BYTES as u32,
+                        );
+                    }
+                }
                 // Refused before recording began.
                 _ => {}
             }
         }
         device.cmd_end_render_pass(command);
+        if recording.replayed.is_some() {
+            device.cmd_pipeline_barrier(
+                command,
+                vk::PipelineStageFlags::COMPUTE_SHADER
+                    | vk::PipelineStageFlags::VERTEX_SHADER
+                    | vk::PipelineStageFlags::FRAGMENT_SHADER,
+                vk::PipelineStageFlags::HOST,
+                vk::DependencyFlags::empty(),
+                &[drawn],
+                &[],
+                &[],
+            );
+        }
         if let (Some(shadow), Some(target)) = (recording.shadow, depth_stencil) {
             shadow.record_copy_out(command, target);
         }

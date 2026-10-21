@@ -56,11 +56,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 mod device_replay;
+mod draw_replay;
 mod replay;
 use crate::candidate::engine::{ChildCommand, CompiledChild};
-use device_replay::{replay_commands, OnDevice, ReplayPath};
+pub(super) use device_replay::{replay_commands, OnDevice, ReplayPath};
 pub(in crate::candidate) use replay::CompileChild;
-pub(super) use replay::{execute_commands, Live, Replay};
+pub(super) use replay::{Live, Replay};
 
 /// One region's push-constant writes: `(stages, offset, bytes)`, holes filled.
 type PushWrites = Vec<(vk::ShaderStageFlags, u32, Vec<u8>)>;
@@ -351,11 +352,7 @@ fn run(
     let out_of_bounds = out_of_bounds.map(|run| with_escaped(run, &escaped, Placement::Allocation));
     let census = executed_census(context, modules, out_of_bounds);
     let mut environment = environment(context, device, "engine-compute");
-    // Which replay ran each executed command buffer, in key order.
-    if let (false, Some(object)) = (replayed.is_empty(), environment.as_object_mut()) {
-        let paths: Vec<&str> = replayed.iter().map(|path| path.name()).collect();
-        object.insert("command_replay".into(), serde_json::json!(paths));
-    }
+    command_replay(&mut environment, &replayed);
     executor_degrades(&mut environment, context, device, depth_upload);
     Ok(ComputeRun {
         output,
@@ -390,6 +387,15 @@ pub(super) fn executed_census(
         leg: Some(context.leg),
         modules,
         artifact: None,
+    }
+}
+
+/// Record in `environment` which replay ran each executed command buffer, in key order
+/// (`command_replay`, [`ReplayPath::name`]), where any ran.
+pub(super) fn command_replay(environment: &mut serde_json::Value, replayed: &[ReplayPath]) {
+    if let (false, Some(object)) = (replayed.is_empty(), environment.as_object_mut()) {
+        let paths: Vec<&str> = replayed.iter().map(|path| path.name()).collect();
+        object.insert("command_replay".into(), serde_json::json!(paths));
     }
 }
 
@@ -911,6 +917,7 @@ fn execute(
         OnDevice {
             registered,
             storage: &|key| embedded.get(&key).and_then(|allocation| allocation.address),
+            writes: pipeline.interface.command_writes,
         },
     )?;
     let mut finals = BTreeMap::new();

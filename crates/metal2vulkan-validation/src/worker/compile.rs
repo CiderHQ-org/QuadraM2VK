@@ -834,7 +834,7 @@ mod tests {
             ),
             template,
             shape: Some(crate::candidate::engine::graphics::render_shape(&case, false).unwrap()),
-            large: false,
+            form: crate::candidate::engine::variants::DrawForm::Bound,
         };
         let (bytes, digest) = input(&device, &bitcode, request.clone());
         let (output, artifact) = served(&bytes, Instant::now()).unwrap();

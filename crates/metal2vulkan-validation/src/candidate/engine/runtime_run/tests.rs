@@ -550,6 +550,54 @@ fn render_commands_and_render_states_run_as_the_executor_compiles_them() {
     }
 }
 
+/// The executor's own context runs an execution of render commands the GPU may write where the
+/// runtime does, by the draw replay rules both share: on the device, one indirect draw per command
+/// of the parent template's draw replay variant (`compute::draw_replay`; its vertex function
+/// writes memory, so the commands' points do not merge), where a kernel or a vertex function writes
+/// the draws or their buffers; by the host replay where the commands inherit the encoder's
+/// buffers, as the runtime's host step. The environment names the path each execution took
+/// (`command_replay`), each output Metal's; the census of each is held to the runtime path's by
+/// `render_commands_and_render_states_run_as_the_executor_compiles_them`.
+#[cfg(any(m2v_gpu, m2v_cpu_icd))]
+#[test]
+fn the_executor_draws_gpu_written_render_commands_where_the_runtime_does() {
+    use crate::candidate::tests::compile_worker;
+    use crate::candidate::tests::engine_compute::BACKEND;
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("corpus");
+    let device = crate::gpu::TEST_DEVICE;
+    let store = CorpusStore::new(&root);
+    let cases = store.read_all_cases().unwrap();
+    for (name, path) in [
+        (
+            "gpu-encoded-draws-run-the-host-encoded-vertex-buffers",
+            "device-draws",
+        ),
+        (
+            "gpu-encoded-vertex-buffers-run-the-host-encoded-draws",
+            "device-draws",
+        ),
+        ("gpu-encoded-draws-run-the-inherited-vertex-buffers", "host"),
+    ] {
+        let case = cases
+            .iter()
+            .find(|case| case.name == name)
+            .expect("the committed public case")
+            .clone();
+        let metal = crate::runtime_lane::metal_output(&store, &case).unwrap();
+        let admitted = admit(&root, case, ExecutionRequest::EngineCandidate { device }).unwrap();
+        let prepared = super::super::prepare_case(device, admitted).unwrap();
+        let on_context = super::super::run_on_context(&prepared, BACKEND, compile_worker())
+            .result
+            .unwrap_or_else(|error| panic!("{name}: {error}"));
+        assert_eq!(on_context.output, metal, "{name}: the executor's output");
+        assert_eq!(
+            on_context.environment["command_replay"],
+            serde_json::json!([path]),
+            "{name}"
+        );
+    }
+}
+
 /// Public cases whose command buffers execute ranges of two or more compute commands, a kernel's
 /// and the host's, run through the runtime path and on the executor's own context (its device
 /// replay), each output Metal's. Where the context enables `VK_EXT_device_generated_commands`, the

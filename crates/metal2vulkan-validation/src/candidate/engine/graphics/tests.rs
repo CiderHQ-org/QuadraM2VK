@@ -716,7 +716,7 @@ pub(crate) fn draw_request<'a>(
                 function: function(&case.vertex),
                 template: render_template(case),
                 shape: Some(shape.clone()),
-                large: false,
+                form: crate::candidate::engine::variants::DrawForm::Bound,
             },
             vec![libraries.vertex],
         ),

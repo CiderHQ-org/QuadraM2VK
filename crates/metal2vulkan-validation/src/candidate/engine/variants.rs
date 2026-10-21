@@ -38,6 +38,7 @@ use metal2vulkan::pipeline::{
 };
 use metal2vulkan::pipeline::{SlotClass, SlotRef, Stage};
 use metal2vulkan::Budget;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 /// Whether a pipeline compiled under `compiled` is the one `variant` asks for.
@@ -209,18 +210,46 @@ fn compile_kernel_for_shape(
     )
 }
 
+/// The form of the variant a render pipeline compiles in for what draws it
+/// ([`compile_render_for_shape`]), as the runtime's draws take them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DrawForm {
+    /// The variant the plan of the bind shape asks for: a case's draw.
+    #[default]
+    Bound,
+    /// Its large-buffer form (`VariantKey::large_buffer_form`): an executed render command's draw,
+    /// which the runtime's host step draws in that form.
+    Large,
+    /// Its draw replay variant (`VariantKey::replay_bindings`): an execution's commands drawn on
+    /// the device, one draw per command, every buffer from the command's slot table, as the
+    /// runtime's GPU form of an execution of GPU-written render commands draws them.
+    Replay,
+    /// Its merged draw replay variant (`VariantKey::replay_bindings` and `merged_draws`): an
+    /// execution's commands drawn on the device as one merged draw.
+    Merged,
+}
+
+impl DrawForm {
+    /// Whether this is the plain form, which a request leaves unstated.
+    pub fn is_bound(&self) -> bool {
+        *self == DrawForm::Bound
+    }
+}
+
 /// Compile `descriptor` into a render pipeline for `device` under `budget` with the variant the
 /// bind shape `shape` decides ([`compile_for_bind_state`] over `Device::compile_render_variant`:
-/// storage-texture formats of both stages, the plan's pulled vertex buffers); returns the
-/// pipeline and that key. Where `large`, the variant is in the large-buffer form, as the runtime's
-/// host step compiles an executed render command's draw (`VariantKey::large_buffer_form` of the
-/// first pipeline's plan, from its dependencies): the plan of the pipeline compiled under it
-/// settles on it where that key covers the plan's.
+/// storage-texture formats of both stages, the plan's pulled vertex buffers) in `form`; returns
+/// the pipeline and that key. In the large-buffer form, as the runtime's host step compiles an
+/// executed render command's draw (`VariantKey::large_buffer_form` of the first pipeline's plan,
+/// from its dependencies), the plan of the pipeline compiled under it settles on it where that key
+/// covers the plan's. In a draw replay's forms the key is the plan's with `replay_bindings` (and
+/// `merged_draws` for the merged one) set, as the runtime's state settles a replayed draw.
 pub fn compile_render_for_shape(
     device: &Device,
     descriptor: &RenderPipelineDescriptor,
     shape: &BindShape,
-    large: bool,
+    form: DrawForm,
     budget: &Budget,
 ) -> Result<(RenderPipeline, VariantKey), Error> {
     let mut large_key: Option<VariantKey> = None;
@@ -230,17 +259,25 @@ pub fn compile_render_for_shape(
         |key| device.compile_render_variant(descriptor, key, budget),
         |pipeline| {
             let plan = pipeline.plan(device, shape).ok()?;
-            if !large {
-                return Some(plan.variant);
+            match form {
+                DrawForm::Bound => Some(plan.variant),
+                DrawForm::Large => {
+                    if let Some(key) = large_key.as_ref().filter(|key| key.covers(&plan.variant)) {
+                        return Some(key.clone());
+                    }
+                    let key = plan
+                        .variant
+                        .large_buffer_form(&pipeline.dependencies, shape);
+                    large_key = Some(key.clone());
+                    Some(key)
+                }
+                DrawForm::Replay | DrawForm::Merged => {
+                    let mut key = plan.variant;
+                    key.replay_bindings = true;
+                    key.merged_draws = form == DrawForm::Merged;
+                    Some(key)
+                }
             }
-            if let Some(key) = large_key.as_ref().filter(|key| key.covers(&plan.variant)) {
-                return Some(key.clone());
-            }
-            let key = plan
-                .variant
-                .large_buffer_form(&pipeline.dependencies, shape);
-            large_key = Some(key.clone());
-            Some(key)
         },
     )
 }
@@ -558,8 +595,14 @@ mod tests {
                     resource_id: None,
                 },
             );
-        let (_, key) =
-            compile_render_for_shape(&device, &descriptor, &state.shape(), false, &budget).unwrap();
+        let (_, key) = compile_render_for_shape(
+            &device,
+            &descriptor,
+            &state.shape(),
+            DrawForm::Bound,
+            &budget,
+        )
+        .unwrap();
         let choice = storage_image_choice(PixelFormat::RGBA32Float, device.profile()).unwrap();
         assert_eq!(key.storage_images.get(&slot), Some(&choice));
     }

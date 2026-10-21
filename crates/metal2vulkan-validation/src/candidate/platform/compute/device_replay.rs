@@ -35,10 +35,13 @@
 //! (`ReplayRefusal::GeneratedCommands`: a limit the device states, or variants that bind other
 //! descriptors), K14c's dispatches run instead; the environment names which ran.
 //!
-//! A render command buffer, a device without device addresses, and a case that registers no
-//! variant run the host replay (`replay::execute_commands`).
+//! A render command buffer runs on the device where the runtime's GPU form draws it
+//! (`draw_replay`); one the shared rules send to the host step, a compute one on a device without
+//! device addresses, and one of a case that registers no variant run the host replay
+//! (`replay::execute_commands`).
 
-use super::replay::require_enabled;
+use super::draw_replay::{draw_commands, Drawing};
+use super::replay::{execute_commands, require_enabled};
 use super::*;
 use crate::candidate::engine::{
     replay_fault_verdict, replay_regions, replay_resident, replay_variant_state,
@@ -62,6 +65,12 @@ pub(in crate::candidate::platform) enum ReplayPath {
     Generated,
     /// The host replay of the decoded records.
     Host,
+    /// The product's draw replay preprocess and one indirect draw per command of the render
+    /// template's draw replay variant (`draw_replay`).
+    Draws,
+    /// The product's draw replay preprocess, its merge passes, and the merged draw of the render
+    /// template's merged variant (`draw_replay`).
+    MergedDraws,
 }
 
 impl ReplayPath {
@@ -71,23 +80,28 @@ impl ReplayPath {
             ReplayPath::Device => "device",
             ReplayPath::Generated => "generated",
             ReplayPath::Host => "host",
+            ReplayPath::Draws => "device-draws",
+            ReplayPath::MergedDraws => "merged-draws",
         }
     }
 }
 
 /// What the device replay needs beyond the host replay's [`Replay`]: the variants the case
-/// registers, and the device address of each command buffer's record storage (its header), by
-/// key.
+/// registers, the device address of each command buffer's record storage (its header), by key,
+/// and what the functions of the case's own dispatch or draw may write into the records of every
+/// command buffer (`PipelineInterface::command_writes`: its encoder makes each resident for
+/// writing, as the case runner's does).
 pub(in crate::candidate::platform) struct OnDevice<'a, K> {
     pub(in crate::candidate::platform) registered: &'a [ReplayVariant],
     pub(in crate::candidate::platform) storage: &'a dyn Fn(K) -> Option<u64>,
+    pub(in crate::candidate::platform) writes: metal2vulkan::pipeline::CommandWrites,
 }
 
 /// Execute each of `command_buffers` that the case executes, in key order: a compute command
 /// buffer on the device ([`device_commands`]) where the product sets the device replay up and
-/// `on_device` registers a variant, every other one by the host replay
-/// ([`execute_commands`]). The census of every module a command executed, and which replay ran
-/// each executed command buffer.
+/// `on_device` registers a variant, a render one on the device where the runtime's GPU form draws
+/// it ([`draw_commands`]), every other one by the host replay ([`execute_commands`]). The census
+/// of every module a command executed, and which replay ran each executed command buffer.
 pub(in crate::candidate::platform) fn replay_commands<'c, K: Ord + Copy + std::fmt::Debug>(
     context: &VulkanContext,
     device: &Device,
@@ -109,6 +123,21 @@ pub(in crate::candidate::platform) fn replay_commands<'c, K: Ord + Copy + std::f
     for (key, command) in command_buffers {
         if command.execute.is_none() {
             continue;
+        }
+        if command.is_render() {
+            let drawing = Drawing {
+                live,
+                addresses,
+                storage: (on_device.storage)(key),
+                writes: on_device.writes,
+            };
+            if let Some((census, path)) =
+                draw_commands(context, device, (key, command), drawing, compile)?
+            {
+                executed.extend(census);
+                paths.push(path);
+                continue;
+            }
         }
         let module = if command.is_render() || on_device.registered.is_empty() {
             None
@@ -334,7 +363,7 @@ fn device_commands<K: Ord + Copy + std::fmt::Debug>(
             .ok_or_else(|| fail(format!("the preprocess push bytes end before {offset}")))?
             .copy_from_slice(&address.to_le_bytes());
     }
-    let mut objects = preprocess_objects(context, module)?;
+    let mut objects = preprocess_objects(context, (&module.spirv, &module.layout), "preprocess")?;
     record_and_submit(
         context,
         &mut objects,
@@ -681,13 +710,15 @@ impl<'c> Variant<'c> {
     }
 }
 
-/// The preprocess's module, pipeline, and layout (its own, [`ReplayPreprocessModule::layout`]),
-/// with the command pool and fence of the replay's submission still to create.
-fn preprocess_objects<'c>(
+/// An owned kernel's (`what`: a replay's preprocess, a merge pass) module of `spirv`, pipeline, and
+/// layout (its own, `layout`: [`ReplayPreprocessModule::layout`] and the like), with the command
+/// pool and fence of the replay's submission still to create.
+pub(super) fn preprocess_objects<'c>(
     context: &'c VulkanContext,
-    module: &ReplayPreprocessModule,
+    (spirv, layout): (&[u32], &metal2vulkan::pipeline::PipelineLayout),
+    what: &str,
 ) -> Result<Objects<'c>, ExecutorError> {
-    let layout = match LayoutObjects::create(&context.device, &module.layout) {
+    let layout = match LayoutObjects::create(&context.device, layout) {
         Ok(layout) => layout,
         Err(LayoutError::Shape(why) | LayoutError::Refused(why)) => {
             return Err(ExecutorError::Failed(why))
@@ -701,10 +732,10 @@ fn preprocess_objects<'c>(
         fence: vk::Fence::null(),
         layout,
     };
-    let module_info = vk::ShaderModuleCreateInfo::default().code(&module.spirv);
+    let module_info = vk::ShaderModuleCreateInfo::default().code(spirv);
     // SAFETY: `module_info` points at live SPIR-V words for the call.
     objects.module = unsafe { context.device.create_shader_module(&module_info, None) }
-        .map_err(|error| format!("create the preprocess's shader module: {error}"))?;
+        .map_err(|error| format!("create the {what}'s shader module: {error}"))?;
     let entry = c"main";
     let stage = vk::PipelineShaderStageCreateInfo::default()
         .stage(vk::ShaderStageFlags::COMPUTE)
@@ -720,9 +751,9 @@ fn preprocess_objects<'c>(
             .device
             .create_compute_pipelines(vk::PipelineCache::null(), &[info], None)
     }
-    .map_err(|(_, error)| format!("the driver refused the preprocess pipeline: {error}"))?;
+    .map_err(|(_, error)| format!("the driver refused the {what} pipeline: {error}"))?;
     objects.pipelines.extend(created.first().copied());
-    crate::budgets::creation_within_ceiling("the preprocess pipeline", clock.read())?;
+    crate::budgets::creation_within_ceiling(&format!("the {what} pipeline"), clock.read())?;
     Ok(objects)
 }
 

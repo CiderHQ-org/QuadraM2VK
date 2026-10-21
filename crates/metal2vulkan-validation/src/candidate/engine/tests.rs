@@ -793,7 +793,7 @@ fn the_cases_own_function_links_and_its_libraries_follow_the_stages() {
             function: linking("shade"),
             template: graphics::render_template(&vertex_case),
             shape: Some(shape.clone()),
-            large: false,
+            form: crate::candidate::engine::variants::DrawForm::Bound,
         }
     );
     assert_eq!(given, expected_libraries(&[&case]));

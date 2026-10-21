@@ -95,9 +95,10 @@ use crate::Device;
 use crate::RenderPipelineState;
 use ash::vk;
 use metal2vulkan::bind::{
-    draw_replay_draw, draw_replay_preprocess, draw_replay_primitive_type, draw_replay_slots,
-    draw_replay_state, BindState, DrawCall, DrawMergeModule, DrawReplay, DrawReplayLayout,
-    DrawReplayPreprocess, IndirectRef, MergePhase, NeutralResource, PushHole, DRAW_ARGUMENT_BYTES,
+    draw_replay_draw, draw_replay_merges, draw_replay_preprocess, draw_replay_primitive_type,
+    draw_replay_slots, draw_replay_state, BindState, DrawCall, DrawMergeModule, DrawReplay,
+    DrawReplayLayout, DrawReplayPreprocess, IndirectRef, MergePhase, NeutralResource, PushHole,
+    DRAW_ARGUMENT_BYTES,
 };
 use metal2vulkan::metal::PrimitiveType;
 use metal2vulkan::pipeline::CommandWrites;
@@ -292,10 +293,7 @@ impl RenderExecution {
             return (core, Err(HostStepCause::Rule(rule)));
         };
         // Merged where the commands draw a list type or points, else one draw per command.
-        let merges = matches!(
-            primitive_type,
-            PrimitiveType::Point | PrimitiveType::Line | PrimitiveType::Triangle
-        );
+        let merges = draw_replay_merges(primitive_type);
         let commands = (decided, primitive_type, range);
         let inputs = (storage, residency);
         let mut core = core;

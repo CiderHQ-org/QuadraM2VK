@@ -317,11 +317,15 @@ pub enum PipelineRequest {
         template: RenderTemplate,
         #[serde(default)]
         shape: Option<BindShape>,
-        /// With a `shape`, the stages compile in the large-buffer form of the variant it decides
-        /// (`VariantKey::large_buffer_form`): an executed render command's draw, which the
-        /// runtime's host step draws in that form.
-        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-        large: bool,
+        /// With a `shape`, the form of the variant it decides the stages compile in
+        /// (`variants::DrawForm`): the plain one, or an executed render command's, the
+        /// large-buffer form the runtime's host step draws in or a draw replay's forms its GPU
+        /// form draws in.
+        #[serde(
+            default,
+            skip_serializing_if = "crate::candidate::engine::variants::DrawForm::is_bound"
+        )]
+        form: crate::candidate::engine::variants::DrawForm,
     },
     /// `Device::compile_render_pipeline` of `vertex` and `fragment`, rasterization enabled, from
     /// the Metal oracle's descriptor `template`: the engine candidate's draw of a case and its
@@ -781,10 +785,10 @@ fn compile_counted(
     };
     let budget = Budget::with_deadline(deadline);
     let render =
-        |descriptor: &RenderPipelineDescriptor, shape: Option<&BindShape>, large| match shape {
+        |descriptor: &RenderPipelineDescriptor, shape: Option<&BindShape>, form| match shape {
             None => device.compile_render_pipeline(descriptor, &budget),
             Some(shape) => crate::candidate::engine::variants::compile_render_for_shape(
-                device, descriptor, shape, large, &budget,
+                device, descriptor, shape, form, &budget,
             )
             .map(|(pipeline, _)| pipeline),
         };
@@ -862,7 +866,7 @@ fn compile_counted(
             function: vertex,
             template,
             shape,
-            large,
+            form,
         } => {
             let (vertex, handles) = function(0, Stage::Vertex, vertex, linked(0))?;
             let descriptor = template.descriptor(StageSource::Function(vertex), None)?;
@@ -870,7 +874,7 @@ fn compile_counted(
                 pipeline: AcceptancePipeline::Render(Box::new(render(
                     &descriptor,
                     shape.as_ref(),
-                    *large,
+                    *form,
                 )?)),
                 handles: vec![handles],
             }
@@ -891,7 +895,7 @@ fn compile_counted(
                 pipeline: AcceptancePipeline::Render(Box::new(render(
                     &descriptor,
                     shape.as_ref(),
-                    false,
+                    crate::candidate::engine::variants::DrawForm::Bound,
                 )?)),
                 handles: vec![vertex_handles, fragment_handles],
             }
@@ -1882,7 +1886,7 @@ mod tests {
             function: function("v", 1),
             template,
             shape: None,
-            large: false,
+            form: crate::candidate::engine::variants::DrawForm::Bound,
         };
         assert_eq!(vertex.linked_ranges(), vec![Range { start: 1, end: 2 }]);
         let row = PipelineRequest::Compute {

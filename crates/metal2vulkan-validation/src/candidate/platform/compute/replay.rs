@@ -175,8 +175,8 @@ pub(in crate::candidate::platform) fn execute_commands<'c, K: Ord + Copy + std::
                     BufferStage::Vertex,
                     RenderStages::VERTEX | RenderStages::FRAGMENT,
                 ),
-                // A record's action is a dispatch or a draw, never a device-replay variant.
-                ChildCommand::ReplayVariant { .. } => {
+                // A record's action is a dispatch or a draw, never a device replay's variant.
+                ChildCommand::ReplayVariant { .. } | ChildCommand::DrawReplay { .. } => {
                     return Err(fail(
                         "a host-replayed command runs no replay variant".into(),
                     ))
@@ -254,7 +254,7 @@ pub(super) fn require_enabled(
 /// allocation each slot binds; for a dispatch, the command's nonzero threadgroup lengths too. A
 /// dynamic attribute stride, which no replayed template reads (no template has stage inputs or
 /// vertex inputs), or an address no allocation holds, is the command's failure.
-fn bound_table(
+pub(super) fn bound_table(
     resolved: &ResolvedBindings<'_>,
     stage: Stage,
     buffers: BufferStage,

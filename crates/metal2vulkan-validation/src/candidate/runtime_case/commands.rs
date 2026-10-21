@@ -25,12 +25,10 @@
 
 use super::CaseError;
 use crate::case::indirect_commands::{
-    metal_index_type, metal_primitive_type, CommandBufferResource, CommandDescriptor,
-    ComputeDispatch, HostAction, HostCommand,
+    metal_index_type, metal_primitive_type, CommandBufferResource, CommandDescriptor, HostAction,
+    HostCommand,
 };
-use metal2vulkan::metal::{
-    IndirectCommandType, PixelFormat, RenderStages, ResourceUsage, TextureUsage,
-};
+use metal2vulkan::metal::{PixelFormat, RenderStages, ResourceUsage, TextureUsage};
 use metal2vulkan_runtime::{
     Buffer, CommandBuffer, CommandQueue, ComputePipelineState, Device, IndirectCommandBuffer,
     IndirectCommandBufferDescriptor, LoadAction, Region, RenderPassDescriptor, RenderPipelineState,
@@ -168,50 +166,26 @@ pub fn pipeline_states(
 /// counts, no kernel buffers; and the authored inheritance.
 fn descriptor(resource: &CommandBufferResource) -> IndirectCommandBufferDescriptor {
     let mut descriptor = IndirectCommandBufferDescriptor::new();
+    descriptor.command_types = resource.descriptor.command_types();
     match resource.descriptor {
         CommandDescriptor::Compute {
-            dispatch,
             max_buffer_bind_count,
             max_threadgroup_memory_bind_count,
             support_dynamic_attribute_stride,
+            ..
         } => {
-            descriptor.command_types = match dispatch {
-                ComputeDispatch::Threadgroups => IndirectCommandType::CONCURRENT_DISPATCH,
-                ComputeDispatch::Threads => IndirectCommandType::CONCURRENT_DISPATCH_THREADS,
-                ComputeDispatch::Both => IndirectCommandType::CONCURRENT_DISPATCH
-                    .union(IndirectCommandType::CONCURRENT_DISPATCH_THREADS),
-            };
             descriptor.max_kernel_buffer_bind_count = max_buffer_bind_count;
             descriptor.max_kernel_threadgroup_memory_bind_count = max_threadgroup_memory_bind_count;
             descriptor.support_dynamic_attribute_stride = support_dynamic_attribute_stride;
         }
         CommandDescriptor::Render {
-            draws,
             max_vertex_buffer_bind_count,
             max_fragment_buffer_bind_count,
             max_object_buffer_bind_count,
             max_mesh_buffer_bind_count,
             support_dynamic_attribute_stride,
+            ..
         } => {
-            descriptor.command_types = [
-                (draws.primitives, IndirectCommandType::DRAW),
-                (draws.indexed, IndirectCommandType::DRAW_INDEXED),
-                (draws.patches, IndirectCommandType::DRAW_PATCHES),
-                (
-                    draws.indexed_patches,
-                    IndirectCommandType::DRAW_INDEXED_PATCHES,
-                ),
-                (
-                    draws.mesh_threadgroups,
-                    IndirectCommandType::DRAW_MESH_THREADGROUPS,
-                ),
-                (draws.mesh_threads, IndirectCommandType::DRAW_MESH_THREADS),
-            ]
-            .into_iter()
-            .filter(|&(allowed, _)| allowed)
-            .fold(IndirectCommandType::empty(), |types, (_, kind)| {
-                types.union(kind)
-            });
             descriptor.max_vertex_buffer_bind_count = max_vertex_buffer_bind_count;
             descriptor.max_fragment_buffer_bind_count = max_fragment_buffer_bind_count;
             descriptor.max_object_buffer_bind_count = max_object_buffer_bind_count;

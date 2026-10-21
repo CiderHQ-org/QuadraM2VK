@@ -4,6 +4,8 @@ use metal2vulkan::bind::indirect_commands::{
     Action, Bindings, BufferBinding, BufferStage, CommandRecord, Inheritance, StateSource,
     BINDING_COUNT, COMMAND_BUFFER_HEADER_BYTES, COMMAND_BYTES,
 };
+use metal2vulkan::metal::IndirectCommandType;
+use metal2vulkan::pipeline::CommandWrites;
 use serde::{Deserialize, Serialize};
 
 /// An immutable authored pipeline template exposed through an argument-buffer handle.
@@ -178,6 +180,38 @@ pub enum ComputeDispatch {
 }
 
 impl CommandDescriptor {
+    /// Metal's command types of the same allowances (`MTLIndirectCommandBufferDescriptor`'s
+    /// `commandTypes`): a compute buffer's dispatch kinds, a render buffer's draw kinds.
+    pub fn command_types(&self) -> IndirectCommandType {
+        match *self {
+            Self::Compute { dispatch, .. } => match dispatch {
+                ComputeDispatch::Threadgroups => IndirectCommandType::CONCURRENT_DISPATCH,
+                ComputeDispatch::Threads => IndirectCommandType::CONCURRENT_DISPATCH_THREADS,
+                ComputeDispatch::Both => IndirectCommandType::CONCURRENT_DISPATCH
+                    .union(IndirectCommandType::CONCURRENT_DISPATCH_THREADS),
+            },
+            Self::Render { draws, .. } => [
+                (draws.primitives, IndirectCommandType::DRAW),
+                (draws.indexed, IndirectCommandType::DRAW_INDEXED),
+                (draws.patches, IndirectCommandType::DRAW_PATCHES),
+                (
+                    draws.indexed_patches,
+                    IndirectCommandType::DRAW_INDEXED_PATCHES,
+                ),
+                (
+                    draws.mesh_threadgroups,
+                    IndirectCommandType::DRAW_MESH_THREADGROUPS,
+                ),
+                (draws.mesh_threads, IndirectCommandType::DRAW_MESH_THREADS),
+            ]
+            .into_iter()
+            .filter(|&(allowed, _)| allowed)
+            .fold(IndirectCommandType::empty(), |types, (_, kind)| {
+                types.union(kind)
+            }),
+        }
+    }
+
     /// The record format's descriptor of the same allowances.
     pub fn product(&self) -> metal2vulkan::bind::indirect_commands::CommandDescriptor {
         use metal2vulkan::bind::indirect_commands::{CommandDescriptor as D, ComputeDispatch as C};
@@ -995,6 +1029,24 @@ impl CommandBufferResource {
                 .map_err(|error| format!("host command {index}: {error}"))?;
         }
         Ok(())
+    }
+
+    /// What the host's setters leave in the records, as the runtime's route of the CPU states it
+    /// for a record it edits: its action's operation and a draw's primitive type, its barrier
+    /// (`CommandRecord::writes`), and a pipeline state where it names one. A buffer the host sets
+    /// adds nothing, as the runtime's route adds nothing for it; where each buffer lies does not
+    /// enter.
+    pub fn host_writes(&self) -> Result<CommandWrites, String> {
+        let records = self.host_records(|_| Some(BufferBinding::MIN_BUFFER_ADDRESS))?;
+        Ok(records
+            .iter()
+            .fold(CommandWrites::NONE, |writes, (_, record)| {
+                let mut written = record.writes();
+                if record.bindings.pipeline.is_some() {
+                    written.operations |= CommandWrites::PIPELINE;
+                }
+                writes.union(written)
+            }))
     }
 
     /// The records the host encodes, by index, each buffer at the address `address` gives its case
