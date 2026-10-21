@@ -1036,6 +1036,7 @@ impl ComputePipelineState {
                 .dispatch_variant(dispatch)
                 .map_err(Error::Bind)?
                 .large_buffer_form(&self.0.base.pipeline().dependencies, shape),
+            BufferForms::Replay => return Err(internal("a dispatch in a draw replay's forms")),
         };
         // A stand-in compile is never dispatched: a plan whose bound formats are the stand-ins'
         // takes a variant of its own (the same compile, from the shader cache).
@@ -1046,7 +1047,7 @@ impl ComputePipelineState {
         let plan = variant.plan(&self.0.device, shape)?;
         let settled = plan.dispatch_variant(dispatch).map_err(Error::Bind)?;
         let runs = match forms {
-            BufferForms::Bound => settled == variant.key,
+            BufferForms::Bound | BufferForms::Replay => settled == variant.key,
             BufferForms::Large => variant.key.covers(&settled),
         };
         if !runs {
@@ -1075,6 +1076,7 @@ impl ComputePipelineState {
             BufferForms::Large => plan
                 .variant
                 .large_buffer_form(&self.0.base.pipeline().dependencies, shape),
+            BufferForms::Replay => return Err(internal("a dispatch in a draw replay's forms")),
         };
         let mut keys = vec![key.clone()];
         // One thread: a threadgroup no tier runs as whole simdgroups.
@@ -1270,6 +1272,10 @@ pub(super) enum BufferForms {
     /// aligned block within the buffer are contained, and an out-of-bounds load reads 0 under
     /// `robustBufferAccess` too. On a device without device addresses, as `Bound`.
     Large,
+    /// A draw replay's (`render/gpu_executions.rs`): the vertex and fragment functions read every
+    /// buffer through the slot table of the replayed command (`VariantKey::replay_bindings`), so
+    /// no buffer is bound. A render pipeline's alone.
+    Replay,
 }
 
 /// The states of a device made with `supportIndirectCommandBuffers` as they were at a moment,

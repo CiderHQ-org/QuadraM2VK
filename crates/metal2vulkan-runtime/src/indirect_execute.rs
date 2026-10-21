@@ -77,7 +77,8 @@ use super::encoder::{EncoderCore, RecordedSegment};
 use super::error::{internal, invalid, Error, Problem};
 use super::executed_commands::{ExecutedCommand, RecordsRead};
 use super::indirect_command_buffer::{
-    IndirectCommandBuffer, IndirectCommandBufferProblem, IndirectCommandCheck, Reader,
+    IndirectCommandBuffer, IndirectCommandBufferProblem, IndirectCommandCheck,
+    IndirectCommandCheckNeeds, Reader,
 };
 use super::pipeline::{BufferForms, ComputePipelineState, IndirectStates, Variant};
 use super::predication::HostGate;
@@ -146,9 +147,9 @@ pub(super) struct Execute {
     /// range, which the step before it writes (`Predication::gates`).
     pub(super) preprocess_gate: Option<Upload>,
     /// The caller's check of the commands its host step records
-    /// (`execute_commands_in_buffer_checked`): the step calls it before it records them, and it
-    /// keeps the execution off the GPU-alone path (`gpu_execute.rs`).
-    pub(super) check: Option<Mutex<IndirectCommandCheck>>,
+    /// (`execute_commands_in_buffer_checked`), and what it looks for: the step calls it before it
+    /// records them, and it keeps the execution off the GPU-alone path (`gpu_execute.rs`).
+    pub(super) check: Option<(Mutex<IndirectCommandCheck>, IndirectCommandCheckNeeds)>,
 }
 
 /// The commands an execution runs.
@@ -453,7 +454,7 @@ impl Execute {
         };
         let written = self.icb.written_records(range.clone())?;
         // The caller's check sees each command the step will record, before it records any.
-        if let Some(check) = &self.check {
+        if let Some((check, _)) = &self.check {
             self.icb
                 .check_recorded(check, range.start, &written.records);
         }

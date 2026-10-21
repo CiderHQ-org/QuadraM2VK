@@ -2800,6 +2800,43 @@ fn low_bits(size: Size) -> [u32; 3] {
 /// commands run. A command buffer dropped before its host step never calls it.
 pub type IndirectCommandCheck = Box<dyn FnMut(u64, &IndirectCommand) + Send + 'static>;
 
+/// What an [`IndirectCommandCheck`] looks for among an execution's commands (a runtime extension;
+/// Metal has none), given with it to `execute_commands_in_buffer_checked`. Where what the
+/// buffer's records may hold, as the runtime last decides on before the execution runs, rules out
+/// every kind it names, the check has nothing to see: an execution that then runs on the GPU
+/// alone never calls it, and no host step reads the records for it. Where it does not, a host
+/// step calls the check with every command, as for [`IndirectCommandCheckNeeds::ALL`].
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct IndirectCommandCheckNeeds {
+    /// Draws of points (`MTLPrimitiveTypePoint`): ruled out where no record may hold one
+    /// ([`IndirectCommandBuffer::command_writes`]; a primitive type the writes do not state, or
+    /// a value Metal has no type for, counts as a point).
+    pub point_draws: bool,
+    /// Commands that run a pipeline state that may encode, reset or copy indirect commands
+    /// (`can_encode_indirect_commands`): ruled out where no state the commands may run can (the
+    /// encoder's state where the buffer inherits it, and those its records may name,
+    /// [`IndirectCommandBuffer::may_name_encoding_states`]).
+    pub encoding_states: bool,
+}
+
+impl IndirectCommandCheckNeeds {
+    /// Every kind: the check is called wherever a host step records the execution.
+    pub const ALL: IndirectCommandCheckNeeds = IndirectCommandCheckNeeds {
+        point_draws: true,
+        encoding_states: true,
+    };
+
+    /// A check that looks for draws of points where `point_draws`, and for commands under states
+    /// that may encode indirect commands where `encoding_states`.
+    pub const fn new(point_draws: bool, encoding_states: bool) -> IndirectCommandCheckNeeds {
+        IndirectCommandCheckNeeds {
+            point_draws,
+            encoding_states,
+        }
+    }
+}
+
 /// One command of an indirect command buffer, as [`IndirectCommandBuffer::commands`] reads it: a
 /// runtime extension standing for Metal's private getters.
 #[non_exhaustive]

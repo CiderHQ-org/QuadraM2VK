@@ -117,10 +117,13 @@ impl Segment {
     /// Whether the host step records it before its batch is submitted: the GPU may write what
     /// its work reads, whether it could at the call or only since (`Deferred::gpu_written` is
     /// for good), or `commit` left it for the pipelines it records; or `commit`'s recording on the
-    /// GPU alone must be made again ([`rerecords`](Self::rerecords)).
+    /// GPU alone must be made again ([`rerecords`](Self::rerecords)); or `commit` recorded it on
+    /// the GPU for good, and a route encoded since may write more than it decided on
+    /// (`Deferred::outgrown`).
     pub(super) fn needs_step(&self) -> bool {
         (!self.stepped && (self.host || self.pipelines || self.work.gpu_written()))
             || self.rerecords()
+            || self.work.outgrown()
     }
 
     /// Whether `commit` recorded it on the GPU alone with no barrier between its commands and its
@@ -133,7 +136,7 @@ impl Segment {
     /// Whether its host step waits for the work submitted before it to complete: the GPU may
     /// write what its work reads. A step for its pipelines alone waits for them alone.
     pub(super) fn steps_after_the_gpu(&self) -> bool {
-        !self.stepped && (self.host || self.work.gpu_written())
+        (!self.stepped && (self.host || self.work.gpu_written())) || self.work.outgrown()
     }
 
     /// Whether its host step waits for a pipeline still being made.

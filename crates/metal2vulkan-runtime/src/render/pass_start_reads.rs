@@ -169,6 +169,12 @@ impl PassStartReads {
         }
     }
 
+    /// Whether a fragment stage of the pass wrote any bytes so far: a later draw's stages before
+    /// its fragments read none from a copy, wherever they read.
+    pub(super) fn fragment_wrote(&self) -> bool {
+        !self.fragment.0.is_empty()
+    }
+
     /// What the pass noted so far, without its copies: what an execution's recording starts from
     /// (`render/executions.rs`), whose copies are its own.
     pub(super) fn notes(&self) -> PassStartReads {

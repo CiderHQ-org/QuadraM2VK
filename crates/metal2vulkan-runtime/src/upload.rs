@@ -217,6 +217,12 @@ impl Upload {
         self.buffer.at(self.offset).1
     }
 
+    /// The buffer the region is in, and the region's offset there: a draw replay's scratch is
+    /// its draws' indirect buffer (`render/executions/gpu.rs`).
+    pub(super) fn buffer(&self) -> (&Buffer, u64) {
+        (&self.buffer, self.offset)
+    }
+
     /// The region's length.
     pub(super) fn len(&self) -> u64 {
         self.len

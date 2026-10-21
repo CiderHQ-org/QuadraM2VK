@@ -1169,8 +1169,12 @@ pub struct RenderCommandEncoder {
     keeping: capture::Keeping,
     /// The buffer forms its draws' variants take (`BufferForms`): the large-buffer form where it
     /// records an execution's commands at its host step, or settles their variants at commit
-    /// (`render/executions.rs`), so no buffer a command binds asks for another variant.
+    /// (`render/executions.rs`), so no buffer a command binds asks for another variant; the
+    /// replay form where it records an execution's GPU form (`render/executions/gpu.rs`).
     forms: BufferForms,
+    /// Where it records an execution's GPU form, the replay's draws, which its draw records in
+    /// place of its own (`render/executions/gpu.rs`).
+    replayed: Option<executions::ReplayedDraws>,
     /// Where the encoder records an execution's commands, the tracked uses of the pass's draws
     /// before the execution, in the stages a draw runs in inside its pass (`PASS_DRAW_STAGES`):
     /// which an emulated mesh command's dispatches, recorded before the pass, must not touch but
@@ -1720,6 +1724,7 @@ impl RenderCommandEncoder {
             rerouting: false,
             keeping,
             forms: BufferForms::Bound,
+            replayed: None,
             drawn_before: Vec::new(),
             run_barrier: false,
             command_barrier: false,
@@ -8337,6 +8342,12 @@ impl RenderCommandEncoder {
         };
         // The draw's push bytes, filled in place, over the last draw's (`LiveBind::pushes`).
         binding::push_writes_into(&commands.push_constants, &bound.holes, &mut live.pushes)?;
+        // A device replay's draws read each command's slot tables (`render/executions/gpu.rs`):
+        // the first command's, in place of the root tables the binder made.
+        let replay_holes = match &self.replayed {
+            Some(replayed) => replayed.first_tables(&commands.push_holes, &mut live.pushes)?,
+            None => Vec::new(),
+        };
         let push = &live.pushes;
         // A plan that draws one amplification at a time records the draw once per amplification,
         // in order, each after that amplification's push writes.
@@ -8783,6 +8794,21 @@ impl RenderCommandEncoder {
         if inline.is_none() && split_inline.is_none() {
             self.begin_new_draws(&mut next)?;
         }
+        // A device replay's draws record as one recording of the draw's, each command's after it
+        // (`ReplayedDraws::record`), which its decision at commit holds to.
+        if self.replayed.is_some()
+            && (pushes.len() != 1
+                || vk_draws.len() != 1
+                || !chunked.is_empty()
+                || pair_base.is_some()
+                || !matches!(draw_states, DrawStates::Whole(_))
+                || !matches!(draw_pipeline, DrawPipeline::Made(_))
+                || !matches!(self.inline, inline_first::Inline::Never))
+        {
+            return Err(internal(
+                "a draw replay's draw of other recordings than one",
+            ));
+        }
         // Recording starts here: nothing below can be refused.
         self.driver_restarts |= tessellation.is_some_and(|t| !t.emulated);
         if !pushed.is_empty() {
@@ -9075,7 +9101,14 @@ impl RenderCommandEncoder {
                                         true => &mut self.held_bound,
                                         false => &mut self.current.bound,
                                     };
-                                    states_recorded += unsafe { recording.record(bound) }
+                                    // A device replay's: each command's draw after it
+                                    // (`render/executions/gpu.rs`).
+                                    states_recorded += match &self.replayed {
+                                        Some(replayed) => unsafe {
+                                            replayed.record(&recording, bound, &replay_holes)
+                                        },
+                                        None => unsafe { recording.record(bound) },
+                                    }
                                 }
                                 (None, _) => owned.push(recording.owned()),
                             }

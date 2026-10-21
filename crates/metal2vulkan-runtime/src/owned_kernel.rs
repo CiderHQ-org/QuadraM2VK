@@ -58,6 +58,9 @@ pub(super) enum OwnedModule {
     /// `bind::replay_preprocess_module`: a device replay's preprocess, which reads every buffer
     /// at its device address (no storage buffer; its push bytes, `gpu_execute.rs`).
     ReplayPreprocess,
+    /// `bind::draw_replay_module`: a draw replay's preprocess, which reads every buffer at its
+    /// device address (no storage buffer; its push bytes, `render/executions/gpu.rs`).
+    DrawReplayPreprocess,
     /// `bind::flat_dispatch_module`: an indirect dispatch's region record and group counts on its
     /// flat variant, from Metal's arguments (`indirect_dispatch.rs`). No descriptor: it reaches
     /// memory by device address.
@@ -237,6 +240,15 @@ impl OwnedModule {
                     module.spirv.to_vec(),
                     0,
                     metal2vulkan::bind::ReplayPreprocessModule::PUSH_BYTES,
+                ))
+            }
+            OwnedModule::DrawReplayPreprocess => {
+                let module = metal2vulkan::bind::draw_replay_module(device.compile_device())
+                    .map_err(Error::Compile)?;
+                Ok((
+                    module.spirv.to_vec(),
+                    0,
+                    metal2vulkan::bind::DrawReplayModule::PUSH_BYTES,
                 ))
             }
             OwnedModule::FlatDispatch => {
@@ -452,6 +464,7 @@ pub(super) struct OwnedKernels {
     index_bounds_plan: Option<OwnedKernel>,
     index_bounds_fill: Option<OwnedKernel>,
     replay_preprocess: Option<OwnedKernel>,
+    draw_replay_preprocess: Option<OwnedKernel>,
     flat_dispatch: Option<OwnedKernel>,
     shadow_merge: Option<OwnedKernel>,
     depth_magnitude: Option<OwnedKernel>,
@@ -492,6 +505,7 @@ impl OwnedKernels {
             self.index_bounds_plan,
             self.index_bounds_fill,
             self.replay_preprocess,
+            self.draw_replay_preprocess,
             self.flat_dispatch,
             self.shadow_merge,
             self.depth_magnitude,
@@ -612,6 +626,7 @@ impl OwnedKernels {
             OwnedModule::IndexBoundsPlan => &mut self.index_bounds_plan,
             OwnedModule::IndexBoundsFill => &mut self.index_bounds_fill,
             OwnedModule::ReplayPreprocess => &mut self.replay_preprocess,
+            OwnedModule::DrawReplayPreprocess => &mut self.draw_replay_preprocess,
             OwnedModule::FlatDispatch => &mut self.flat_dispatch,
             OwnedModule::ShadowMerge => &mut self.shadow_merge,
             OwnedModule::DepthMagnitude => &mut self.depth_magnitude,

@@ -1319,10 +1319,12 @@ fast forms record, and each `PrecisionNote`'s rustdoc states its bound.
 - `metal2vulkan-degrade-host-replayed-indirect-commands` (performance).
   `HostReplayedIndirectCommands`: An execution of an indirect command buffer that an encoder made
   resident for writing, or that lies inside a block of command predication or reads its range from
-  a buffer, which the GPU cannot run alone: one with the caller's check
+  a buffer, which the GPU cannot run alone: a compute execution with the caller's check
   (`execute_commands_in_buffer_checked`), of a range read from a buffer, of a buffer that inherits
   the encoder's buffers, or whose records may name a pipeline state whose kernel observes its
-  threadgroup partition or fetches `[[stage_in]]` attributes. The GPU may write the records it
+  threadgroup partition or fetches `[[stage_in]]` attributes; a render execution whose records may
+  hold, at the commit or as its batch is ready, more than draws of one primitive type under the
+  encoder's state, or what its check looks for. The GPU may write the records it
   runs, so they are known only once the work before it completed. Cost: one GPU-to-CPU round trip per execution: its command buffer's work
   before it, and every batch submitted before that on any queue, completes before the CPU records
   its commands from their records and submits the rest; the device's scheduler submits nothing else
@@ -2717,6 +2719,17 @@ each item named states the rule in full.
   where Metal orders them only where their uses meet: the uses are the records', which the GPU
   writes. In a concurrent encoder its commands run together where no route that wrote the records
   may set a barrier (`IndirectCommandBuffer::command_writes`), and one after another otherwise.
+- **Render commands the GPU may write run on the GPU alone** where the commit can tell from what
+  the records may hold (`IndirectCommandBuffer::command_writes`) that every command is a draw of one
+  primitive type under the encoder's pipeline state, which the buffer inherits with none of its
+  buffers: one indirect draw per command, in order, from what a preprocess wrote. Otherwise, and
+  where what the records may hold grew by the time the pass's batch is ready to submit, a host step
+  records the pass.
+- **A checked execution states what its check looks for**
+  (`execute_commands_in_buffer_checked`'s `IndirectCommandCheckNeeds`, no Metal counterpart): draws
+  of points, and commands under states that may encode indirect commands. Where what the records
+  may hold rules out both, the check has nothing to see, is never called, and the execution may run
+  on the GPU alone; `IndirectCommandCheckNeeds::ALL` keeps it on its host step.
 - **Command predication** (`encode_start_if`, `encode_start_else`, `encode_end_if` and the
   while and do-while loops) runs Metal's blocks and loops. A loop is laid down as 64 copies (16
   inside another loop); one that runs past them fails its command buffer

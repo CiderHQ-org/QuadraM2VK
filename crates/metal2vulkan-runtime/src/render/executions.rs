@@ -19,8 +19,10 @@
 //!   of no draws that resolve after the last). `commit` records the segment from the CPU's
 //!   records; where an
 //!   encoder made a buffer the pass executes resident for writing
-//!   (`IndirectCommandBuffer::gpu_written`), the scheduler's host step records it once the work
-//!   before it completed, which the device announces once
+//!   (`IndirectCommandBuffer::gpu_written`), `commit` records it for good where every such
+//!   execution of the pass runs on the GPU alone (`executions/gpu.rs`, which states which do and
+//!   when the decision is taken again), and otherwise the scheduler's host step records it once
+//!   the work before it completed, which the device announces once
 //!   (`Degradation::HostReplayedIndirectCommands`). The step draws in the large-buffer form,
 //!   whose variant no command's buffer lengths change (`BufferForms::Large`), and the commit
 //!   settles what it will draw (the step compiled each draw's variant and `VkPipeline` as it met
@@ -272,7 +274,8 @@ use crate::error::{internal, invalid, vulkan, Error, Problem, RuntimeGap};
 use crate::executed_commands::{ExecutedCommand, RecordsRead};
 use crate::fragment_imageblock::PassImageblock;
 use crate::indirect_command_buffer::{
-    IndirectCommandBuffer, IndirectCommandBufferProblem, IndirectCommandCheck, Reader,
+    IndirectCommandBuffer, IndirectCommandBufferProblem, IndirectCommandCheck,
+    IndirectCommandCheckNeeds, Reader,
 };
 use crate::indirect_dispatch;
 use crate::indirect_execute::{self, ExecutionRange};
@@ -295,22 +298,25 @@ use crate::tracker::{
     Barrier, EncoderUses, GeometryWrites, IndirectReads, Summary, UnorderedWrites, Use,
 };
 use crate::visibility::{Lent, Visibility};
-use crate::written_commands::Writers;
+use crate::written_commands::{Writers, WrittenCommands};
 use crate::Device;
 use ahead::Ahead;
 use ash::vk;
+use gpu::GpuForm;
+pub(super) use gpu::ReplayedDraws;
 use metal2vulkan::bind::indirect_commands::{Action, BufferStage, CommandRecord};
 use metal2vulkan::bind::{DrawCall, ReplayFaults, ViewSetup};
 use metal2vulkan::metal::{
     IndexType, IndirectCommandType, PrimitiveTopologyClass, PrimitiveType, VertexStepFunction,
 };
-use metal2vulkan::pipeline::VertexStride;
+use metal2vulkan::pipeline::{CommandWrites, VertexStride};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
 use std::sync::{Arc, Mutex, OnceLock};
 
 mod ahead;
+mod gpu;
 
 /// The call an execution's refusals name.
 const CALL: &str = "execute_commands_in_buffer";
@@ -359,29 +365,34 @@ impl RenderCommandEncoder {
     }
 
     /// [`execute_commands_in_buffer`](Self::execute_commands_in_buffer) with a check of the
-    /// commands its host step runs (a runtime extension; Metal has none): where a host step
-    /// records the pass from the records as the GPU and the CPU left them (an encoder made `icb`
-    /// resident for writing, `IndirectCommandBuffer::gpu_written`), the step first calls `check`
-    /// with each command of the range it will record, in order, before it records any of them
-    /// ([`IndirectCommandCheck`]). An execution `commit` records from the CPU's records never
-    /// calls it. Refused as [`execute_commands_in_buffer`](Self::execute_commands_in_buffer)
-    /// refuses.
+    /// commands its host step runs (a runtime extension; Metal has none), which looks for `needs`:
+    /// where a host step records the pass from the records as the GPU and the CPU left them (an
+    /// encoder made `icb` resident for writing, `IndirectCommandBuffer::gpu_written`), the step
+    /// first calls `check` with each command of the range it will record, in order, before it
+    /// records any of them ([`IndirectCommandCheck`]). An execution `commit` records from the CPU's
+    /// records never calls it; nor does one that runs on the GPU alone (`render/executions/gpu.rs`),
+    /// which it may only where what `icb`'s records may hold, at the commit and again as the
+    /// pass's batch is ready to submit, rules out every kind `needs` names
+    /// ([`IndirectCommandCheckNeeds`]; [`IndirectCommandCheckNeeds::ALL`] keeps every such
+    /// execution on its host step). Refused as
+    /// [`execute_commands_in_buffer`](Self::execute_commands_in_buffer) refuses.
     pub fn execute_commands_in_buffer_checked(
         &mut self,
         icb: &IndirectCommandBuffer,
         range: Range<u64>,
         check: IndirectCommandCheck,
+        needs: IndirectCommandCheckNeeds,
     ) -> Result<(), Error> {
-        self.execute_range(icb, range, Some(check))
+        self.execute_range(icb, range, Some((check, needs)))
     }
 
     /// [`execute_commands_in_buffer`](Self::execute_commands_in_buffer), with `check` for its
-    /// host step where one is given.
+    /// host step where one is given, and what it looks for.
     fn execute_range(
         &mut self,
         icb: &IndirectCommandBuffer,
         range: Range<u64>,
-        check: Option<IndirectCommandCheck>,
+        check: Option<(IndirectCommandCheck, IndirectCommandCheckNeeds)>,
     ) -> Result<(), Error> {
         self.log(|_| RenderCall::Execute(icb.clone(), range.clone()));
         self.core.check_device(CALL, icb.device())?;
@@ -456,17 +467,18 @@ impl RenderCommandEncoder {
         offset: u64,
         check: IndirectCommandCheck,
     ) -> Result<(), Error> {
+        let check = (check, IndirectCommandCheckNeeds::ALL);
         self.execute_indirect_range(icb, range_buffer, offset, Some(check))
     }
 
     /// [`execute_commands_in_buffer_indirect`](Self::execute_commands_in_buffer_indirect), with
-    /// `check` for its host step where one is given.
+    /// `check` for its host step where one is given, and what it looks for.
     fn execute_indirect_range(
         &mut self,
         icb: &IndirectCommandBuffer,
         range_buffer: &Buffer,
         offset: u64,
-        check: Option<IndirectCommandCheck>,
+        check: Option<(IndirectCommandCheck, IndirectCommandCheckNeeds)>,
     ) -> Result<(), Error> {
         self.log(|_| RenderCall::ExecuteIndirect(icb.clone(), range_buffer.clone(), offset));
         const CALL_INDIRECT: &str = indirect_execute::CALL_INDIRECT;
@@ -551,7 +563,7 @@ impl RenderCommandEncoder {
         icb: &IndirectCommandBuffer,
         range: ExecutionRange,
         pipeline: Option<RenderPipelineState>,
-        check: Option<IndirectCommandCheck>,
+        check: Option<(IndirectCommandCheck, IndirectCommandCheckNeeds)>,
     ) -> Result<(), Error> {
         self.sync_heaps();
         // Its commands run the states their records name, where it inherits none.
@@ -764,7 +776,10 @@ impl RenderCommandEncoder {
             snapshot,
             shadows,
             lent,
-            check: check.map(Mutex::new),
+            needs: check
+                .as_ref()
+                .map_or(IndirectCommandCheckNeeds::ALL, |(_, needs)| *needs),
+            check: check.map(|(check, _)| Mutex::new(check)),
         });
         // Its commands may name any pipeline state, reading handles in any stage.
         self.command_encoded(every_render_stage());
@@ -818,6 +833,9 @@ pub(crate) struct RenderExecution {
     /// The caller's check of the commands the host step records
     /// (`execute_commands_in_buffer_checked`), which the step calls before it records them.
     check: Option<Mutex<IndirectCommandCheck>>,
+    /// What the check looks for, which decides whether the execution may run on the GPU alone
+    /// (`gpu.rs`): every kind where it has no check.
+    needs: IndirectCommandCheckNeeds,
 }
 
 /// The encoder's state an execution's draws take: as the call found it, its tables only where
@@ -1799,18 +1817,23 @@ impl RenderExecution {
     /// part `None` where no draw made it yet), in a pass whose instances `rendered` lays out,
     /// with `residency`, the command buffer's (`residency.rs`): from the CPU's records as they
     /// stand now, or, for the host step (`step`), from the records as the GPU and the CPU left
-    /// them. Commands that run as several back the pass's memoryless attachments
-    /// (`Rendered::back_memoryless`).
+    /// them; or in its GPU form (`gpu`), whose records the host never reads (`gpu.rs`). Commands
+    /// that run as several back the pass's memoryless attachments (`Rendered::back_memoryless`).
     fn record(
         &self,
         core: EncoderCore,
         (command_buffer, residency): (&CommandBuffer, &Residency),
-        (step, splits): (bool, bool),
+        (step, splits, gpu): (bool, bool, Option<&GpuForm>),
         found: &mut Found,
         (storage, rendered): (PassStorage, &mut Rendered),
     ) -> Result<Recorded, Error> {
         let snapshot = &self.snapshot;
         let device = command_buffer.device().clone();
+        if let Some(form) = gpu {
+            let encoder =
+                self.record_gpu(core, (command_buffer, residency), form, (storage, rendered))?;
+            return self.finish(encoder, found, rendered, &device);
+        }
         let (commands, faults) = self.commands(&device, step)?;
         found.faults = ReplayFaults(found.faults.0 | faults.0);
         // What the commands run, for the command buffer's handlers (`executed_commands.rs`).
@@ -2002,6 +2025,21 @@ impl RenderExecution {
                 }
             }
         }
+        self.finish(encoder, found, rendered, &device)
+    }
+
+    /// The recording `encoder` made of the commands, its runs ended (`record`'s): what its draws
+    /// noted into `found`, the pass's memoryless attachments backed into `rendered` where its
+    /// commands ran as several, and each run's steps.
+    fn finish(
+        &self,
+        mut encoder: RenderCommandEncoder,
+        found: &mut Found,
+        rendered: &mut Rendered,
+        device: &Device,
+    ) -> Result<Recorded, Error> {
+        let snapshot = &self.snapshot;
+        let raw = device.shared().vk();
         // The lent query, or the last spare the replay took, ends in the last run; every spare
         // left begins and ends there, empty.
         encoder.visibility.end(raw, encoder.current.draws);
@@ -2054,7 +2092,7 @@ impl RenderExecution {
             };
             let steps = match &other {
                 Some((shape, _)) if !shape.storage.is_empty() || !framed.is_empty() => {
-                    RunSteps::plan(&device, &layout, pass, (&shape.storage, &framed))?
+                    RunSteps::plan(device, &layout, pass, (&shape.storage, &framed))?
                 }
                 Some(_) | None => None,
             };
@@ -2193,6 +2231,7 @@ impl RenderExecution {
             rerouting: false,
             keeping: super::capture::Keeping::Stopped,
             forms,
+            replayed: None,
             drawn_before: snapshot.drawn.clone(),
             run_barrier: false,
             command_barrier: false,
@@ -2398,6 +2437,11 @@ pub(crate) struct DeferredPass {
     shadowed: bool,
     /// What the commit made ahead for the host step that records it (`ahead.rs`), once made.
     ahead: OnceLock<Arc<Ahead>>,
+    /// Where `commit` recorded the pass with executions in their GPU form (`gpu.rs`), what each
+    /// such execution's buffer's records may hold as the decision found it: a route encoded
+    /// since that adds to it sends the pass to the host step ([`outgrown`](Self::outgrown)),
+    /// which empties it.
+    on_gpu: Mutex<Vec<(Arc<WrittenCommands>, CommandWrites)>>,
 }
 
 /// One render pass instance of a [`DeferredPass`].
@@ -2465,6 +2509,7 @@ impl DeferredPass {
             bare,
             shadowed,
             ahead: OnceLock::new(),
+            on_gpu: Mutex::new(Vec::new()),
         }
     }
 
@@ -2595,7 +2640,72 @@ impl DeferredPass {
         command_buffer: &CommandBuffer,
         step: bool,
     ) -> Result<RecordedSegment, Error> {
+        self.record_forms(command_buffer, step, &[])
+    }
+
+    /// Record the pass at commit, for good, where every execution whose records the GPU may write
+    /// takes its GPU form (`gpu.rs`, [`RenderExecution::gpu_form`]) and the others read the CPU's
+    /// records as they stand now; `None` where one does not, and a host step records the pass.
+    /// The pipelines its draws record are waited for first.
+    pub(crate) fn record_on_gpu(
+        &self,
+        command_buffer: &CommandBuffer,
+    ) -> Result<Option<RecordedSegment>, Error> {
+        if self.shadowed || self.executions.iter().any(|e| e.range.indirect()) {
+            return Ok(None);
+        }
+        let residency = command_buffer.residency()?;
+        let mut core = EncoderCore::segment(command_buffer, false)?;
+        let mut forms = Vec::with_capacity(self.executions.len());
+        for execution in &self.executions {
+            if !execution.icb.gpu_written() {
+                forms.push(None);
+                continue;
+            }
+            let (back, form) = execution.gpu_form(core, (self.storage.clone(), &residency));
+            core = back;
+            match form {
+                Some(form) => forms.push(Some(form)),
+                None => return Ok(None),
+            }
+        }
+        drop(core);
+        self.wait_made();
+        if self.making() || self.failed() {
+            return Ok(None);
+        }
+        let recorded = self.record_forms(command_buffer, false, &forms)?;
+        let decided = (self.executions.iter().zip(&forms)).filter_map(|(execution, form)| {
+            Some((Arc::clone(execution.icb.written()), form.as_ref()?.decided))
+        });
+        *lock(&self.on_gpu) = decided.collect();
+        // What a host step needs where a route outgrows the decision (`outgrown`), made now on
+        // the committing thread, as for any pass a host step records.
+        self.make_ahead(command_buffer);
+        Ok(Some(recorded))
+    }
+
+    /// Whether a route encoded since `commit` recorded the pass with executions in their GPU form
+    /// may write more into one of their buffers than the decision found (`gpu.rs`): a route that
+    /// runs before the pass, which a command buffer enqueued before its own and committed after it
+    /// may hold, may have written commands the GPU form does not run. Until its batch is
+    /// submitted, the host step records the pass instead (`Deferred::outgrown`).
+    pub(crate) fn outgrown(&self) -> bool {
+        lock(&self.on_gpu)
+            .iter()
+            .any(|(written, decided)| written.writes() != *decided)
+    }
+
+    /// [`record`](Self::record), each execution with a GPU form among `forms` (by index) in it.
+    fn record_forms(
+        &self,
+        command_buffer: &CommandBuffer,
+        step: bool,
+        forms: &[Option<GpuForm>],
+    ) -> Result<RecordedSegment, Error> {
         if step {
+            // The host step records what a GPU form left to it, for good.
+            lock(&self.on_gpu).clear();
             self.degrade_repeated_start(command_buffer.device())?;
         }
         // The executions resolve and bind against the command buffer's resident resources,
@@ -2636,10 +2746,11 @@ impl DeferredPass {
                         .iter()
                         .any(|piece| matches!(*piece, Piece::Execution(x) if x == at))
             });
+            let gpu = forms.get(at).and_then(Option::as_ref);
             let back = execution.record(
                 core,
                 (command_buffer, &residency),
-                (step, splits),
+                (step, splits, gpu),
                 &mut found,
                 (storage, &mut rendered),
             )?;

@@ -166,7 +166,7 @@ narrow refusal that the call's rustdoc describes.
 | `EncodeStartWhile` | `encodeStartWhile:offset:comparison:referenceValue:` (SPI) | `ComputeCommandEncoder::encode_start_while`, as Metal runs it, laid down as `encode_start_do_while`'s loops are; refused as there, and as `encode_start_if` refuses its word *(partial)* |
 | `EndEncoding` | `endEncoding` | `ComputeCommandEncoder::end_encoding` |
 | `ExecuteCommandsIndirect` | `executeCommandsInBuffer:indirectBuffer:indirectBufferOffset:` | `ComputeCommandEncoder::execute_commands_in_buffer_indirect`; `_checked` adds an `IndirectCommandCheck` its host step calls on each command first |
-| `ExecuteCommandsInBuffer` | `executeCommandsInBuffer:withRange:` | `ComputeCommandEncoder::execute_commands_in_buffer`; `_checked` adds an `IndirectCommandCheck` a host step calls on each command first |
+| `ExecuteCommandsInBuffer` | `executeCommandsInBuffer:withRange:` | `ComputeCommandEncoder::execute_commands_in_buffer`; `_checked` adds an `IndirectCommandCheck` a host step calls on each command first, and the `IndirectCommandCheckNeeds` it looks for |
 | `CompressedTextureReinterpretationFlush` | `insertCompressedTextureReinterpretationFlush` (SPI) | `ComputeCommandEncoder::insert_compressed_texture_reinterpretation_flush`: a no-op |
 | `MemoryBarrierWithResources` | `memoryBarrierWithResources:count:` | `ComputeCommandEncoder::memory_barrier_with_resources` |
 | `MemoryBarrierWithScope` | `memoryBarrierWithScope:` | `ComputeCommandEncoder::memory_barrier_with_scope` |
@@ -387,7 +387,7 @@ narrow refusal that the call's rustdoc describes.
 | `DrawPrimitivesBase` | `drawPrimitives:vertexStart:vertexCount:instanceCount:baseInstance:` | `RenderCommandEncoder::draw_primitives` *(partial)* |
 | `EndEncoding` | `endEncoding` | `RenderCommandEncoder::end_encoding` |
 | `ExecuteCommandsIndirect` | `executeCommandsInBuffer:indirectBuffer:indirectBufferOffset:` | `RenderCommandEncoder::execute_commands_in_buffer_indirect`: the pass is recorded at a host step (announced once); `_checked` adds an `IndirectCommandCheck` the step calls on each command first *(partial)* |
-| `ExecuteCommandsInBuffer` | `executeCommandsInBuffer:withRange:` | `RenderCommandEncoder::execute_commands_in_buffer`: the records as they stand at commit, or at a host step where the GPU writes them; `_checked` adds an `IndirectCommandCheck` that step calls on each command first *(partial)* |
+| `ExecuteCommandsInBuffer` | `executeCommandsInBuffer:withRange:` | `RenderCommandEncoder::execute_commands_in_buffer`: the records as they stand at commit, on the GPU alone where the commit can tell every command draws one primitive type under the inherited state, or at a host step where the GPU writes them otherwise; `_checked` adds an `IndirectCommandCheck` that step calls on each command first, and the `IndirectCommandCheckNeeds` it looks for, which the GPU alone may rule out *(partial)* |
 | `MemoryBarrierWithScope` | `memoryBarrierWithScope:afterStages:beforeStages:` | `RenderCommandEncoder::memory_barrier_with_scope` |
 | `SetAlphaTestReferenceValue` | `setAlphaTestReferenceValue:` (SPI) | `RenderCommandEncoder::set_alpha_test_reference_value`: a no-op (no runtime pipeline has an alpha test) |
 | `SetBlendColorRed` | `setBlendColorRed:green:blue:alpha:` | `RenderCommandEncoder::set_blend_color` |

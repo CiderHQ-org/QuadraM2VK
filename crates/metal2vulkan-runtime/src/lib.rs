@@ -283,8 +283,8 @@ pub use host_memory::{Deallocator, HostMemory, KeepAlive};
 pub use indirect_command_buffer::{
     EncodedComputeCommand, EncodedRenderCommand, IndirectBufferBinding, IndirectCommand,
     IndirectCommandBuffer, IndirectCommandBufferDescriptor, IndirectCommandBufferProblem,
-    IndirectCommandCheck, IndirectComputeCommand, IndirectDispatch, IndirectDraw,
-    IndirectRenderCommand,
+    IndirectCommandCheck, IndirectCommandCheckNeeds, IndirectComputeCommand, IndirectDispatch,
+    IndirectDraw, IndirectRenderCommand,
 };
 pub use interop::SemaphoreProblem;
 pub use library::{Function, FunctionDescriptor, Library};

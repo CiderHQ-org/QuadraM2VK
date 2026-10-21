@@ -59,7 +59,9 @@ use super::fetch_reach;
 use super::function_table::VisibleFunctionTable;
 use super::heap::Heap;
 use super::heap_sets;
-use super::indirect_command_buffer::{IndirectCommandBuffer, IndirectCommandCheck};
+use super::indirect_command_buffer::{
+    IndirectCommandBuffer, IndirectCommandCheck, IndirectCommandCheckNeeds,
+};
 use super::indirect_dispatch::{
     self, ArgumentDispatch, Arguments, FlatCall, FlatPreprocess, HostDispatch,
     STAGE_IN_REGION_BYTES,
@@ -1051,26 +1053,29 @@ impl ComputeCommandEncoder {
     /// records the execution from the records as the GPU and the CPU left them (an encoder made
     /// `icb` resident for writing, or the execution lies inside a block of command predication),
     /// the step first calls `check` with each command it will record, in order, before it records
-    /// any of them ([`IndirectCommandCheck`]). An execution recorded at the commit from the CPU's
-    /// records never calls it, and one with a check never runs on the GPU alone
-    /// (`VK_EXT_device_generated_commands`), so the step always reads the records. Refused as
-    /// [`execute_commands_in_buffer`](Self::execute_commands_in_buffer) refuses.
+    /// any of them ([`IndirectCommandCheck`]); `needs` is what it looks for
+    /// ([`IndirectCommandCheckNeeds`], the render encoder's shape). An execution recorded at the
+    /// commit from the CPU's records never calls it, and one with a check never runs on the GPU
+    /// alone (`VK_EXT_device_generated_commands`), whatever its `needs`, so the step always reads
+    /// the records. Refused as [`execute_commands_in_buffer`](Self::execute_commands_in_buffer)
+    /// refuses.
     pub fn execute_commands_in_buffer_checked(
         &mut self,
         icb: &IndirectCommandBuffer,
         range: Range<u64>,
         check: IndirectCommandCheck,
+        needs: IndirectCommandCheckNeeds,
     ) -> Result<(), Error> {
-        self.execute_range(icb, range, Some(check))
+        self.execute_range(icb, range, Some((check, needs)))
     }
 
     /// [`execute_commands_in_buffer`](Self::execute_commands_in_buffer), with `check` for its
-    /// host step where one is given.
+    /// host step where one is given, and what it looks for.
     fn execute_range(
         &mut self,
         icb: &IndirectCommandBuffer,
         range: Range<u64>,
-        check: Option<IndirectCommandCheck>,
+        check: Option<(IndirectCommandCheck, IndirectCommandCheckNeeds)>,
     ) -> Result<(), Error> {
         self.log(|_| ComputeCall::Execute(icb.clone(), range.clone()));
         const CALL: &str = indirect_execute::CALL;
@@ -1137,17 +1142,18 @@ impl ComputeCommandEncoder {
         offset: u64,
         check: IndirectCommandCheck,
     ) -> Result<(), Error> {
+        let check = (check, IndirectCommandCheckNeeds::ALL);
         self.execute_indirect_range(icb, range_buffer, offset, Some(check))
     }
 
     /// [`execute_commands_in_buffer_indirect`](Self::execute_commands_in_buffer_indirect), with
-    /// `check` for its host step where one is given.
+    /// `check` for its host step where one is given, and what it looks for.
     fn execute_indirect_range(
         &mut self,
         icb: &IndirectCommandBuffer,
         range_buffer: &Buffer,
         offset: u64,
-        check: Option<IndirectCommandCheck>,
+        check: Option<(IndirectCommandCheck, IndirectCommandCheckNeeds)>,
     ) -> Result<(), Error> {
         self.log(|_| ComputeCall::ExecuteIndirect(icb.clone(), range_buffer.clone(), offset));
         const CALL: &str = indirect_execute::CALL_INDIRECT;
@@ -1195,7 +1201,7 @@ impl ComputeCommandEncoder {
         icb: &IndirectCommandBuffer,
         range: ExecutionRange,
         pipeline: Option<ComputePipelineState>,
-        check: Option<IndirectCommandCheck>,
+        check: Option<(IndirectCommandCheck, IndirectCommandCheckNeeds)>,
     ) -> Result<(), Error> {
         self.sync_heaps();
         // Its commands run the states their records name, where it inherits none.
@@ -1234,7 +1240,7 @@ impl ComputeCommandEncoder {
             ordered: self.dispatch_type == DispatchType::Serial,
             gate,
             preprocess_gate,
-            check: check.map(Mutex::new),
+            check: check.map(|(check, needs)| (Mutex::new(check), needs)),
         })))?;
         // Its commands may name any pipeline state.
         self.command_encoded(true);

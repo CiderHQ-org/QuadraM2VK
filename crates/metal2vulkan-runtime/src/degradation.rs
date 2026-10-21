@@ -643,12 +643,14 @@ degradations! {
              encoder, and back to its home layout at its end";
         /// An execution of an indirect command buffer that an encoder made resident for writing
         /// (`executeCommandsInBuffer:withRange:`), or that lies inside a block of command
-        /// predication or reads its range from a buffer, which the GPU cannot run alone: one with
-        /// the caller's check (`execute_commands_in_buffer_checked`), of a range read from a
-        /// buffer, of a buffer that inherits the encoder's buffers, or whose records may name a
-        /// pipeline state whose kernel observes its threadgroup partition or fetches
-        /// `[[stage_in]]` attributes. The GPU may write the records it runs, so they are known
-        /// only once the work before it completed.
+        /// predication or reads its range from a buffer, which the GPU cannot run alone: a compute
+        /// execution with the caller's check (`execute_commands_in_buffer_checked`), of a range
+        /// read from a buffer, of a buffer that inherits the encoder's buffers, or whose records
+        /// may name a pipeline state whose kernel observes its threadgroup partition or fetches
+        /// `[[stage_in]]` attributes; a render execution whose records may hold, at the commit or
+        /// as its batch is ready, more than draws of one primitive type under the encoder's state,
+        /// or what its check looks for (`render/executions/gpu.rs`). The GPU may write the records
+        /// it runs, so they are known only once the work before it completed.
         HostReplayedIndirectCommands = "host-replayed-indirect-commands", Performance,
             "one GPU-to-CPU round trip per execution: its command buffer's work before it, and \
              every batch submitted before that on any queue, completes before the CPU records \

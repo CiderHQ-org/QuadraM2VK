@@ -48,8 +48,8 @@ use metal2vulkan_runtime::{
     ComputeCommandEncoder, ComputePipelineState, Deallocator, Degradation, Device, DeviceOptions,
     Error, EventRef, ExecutedCommands, ExecutedCommandsHandler, ExecutedPipeline, Execution,
     IdPlacement, IndirectCommand, IndirectCommandBuffer, IndirectCommandBufferDescriptor,
-    IndirectCommandBufferProblem, Invalid, PipelineOptions, Problem, RecordsRead, ResourceId,
-    ResourceOptions, Size,
+    IndirectCommandBufferProblem, IndirectCommandCheckNeeds, Invalid, PipelineOptions, Problem,
+    RecordsRead, ResourceId, ResourceOptions, Size,
 };
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -456,6 +456,7 @@ fn a_checked_execution_checks_each_written_command_before_its_step_records_it() 
                     );
                     log.lock().unwrap().push((index, dispatches, untouched));
                 }),
+                IndirectCommandCheckNeeds::ALL,
             )
             .unwrap();
         encoder.end_encoding().unwrap();
@@ -488,6 +489,7 @@ fn a_checked_execution_checks_each_written_command_before_its_step_records_it() 
                 Box::new(move |_, _| {
                     counted.fetch_add(1, Ordering::SeqCst);
                 }),
+                IndirectCommandCheckNeeds::ALL,
             )
             .unwrap();
         encoder.end_encoding().unwrap();
@@ -522,6 +524,7 @@ fn a_checked_host_step_reads_each_record_once() {
                 &setup.icb,
                 0..COMMANDS,
                 Box::new(move |_, command| log.lock().unwrap().push(format!("{command:?}"))),
+                IndirectCommandCheckNeeds::ALL,
             )
             .unwrap();
         encoder.end_encoding().unwrap();

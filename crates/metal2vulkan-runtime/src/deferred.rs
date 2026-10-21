@@ -74,7 +74,7 @@ pub(super) struct Prepared {
     /// Its recording, where `commit` recorded it.
     pub(super) recorded: Option<RecordedSegment>,
     /// `commit` recorded it for good, though the GPU may write what it reads: it runs on the GPU
-    /// alone (`gpu_execute.rs`), and no host step records it.
+    /// alone (`gpu_execute.rs`, `render/executions/gpu.rs`), and no host step records it.
     pub(super) for_good: bool,
     /// What its host step needs.
     pub(super) inputs: StepInputs,
@@ -126,8 +126,10 @@ impl Deferred {
     /// the CPU's records is watched by its buffer for a host step `commit` did not foresee. An
     /// indirect dispatch's step needs its variants ([`ArgumentDispatch::settle`]); it is never
     /// recorded before its step. A render pass is recorded now from the CPU's records, unless
-    /// its step records it; that step's draws need the variants and pipelines of the states its
-    /// records may name ([`DeferredPass::settle`]).
+    /// its step records it; a pass its step would record is recorded now for good where its
+    /// executions run on the GPU alone (`DeferredPass::record_on_gpu`); otherwise the step's draws
+    /// need the variants and pipelines of the states its records may name
+    /// ([`DeferredPass::settle`]).
     pub(super) fn prepare(
         &self,
         command_buffer: &CommandBuffer,
@@ -194,12 +196,22 @@ impl Deferred {
                 retained: None,
                 pipelines: false,
             }),
-            // Its step's draws compile what `commit` cannot foresee alone: it settles their
-            // variants and pipelines now (`DeferredPass::settle`), held until the command buffer
-            // completes.
+            // Recorded now for good where every execution whose records the GPU may write runs
+            // on the GPU alone (`render/executions/gpu.rs`). Otherwise its step's draws compile
+            // what `commit` cannot foresee alone: it settles their variants and pipelines now
+            // (`DeferredPass::settle`), held until the command buffer completes.
             // The step waits for the pipelines its draws record too (`render/pending.rs`).
             // And makes now what the step would make (`render/executions/ahead.rs`).
             Deferred::RenderPass(pass) if step => {
+                if let Some(recorded) = pass.record_on_gpu(command_buffer)? {
+                    return Ok(Prepared {
+                        recorded: Some(recorded),
+                        for_good: true,
+                        inputs: StepInputs::RenderPass,
+                        retained: None,
+                        pipelines: false,
+                    });
+                }
                 pass.make_ahead(command_buffer);
                 Ok(Prepared {
                     recorded: None,
@@ -285,6 +297,19 @@ impl Deferred {
             Deferred::SparseScrub(_) => Err(internal("a sparse scrub's host step")),
             Deferred::RenderPass(pass) => pass.record(command_buffer, true),
             Deferred::Pending(dispatch) => dispatch.record(command_buffer),
+        }
+    }
+
+    /// Whether a route encoded since `commit` recorded the work for good on the GPU may write
+    /// more than `commit` decided on (`DeferredPass::outgrown`): its host step records it
+    /// instead, before its batch is submitted. A render pass's executions' GPU form alone.
+    pub(super) fn outgrown(&self) -> bool {
+        match self {
+            Deferred::RenderPass(pass) => pass.outgrown(),
+            Deferred::Execute(_)
+            | Deferred::Dispatch(_)
+            | Deferred::SparseScrub(_)
+            | Deferred::Pending(_) => false,
         }
     }
 

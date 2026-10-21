@@ -655,6 +655,8 @@ mod render_barriers;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
 mod render_executions;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
+mod render_gpu_executions;
+#[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
 mod render_state;
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
 mod renders;

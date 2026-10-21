@@ -69,21 +69,21 @@ use metal2vulkan_runtime::{LoadAction, StoreAction, TextureDescriptor};
 const CALL: &str = "execute_commands_in_buffer";
 
 /// The words of one window of `params` and of `out`.
-const WINDOW: usize = 64;
+pub(super) const WINDOW: usize = 64;
 
 /// The windows of `params` and `out`.
 const WINDOWS: usize = 4;
 
 /// The template's state, `params` (each window's words as `indirect_host_steps::param` gives
 /// them) and `out` (zero).
-struct Setup {
-    state: RenderPipelineState,
-    params: Buffer,
-    out: Buffer,
+pub(super) struct Setup {
+    pub(super) state: RenderPipelineState,
+    pub(super) params: Buffer,
+    pub(super) out: Buffer,
 }
 
 impl Setup {
-    fn new(device: &Device) -> Setup {
+    pub(super) fn new(device: &Device) -> Setup {
         let params: Vec<u8> = (0..WINDOWS * WINDOW)
             .map(|word| param(word / WINDOW, word % WINDOW))
             .flat_map(u32::to_le_bytes)
@@ -127,7 +127,7 @@ impl Setup {
     }
 
     /// Make `params` and `out` resident for `encoder`'s vertex stage.
-    fn resident(&self, encoder: &mut RenderCommandEncoder) {
+    pub(super) fn resident(&self, encoder: &mut RenderCommandEncoder) {
         encoder
             .use_resource(
                 self.params.as_resource(),
@@ -145,7 +145,7 @@ impl Setup {
     }
 
     /// `out`, read back.
-    fn output(&self) -> Vec<u32> {
+    pub(super) fn output(&self) -> Vec<u32> {
         read_buffer(&self.out, 0, self.out.length())
             .unwrap()
             .as_chunks::<4>()
@@ -157,7 +157,7 @@ impl Setup {
 
     /// [`Setup::new`]'s, with `params` and `out` placed in a heap of their own ([`shared_heap`]),
     /// which it returns.
-    fn in_heap(device: &Device) -> (Setup, Heap) {
+    pub(super) fn in_heap(device: &Device) -> (Setup, Heap) {
         let own = Setup::new(device);
         let heap = shared_heap(device);
         let place =
@@ -194,16 +194,16 @@ fn placed(heap: &Heap, bytes: &[u8]) -> Buffer {
 }
 
 /// A draw over a window: `count` vertices from `start`, `instances` instances from `base`.
-struct Drawn {
-    window: usize,
-    start: usize,
-    count: usize,
-    instances: usize,
-    base: usize,
+pub(super) struct Drawn {
+    pub(super) window: usize,
+    pub(super) start: usize,
+    pub(super) count: usize,
+    pub(super) instances: usize,
+    pub(super) base: usize,
 }
 
 /// `out` after `draws`, zero where none wrote.
-fn expected(draws: &[Drawn]) -> Vec<u32> {
+pub(super) fn expected(draws: &[Drawn]) -> Vec<u32> {
     let mut out = vec![0; WINDOWS * WINDOW];
     for draw in draws {
         let (p0, p1) = (param(draw.window, 0), param(draw.window, 1));
@@ -218,7 +218,7 @@ fn expected(draws: &[Drawn]) -> Vec<u32> {
 }
 
 /// A buffer of `count` render commands as `descriptor` describes.
-fn icb(
+pub(super) fn icb(
     device: &Device,
     descriptor: &IndirectCommandBufferDescriptor,
     count: u64,
@@ -238,7 +238,7 @@ fn descriptor() -> IndirectCommandBufferDescriptor {
 }
 
 /// A 1x1 pass without attachments.
-fn pass() -> RenderPassDescriptor {
+pub(super) fn pass() -> RenderPassDescriptor {
     let mut pass = RenderPassDescriptor::new();
     pass.render_target_width = 1;
     pass.render_target_height = 1;
@@ -248,7 +248,7 @@ fn pass() -> RenderPassDescriptor {
 
 /// The kinds a test's steps force beside its own, where the device has not announced them: the
 /// makings of the pipeline states of `made`, and the `Shared` buffers' system memory.
-fn forced_with(
+pub(super) fn forced_with(
     device: &Device,
     made: &[metal2vulkan::pipeline::RenderPipelineDescriptor],
 ) -> std::collections::BTreeSet<Degradation> {
