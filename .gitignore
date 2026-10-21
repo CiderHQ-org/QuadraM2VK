@@ -1,0 +1,33 @@
+# Roblox client and everything downloaded or generated locally
+/RobloxPlayer.app/
+/backups/
+/downloads/
+/logs/
+/build/
+/studio/
+/modifications/
+/mods_backup/
+*.dylib
+__pycache__/
+
+# Local experiments and history
+/work/
+/frameworks_backup/
+/ffmpeg6/
+/ffmpeg_compat/
+/build_shims.py
+/dialog.txt
+
+# Roblox's own icon, only the source of the tilt
+/branding/source/Roblox_player_icon_black.*
+
+# Flatpak builds
+/.flatpak-builder/
+/flatpak/build-dir/
+/flatpak/repo/
+/flatpak/build.log
+/flatpak/.flatpak-builder/
+/flatpak/*.flatpak
+
+# Local Vercel project settings
+/.vercel/
