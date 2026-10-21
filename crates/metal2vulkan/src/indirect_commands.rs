@@ -694,6 +694,48 @@ impl fmt::Display for RecordError {
 impl std::error::Error for RecordError {}
 
 impl CommandRecord {
+    /// What the record holds, as a route that wrote it states it (`pipeline::CommandWrites`): its
+    /// action's operation and a draw's primitive type (a value past Metal's five counting as all
+    /// of them), and its barrier. The pipeline state it names is the writer's to add: a CPU setter
+    /// names one by the state itself.
+    pub fn writes(&self) -> crate::pipeline::CommandWrites {
+        use crate::pipeline::CommandWrites;
+        let draw = |operations: u32, primitive_type: u32| CommandWrites {
+            operations,
+            primitive_types: if primitive_type < 5 {
+                1 << primitive_type
+            } else {
+                CommandWrites::ALL_PRIMITIVE_TYPES
+            },
+        };
+        let only = |operations: u32| CommandWrites {
+            operations,
+            primitive_types: 0,
+        };
+        let mut writes = match self.action {
+            Action::Empty => CommandWrites::NONE,
+            Action::DispatchThreadgroups { .. } | Action::DispatchThreads { .. } => {
+                only(CommandWrites::DISPATCH)
+            }
+            Action::DrawPrimitives { primitive_type, .. } => {
+                draw(CommandWrites::DRAW, primitive_type)
+            }
+            Action::DrawIndexedPrimitives { primitive_type, .. } => {
+                draw(CommandWrites::DRAW_INDEXED, primitive_type)
+            }
+            Action::DrawPatches { .. } | Action::DrawIndexedPatches { .. } => {
+                only(CommandWrites::DRAW_PATCHES)
+            }
+            Action::DrawMeshThreadgroups { .. } | Action::DrawMeshThreads { .. } => {
+                only(CommandWrites::DRAW_MESH)
+            }
+        };
+        if self.barrier {
+            writes.operations |= CommandWrites::BARRIER;
+        }
+        writes
+    }
+
     /// Encode a complete record without allocating. Invalid input leaves the destination unchanged.
     pub fn encode_into(&self, bytes: &mut [u8]) -> Result<(), RecordError> {
         require_length(bytes)?;

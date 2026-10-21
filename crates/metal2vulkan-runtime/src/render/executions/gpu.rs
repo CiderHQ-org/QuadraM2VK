@@ -95,19 +95,12 @@ use crate::Device;
 use crate::RenderPipelineState;
 use ash::vk;
 use metal2vulkan::bind::{
-    draw_replay_preprocess, BindState, DrawCall, DrawMergeModule, DrawReplay, DrawReplayLayout,
-    DrawReplayPreprocess, IndirectRef, MergePhase, NeutralResource, PushHole, ViewSetup,
-    DRAW_ARGUMENT_BYTES,
+    draw_replay_draw, draw_replay_preprocess, draw_replay_primitive_type, draw_replay_slots,
+    draw_replay_state, BindState, DrawCall, DrawMergeModule, DrawReplay, DrawReplayLayout,
+    DrawReplayPreprocess, IndirectRef, MergePhase, NeutralResource, PushHole, DRAW_ARGUMENT_BYTES,
 };
-use metal2vulkan::metal::{IndirectCommandType, PrimitiveType};
-use metal2vulkan::pipeline::{CommandWrites, SlotClass, Stage};
-
-/// What the records of an execution that takes the GPU form may hold beside draws: buffers,
-/// resets and cleared barriers.
-const GPU_FORM_WRITES: u32 = CommandWrites::DRAW
-    | CommandWrites::BUFFER
-    | CommandWrites::RESET
-    | CommandWrites::CLEAR_BARRIER;
+use metal2vulkan::metal::PrimitiveType;
+use metal2vulkan::pipeline::CommandWrites;
 
 /// An execution's GPU form, decided at commit ([`RenderExecution::gpu_form`]).
 pub(super) struct GpuForm {
@@ -356,7 +349,7 @@ impl RenderExecution {
                 let commands = (decided, primitive_type, range);
                 self.preprocess(core.device(), residency, commands, slots, merged)
             }
-            Ok(Err(rule)) => Err(HostStepCause::Rule(rule)),
+            Ok(Err(cause)) => Err(cause),
             Err(error) => Err(HostStepCause::Refused(error.to_string())),
         };
         (core, form)
@@ -379,32 +372,13 @@ impl RenderExecution {
         let written = self.icb.written().writes();
         rule(!range.is_empty(), "the execution's range is empty")?;
         rule(self.lent.is_none(), "the encoder counts visibility results")?;
-        rule(
-            descriptor.command_types == IndirectCommandType::DRAW,
-            "the buffer's command types are not draws of primitives alone",
-        )?;
-        rule(
+        let inherits = (
             descriptor.inherit_pipeline_state,
-            "the buffer's commands set their own pipeline states",
-        )?;
-        rule(
-            !descriptor.inherit_buffers,
-            "the buffer's commands inherit the encoder's buffers",
-        )?;
-        let past = written.operations & !GPU_FORM_WRITES;
-        if past != 0 {
-            return Err(HostStepCause::Operations(past));
-        }
-        rule(
-            written.may(CommandWrites::DRAW),
-            "the buffer's records hold no draws",
-        )?;
-        let primitive_type = match written.primitive_types.count_ones() {
-            1 => PrimitiveType::try_from(written.primitive_types.trailing_zeros()).ok(),
-            _ => None,
-        };
+            descriptor.inherit_buffers,
+        );
         let primitive_type =
-            primitive_type.ok_or(HostStepCause::PrimitiveTypes(written.primitive_types))?;
+            draw_replay_primitive_type(descriptor.command_types, inherits, written)
+                .map_err(HostStepCause::Replay)?;
         self.check_has_nothing_to_see(written)?;
         rule(!self.reaches_tile_memory(), "the pass reaches tile memory")?;
         rule(
@@ -701,10 +675,8 @@ impl RenderLowering {
         &self,
         state: &crate::pipeline::GraphicsState,
         primitive_type: PrimitiveType,
-    ) -> Result<Result<(u32, u32), &'static str>, Error> {
+    ) -> Result<Result<(u32, u32), HostStepCause>, Error> {
         let graphics = &state.base().graphics;
-        // A merged draw runs a vertex for each corner of a whole primitive, which only a vertex
-        // function that writes no memory cannot tell from Metal's.
         let merged = self.forms == BufferForms::Merged;
         let rules = [
             (
@@ -720,51 +692,29 @@ impl RenderLowering {
                 "the inherited state reads tile memory",
             ),
             (
-                graphics.vertex_writes_memory && (merged || !graphics.rasterizer_discard),
-                "the inherited state's vertex function writes memory",
-            ),
-            (
-                graphics.fragment_writes_memory,
-                "the inherited state's fragment function writes memory",
-            ),
-            (
-                graphics.fragment_imageblock.is_some(),
-                "the inherited state has a fragment imageblock",
-            ),
-            (
-                graphics.shadow_stencil.is_some(),
-                "the inherited state tests stencil in its shaders",
-            ),
-            (
-                graphics.shader_tests.is_some(),
-                "the inherited state tests depth or stencil in its shaders",
-            ),
-            (
-                !graphics.input_attachments.is_empty(),
-                "the inherited state reads its attachments",
-            ),
-            (
                 self.rate_map.is_some(),
                 "the pass has a rasterization rate map",
             ),
         ];
         if let Some((_, rule)) = rules.iter().find(|(breaks, _)| *breaks) {
-            return Ok(Err(rule));
+            return Ok(Err(HostStepCause::Rule(rule)));
+        }
+        if let Err(rule) = draw_replay_state(graphics, merged) {
+            return Ok(Err(HostStepCause::Replay(rule)));
         }
         if !self.storage_attachments(graphics)?.is_empty() {
-            return Ok(Err("the inherited state writes an attachment as storage"));
+            let rule = "the inherited state writes an attachment as storage";
+            return Ok(Err(HostStepCause::Rule(rule)));
         }
         let settings =
             self.draw_settings(CALL, state, Assembly::Primitives(primitive_type), false)?;
         if *self.current.shape.locations != *settings.routing.locations {
-            return Ok(Err(
-                "the inherited state's color outputs go to other locations than the pass's",
-            ));
+            let rule = "the inherited state's color outputs go to other locations than the pass's";
+            return Ok(Err(HostStepCause::Rule(rule)));
         }
         if !self.reformats(state, &settings.routing)?.is_empty() {
-            return Ok(Err(
-                "the inherited state writes a color in another format than its attachment's",
-            ));
+            let rule = "the inherited state writes a color in another format than its attachment's";
+            return Ok(Err(HostStepCause::Rule(rule)));
         }
         let mut argument_samplers = ArgumentSamplers::taken(self.core.device());
         let function_tables = state.function_tables();
@@ -786,68 +736,9 @@ impl RenderLowering {
         let commands = plan
             .instantiate_draw(&live.state, &draw)
             .map_err(Error::Bind)?;
-        // Each slot table one function's; a merged draw's at its header alone, the vertex
-        // function's.
-        let one_function = commands.push_holes.iter().all(|hole| match *hole {
-            PushHole::RootTableAddress { stages, .. } => {
-                let stages: vk::ShaderStageFlags = stages.into();
-                !merged
-                    && (stages == vk::ShaderStageFlags::VERTEX
-                        || stages == vk::ShaderStageFlags::FRAGMENT)
-            }
-            PushHole::MergedDrawAddress { stages, .. } => {
-                merged && vk::ShaderStageFlags::from(stages) == vk::ShaderStageFlags::VERTEX
-            }
-            _ => true,
-        });
-        let header = commands
-            .push_holes
-            .iter()
-            .any(|hole| matches!(hole, PushHole::MergedDrawAddress { .. }));
-        let rules = [
-            (
-                commands.indirect_needs_arguments,
-                "the inherited state's indirect draw needs its arguments on the CPU",
-            ),
-            (
-                commands.index_bounds_pass,
-                "the inherited state's draw bounds its indices",
-            ),
-            (
-                commands.mesh_dispatch.is_some() || commands.tessellation_dispatch.is_some(),
-                "the inherited state's draw dispatches before it draws",
-            ),
-            (
-                !commands.amplifications.is_empty() || plan.views != ViewSetup::default(),
-                "the inherited state's draw is amplified or draws views",
-            ),
-            (
-                !plan.vertex_buffers.is_empty(),
-                "the inherited state's vertex function fetches attributes",
-            ),
-            (
-                variant.key().primitive_id_indices.is_some(),
-                "the inherited state's fragment function reads the primitive ID of an indexed draw",
-            ),
-            (
-                !one_function,
-                "the inherited state's functions share a slot table",
-            ),
-            (
-                merged != header,
-                "the inherited state's variant does not read the merged draw's header",
-            ),
-        ];
-        if let Some((_, rule)) = rules.iter().find(|(breaks, _)| *breaks) {
-            return Ok(Err(rule));
+        if let Err(rule) = draw_replay_draw(&commands, (&plan, variant.key()), merged) {
+            return Ok(Err(HostStepCause::Replay(rule)));
         }
-        let slots = |stage: Stage| {
-            (variant.pipeline().interface.slots.keys())
-                .filter(|slot| slot.stage == stage && slot.class == SlotClass::Buffer)
-                .map(|slot| slot.index + 1)
-                .max()
-                .unwrap_or(0)
-        };
-        Ok(Ok((slots(Stage::Vertex), slots(Stage::Fragment))))
+        Ok(Ok(draw_replay_slots(&variant.pipeline().interface)))
     }
 }

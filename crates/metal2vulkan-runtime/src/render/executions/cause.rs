@@ -4,7 +4,7 @@
 
 use std::fmt;
 
-use metal2vulkan::pipeline::CommandWrites;
+use metal2vulkan::bind::DrawReplayRule;
 
 /// The rule that sent a pass to the host step (the module docs).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -15,12 +15,9 @@ pub(crate) enum HostStepCause {
     /// commands under a state that may encode indirect commands (`encodes`), the needs the
     /// buffer's records did not rule out.
     Check { points: bool, encodes: bool },
-    /// The records may hold operations past draws, buffers, resets and cleared barriers: the
-    /// `CommandWrites` operation bits past those.
-    Operations(u32),
-    /// The records' draws may pass more than one primitive type (one the writes do not state
-    /// counts as all five): the `CommandWrites` primitive-type bits.
-    PrimitiveTypes(u8),
+    /// A rule of the buffer, its records, the inherited state or its draw that every draw replay
+    /// keeps (`metal2vulkan::bind::draw_replay_primitive_type` and its neighbours).
+    Replay(DrawReplayRule),
     /// The inherited state's replay variant, or the call's check of it, was refused so.
     Refused(String),
     /// What the records may hold grew after the commit's decision, before the pass's batch was
@@ -46,25 +43,7 @@ impl fmt::Display for HostStepCause {
                     "the execution's check looks for {needs}, which the buffer's records may hold"
                 )
             }
-            HostStepCause::Operations(bits) => {
-                f.write_str("the buffer's records may hold ")?;
-                let names = OPERATIONS
-                    .iter()
-                    .filter(|(bit, _)| bits & bit != 0)
-                    .map(|(_, name)| *name);
-                for (at, name) in names.enumerate() {
-                    if at > 0 {
-                        f.write_str(", ")?;
-                    }
-                    f.write_str(name)?;
-                }
-                Ok(())
-            }
-            HostStepCause::PrimitiveTypes(bits) => write!(
-                f,
-                "the buffer's draws may pass more than one primitive type (MTLPrimitiveType bits \
-                 {bits:#07b})"
-            ),
+            HostStepCause::Replay(rule) => write!(f, "{rule}"),
             HostStepCause::Refused(error) => {
                 write!(f, "the inherited state's replay was refused: {error}")
             }
@@ -75,21 +54,3 @@ impl fmt::Display for HostStepCause {
         }
     }
 }
-
-/// The operations past a GPU form's, by their `CommandWrites` bit.
-const OPERATIONS: [(u32, &str); 11] = [
-    (CommandWrites::DRAW_INDEXED, "indexed draws"),
-    (CommandWrites::DRAW_PATCHES, "draws of patches"),
-    (CommandWrites::DRAW_MESH, "mesh draws"),
-    (CommandWrites::DISPATCH, "dispatches"),
-    (CommandWrites::PIPELINE, "pipeline states"),
-    (CommandWrites::BARRIER, "barriers"),
-    (CommandWrites::RENDER_STATE, "render state setters"),
-    (
-        CommandWrites::THREADGROUP_MEMORY,
-        "threadgroup memory lengths",
-    ),
-    (CommandWrites::STAGE_IN_REGION, "stage-in regions"),
-    (CommandWrites::IMAGEBLOCK_SIZE, "imageblock sizes"),
-    (CommandWrites::COPY, "copied commands"),
-];

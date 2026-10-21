@@ -156,9 +156,14 @@ pub use merged::{
 };
 pub(crate) use merged::{merged_vertex, MergedVertex};
 mod predication;
+mod rules;
 pub use predication::{
     predication_step_module, PredicationCompare, PredicationOp, PredicationStep,
     PredicationStepModule,
+};
+pub use rules::{
+    draw_replay_draw, draw_replay_merges, draw_replay_primitive_type, draw_replay_slots,
+    draw_replay_state, DrawReplayRule, DRAW_REPLAY_WRITES,
 };
 
 /// The most commands one device replay runs: Metal's indirect command buffer holds at most 16,384

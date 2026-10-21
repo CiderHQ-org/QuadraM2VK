@@ -258,6 +258,10 @@ pub use replay::{
     MERGED_HEADER_BYTES, MERGED_REST_FIRST,
 };
 pub use replay::{
+    draw_replay_draw, draw_replay_merges, draw_replay_primitive_type, draw_replay_slots,
+    draw_replay_state, DrawReplayRule, DRAW_REPLAY_WRITES,
+};
+pub use replay::{
     draw_replay_module, draw_replay_preprocess, DrawReplay, DrawReplayLayout, DrawReplayModule,
     DrawReplayPreprocess, DRAW_ARGUMENT_BYTES, MAX_DRAW_REPLAY_TYPES,
 };

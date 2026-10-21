@@ -18,7 +18,7 @@
 
 use std::sync::{Arc, Mutex, Weak};
 
-use metal2vulkan::bind::indirect_commands::{Action, CommandRecord};
+use metal2vulkan::bind::indirect_commands::CommandRecord;
 use metal2vulkan::pipeline::CommandWrites;
 
 use super::device::lock;
@@ -97,10 +97,7 @@ impl WrittenCommands {
 
     /// What the CPU's edit left in a record: its action, its barrier, and the state it names.
     pub(crate) fn add_record(self: &Arc<Self>, record: &CommandRecord, named: Option<Named>) {
-        let mut writes = action_writes(&record.action);
-        if record.barrier {
-            writes.operations |= CommandWrites::BARRIER;
-        }
+        let mut writes = record.writes();
         if named.is_some() {
             writes.operations |= CommandWrites::PIPELINE;
         }
@@ -134,38 +131,6 @@ impl WrittenCommands {
             (held.writes, held.named)
         };
         self.add(writes, named);
-    }
-}
-
-/// The operation and primitive type of a record's action.
-fn action_writes(action: &Action) -> CommandWrites {
-    let draw = |operations: u32, primitive_type: u32| CommandWrites {
-        operations,
-        primitive_types: if primitive_type < 5 {
-            1 << primitive_type
-        } else {
-            CommandWrites::ALL_PRIMITIVE_TYPES
-        },
-    };
-    let only = |operations: u32| CommandWrites {
-        operations,
-        primitive_types: 0,
-    };
-    match *action {
-        Action::Empty => CommandWrites::NONE,
-        Action::DispatchThreadgroups { .. } | Action::DispatchThreads { .. } => {
-            only(CommandWrites::DISPATCH)
-        }
-        Action::DrawPrimitives { primitive_type, .. } => draw(CommandWrites::DRAW, primitive_type),
-        Action::DrawIndexedPrimitives { primitive_type, .. } => {
-            draw(CommandWrites::DRAW_INDEXED, primitive_type)
-        }
-        Action::DrawPatches { .. } | Action::DrawIndexedPatches { .. } => {
-            only(CommandWrites::DRAW_PATCHES)
-        }
-        Action::DrawMeshThreadgroups { .. } | Action::DrawMeshThreads { .. } => {
-            only(CommandWrites::DRAW_MESH)
-        }
     }
 }
 

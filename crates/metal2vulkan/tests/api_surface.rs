@@ -578,6 +578,13 @@ surface! {
         struct DrawReplayPreprocess N;
         const DRAW_ARGUMENT_BYTES;
         const MAX_DRAW_REPLAY_TYPES;
+        fn draw_replay_draw;
+        fn draw_replay_merges;
+        fn draw_replay_primitive_type;
+        fn draw_replay_slots;
+        fn draw_replay_state;
+        enum DrawReplayRule N;
+        const DRAW_REPLAY_WRITES;
         fn draw_merge_module;
         struct DrawMergeModule N;
         enum MergePhase E;
