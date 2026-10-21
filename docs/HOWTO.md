@@ -67,8 +67,11 @@ The translator keeps no cache; it gives you keys and encodings to keep one
 
 ### The runtime's shader cache
 
-The runtime keeps every shader it translates on disk, as Metal programs get from the OS, so a
-second process does not translate it again. It cannot be turned off.
+The runtime keeps translated shaders on disk by default, as Metal programs get from the OS,
+so a second process does not translate them again. `ShaderCacheOptions::mode` can instead select
+`ShaderCacheMode::MemoryOnly` (the bounded memo alone, no filesystem access or cache thread),
+or `PreferPersistent` (announce a memory-only fallback if the directory cannot be opened).
+`Device::shader_cache_is_persistent()` reports whether persistent storage was opened.
 
 - **Where.** By default `~/Library/Caches/metal2vulkan` on macOS, `$XDG_CACHE_HOME/metal2vulkan`
   elsewhere, or `~/.cache/metal2vulkan` when `XDG_CACHE_HOME` is unset. `ShaderCacheOptions`
@@ -89,8 +92,10 @@ second process does not translate it again. It cannot be turned off.
   stderr) as a `Warning` whose `id_name` is `metal2vulkan-shader-cache-evicted` or
   `metal2vulkan-shader-cache-write-failed`. Match on `id_name`, never on the text. Later events are
   counted in `Device::shader_cache_statistics`.
-- **Failures.** Making or adopting a device fails with `Error::ShaderCache` when the directory
-  cannot be made or written. After that, a failed read or write only costs a translation.
+- **Failures.** In the default `Persistent` mode, making or adopting a device fails with
+  `Error::ShaderCache` when the directory cannot be made or written. `PreferPersistent` instead
+  announces `metal2vulkan-shader-cache-memory-fallback` once for the device and uses its bounded
+  memo. After a persistent directory opened, a failed read or write only costs a translation.
 - **Cold runs.** To measure with nothing cached, give the device an empty directory, and turn the
   driver's own shader cache off (`__GL_SHADER_DISK_CACHE=0` for NVIDIA,
   `MESA_SHADER_CACHE_DISABLE=true` for Mesa). Give each test its own directory.
