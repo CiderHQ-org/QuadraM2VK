@@ -881,6 +881,7 @@ fn the_merged_members_round_trip_in_one_render_pipeline() {
                 source: BindingSource::CombinedTextureSampler { texture, sampler },
                 immutable_sampler: None,
                 flags: vk::DescriptorBindingFlags::empty(),
+                variables: 1,
             },
             DescriptorBinding {
                 binding: 1,
@@ -890,6 +891,7 @@ fn the_merged_members_round_trip_in_one_render_pipeline() {
                 source: BindingSource::RawTexture(texture),
                 immutable_sampler: None,
                 flags: vk::DescriptorBindingFlags::empty(),
+                variables: 1,
             },
         ],
         flags: vk::DescriptorSetLayoutCreateFlags::empty(),
@@ -909,6 +911,7 @@ fn the_merged_members_round_trip_in_one_render_pipeline() {
             }),
             immutable_sampler: None,
             flags: vk::DescriptorBindingFlags::PARTIALLY_BOUND,
+            variables: 1,
         },
         DescriptorBinding {
             binding: 3,
@@ -921,6 +924,7 @@ fn the_merged_members_round_trip_in_one_render_pipeline() {
             },
             immutable_sampler: None,
             flags: vk::DescriptorBindingFlags::empty(),
+            variables: 1,
         },
     ];
     if let Some(last) = p.layout.sets.last_mut() {

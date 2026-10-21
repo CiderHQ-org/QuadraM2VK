@@ -1501,3 +1501,54 @@ fn specialization_disagreements_are_descriptor_errors() {
 pub(super) fn render() -> LinkInputs {
     LinkInputs::Render(Box::default())
 }
+
+/// A module of words `body` after the header of SPIR-V `version`.
+fn module_words(version: u32, body: &[u32]) -> Vec<u32> {
+    [crate::spv::MAGIC_NUMBER, version, 0, 16, 0]
+        .into_iter()
+        .chain(body.iter().copied())
+        .collect()
+}
+
+/// A binding declared by two variables, `%5` and `%10`, counts the variables its entry point
+/// lists (`DescriptorBinding::variables`): `%10` alone where the entry point uses it alone, both
+/// where it uses both, and both in a module before SPIR-V 1.4, whose entry point lists its inputs
+/// and outputs alone.
+#[test]
+fn a_binding_counts_the_variables_its_entry_point_uses() {
+    let slot = res(Stage::Fragment, ResourceKind::Buffer, 0);
+    let mut table = LinkTable::default();
+    table.bindings.insert(slot, (0, 3));
+    let entry_point = |interface: &[u32]| {
+        // `OpEntryPoint Fragment %1 "main"`, then the interface.
+        let len = 5 + interface.len() as u32;
+        let mut words = vec![
+            len << 16 | crate::spv::Op::EntryPoint as u32,
+            4,
+            1,
+            u32::from_le_bytes(*b"main"),
+            0,
+        ];
+        words.extend_from_slice(interface);
+        words
+    };
+    let decorate = |id: u32| [4 << 16 | crate::spv::Op::Decorate as u32, id, 33, 0];
+    let module = |version: u32, interface: &[u32]| {
+        let mut body = entry_point(interface);
+        body.extend(decorate(5));
+        body.extend(decorate(10));
+        let words = module_words(version, &body);
+        // Each `Binding` literal: the last word of each decoration.
+        let at = |n: usize| (words.len() - 4 * (1 - n) - 1) as u32;
+        let relocs = vec![
+            (Symbol::Binding(slot), at(0)),
+            (Symbol::Binding(slot), at(1)),
+        ];
+        used_variables(&words, &relocs, &table)
+    };
+    let used = |counts: BTreeMap<(u32, u32), u32>| counts.get(&(0, 3)).copied();
+    assert_eq!(used(module(0x0001_0500, &[10, 17])), Some(1));
+    assert_eq!(used(module(0x0001_0500, &[5, 10, 17])), Some(2));
+    assert_eq!(used(module(0x0001_0300, &[17])), Some(2));
+    assert_eq!(used(module(0x0001_0500, &[17])), None);
+}

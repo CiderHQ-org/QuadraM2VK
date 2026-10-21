@@ -359,6 +359,7 @@ pub fn link(
         synthesized.push((mesh::WORK_SLOT, vk::ShaderStageFlags::VERTEX));
     }
     let mut layout = layout(&ifaces, &synthesized, &mut table, p)?;
+    count_variables(&mut layout, stages, &table);
     let control = match plan {
         Some(plan) => {
             let offset = tessellation::push_offset(&layout.push_constants, p)?;
@@ -682,6 +683,77 @@ fn immutable_sampler(
     }
 }
 
+/// Set each binding's `variables` (`DescriptorBinding::variables`): the most variables one of
+/// `stages`' entry points uses at it. A module's variables are its `Binding` relocations' targets
+/// (the decoration's word two before the relocated literal), which `table` resolves to their
+/// bindings; those its entry point uses are those its `OpEntryPoint` lists, where a module lists
+/// every global variable its entry point's call tree references: from SPIR-V 1.4 on ("the
+/// interface's storage classes are all storage classes used in declaring all global variables
+/// referenced by the entry point's call tree"). The serializer writes 1.5 (`SPIRV_VERSION`); a
+/// module of an earlier version, whose interface lists its inputs and outputs alone, counts each
+/// variable it declares.
+fn count_variables(layout: &mut PipelineLayout, stages: &[&FunctionArtifact], table: &LinkTable) {
+    for a in stages {
+        let used = used_variables(&a.module.words, &a.module.relocs, table);
+        for set in &mut layout.sets {
+            for b in &mut set.bindings {
+                if let Some(&n) = used.get(&(set.set, b.binding)) {
+                    b.variables = b.variables.max(n);
+                }
+            }
+        }
+    }
+}
+
+/// The variables the entry point of module `words` uses at each `(set, binding)`, its `Binding`
+/// relocations `relocs` resolved through `table` ([`count_variables`]): every variable a module
+/// before SPIR-V 1.4 declares there.
+fn used_variables(
+    words: &[u32],
+    relocs: &[(Symbol, u32)],
+    table: &LinkTable,
+) -> BTreeMap<(u32, u32), u32> {
+    let listed = words.get(1).is_some_and(|&version| version >= 0x0001_0400);
+    let interface = entry_interface(words);
+    let mut used = BTreeMap::new();
+    for (sym, at) in relocs {
+        let Symbol::Binding(slot) = sym else {
+            continue;
+        };
+        let id = (*at as usize).checked_sub(2).and_then(|i| words.get(i));
+        if let (Some(&binding), Some(id)) = (table.bindings.get(slot), id) {
+            if !listed || interface.contains(id) {
+                *used.entry(binding).or_default() += 1;
+            }
+        }
+    }
+    used
+}
+
+/// The interface of the first `OpEntryPoint` of module `words`: the ids after its execution model,
+/// its function and its name (a string of words, the last holding its NUL byte).
+fn entry_interface(words: &[u32]) -> BTreeSet<u32> {
+    let entry_point = crate::spv::Op::EntryPoint as u32;
+    let mut at = 5;
+    while let Some(&word) = words.get(at) {
+        let len = (word >> 16) as usize;
+        let Some(inst) = words.get(at..at + len).filter(|_| len > 0) else {
+            break;
+        };
+        if word & 0xFFFF == entry_point {
+            let name = inst
+                .iter()
+                .skip(3)
+                .position(|w| w.to_le_bytes().contains(&0));
+            return name
+                .map(|end| inst[3 + end + 1..].iter().copied().collect())
+                .unwrap_or_default();
+        }
+        at += len;
+    }
+    BTreeSet::new()
+}
+
 /// The stages declaring one heap class, and its descriptor type.
 struct HeapDecl {
     ty: vk::DescriptorType,
@@ -778,6 +850,7 @@ fn layout(
             source: binding_source(slot),
             immutable_sampler: immutable_sampler(slot, p)?,
             flags: vk::DescriptorBindingFlags::empty(),
+            variables: 0,
         });
     }
     check_set_limits(&bindings, p)?;
@@ -930,6 +1003,7 @@ fn heap_set(
             source: BindingSource::Heap(*class),
             immutable_sampler: None,
             flags,
+            variables: 0,
         });
     }
     Ok(Some(DescriptorSetLayout {

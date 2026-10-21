@@ -2002,6 +2002,23 @@ fn every_view_of_a_written_slot_stays_writable() {
                     if has.has(bytes) { 2 } else { 1 },
                     "{what}: views of data"
                 );
+                // The layout counts the slot's views as its binding's variables.
+                let inputs = crate::pipeline::link::LinkInputs::standalone();
+                let linked = crate::pipeline::link::link(&[&a], &inputs, &p)
+                    .unwrap_or_else(|e| panic!("{what}: link: {e}"));
+                let variables = linked.layout.sets[0]
+                    .bindings
+                    .iter()
+                    .find(|b| {
+                        matches!(b.source,
+                            crate::pipeline::layout::BindingSource::Buffer(s) if s.index == 0)
+                    })
+                    .map(|b| b.variables);
+                assert_eq!(
+                    variables,
+                    Some(data.len() as u32),
+                    "{what}: variables of data's binding"
+                );
                 for id in &data {
                     assert_eq!(
                         non_writable.contains(id),

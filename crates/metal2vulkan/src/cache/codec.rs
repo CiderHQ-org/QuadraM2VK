@@ -1293,7 +1293,9 @@ codec_struct! {
     }
     PipelineLayout { sets, push_constants, push_descriptor_eligible }
     DescriptorSetLayout { set, bindings, flags }
-    DescriptorBinding { binding, ty, count, stages, source, immutable_sampler, flags }
+    DescriptorBinding {
+        binding, ty, count, stages, source, immutable_sampler, flags, variables,
+    }
     PushConstantRange { stages, offset, size }
     VertexInputState { bindings, attributes, pulled, variant_pulled }
     VertexBinding { binding, buffer_index, input_rate, divisor, stride }

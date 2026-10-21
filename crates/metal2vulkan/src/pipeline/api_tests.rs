@@ -477,6 +477,7 @@ mod serde_round_trips {
                         source: BindingSource::Buffer(buffer(0)),
                         immutable_sampler: None,
                         flags: vk::DescriptorBindingFlags::empty(),
+                        variables: 1,
                     },
                     DescriptorBinding {
                         binding: 1,
@@ -489,6 +490,7 @@ mod serde_round_trips {
                         },
                         immutable_sampler: None,
                         flags: vk::DescriptorBindingFlags::empty(),
+                        variables: 1,
                     },
                 ],
                 flags: vk::DescriptorSetLayoutCreateFlags::empty(),
