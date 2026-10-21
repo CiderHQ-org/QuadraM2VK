@@ -625,6 +625,8 @@ impl Drop for DeviceShared {
         // Every command buffer holds its device, so none is held or pending: the threads only
         // stop.
         self.scheduler.stop();
+        // Every open render encoder holds the device too: none is left to lower.
+        self.deferred.stop();
         // Every decode job holds its image, and so the device: none is left.
         self.textures.twin_decodes.stop();
         // What the reaper is handed holds the device: none is left, and it only stops, unless

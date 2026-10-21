@@ -390,6 +390,7 @@ mod extended_shadow;
 mod inline_first;
 mod inline_splits;
 mod late_resolve;
+mod lowering_worker;
 mod mesh;
 mod pass_start_reads;
 mod pass_steps;
@@ -412,6 +413,8 @@ mod vertex_strides;
 use bound::{Bound, EqualShapes, Now, Recorded};
 use deferral::Logged;
 pub(crate) use deferral::{lowering, DeferredEncoders};
+#[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
+pub(crate) use deferral::{BATCH_CALLS, HANDED_BATCHES};
 pub(crate) use inline_splits::SpareKept;
 use replay::{
     DrawIndexed, DrawIndexedIndirect, DrawIndexedPatches, DrawIndexedPatchesIndirect, DrawPatches,

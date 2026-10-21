@@ -8,7 +8,8 @@
 //! beside the validation layer's destructors.
 //!
 //! - **Sections.** Each Vulkan call the runtime makes on its own threads (the scheduler's
-//!   submissions, the queues' waiters' polls), each release of a
+//!   submissions, the queues' waiters' polls, the lowering of render encoders' calls on the
+//!   device's lowering thread), each release of a
 //!   Vulkan object (a drop, on whatever thread it runs), and each read of an event's counter runs
 //!   inside a section ([`enter`]), which counts itself. A section runs none of the program's code
 //!   (handlers, deallocators, notifications) except a device's message sink, which Vulkan calls
@@ -38,8 +39,10 @@
 //!   The program's own calls on its own threads (making objects, encoding) take no section:
 //!   their race with an exit is the program's.
 //! - **A host step makes no image, render pass, framebuffer or neutral**. Those are outside the
-//!   table, and a host step ([`host_step`]) runs inside a section: what one may need is made before
-//!   it, on the program's thread. Their one door (`creation.rs`, and `neutral.rs` for the neutrals)
+//!   entry points a host step ([`host_step`]) calls in its section ([`HOST_STEP`]): what one may
+//!   need is made before it, on the program's thread. The device's lowering thread makes them in
+//!   its sections, as the program's calls it lowers would (`render/lowering_worker.rs`), so the
+//!   table holds their entry points. Their one door (`creation.rs`, and `neutral.rs` for the neutrals)
 //!   refuses one in a host step before any Vulkan call, `Error::HostStepObject`, in every build; a
 //!   source test fails when another file makes such an object.
 //! - **The hook.** A device made or adopted registers an exit handler ([`register_device`]), once
@@ -481,6 +484,15 @@ calls! {
     CmdSetColorWriteMask => c"vkCmdSetColorWriteMaskEXT",
     CmdSetDepthBias2 => c"vkCmdSetDepthBias2EXT",
     CmdBindIndexBuffer2 => c"vkCmdBindIndexBuffer2",
+    // The objects a render encoder's lowering makes as it draws (its pass's render pass and
+    // framebuffer, stand-in and scratch images, `creation.rs`), on the device's lowering thread
+    // (`render/lowering_worker.rs`); never in a host step.
+    CreateImage => c"vkCreateImage",
+    GetImageMemoryRequirements => c"vkGetImageMemoryRequirements",
+    BindImageMemory => c"vkBindImageMemory",
+    CreateRenderPass => c"vkCreateRenderPass",
+    CreateRenderPass2 => c"vkCreateRenderPass2",
+    CreateFramebuffer => c"vkCreateFramebuffer",
     // A mesh draw's, and an execution of commands the GPU generates: never primed
     // ([`UNPRIMED`](crate::device::prime::UNPRIMED)).
     CmdDrawMeshTasks => c"vkCmdDrawMeshTasksEXT",
@@ -597,12 +609,34 @@ thread_local! {
     static HOST_STEPS: Cell<usize> = const { Cell::new(0) };
     /// Command buffers' completion depends on this thread ([`serves_completion`]).
     static SERVES_COMPLETION: Cell<bool> = const { Cell::new(false) };
+    /// The runs of the program's calls this thread lowers now, made earlier on a thread of the
+    /// program's ([`lowering_program_calls`]).
+    static LOWERING: Cell<usize> = const { Cell::new(0) };
 }
 
 /// Whether this thread runs inside a call of the program's: one of the program's own threads,
-/// or a runtime thread running the program's code ([`program`]), which may call the runtime.
+/// a runtime thread running the program's code ([`program`]), which may call the runtime, or one
+/// lowering the program's calls that returned ([`lowering_program_calls`]).
 pub(crate) fn in_program_call() -> bool {
-    !RUNTIME.with(Cell::get) || PROGRAM.with(Cell::get) > 0
+    !RUNTIME.with(Cell::get) || PROGRAM.with(Cell::get) > 0 || LOWERING.with(Cell::get) > 0
+}
+
+/// Run `f`, which lowers calls the program made on a thread of its own and that returned (a render
+/// encoder's logged calls, on the device's lowering thread, `render/deferral.rs`), as those calls:
+/// what it does is the program's calls' ([`in_program_call`]), in the order the program made
+/// them. It runs inside a section all the same, which an exit waits for, and calls only the
+/// table's entry points there ([`Call`]).
+pub(crate) fn lowering_program_calls<T>(f: impl FnOnce() -> T) -> T {
+    /// Ends the mark as `f` returns or unwinds.
+    struct Mark;
+    impl Drop for Mark {
+        fn drop(&mut self) {
+            LOWERING.with(|lowering| lowering.set(lowering.get() - 1));
+        }
+    }
+    LOWERING.with(|lowering| lowering.set(lowering.get() + 1));
+    let _mark = Mark;
+    f()
 }
 
 /// Run `f`, a command buffer's host step, marked as one ([`in_host_step`]): a serial point of the
@@ -842,8 +876,10 @@ where
 /// running `f`, as [`spawn`] does, but at the user-interactive quality of service on macOS, and
 /// with the utilization floor at its top on Linux, from its start ([`run_at_user_interactive`]):
 /// the scheduler's (`scheduler/`), each `VkQueue`'s waiter, which makes the completion turns
-/// (`command_buffer/completion.rs`), and every thread of the handler
-/// pool (`contexts/`). A thread one of them starts (the reaper a pipeline state's last release
+/// (`command_buffer/completion.rs`), every thread of the handler
+/// pool (`contexts/`), and the device's recorder and lowering threads (`recorder`,
+/// `render/lowering_worker.rs`), whose work the program's command buffers wait for. A thread one
+/// of them starts (the reaper a pipeline state's last release
 /// starts on a handler thread, a program's thread made in a handler) does not take either: it
 /// starts at the default class on macOS ([`spawn`]), and with no floor on Linux.
 pub(crate) fn spawn_user_interactive<F, T>(

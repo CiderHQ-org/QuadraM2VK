@@ -322,6 +322,9 @@ pub(crate) struct Counters {
     tile_pipelines_pooled: AtomicU64,
     upload_chunks_in_device_memory: AtomicU64,
     tile_dispatches_recorded: AtomicU64,
+    render_log_batches_by_thread: AtomicU64,
+    render_log_batches_by_program: AtomicU64,
+    render_log_waits: AtomicU64,
 }
 
 /// How a render pass took a shadowed texture as a color attachment
@@ -964,6 +967,22 @@ impl Counters {
     /// A render encoder ended (`RenderCommandEncoder::end_encoding`).
     pub(crate) fn render_encoder_ended(&self) {
         self.render_encoders_ended.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A batch of a render encoder's logged calls was lowered: on the device's lowering thread
+    /// (`by_thread`), or on the program's at a drain (`render/deferral.rs`).
+    pub(crate) fn render_log_batch_lowered(&self, by_thread: bool) {
+        match by_thread {
+            true => &self.render_log_batches_by_thread,
+            false => &self.render_log_batches_by_program,
+        }
+        .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A render encoder's call waited for the device's lowering thread, its encoder's batches
+    /// handed and not taken at their cap (`render/deferral.rs`).
+    pub(crate) fn render_log_waited(&self) {
+        self.render_log_waits.fetch_add(1, Ordering::Relaxed);
     }
 
     /// A render pass instance of a render encoder's pass was begun at `site`.
@@ -2839,6 +2858,16 @@ pub struct WorkCounts {
     pub inline_memoryless_write_splits: u64,
     /// Render encoders ended (`RenderCommandEncoder::end_encoding`): each a Metal pass.
     pub render_encoders_ended: u64,
+    /// Batches of render encoders' calls logged under `RenderLoweringPolicy::Worker` that the
+    /// device's lowering thread lowered, while the program went on.
+    pub render_log_batches_by_thread: u64,
+    /// Batches of render encoders' logged calls lowered on the program's thread: at an encoder's
+    /// end, a read of these counts, a query of the pass or a call lowered at the call, the calls
+    /// the lowering thread had not taken; and all of them where the device runs no such thread.
+    pub render_log_batches_by_program: u64,
+    /// Render encoders' calls that waited for the device's lowering thread, the program having
+    /// handed it as many of its encoder's batches as it holds untaken.
+    pub render_log_waits: u64,
     /// Render pass instances of render encoders' passes begun where the pass is recorded, each
     /// running a secondary of its draws (`render/pass_steps.rs`): an encoder's instances not
     /// recorded inline, and the runs of executions' commands. With the three fields after this
@@ -3897,6 +3926,11 @@ impl Device {
             inline_memoryless_write_splits: (counters.inline_memoryless_write_splits)
                 .load(Ordering::Relaxed),
             render_encoders_ended: counters.render_encoders_ended.load(Ordering::Relaxed),
+            render_log_batches_by_thread: (counters.render_log_batches_by_thread)
+                .load(Ordering::Relaxed),
+            render_log_batches_by_program: (counters.render_log_batches_by_program)
+                .load(Ordering::Relaxed),
+            render_log_waits: counters.render_log_waits.load(Ordering::Relaxed),
             render_passes_begun_instances: pass_begun(PassBegun::Instance),
             render_passes_begun_inline: pass_begun(PassBegun::Inline),
             render_passes_begun_inline_splits: pass_begun(PassBegun::InlineSplit),

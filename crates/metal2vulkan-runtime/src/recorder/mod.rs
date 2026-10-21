@@ -64,8 +64,8 @@ use std::sync::Arc;
 
 pub(crate) use handles::is_deferred;
 #[cfg(test)]
-pub(crate) use replays::{queue_room, take_leaving_room};
-pub(crate) use replays::{resolve, RecorderShared, ReplayCounts, Replays};
+pub(crate) use replays::queue_room;
+pub(crate) use replays::{resolve, take_leaving_room, RecorderShared, ReplayCounts, Replays};
 pub(crate) use thunks::Command;
 pub use thunks::CommandsReplayed;
 

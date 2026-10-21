@@ -2,15 +2,17 @@
 //! `vkCreateRenderPass`, `vkCreateRenderPass2` and `vkCreateFramebuffer`.
 //!
 //! A host step (`exit_guard::host_step`) runs on the scheduler's thread inside the exit guard's
-//! section, which reaches only the guard's table of entry points (`exit_guard::HOST_STEP`), primed
-//! before the exit hook registers. These four are not in it: a host step makes no image, render
-//! pass or framebuffer. What a host step may need of them is made before, on the program's thread
-//! (a state's creation, an encoder's end, a command buffer's commit); one nothing made is refused
-//! here, before any Vulkan call, with [`Error::HostStepObject`], which fails the command buffer
-//! `CommandBufferError::HostStepObject` of the same kind. Outside a host step each call is the
-//! entry point's. The device's priming (`device/prime.rs`) makes its own, on the thread that
-//! makes the device. No other file calls these entry points: a source test fails when one does
-//! (`tests/exit_guard.rs`).
+//! section, which reaches only the entry points a host step calls (`exit_guard::HOST_STEP`), primed
+//! before the exit hook registers. These four are not among them: a host step makes no image,
+//! render pass or framebuffer. What a host step may need of them is made before, on the program's
+//! thread (a state's creation, an encoder's end, a command buffer's commit); one nothing made is
+//! refused here, before any Vulkan call, with [`Error::HostStepObject`], which fails the command
+//! buffer `CommandBufferError::HostStepObject` of the same kind. Outside a host step each call is
+//! the entry point's: on the program's thread, or in a section of the device's lowering thread,
+//! which lowers render encoders' calls (`render/lowering_worker.rs`), so the four and an image's
+//! memory requirements and binding are in the guard's table (`exit_guard::Call`). The device's
+//! priming (`device/prime.rs`) makes its own, on the thread that makes the device. No other file
+//! calls these entry points: a source test fails when one does (`tests/exit_guard.rs`).
 
 use crate::error::{vulkan, Error, HostStepObject};
 use crate::exit_guard;

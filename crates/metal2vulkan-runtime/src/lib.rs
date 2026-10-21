@@ -22,6 +22,10 @@
 // Every public item says what it is and its Metal counterpart: a new undocumented one fails the
 // warnings-denied gates.
 #![warn(missing_docs)]
+// Rustdoc works out each public type's `Send` and `Sync` through every type it holds: a device's
+// open encoders' lowerings and checks (`render/deferral.rs`) down to the translator's reflection,
+// past the default limit of 128 nested obligations.
+#![recursion_limit = "256"]
 
 mod address;
 mod address_map;

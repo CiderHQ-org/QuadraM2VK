@@ -127,8 +127,10 @@ compile does. `DevicePolicy::default()` is `DevicePolicy::UNTRUSTED`:
   default, which `exact_answers()` selects too; the runtime's choice, no pipeline differs): each
   call works out and records its commands before it returns, and returns every refusal.
   `render_lowering = RenderLoweringPolicy::Worker` logs each call and lowers it later, in order,
-  before the command buffer's submission (today as the encoder ends, on the program's thread).
-  The call still makes Metal's checks of its arguments and of the encoder's state, and returns
+  before the command buffer's submission: in batches of 32 calls on the device's lowering thread
+  while the program goes on, and what that thread has not taken on the program's thread as the
+  encoder ends. A program that runs 16 batches ahead of that thread waits for it in its next
+  call. The call still makes Metal's checks of its arguments and of the encoder's state, and returns
   their refusals: the argument tables' and state setters', the objects' devices, the pipeline
   state's against the pass, and a draw's kind, arguments and settings. It copies the bytes it
   was lent and holds the objects it names. A call those checks do not cover is lowered inside
@@ -145,8 +147,9 @@ compile does. `DevicePolicy::default()` is `DevicePolicy::UNTRUSTED`:
   `CommandBufferError::CallRefused` names the call (`EncoderCall`: its Metal selector and its
   index among the encoder's calls), `CommandBuffer::refusal` returns the error the call would
   have returned, and that encoder and every one after it in the command buffer run nothing.
-  Notices a logged call's lowering announces name the call (`DegradeNotice::call`), and
-  `DeviceOptions::lowering_refuses` turns the kinds it lists into such refusals (section 9).
+  Notices a logged call's lowering announces name the call (`DegradeNotice::call`) and may reach
+  the message sink on the lowering thread, and `DeviceOptions::lowering_refuses` turns the kinds
+  it lists into such refusals (section 9).
 
 Loops run as written: no execution bound is translated in.
 

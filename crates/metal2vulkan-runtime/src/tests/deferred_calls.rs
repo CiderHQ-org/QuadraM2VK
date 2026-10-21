@@ -6,7 +6,8 @@
 //! error; a notice announced while a call is lowered names it, and a kind the device refuses while
 //! lowering (`DeviceOptions::lowering_refuses`) refuses it; the bytes a call was lent are copied at
 //! the call, and the objects it names are held from the call until its command buffer completed;
-//! a buffer detached after the call refuses nothing of it.
+//! a buffer detached after the call refuses nothing of it; a program that outruns the device's
+//! lowering thread waits for it at the cap of its encoder's batches, and goes on.
 //!
 //! Device tests: compiled only under the validation crate's GPU safety cfgs (`m2v_gpu`,
 //! `m2v_cpu_icd`), on the kind of device the cfg selects. The functions are the owned fixture
@@ -14,6 +15,7 @@
 
 use super::blit_holds::{busy, over_host, until, Host, Scratch, FILLED, WAIT};
 use super::encoder_holds::{bits, bytes_of, pass, render_state, words_of};
+use crate::render::{BATCH_CALLS, HANDED_BATCHES};
 use crate::{
     BlitOption, Buffer, CommandBuffer, CommandBufferError, CommandBufferStatus, Degradation,
     DegradeNotice, Device, DeviceKind, DeviceOptions, EncoderCall, Error, MessageSink, Origin,
@@ -24,7 +26,8 @@ use metal2vulkan::device::RenderLoweringPolicy;
 use metal2vulkan::metal::{IndexType, PixelFormat, PrimitiveType, TextureUsage};
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex};
+use std::time::Duration;
 
 /// The side of the target, and the color the draws draw: `(0.2, 0.4, 0.6, 1)`, whose
 /// `RGBA8Unorm` bytes are exact.
@@ -556,5 +559,98 @@ fn a_call_made_while_a_buffer_is_detached_is_lowered_at_the_call() {
             CommandBufferStatus::Error,
             Some(CommandBufferError::DetachedBacking)
         )
+    );
+}
+
+/// A program that outruns the device's lowering thread waits for it once its encoder has handed
+/// the thread `HANDED_BATCHES` batches it has not taken, and goes on as the thread takes them: with
+/// the thread held, the program's calls stop at the cap, its log grows no more, and once the hold
+/// goes every call is lowered once, in order (the last draw's color left): by the thread, and what
+/// it had not taken as the encoder ended on the program's thread.
+#[test]
+fn a_program_that_outruns_the_lowering_thread_waits_for_it() {
+    let scratch = Scratch::new("deferred-outrun");
+    let device = device(
+        &scratch.0,
+        RenderLoweringPolicy::Worker,
+        &[],
+        &Heard::default(),
+    );
+    // Two calls a draw: past the batches the cap allows, the thread's own and the one filled.
+    let draws = (HANDED_BATCHES + 4) * BATCH_CALLS / 2;
+    let made = Arc::new(AtomicUsize::new(0));
+    let (opened, open) = mpsc::channel();
+    let (go, going) = mpsc::channel::<()>();
+    let encoding = std::thread::spawn({
+        let device = device.clone();
+        let made = Arc::clone(&made);
+        move || {
+            let state = rectangle_state(&device);
+            let queue = device.new_command_queue().unwrap();
+            let command_buffer = queue.command_buffer().unwrap();
+            let target = target(&device);
+            let mut encoder = command_buffer
+                .render_command_encoder(&pass(&target))
+                .unwrap();
+            rectangle(&state, &mut encoder);
+            opened.send(()).unwrap();
+            going.recv().unwrap();
+            let other = bytes_of(&[1.0f32, 0.0, 0.0, 1.0], f32::to_le_bytes);
+            let last = bytes_of(&COLOR, f32::to_le_bytes);
+            for draw in 0..draws {
+                let color = if draw + 1 == draws { &last } else { &other };
+                encoder.set_fragment_bytes(color, 0).unwrap();
+                encoder
+                    .draw_primitives(PrimitiveType::Triangle, 0, 6, 1, 0)
+                    .unwrap();
+                made.fetch_add(1, Ordering::SeqCst);
+            }
+            encoder.end_encoding().unwrap();
+            let back = copy_back(&device, &command_buffer, &target);
+            committed(&command_buffer, &back)
+        }
+    });
+    open.recv().unwrap();
+    let slots = device.shared().deferred.taken();
+    let [slot] = &slots[..] else {
+        panic!("{} encoders' slots taken, not one", slots.len());
+    };
+    let (stopped, after, handed) = slot.while_held(|| {
+        go.send(()).unwrap();
+        until("the program's calls stop at the cap", || {
+            slot.handed() == HANDED_BATCHES
+        });
+        let stopped = made.load(Ordering::SeqCst);
+        std::thread::sleep(Duration::from_millis(200));
+        (stopped, made.load(Ordering::SeqCst), slot.handed())
+    });
+    assert_eq!(stopped, after, "draws made with the thread held at the cap");
+    assert!(
+        stopped < draws,
+        "{stopped} of {draws} draws made at the cap"
+    );
+    assert_eq!(
+        handed, HANDED_BATCHES,
+        "batches handed with the thread held"
+    );
+    let words = encoding.join().unwrap();
+    assert!(
+        words.iter().all(|&word| word == PACKED),
+        "{:x?}",
+        &words[..4]
+    );
+    // Every batch lowered once: the thread's, and those it had not taken as the encoder ended.
+    let counts = device.work_counts();
+    let calls = 2 + 2 * draws;
+    let (by_thread, by_program) = (
+        counts.render_log_batches_by_thread,
+        counts.render_log_batches_by_program,
+    );
+    assert!(counts.render_log_waits >= 1, "{counts:?}");
+    assert!(by_thread >= 1, "{counts:?}");
+    assert_eq!(
+        by_thread + by_program,
+        calls.div_ceil(BATCH_CALLS) as u64,
+        "batches lowered"
     );
 }

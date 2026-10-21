@@ -25,7 +25,8 @@
 //! calibration reading ([`CALIBRATION_CALLS`]), as a completion turn makes them); a sampler, an
 //! occlusion query pool, a buffer in host-visible memory, mapped (and, where the device has device
 //! addresses, [`DEVICE_ADDRESS_CALLS`], its address read), and an image with their memory and
-//! views, a depth image, a render pass and a framebuffer, a descriptor set layout, a pipeline
+//! views, a depth image, a render pass of each form (`vkCreateRenderPass`, `vkCreateRenderPass2`)
+//! and a framebuffer, a descriptor set layout, a pipeline
 //! layout with a push constant range and a descriptor pool with a set written, and a compute
 //! pipeline made with a pipeline cache from a shader module, its stage specialized as the runtime's
 //! makings are ([`SPECIALIZED`]), whose data is read; a command buffer, recorded and never
@@ -962,7 +963,9 @@ impl Primer<'_> {
                 .initial_layout(vk::ImageLayout::UNDEFINED);
             let info = self.sharing.image(info);
             let image = device.create_image(&info, None).map_err(vulkan)?;
+            self.made(Call::CreateImage);
             let requirements = device.get_image_memory_requirements(image);
+            self.made(Call::GetImageMemoryRequirements);
             let memory = match self.allocate(requirements, vk::MemoryPropertyFlags::empty(), false)
             {
                 Ok(memory) => memory,
@@ -973,6 +976,7 @@ impl Primer<'_> {
             };
             self.hold(image);
             device.bind_image_memory(image, memory, 0).map_err(vulkan)?;
+            self.made(Call::BindImageMemory);
             let info = vk::ImageViewCreateInfo::default()
                 .image(image)
                 .view_type(vk::ImageViewType::TYPE_2D)
@@ -1039,7 +1043,32 @@ impl Primer<'_> {
                 .attachments(&attachments)
                 .subpasses(&subpasses);
             let render_pass = device.create_render_pass(&info, None).map_err(vulkan)?;
+            self.made(Call::CreateRenderPass);
             self.hold(render_pass);
+            // The same in `vkCreateRenderPass2`'s form, a render encoder's pass's
+            // (`render_target.rs`).
+            let attachments = [vk::AttachmentDescription2::default()
+                .format(format)
+                .samples(vk::SampleCountFlags::TYPE_1)
+                .load_op(vk::AttachmentLoadOp::DONT_CARE)
+                .store_op(vk::AttachmentStoreOp::DONT_CARE)
+                .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
+                .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
+                .initial_layout(vk::ImageLayout::UNDEFINED)
+                .final_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)];
+            let colors = [vk::AttachmentReference2::default()
+                .attachment(0)
+                .layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                .aspect_mask(vk::ImageAspectFlags::COLOR)];
+            let subpasses = [vk::SubpassDescription2::default()
+                .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
+                .color_attachments(&colors)];
+            let info = vk::RenderPassCreateInfo2::default()
+                .attachments(&attachments)
+                .subpasses(&subpasses);
+            let render_pass2 = device.create_render_pass2(&info, None).map_err(vulkan)?;
+            self.made(Call::CreateRenderPass2);
+            self.hold(render_pass2);
             let views = [view];
             let info = vk::FramebufferCreateInfo::default()
                 .render_pass(render_pass)
@@ -1048,6 +1077,7 @@ impl Primer<'_> {
                 .height(1)
                 .layers(1);
             let framebuffer = device.create_framebuffer(&info, None).map_err(vulkan)?;
+            self.made(Call::CreateFramebuffer);
             self.hold(framebuffer);
 
             // A compute pipeline with one storage buffer binding and a push constant range,
