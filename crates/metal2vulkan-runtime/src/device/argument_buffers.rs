@@ -22,7 +22,10 @@
 //! as 1,000,000 where `isTier2MetalArgumentBuffers()` (argument buffers in use on a tier-2 GPU),
 //! else as `maxPerStageDescriptorSampledImages`; and every Apple GPU a Mac has is tier 2, so on
 //! one the per-stage value means argument buffers are off. Measured on 1.4.1 on an Apple M3 Max:
-//! 1,000,000 (and 256 per stage) with the setting on, 128 and 128 with it off. Not from
+//! 1,000,000 (and 256 per stage) with the setting on, 128 and 128 with it off. 1.4.2's
+//! `initProperties`, `isTier2MetalArgumentBuffers` and `initMetalFeatures` are 1.4.1's on these
+//! (read in its source), and on an Apple M3 Max it reports 1,000,000 with the setting on and is
+//! refused with it off (`runtime_lane::degrade_notices`). Not from
 //! `pipelineCacheUUID`, whose argument-buffer bit `initPipelineCacheUUID` writes before
 //! `initMetalFeatures` sets the flag, so it is 1 either way (read in 1.4.1's source, and measured).
 //! Any other release, or another GPU's vendor, or limits of neither shape, is
@@ -44,7 +47,7 @@ pub(crate) const SETTING: &CStr = c"MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS";
 
 /// The MoltenVK releases (`driverVersion`, `major * 10000 + minor * 100 + patch`) whose
 /// `initProperties` and `initMetalFeatures` were read for the limits the module docs decode.
-pub(crate) const READ: &[u32] = &[10401];
+pub(crate) const READ: &[u32] = &[10401, 10402];
 
 /// `maxPerStageDescriptorUpdateAfterBindSampledImages` with tier-2 argument buffers in use, at
 /// each release [`READ`] lists (`1e6` in `initProperties`).

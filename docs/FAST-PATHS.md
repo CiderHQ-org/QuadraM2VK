@@ -189,7 +189,7 @@ recorded here.
   textures made once and 3.4-7.1 ms with new ones each frame, where images over the rows took
   3.0-6.1 and 4.6-8.6 ms. An ordinary buffer's packed rows avoid it.
 - **On MoltenVK, a texture over a buffer that renders or that blits write keeps a shadow.** MoltenVK
-  1.4.1 reports a format's linear-tiling attachment and blit-destination features from
+  1.4.1 and 1.4.2 report a format's linear-tiling attachment and blit-destination features from
   uninitialized memory, so no MoltenVK description states them
   (`DriverFact::LinearTilingFeaturesUninitialized`) and such a texture is a shadow
   (`shadowed-texture`).
@@ -332,8 +332,8 @@ driver's. Each is open work.
   announced as `DeviceSampleLevel`. An extended-range texture's such sample takes Vulkan's level of
   detail computed in the shader on every device, with the same note.
 - **An anisotropic cube sample on a `y` face through MoltenVK's vertex and fragment stages under
-  macOS 27.** SPIRV-Cross's `spvGradientCube`, which MoltenVK 1.4.1 applies, writes a `+Y` or `-Y`
-  face's gradients as `(d_x, d_z, d_x)`, so Metal loses the `z` gradient. The module hands such a
+  macOS 27.** SPIRV-Cross's `spvGradientCube`, which MoltenVK 1.4.1 and 1.4.2 apply, writes a
+  `+Y` or `-Y` face's gradients as `(d_x, d_z, d_x)`, so Metal loses the `z` gradient. The module hands such a
   face Metal's length of the two tangents on both (`CubeGradientRoute::AppleProjected`): isotropic
   samples, and every sample on the `x` and `z` faces, are Metal's, but an anisotropic one on a `y`
   face filters along the face's diagonal, announced as `CubeGradientFootprint`

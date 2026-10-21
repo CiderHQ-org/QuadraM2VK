@@ -26,7 +26,10 @@
 //! never a host's name), and [`DeviceDescription::measured_identity`] answers whether a description
 //! is one. A GPU that reports more than one `deviceID` is one device class under each: every table
 //! here names it by the ID it was measured under, and a description is read by its
-//! [`DeviceDescription::canonical_device_id`].
+//! [`DeviceDescription::canonical_device_id`]. A `deviceID` that names more than one GPU
+//! (MoltenVK's on Apple's GPUs is the macOS release and the GPU family) is one device class for
+//! every release measured on each of its GPUs; a release measured on one of them alone names that
+//! GPU by its `deviceName` (`NAMED_RELEASES`), and is no measured identity of the others.
 //! - **On a measured identity** a fact is taken where a row of its driver names the identity's
 //!   release (from the first through the last) and, where it names them, its vendor and GPU: as
 //!   measured.
@@ -78,15 +81,21 @@ pub(crate) enum Standing {
     },
 }
 
-/// The facts of `table` that the driver `driver` on GPU `device` of `vendor` has at release
-/// `version`, each with its standing; an unmeasured fact is absent. A `device` of `None` is a GPU
-/// no row names (`DeviceDescription::measured_gpu`): only the rows of every GPU hold for it.
+/// The facts of `table` that the driver `driver` on GPU `device` of `vendor`, named `name`
+/// (`VkPhysicalDeviceProperties::deviceName`), has at release `version`, each with its standing;
+/// an unmeasured fact is absent. A `device` of `None` is a GPU no row names
+/// (`DeviceDescription::measured_gpu`): only the rows of every GPU hold for it. Where `version` of
+/// the identity was measured on another GPU of it alone ([`NAMED_RELEASES`]), no row of its GPU
+/// that covers `version` holds, so the rows of earlier releases stand beyond their last; a `name`
+/// of `None` is put out by no named release.
 pub(crate) fn among<F: Copy + Ord>(
     table: &[Measured<F>],
     driver: Option<DriverId>,
     (vendor, device): (u32, Option<u32>),
     version: u32,
+    name: Option<&str>,
 ) -> BTreeMap<F, Standing> {
+    let out = name.is_some_and(|name| named_out(driver, (vendor, device), version, name));
     let mut facts = BTreeMap::new();
     for row in table {
         let ours = Some(row.driver) == driver
@@ -95,13 +104,22 @@ pub(crate) fn among<F: Copy + Ord>(
         if !ours || version < row.first {
             continue;
         }
+        if out && row.device.is_some() && version <= row.last {
+            continue;
+        }
         let standing = match version <= row.last {
             true => Standing::Measured,
             false => Standing::Beyond { last: row.last },
         };
-        // Two rows of one fact (a driver measured on two vendors) keep the better standing.
+        // Two rows of one fact (a driver measured on two vendors, or at two releases) keep the
+        // better standing: measured, else beyond the later last release measured.
         let kept = facts.entry(row.fact).or_insert(standing);
-        *kept = (*kept).min(standing);
+        *kept = match (*kept, standing) {
+            (Standing::Beyond { last: a }, Standing::Beyond { last: b }) => {
+                Standing::Beyond { last: a.max(b) }
+            }
+            _ => Standing::Measured,
+        };
     }
     facts
 }
@@ -468,6 +486,19 @@ pub(crate) fn among<F: Copy + Ord>(
 /// words in every slice and viewport quadrant, as a Metal probe of the same functions on the same
 /// GPU left them.
 ///
+/// MoltenVK 1.4.2 (its SPIRV-Cross `6c09849f`) on the M3 Max under macOS 27.0.1
+/// ([`moltenvk_142`]; 2026-10-21, the runtime lanes in release builds under `--cfg m2v_gpu`): every
+/// deviation of the 1.4.1 rows of [`APPLE_M4`]'s identity, each taken, passed the lanes that
+/// measured it (`driver_deviations`' lockstep, float function, denormal, half, minimum and
+/// maximum, cube gradient, fragment and vertex simdgroup checks, `color_writes`, `first_vertex`,
+/// `renders::public_render_cases_match_metal` and the authored cases against the M3 Max's Metal
+/// rows), and SPIRV-Cross's `spvGradientCube` is `adec7acb`'s. `MetalFullQuads` is 1.4.2's alone:
+/// 1.4.2 stops advertising `shaderQuadControl` on Apple's GPUs, and its SPIRV-Cross writes no
+/// mode for `RequireFullQuadsKHR` but hands the fragment function to Metal, whose quads keep their
+/// helpers; the lanes that took the feature before (`discard_counts`, `discard_hoist`,
+/// `helper_tangle`, `driver_deviations::fragment_simdgroup_lanes_are_metal_s` and the public
+/// render cases) answer Metal's with it.
+///
 /// Another driver has none of them, as Vulkan states, but a listed driver at a release outside
 /// its rows, or on another vendor's GPU (or another GPU than a row's), is unmeasured: the profile
 /// then takes each one's conservative route (`derive.rs`).
@@ -789,6 +820,33 @@ pub(crate) const DEVIATIONS: &[Measured<DriverDeviation>] = &[
     moltenvk_141(DriverDeviation::MetalDepth16BiasedStores),
     moltenvk_141(DriverDeviation::MetalInterpolation),
     moltenvk_141(DriverDeviation::MetalFirstVertexIndices),
+    moltenvk_142(DriverDeviation::SimdgroupLockstep),
+    moltenvk_142(DriverDeviation::MetalFloatFunctions),
+    moltenvk_142(DriverDeviation::MetalCanonicalNans),
+    moltenvk_142(DriverDeviation::MetalSampler),
+    moltenvk_142(DriverDeviation::CubeGradientRoute),
+    moltenvk_142(DriverDeviation::GraphicsCubeGradientTangents),
+    moltenvk_142(DriverDeviation::MetalColorWrites),
+    moltenvk_142(DriverDeviation::HalfColorOutputBits),
+    moltenvk_142(DriverDeviation::MetalHalfFma),
+    moltenvk_142(DriverDeviation::MetalFloatDenormals),
+    moltenvk_142(DriverDeviation::MetalHalfQuantize),
+    moltenvk_142(DriverDeviation::MetalHalfConversion),
+    moltenvk_142(DriverDeviation::MetalCenterVaryings),
+    moltenvk_142(DriverDeviation::MetalMinMax),
+    moltenvk_142(DriverDeviation::MetalHalfArithmetic),
+    moltenvk_142(DriverDeviation::MetalHalfStorageWrites),
+    moltenvk_142(DriverDeviation::MetalHalfStorageNans),
+    moltenvk_142(DriverDeviation::MetalFloatStorageNans),
+    moltenvk_142(DriverDeviation::MetalFragmentSimdgroups),
+    moltenvk_142(DriverDeviation::MetalVertexSimdgroups),
+    moltenvk_142(DriverDeviation::CenterFragCoordDepth),
+    moltenvk_142(DriverDeviation::MetalNormStorageWrites),
+    moltenvk_142(DriverDeviation::MetalDepth16Stores),
+    moltenvk_142(DriverDeviation::MetalDepth16BiasedStores),
+    moltenvk_142(DriverDeviation::MetalInterpolation),
+    moltenvk_142(DriverDeviation::MetalFirstVertexIndices),
+    moltenvk_142(DriverDeviation::MetalFullQuads),
 ];
 
 /// NVIDIA's `vendorID`.
@@ -870,6 +928,22 @@ const fn moltenvk_141(fact: DriverDeviation) -> Measured<DriverDeviation> {
         device: None,
         first: moltenvk(1, 4, 1),
         last: moltenvk(1, 4, 1),
+    }
+}
+
+/// The row of `fact` measured on MoltenVK 1.4.2 (`driverVersion` 10402, Homebrew's build, its
+/// SPIRV-Cross `6c09849f`) on the Apple M3 Max under macOS 27.0.1, whose `deviceID` is
+/// [`APPLE_M4`]'s: the identity [`MEASURED_DEVICES`] lists at that release, for the M3 Max alone
+/// ([`NAMED_RELEASES`]). The M4, which reports the same `deviceID` under macOS 27, is not measured
+/// at 1.4.2: its 1.4.1 rows stand beyond their last there.
+const fn moltenvk_142<F>(fact: F) -> Measured<F> {
+    Measured {
+        fact,
+        driver: DriverId::MOLTENVK,
+        vendor: Some(APPLE_VENDOR_ID),
+        device: Some(APPLE_M4),
+        first: moltenvk(1, 4, 2),
+        last: moltenvk(1, 4, 2),
     }
 }
 
@@ -1026,6 +1100,7 @@ pub(crate) fn defects(description: &DeviceDescription) -> BTreeSet<DriverWorkaro
         description.driver_id,
         (description.vendor_id, description.measured_gpu()),
         description.driver_version,
+        Some(&description.device_name),
     )
     .into_keys()
     .collect()
@@ -1038,7 +1113,53 @@ pub(crate) fn deviations(description: &DeviceDescription) -> BTreeMap<DriverDevi
         description.driver_id,
         (description.vendor_id, description.measured_gpu()),
         description.driver_version,
+        Some(&description.device_name),
     )
+}
+
+/// The releases of an identity measured on one GPU of it alone, where its `deviceID` names more
+/// than one GPU: the driver, `vendorID`, `deviceID` and `driverVersion`, and the measured GPU's
+/// `deviceName`. A row of the identity's GPU that covers the release holds there for that GPU
+/// alone ([`among`]'s rows, [`MEASURED`]'s); another GPU of the identity at the release is no
+/// measured identity ([`DeviceDescription::measured_identity`]), and the rows of earlier releases
+/// stand beyond their last for it.
+///
+/// MoltenVK 1.4.2 on the Apple9 family under macOS 27 ([`APPLE_M4`]'s identity): measured on the
+/// Apple M3 Max (macOS 27.0.1) alone; the Apple M4, measured at 1.4.1, is not at 1.4.2.
+pub(crate) const NAMED_RELEASES: &[NamedRelease] = &[NamedRelease {
+    driver: DriverId::MOLTENVK,
+    vendor: APPLE_VENDOR_ID,
+    device: APPLE_M4,
+    release: moltenvk(1, 4, 2),
+    gpu: "Apple M3 Max",
+}];
+
+/// One release of an identity measured on one GPU of it alone ([`NAMED_RELEASES`]).
+pub(crate) struct NamedRelease {
+    pub(crate) driver: DriverId,
+    pub(crate) vendor: u32,
+    pub(crate) device: u32,
+    pub(crate) release: u32,
+    /// The measured GPU's `VkPhysicalDeviceProperties::deviceName`.
+    pub(crate) gpu: &'static str,
+}
+
+/// Whether a GPU named `name` of `driver`, `vendor` and `device` (its measured `deviceID`) at
+/// `version` is another GPU than the one its identity's release was measured on
+/// ([`NAMED_RELEASES`]).
+fn named_out(
+    driver: Option<DriverId>,
+    (vendor, device): (u32, Option<u32>),
+    version: u32,
+    name: &str,
+) -> bool {
+    NAMED_RELEASES.iter().any(|r| {
+        Some(r.driver) == driver
+            && r.vendor == vendor
+            && Some(r.device) == device
+            && r.release == version
+            && r.gpu != name
+    })
 }
 
 /// A driver's measured answer where Vulkan leaves the result undefined, or its measured cost of
@@ -1999,6 +2120,50 @@ const DYNAMIC_RESTART_WARNING: DriverDiagnostic = DriverDiagnostic {
 /// Measured not to have it: RADV, Mesa 26.2.4 on the Radeon 780M, which passes the first but
 /// leaves 19 of the second's 495 bands wrong. Every other driver is unmeasured, and takes the
 /// barrier.
+///
+/// MoltenVK 1.4.2 on the M3 Max under macOS 27.0.1 ([`moltenvk_142`]; 2026-10-21, the runtime
+/// lanes in release builds under `--cfg m2v_gpu`, each fact taken):
+/// - Measured by the lane that measured its 1.4.1 row, which passed: `DepthImageKeepsDenormals`
+///   and `DepthImageKeepsValuesOutsideUnitRange`
+///   (`texture_blits::depth_images_keep_what_their_drivers_claim`, `depth_denormals`),
+///   `DepthTestKeepsDenormals` and `DepthTestComparesMagnitudes` (`depth_denormals`' stored
+///   depths, tested and compared as Metal's), `DepthStencilImagesLieApart`
+///   (`heap_textures::heap_depth_textures_keep_their_bytes_with_their_twins`),
+///   `DepthStencilImagesStayGpuOptimized`
+///   (`heap_textures::heap_textures_answer_and_place_as_metal_s_do`),
+///   `ColorResolveAverageIsMetals` (`resolve_rounding::color_resolves_against_metals_rules`),
+///   `SampledFetchRecoversCodes`
+///   (`mipmaps_exact::a_first_level_read_in_place_recovers_every_code`), `DynamicRestartWarns`
+///   (`restart`, `made_at_creation`: its warning withheld at each such pipeline's creation and
+///   nowhere else), `DontCareStoreIsMetals` (`dont_care_stores`, `kept_buffer_bytes`),
+///   `ColorBlockDecodeIsMetals` and `ChannelBlockDecodeIsMetals`
+///   (`compressed_decode::bc1_to_bc5_texels_read_as_metal_s`) and `TileStoreIsMetals`
+///   (`snorm_tile_store`).
+/// - `BlendlessColorAttachmentsWarn`, new at 1.4.2 (the fact's docs): where the release was
+///   unmeasured, the warning of each color attachment of a format the device cannot blend
+///   (`R32Uint`, `RGBA32Uint` and the rest) failed the runtime's `srgb_fetch_images` and about 25
+///   lanes; with the fact, none.
+/// - `TimestampsWaitForEveryQueue`, by the plain Vulkan program behind the fact (our upstream
+///   draft's): a 256-byte fill on a queue of another family, submitted just after a 30.7 ms
+///   dispatch, completed at 30.78 ms (median) in 40 of 40 rounds where both command buffers wrote
+///   timestamps after their work, and at 0.28 ms (1 of 40 held) where neither did; argument
+///   buffers on, as the runtime runs. `encodeTimestampStageCounterSamples` is 1.4.1's.
+/// - `TimestampPoolsAreCounterSampleBuffers` and `LinearTilingFeaturesUninitialized`, defect
+///   facts, read in 1.4.2's source as at 1.4.1:
+///   `MVKGPUCounterQueryPool::initMTLCounterSampleBuffer` makes each pool one counter sample
+///   buffer of its query count, and `MVKPhysicalDevice` still builds `_pixelFormats` (which reads
+///   `renderLinearTextures`) before `initMetalFeatures` sets it.
+/// - `Bc6hBlockDecodeIsMetals` and `Bc7BlockDecodeIsMetals`, by construction as at 1.4.1: 1.4.2's
+///   `MVKPixelFormats.mm` hands every BC format to Metal as Metal's own, line for line 1.4.1's.
+///
+/// Not extended to 1.4.2, so not taken there: `InterlockedPassSplitNoSlower`, a cost fact whose
+/// 1.4.1 timing needed a scratch build that keeps such a pass whole (its passes split there,
+/// announced, as on any unmeasured release); and `FillCompiledPerCommandPool`, whose wait our
+/// probe did not find: a command buffer of one `vkCmdFillBuffer`, the first in a fresh command
+/// pool, took 0.022 to 0.038 ms (median) in `vkQueueSubmit` beside one to eight threads making
+/// compute pipelines (91 and 496 made), as a `vkCmdUpdateBuffer` did, though
+/// `MVKCommandEncodingPool::getCmdFillBufferMTLComputePipelineState` is 1.4.1's (fills there take
+/// `vkCmdFillBuffer`).
 pub(crate) const MEASURED: &[Measured<DriverFact>] = &[
     Measured {
         fact: DriverFact::RobustIndexFetchReadsZero,
@@ -2552,6 +2717,25 @@ pub(crate) const MEASURED: &[Measured<DriverFact>] = &[
         first: mesa(26, 2, 4),
         last: mesa(26, 2, 4),
     },
+    moltenvk_142(DriverFact::DepthImageKeepsDenormals),
+    moltenvk_142(DriverFact::DepthImageKeepsValuesOutsideUnitRange),
+    moltenvk_142(DriverFact::DepthTestKeepsDenormals),
+    moltenvk_142(DriverFact::DepthTestComparesMagnitudes),
+    moltenvk_142(DriverFact::DepthStencilImagesLieApart),
+    moltenvk_142(DriverFact::ColorResolveAverageIsMetals),
+    moltenvk_142(DriverFact::DepthStencilImagesStayGpuOptimized),
+    moltenvk_142(DriverFact::SampledFetchRecoversCodes),
+    moltenvk_142(DriverFact::DynamicRestartWarns),
+    moltenvk_142(DriverFact::BlendlessColorAttachmentsWarn),
+    moltenvk_142(DriverFact::DontCareStoreIsMetals),
+    moltenvk_142(DriverFact::TimestampsWaitForEveryQueue),
+    moltenvk_142(DriverFact::TimestampPoolsAreCounterSampleBuffers),
+    moltenvk_142(DriverFact::LinearTilingFeaturesUninitialized),
+    moltenvk_142(DriverFact::ColorBlockDecodeIsMetals),
+    moltenvk_142(DriverFact::ChannelBlockDecodeIsMetals),
+    moltenvk_142(DriverFact::Bc6hBlockDecodeIsMetals),
+    moltenvk_142(DriverFact::Bc7BlockDecodeIsMetals),
+    moltenvk_142(DriverFact::TileStoreIsMetals),
 ];
 
 /// Intel's `vendorID`.
@@ -2594,6 +2778,12 @@ pub(crate) const MEASURED_DEVICES: &[MeasuredDevice] = &[
         vendor: APPLE_VENDOR_ID,
         device: APPLE_M4,
         release: moltenvk(1, 4, 1),
+    },
+    MeasuredDevice {
+        driver: DriverId::MOLTENVK,
+        vendor: APPLE_VENDOR_ID,
+        device: APPLE_M4,
+        release: moltenvk(1, 4, 2),
     },
     MeasuredDevice {
         driver: DriverId::MESA_LLVMPIPE,
@@ -2647,6 +2837,7 @@ impl DeviceDescription {
     /// ([`DriverFact::assumed_where_unmeasured`]). The runtime relies on an answer fact only where
     /// the driver has it, and elsewhere takes the exact path that needs none.
     pub fn driver_facts(&self) -> BTreeSet<DriverFact> {
+        // A measured identity is no GPU a named release puts out (`NAMED_RELEASES`).
         let measured = self.measured_identity();
         let gpu = self.measured_gpu();
         MEASURED
@@ -2674,7 +2865,13 @@ impl DeviceDescription {
     /// ([`DeviceDescription::assumed_unmeasured`]) is none.
     pub fn measured_identity(&self) -> bool {
         let gpu = self.measured_gpu();
-        MEASURED_DEVICES.iter().any(|m| {
+        let identity = (self.vendor_id, gpu);
+        !named_out(
+            self.driver_id,
+            identity,
+            self.driver_version,
+            &self.device_name,
+        ) && MEASURED_DEVICES.iter().any(|m| {
             Some(m.driver) == self.driver_id
                 && m.vendor == self.vendor_id
                 && Some(m.device) == gpu

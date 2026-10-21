@@ -612,6 +612,7 @@ pub(super) fn check_restricted(
     translated.driver_version = native.driver_version;
     translated.vendor_id = native.vendor_id;
     translated.device_id = native.device_id;
+    translated.device_name.clone_from(&native.device_name);
     translated.device_type = native.device_type;
     Ok(translated)
 }
@@ -687,12 +688,13 @@ fn kept_outside(expected: &Value, queried: &Value, native: &Value) -> Vec<Differ
 
 /// The members that name the device rather than describe its capabilities: `vk.xml` gives them
 /// `limittype="noauto"`, and the layer keeps them from the device ([`check_restricted`]).
-fn identity(description: &DeviceDescription) -> [(&'static str, String); 5] {
+fn identity(description: &DeviceDescription) -> [(&'static str, String); 6] {
     [
         ("driver_id", format!("{:?}", description.driver_id)),
         ("driver_version", description.driver_version.to_string()),
         ("vendor_id", description.vendor_id.to_string()),
         ("device_id", description.device_id.to_string()),
+        ("device_name", format!("{:?}", description.device_name)),
         ("device_type", format!("{:?}", description.device_type)),
     ]
 }
@@ -723,6 +725,7 @@ fn capability_members(description: &DeviceDescription) -> Value {
             "driver_version",
             "vendor_id",
             "device_id",
+            "device_name",
             "device_type",
             "assumed_unmeasured",
             "extensions",

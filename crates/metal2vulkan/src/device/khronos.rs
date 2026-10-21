@@ -338,6 +338,7 @@ impl Merged {
         desc.driver_version = p.u32("driverVersion")?;
         desc.vendor_id = p.u32("vendorID")?;
         desc.device_id = p.u32("deviceID")?;
+        desc.device_name = p.string("deviceName");
         desc.device_type = p.enum_value("deviceType", vk::PhysicalDeviceType::from_name)?;
         desc.limits = limits(&p, api_version, &self.extensions)?;
         desc.allocation = AllocationLimits::new(
@@ -536,6 +537,14 @@ struct Props<'a>(&'a BTreeMap<String, Value>);
 impl Props<'_> {
     fn get(&self, name: &str) -> Option<&Value> {
         self.0.get(name)
+    }
+
+    /// The string member `name`, empty where absent or not a string.
+    fn string(&self, name: &str) -> String {
+        self.get(name)
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned()
     }
 
     fn u64_or(&self, name: &str, absent: u64) -> Result<u64, Error> {

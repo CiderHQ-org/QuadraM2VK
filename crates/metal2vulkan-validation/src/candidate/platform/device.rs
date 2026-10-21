@@ -2224,6 +2224,10 @@ unsafe fn describe_formats(
     identity.driver_version = core.driver_version;
     identity.vendor_id = core.vendor_id;
     identity.device_id = core.device_id;
+    identity.device_name = core
+        .device_name_as_c_str()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
     let unreliable = identity.unreliable_linear_tiling().as_raw();
     let mut formats = serde_json::Map::new();
     for &format in mvk::Format::KNOWN {

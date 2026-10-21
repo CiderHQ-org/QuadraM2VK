@@ -28,7 +28,7 @@ fn a_fact_holds_from_the_first_release_measured_and_past_the_last_as_beyond() {
         last: mesa(26, 2, 6),
     };
     let at = |table: &[Measured<u8>], driver, vendor, version| {
-        among(table, driver, (vendor, Some(0x1A06_0209)), version)
+        among(table, driver, (vendor, Some(0x1A06_0209)), version, None)
             .get(&1)
             .copied()
     };
@@ -78,7 +78,7 @@ fn a_fact_holds_from_the_first_release_measured_and_past_the_last_as_beyond() {
     };
     assert_eq!(at(&[one_gpu], mvk, APPLE, 10401), Some(Standing::Measured));
     assert_eq!(
-        among(&[one_gpu], mvk, (APPLE, Some(0x1B00_0209)), 10401).get(&1),
+        among(&[one_gpu], mvk, (APPLE, Some(0x1B00_0209)), 10401, None).get(&1),
         None
     );
     // Two rows: the later measurement covers what the earlier left beyond.
@@ -91,6 +91,13 @@ fn a_fact_holds_from_the_first_release_measured_and_past_the_last_as_beyond() {
         at(&[apple, later], mvk, APPLE, moltenvk(1, 4, 2)),
         Some(Standing::Measured)
     );
+    // Past both, in either order, it names the later of their last releases.
+    for table in [[apple, later], [later, apple]] {
+        assert_eq!(
+            at(&table, mvk, APPLE, moltenvk(1, 4, 3)),
+            Some(Standing::Beyond { last: 10402 })
+        );
+    }
     // The encodings, as the committed profiles state their releases.
     assert_eq!(nvidia(615, 71, 9), 2_580_660_800);
     assert_eq!(mesa(26, 2, 4), 109_060_100);
@@ -228,6 +235,7 @@ fn taken(p: &crate::device::DeviceProfile) -> Vec<crate::error::DriverDeviation>
             D::MetalFirstVertexIndices,
             property(VkProperty::MetalFirstVertexIndices),
         ),
+        (D::MetalFullQuads, property(VkProperty::MetalFullQuads)),
     ]
     .into_iter()
     .inspect(|&(d, taken)| {
@@ -441,14 +449,44 @@ fn the_profile_takes_the_deviations_its_driver_release_is_measured_with() {
         graphics: CubeGradientRoute::Unmeasured,
         compute: CubeGradientRoute::Unmeasured,
     };
-    // A later release: taken, and listed with the last release measured.
-    let mut later = m4.clone();
-    later.driver_version = moltenvk(1, 4, 2);
-    let p = profile_of(later);
+    // MoltenVK 1.4.2 on the GPU of the identity measured there (the M3 Max under macOS 27.0.1,
+    // `NAMED_RELEASES`): each measured again, and its full quads, none past its measurement.
+    let mut all_142 = all.clone();
+    all_142.push(D::MetalFullQuads);
+    let mut m3_142 = super::profile("moltenvk-m3");
+    m3_142.driver_version = moltenvk(1, 4, 2);
+    assert_eq!(m3_142.device_name, "Apple M3 Max");
+    let p = profile_of(m3_142);
+    assert_eq!(taken(&p), all_142);
+    assert!(p.fields().deviations_beyond.is_empty());
+    assert!(!centered(&p));
+    // The M4, the identity's other GPU, at 1.4.2: not measured there, so its 1.4.1 rows past
+    // their measurement, and no full quads.
+    let mut m4_142 = m4.clone();
+    m4_142.driver_version = moltenvk(1, 4, 2);
+    assert_eq!(m4_142.device_name, "Apple M4");
+    let p = profile_of(m4_142);
     assert_eq!(taken(&p), all);
     let beyond: BTreeMap<D, u32> = all.iter().map(|&d| (d, 10401)).collect();
     assert_eq!(p.fields().deviations_beyond, beyond);
+    // A later release, on either GPU of the identity: taken, and listed with the last release
+    // measured.
+    let mut later = m4.clone();
+    later.driver_version = moltenvk(1, 4, 3);
+    let p = profile_of(later);
+    assert_eq!(taken(&p), all_142);
+    let beyond: BTreeMap<D, u32> = all_142.iter().map(|&d| (d, 10402)).collect();
+    assert_eq!(p.fields().deviations_beyond, beyond);
     assert!(!centered(&p));
+    // Another Apple identity at 1.4.2 (the M3 Max under macOS 26.7): its 1.4.1 rows, past their
+    // measurement.
+    let mut m3_macos26_142 = super::profile("moltenvk-m3");
+    m3_macos26_142.device_id = crate::device::driver_facts::APPLE_M3_MAX;
+    m3_macos26_142.driver_version = moltenvk(1, 4, 2);
+    let p = profile_of(m3_macos26_142);
+    assert_eq!(taken(&p), m3_max);
+    let beyond: BTreeMap<D, u32> = m3_max.iter().map(|&d| (d, 10401)).collect();
+    assert_eq!(p.fields().deviations_beyond, beyond);
     // An earlier release, and another vendor's GPU: none, the cube routes unmeasured.
     let mut earlier = m4.clone();
     earlier.driver_version = moltenvk(1, 4, 0);
@@ -740,7 +778,7 @@ fn an_unmeasured_identity_takes_its_drivers_defects_alone() {
     assert!(desc.measured_identity());
     assert!(desc.driver_facts().contains(&SPLIT));
     assert!(desc.driver_facts().contains(&FETCH));
-    for release in [10402, 10400] {
+    for release in [10403, 10400] {
         desc.driver_version = release;
         assert!(!desc.measured_identity());
         assert_eq!(
@@ -887,9 +925,10 @@ fn a_gpu_under_another_of_its_device_ids_takes_its_measured_rows() {
 }
 
 /// The identities measured whose venue has no committed profile: the RTX 3090 (gem10) at NVIDIA's
-/// 615.71.09, lavapipe at Mesa 26.2.4 (the Linux venues' own lavapipe), and the M3 Max under macOS
-/// 26.7 at MoltenVK 1.4.1 (its venue's capture is now macOS 27's, the M4's identity).
-const MEASURED_WITHOUT_PROFILE: [(DriverId, u32, u32, u32); 3] = [
+/// 615.71.09, lavapipe at Mesa 26.2.4 (the Linux venues' own lavapipe), the M3 Max under macOS
+/// 26.7 at MoltenVK 1.4.1 (its venue's capture is now macOS 27's, the M4's identity), and the M3
+/// Max under macOS 27.0.1 at MoltenVK 1.4.2 (its venue's capture is 1.4.1's).
+const MEASURED_WITHOUT_PROFILE: [(DriverId, u32, u32, u32); 4] = [
     (
         DriverId::NVIDIA_PROPRIETARY,
         0x10de,
@@ -902,6 +941,12 @@ const MEASURED_WITHOUT_PROFILE: [(DriverId, u32, u32, u32); 3] = [
         APPLE,
         crate::device::driver_facts::APPLE_M3_MAX,
         moltenvk(1, 4, 1),
+    ),
+    (
+        DriverId::MOLTENVK,
+        APPLE,
+        crate::device::driver_facts::APPLE_M4,
+        moltenvk(1, 4, 2),
     ),
 ];
 
@@ -919,7 +964,7 @@ fn a_driver_that_lays_depth_images_apart_holds_no_depth_twin() {
     );
     for row in apart {
         let gpu = (row.vendor.unwrap_or(APPLE), Some(row.device.unwrap_or(0)));
-        let facts = among(MEASURED, Some(row.driver), gpu, row.first);
+        let facts = among(MEASURED, Some(row.driver), gpu, row.first, None);
         assert!(
             facts.contains_key(&DENORMALS) && facts.contains_key(&OUTSIDE),
             "{:?} from {:#x} lays depth images apart but may lose a depth texel: {facts:?}",
@@ -961,18 +1006,19 @@ fn nvidia_s_semaphore_stall_holds_on_the_gpus_measured() {
 }
 
 /// MoltenVK's warning of a pipeline whose restart may be disabled (`MVKPipeline.mm` lines 881-893
-/// at 1.4.1) is the diagnostic of a pipeline that makes the restart dynamic with its topology
-/// dynamic or a strip or fan, exactly as the driver reports it; no other pipeline's, and no other
-/// fact's. It is measured on MoltenVK 1.4.1 alone, on any GPU: 1.4.0 and 1.4.2 relay it, as does
-/// any other driver at 1.4.1's `driverVersion`.
+/// at 1.4.1, 883-895 at 1.4.2) is the diagnostic of a pipeline that makes the restart dynamic with
+/// its topology dynamic or a strip or fan, exactly as the driver reports it; no other pipeline's,
+/// and no other fact's. It is measured on MoltenVK 1.4.1, on any GPU, and on 1.4.2 on the measured
+/// identity: 1.4.0 and 1.4.3 relay it, as does any other driver at 1.4.1's `driverVersion`.
 #[test]
-fn moltenvk_1_4_1_warns_of_a_pipeline_whose_restart_is_dynamic() {
+fn moltenvk_warns_of_a_pipeline_whose_restart_is_dynamic() {
     use crate::device::DriverDiagnostic;
     use crate::vk::{DynamicState as D, PrimitiveTopology as T};
     let warning = DriverDiagnostic {
         id_name: "mvk-warn",
         id: 0,
-        text: "VK_ERROR_FEATURE_NOT_PRESENT: Metal does not support disabling primitive restart.",
+        text: "VK_ERROR_FEATURE_NOT_PRESENT: Metal does not support disabling primitive restart."
+            .into(),
     };
     let both = [D::PRIMITIVE_TOPOLOGY, D::PRIMITIVE_RESTART_ENABLE];
     let restart = [D::CULL_MODE, D::PRIMITIVE_RESTART_ENABLE];
@@ -989,28 +1035,45 @@ fn moltenvk_1_4_1_warns_of_a_pipeline_whose_restart_is_dynamic() {
         (&[], T::TRIANGLE_STRIP, false),
         (&[D::CULL_MODE], T::LINE_STRIP, false),
     ];
+    let blendless = [crate::vk::Format::R32_UINT];
     for (dynamic, top, warns) in cases {
         assert_eq!(
-            RESTART.pipeline_creation_diagnostic(dynamic, top),
-            warns.then_some(warning),
+            RESTART.pipeline_creation_diagnostics(dynamic, top, &blendless),
+            warns
+                .then(|| warning.clone())
+                .into_iter()
+                .collect::<Vec<_>>(),
             "{dynamic:?} {top:?}"
         );
         for other in [ZERO, DENORMALS, FETCH, SPLIT] {
-            assert_eq!(other.pipeline_creation_diagnostic(dynamic, top), None);
+            assert!(other
+                .pipeline_creation_diagnostics(dynamic, top, &blendless)
+                .is_empty());
         }
     }
-    let rows: Vec<_> = MEASURED.iter().filter(|row| row.fact == RESTART).collect();
-    assert_eq!(rows.len(), 1);
-    let row = rows[0];
+    let rows: Vec<_> = MEASURED
+        .iter()
+        .filter(|row| row.fact == RESTART)
+        .map(|row| (row.driver, row.vendor, row.device, row.first, row.last))
+        .collect();
     assert_eq!(
-        (row.driver, row.vendor, row.device, row.first, row.last),
-        (
-            DriverId::MOLTENVK,
-            None,
-            None,
-            moltenvk(1, 4, 1),
-            moltenvk(1, 4, 1)
-        )
+        rows,
+        [
+            (
+                DriverId::MOLTENVK,
+                None,
+                None,
+                moltenvk(1, 4, 1),
+                moltenvk(1, 4, 1)
+            ),
+            (
+                DriverId::MOLTENVK,
+                Some(APPLE),
+                Some(crate::device::driver_facts::APPLE_M4),
+                moltenvk(1, 4, 2),
+                moltenvk(1, 4, 2)
+            ),
+        ]
     );
     let text = std::fs::read_to_string(
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -1018,13 +1081,92 @@ fn moltenvk_1_4_1_warns_of_a_pipeline_whose_restart_is_dynamic() {
     )
     .expect("moltenvk-m3");
     let mut desc = DeviceDescription::from_khronos_json(&text, None).expect("profile parses");
-    for (version, has) in [(10400, false), (10401, true), (10402, false)] {
+    for (version, has) in [(10400, false), (10401, true), (10402, true), (10403, false)] {
         desc.driver_version = version;
         assert_eq!(desc.driver_facts().contains(&RESTART), has, "{version}");
     }
     desc.driver_version = 10401;
     desc.driver_id = Some(DriverId::MESA_LLVMPIPE);
     assert!(!desc.driver_facts().contains(&RESTART));
+}
+
+/// MoltenVK 1.4.2 on the Apple9 family under macOS 27 was measured on the M3 Max alone
+/// (`NAMED_RELEASES`): the M3 Max's capture at 1.4.2 is a measured identity and takes the
+/// release's facts; the M4's, which reports the same `deviceID`, is not and takes none of them,
+/// nor does a GPU of no name; at 1.4.1 both are measured.
+#[test]
+fn moltenvk_1_4_2_is_measured_on_the_m3_max_alone() {
+    let m3 = super::profile("moltenvk-m3");
+    let m4 = super::profile("moltenvk-m4");
+    assert_eq!(
+        (m3.device_id, m3.driver_version),
+        (m4.device_id, m4.driver_version)
+    );
+    for (mut d, at_142) in [(m3.clone(), true), (m4, false)] {
+        assert!(d.measured_identity(), "{}", d.device_name);
+        d.driver_version = moltenvk(1, 4, 2);
+        assert_eq!(d.measured_identity(), at_142, "{}", d.device_name);
+        let blend = d
+            .driver_facts()
+            .contains(&DriverFact::BlendlessColorAttachmentsWarn);
+        assert_eq!(blend, at_142, "{}", d.device_name);
+    }
+    let mut nameless = m3;
+    nameless.driver_version = moltenvk(1, 4, 2);
+    nameless.device_name.clear();
+    assert!(!nameless.measured_identity());
+}
+
+/// MoltenVK 1.4.2's warning of a color attachment whose format cannot blend
+/// (`MVKPipeline.mm`'s `addFragmentOutputToPipeline` at 1.4.2), whether the pipeline blends it
+/// or not, is one diagnostic for each such format, named as the registry names it, exactly as the
+/// driver reports it; none for a pipeline without such an attachment, and none of another fact.
+/// It is measured on 1.4.2 on the M3 Max alone: 1.4.1, which has no such warning, and 1.4.3 relay
+/// it.
+#[test]
+fn moltenvk_1_4_2_warns_of_each_color_attachment_it_cannot_blend() {
+    use crate::device::DriverDiagnostic;
+    use crate::vk::{Format as F, PrimitiveTopology as T};
+    const BLEND: DriverFact = DriverFact::BlendlessColorAttachmentsWarn;
+    let warning = |name: &str| DriverDiagnostic {
+        id_name: "mvk-warn",
+        id: 0,
+        text: format!(
+            "VK_ERROR_FEATURE_NOT_PRESENT: Blending is enabled for attachment with format {name}, \
+             which does not support it."
+        )
+        .into(),
+    };
+    let blendless = [F::R32_UINT, F::E5B9G9R9_UFLOAT_PACK32];
+    assert_eq!(
+        BLEND.pipeline_creation_diagnostics(&[], T::TRIANGLE_LIST, &blendless),
+        [
+            warning("VK_FORMAT_R32_UINT"),
+            warning("VK_FORMAT_E5B9G9R9_UFLOAT_PACK32")
+        ]
+    );
+    // The text MoltenVK 1.4.2 reported for `R32_UINT` on the M3 Max (2026-10-21).
+    assert_eq!(
+        warning("VK_FORMAT_R32_UINT").text,
+        "VK_ERROR_FEATURE_NOT_PRESENT: Blending is enabled for attachment with format \
+         VK_FORMAT_R32_UINT, which does not support it."
+    );
+    assert!(BLEND
+        .pipeline_creation_diagnostics(&[], T::TRIANGLE_STRIP, &[])
+        .is_empty());
+    assert!(RESTART
+        .pipeline_creation_diagnostics(&[], T::TRIANGLE_LIST, &blendless)
+        .is_empty());
+    let text = std::fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../metal2vulkan-validation/profiles/moltenvk-m3.json"),
+    )
+    .expect("moltenvk-m3");
+    let mut desc = DeviceDescription::from_khronos_json(&text, None).expect("profile parses");
+    for (version, has) in [(10401, false), (10402, true), (10403, false)] {
+        desc.driver_version = version;
+        assert_eq!(desc.driver_facts().contains(&BLEND), has, "{version}");
+    }
 }
 
 /// A description leaves out of every format's linear tiling the features its driver reports from

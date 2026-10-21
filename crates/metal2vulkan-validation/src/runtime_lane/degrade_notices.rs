@@ -568,16 +568,13 @@ fn every_kind_has_a_site_a_lane_test_takes() {
 /// ([`moltenvk_argument_buffers_are_announced_where_unread_and_refused_off`]).
 const ARGUMENT_BUFFERS: [Degradation; 1] = [Degradation::MoltenVkArgumentBuffersUnread];
 
-/// The MoltenVK release (`driverVersion`) whose argument-buffer state the runtime reads: 1.4.1.
-const ARGUMENT_BUFFERS_READ: u32 = 10401;
-
 /// A device opens announcing [`ARGUMENT_BUFFERS`] exactly where it is MoltenVK and its
-/// argument-buffer state is not read: a release other than 1.4.1, or 1.4.1 whose
+/// argument-buffer state is not read: a release other than 1.4.1 and 1.4.2, or one of them whose
 /// `maxPerStageDescriptorUpdateAfterBindSampledImages` is neither 1,000,000 (argument buffers on)
-/// nor, on an Apple GPU, the per-stage limit (off). Every lane venue's MoltenVK is 1.4.1 on an
-/// Apple GPU with argument buffers on, so no venue announces it today; each checks the rule on its
-/// own device. On MoltenVK (the M3 and M4 venues) a device opened with the consumer's own layer
-/// setting `MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS` false, which MoltenVK applies after the
+/// nor, on an Apple GPU, the per-stage limit (off). Every lane venue's MoltenVK is 1.4.1 or 1.4.2
+/// on an Apple GPU with argument buffers on, so no venue announces it today; each checks the rule
+/// on its own device. On MoltenVK (the M3 and M4 venues) a device opened with the consumer's own
+/// layer setting `MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS` false, which MoltenVK applies after the
 /// runtime's, is refused at device open, `Error::DriverSetting(MoltenVkArgumentBuffersOff)`, with
 /// nothing for the validation layer to report.
 #[test]
@@ -591,7 +588,7 @@ fn moltenvk_argument_buffers_are_announced_where_unread_and_refused_off() {
         let limits = &description.limits;
         let moltenvk = description.driver_id == Some(DriverId::MOLTENVK);
         let uab = limits.max_per_stage_descriptor_update_after_bind_sampled_images;
-        let read = description.driver_version == ARGUMENT_BUFFERS_READ
+        let read = super::MOLTENVK_ARGUMENT_BUFFERS_READ.contains(&description.driver_version)
             && (uab == 1_000_000
                 || (description.vendor_id == 0x106b
                     && uab == limits.max_per_stage_descriptor_sampled_images));

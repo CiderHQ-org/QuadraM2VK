@@ -131,8 +131,12 @@ const WAIT: Duration = Duration::from_secs(30);
 /// The tries of a storm whose busy work changed speed under it.
 const TRIES: usize = 3;
 
-/// The MoltenVK release (`driverVersion`) whose encoding [`moltenvk_fences`] was read at: 1.4.1.
-const MOLTENVK_READ: u32 = 10401;
+/// The MoltenVK releases (`driverVersion`) whose encoding [`moltenvk_fences`] was read at: 1.4.1,
+/// and 1.4.2, whose fence code (`barrierWait`, `barrierUpdate`, `syncFences` and the residency
+/// set's making) is 1.4.1's, measured by this lane on the M3 Max under macOS 27.0.1 (a light
+/// burst's median 1.93 busy command buffers judged against Metal's unfenced storm, as the fenced
+/// probe's 1.91 to 1.95).
+const MOLTENVK_READ: [u32; 2] = [10401, 10402];
 
 /// `maxPerStageDescriptorUpdateAfterBindSampledImages` where MoltenVK binds through tier-2 Metal
 /// argument buffers (`device/argument_buffers.rs` reads it so at [`MOLTENVK_READ`]).
@@ -146,7 +150,7 @@ const TIER_2_ARGUMENT_BUFFERS: u32 = 1_000_000;
 fn moltenvk_fences(device: &Device) -> bool {
     let description = &device.properties().description;
     description.driver_id == Some(DriverId::MOLTENVK)
-        && description.driver_version == MOLTENVK_READ
+        && MOLTENVK_READ.contains(&description.driver_version)
         && description.vendor_id == 0x106b
         && description
             .limits

@@ -945,6 +945,10 @@ impl DeviceDescription {
         desc.driver_version = props.driver_version;
         desc.vendor_id = props.vendor_id;
         desc.device_id = props.device_id;
+        desc.device_name = props
+            .device_name_as_c_str()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
         desc.device_type = Some(props.device_type.into());
         desc.driver_id = Some(properties.v12.driver_id.into());
         desc.extensions = exposure

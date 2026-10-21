@@ -692,7 +692,8 @@ degradations! {
         /// A command buffer's GPU times on a device told to answer them from the host
         /// (`DeviceOptions::gpu_times_from_host`, `RawDevice::gpu_times_from_host`), or whose
         /// driver's timestamps wait for every queue's (`DriverFact::TimestampsWaitForEveryQueue`:
-        /// MoltenVK 1.4.1 on Apple's GPUs), which writes no GPU timestamps (`gpu_time.rs`). Every
+        /// MoltenVK 1.4.1 on Apple's GPUs, 1.4.2 on the M3 Max), which writes no GPU timestamps
+        /// (`gpu_time.rs`). Every
         /// answer is one Metal could give: seconds of Metal's clock (`mach_absolute_time`'s, on
         /// macOS); its commit, kernel start, kernel end, GPU start, GPU end and the moment its
         /// completion is observable in that order; and a queue's command buffers one after
@@ -1538,9 +1539,10 @@ degradations! {
              differs";
         /// A texture of a BC1 to BC5 format (`BC1_RGBA` to `BC5_RGSnorm`, the sRGB forms too)
         /// made on a device whose driver is not measured to decode their texels as Metal does
-        /// (BC1 to BC3 `DriverFact::ColorBlockDecodeIsMetals`: MoltenVK 1.4.1 on Apple's GPUs,
-        /// RADV from Mesa 26.2.4 on the 780M; BC4 and BC5 `DriverFact::ChannelBlockDecodeIsMetals`:
-        /// MoltenVK 1.4.1 on Apple's GPUs). Only a texture without a decoded twin
+        /// (BC1 to BC3 `DriverFact::ColorBlockDecodeIsMetals`: MoltenVK 1.4.1 on Apple's GPUs
+        /// and 1.4.2 on the M3 Max, RADV from Mesa 26.2.4 on the 780M; BC4 and BC5
+        /// `DriverFact::ChannelBlockDecodeIsMetals`: MoltenVK 1.4.1 on Apple's GPUs and 1.4.2 on
+        /// the M3 Max). Only a texture without a decoded twin
         /// (`decoded-block-twin`): one over the caller's host pages or laid out apart from a heap's
         /// bytes, a memoryless or sparse texture, one over a surface or the caller's image, one
         /// whose twin's format the device cannot sample, filter and copy into.

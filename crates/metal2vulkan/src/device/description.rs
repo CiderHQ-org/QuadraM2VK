@@ -31,6 +31,12 @@ pub struct DeviceDescription {
     pub driver_version: u32,
     pub vendor_id: u32,
     pub device_id: u32,
+    /// `VkPhysicalDeviceProperties::deviceName`. No translation reads it but through the tables
+    /// keyed on a measured GPU, where a `deviceID` names more than one GPU: MoltenVK's on Apple's
+    /// GPUs is the macOS release and the GPU family, so a release measured on one GPU of such an
+    /// identity names that GPU by its name (`driver_facts`). Empty where unknown.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub device_name: String,
     pub device_type: Option<vk::PhysicalDeviceType>,
     /// Enabled device extensions the core consumes.
     pub extensions: BTreeSet<VkExtension>,
@@ -179,6 +185,7 @@ impl DeviceDescription {
             driver_version: 0,
             vendor_id: 0,
             device_id: 0,
+            device_name: String::new(),
             device_type: None,
             extensions: BTreeSet::new(),
             features: BTreeSet::new(),

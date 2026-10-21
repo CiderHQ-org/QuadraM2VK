@@ -495,6 +495,7 @@ fn fingerprints_distinguish_committed_profiles() {
     let translated = |stem: &str| {
         let mut d = profile(stem);
         (d.vendor_id, d.device_id, d.driver_version, d.device_type) = (0, 0, 0, None);
+        d.device_name.clear();
         d.allocation = AllocationLimits::default();
         d
     };

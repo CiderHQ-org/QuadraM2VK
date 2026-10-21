@@ -366,6 +366,7 @@ fn a_restricted_context_runs_only_on_a_device_that_has_and_reports_its_profile()
     queried.driver_version = native.driver_version;
     queried.vendor_id = native.vendor_id;
     queried.device_id = native.device_id;
+    queried.device_name.clone_from(&native.device_name);
     queried.device_type = native.device_type;
     queried.float_controls.denorm_independence = native.float_controls.denorm_independence;
     queried.float_controls.rounding_independence = native.float_controls.rounding_independence;
@@ -385,6 +386,7 @@ fn a_restricted_context_runs_only_on_a_device_that_has_and_reports_its_profile()
     translated.driver_version = native.driver_version;
     translated.vendor_id = native.vendor_id;
     translated.device_id = native.device_id;
+    translated.device_name.clone_from(&native.device_name);
     translated.device_type = native.device_type;
     assert_ne!(translated.driver_id, profile.driver_id);
     assert_eq!(check(&native, &tools, &queried), Ok(translated.clone()));
@@ -841,6 +843,7 @@ fn the_layer_reports_the_device_value_of_a_member_a_requirements_document_omits(
     queried.driver_version = native.driver_version;
     queried.vendor_id = native.vendor_id;
     queried.device_id = native.device_id;
+    queried.device_name.clone_from(&native.device_name);
     queried.device_type = native.device_type;
     queried.float_controls.denorm_independence = native.float_controls.denorm_independence;
     queried.float_controls.rounding_independence = native.float_controls.rounding_independence;

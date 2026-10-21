@@ -199,10 +199,13 @@ MoltenVK's `device_id` is the macOS release and the Apple GPU family, so the M3 
 one under macOS 27 and a macOS release not measured is another identity), never on a claim of the
 description itself. A GPU that reports more than one `device_id` is read by the one it was measured
 under (`DeviceDescription::canonical_device_id`): the Radeon 780M of Hawk Point (`0x1900`) as
-Phoenix's (`0x15bf`), at the releases measured there. These are `DriverDeviation`s (simdgroups that run in lockstep, Metal's own
-`float` functions, sampler and canonical NaNs, color writes, ...), measured on MoltenVK 1.4.1 on
-Apple's M3 Max and M4, with a few per-GPU facts measured elsewhere. A driver,
-GPU or release that was not measured takes the conservative, exact route. A newer MoltenVK release
+Phoenix's (`0x15bf`), at the releases measured there. A release measured on one GPU of a shared
+`device_id` alone names that GPU by its `device_name`: MoltenVK 1.4.2 under macOS 27 was measured
+on the M3 Max, so the M4 at 1.4.2 is no measured identity. These are `DriverDeviation`s (simdgroups
+that run in lockstep, Metal's own `float` functions, sampler and canonical NaNs, color writes,
+...), measured on MoltenVK 1.4.1 on Apple's M3 Max and M4 and on MoltenVK 1.4.2 on the M3 Max,
+with a few per-GPU facts measured elsewhere. A driver, GPU or release that was not measured takes
+the conservative, exact route. A newer MoltenVK release
 takes the measured facts and records `PrecisionNote::BeyondMeasuredDeviation`.
 
 Metal semantics the translation keeps on every device, beyond Vulkan's: Metal's 32-lane
@@ -1417,10 +1420,11 @@ fast forms record, and each `PrecisionNote`'s rustdoc states its bound.
 - `metal2vulkan-degrade-gpu-times-from-host` (precision). `GpuTimesFromHost`: A command buffer's GPU
   times on a device told to answer them from the host (`DeviceOptions::gpu_times_from_host`,
   `RawDevice::gpu_times_from_host`), or whose driver's timestamps wait for every queue's
-  (`DriverFact::TimestampsWaitForEveryQueue`: MoltenVK 1.4.1 on Apple's GPUs), which writes no GPU
-  timestamps. Cost: its GPU start is its kernel end time (or its queue's latest GPU end before it)
-  and its GPU end the host time the runtime saw it complete: a window its work ran in, which holds
-  the submission's and the completion's latencies, not the GPU's own start and end.
+  (`DriverFact::TimestampsWaitForEveryQueue`: MoltenVK 1.4.1 on Apple's GPUs, 1.4.2 on the M3
+  Max), which writes no GPU timestamps. Cost: its GPU start is its kernel end time (or its queue's
+  latest GPU end before it) and its GPU end the host time the runtime saw it complete: a window its
+  work ran in, which holds the submission's and the completion's latencies, not the GPU's own start
+  and end.
 - `metal2vulkan-degrade-device-rounded-resolve` (precision). `DeviceRoundedResolve`: A multisample
   color resolve averages through Vulkan's `AVERAGE` mode, which leaves the rounding of the average
   (and the sRGB encoding) to the device, on a device not measured to round as Metal does: under
@@ -1988,8 +1992,9 @@ fast forms record, and each `PrecisionNote`'s rustdoc states its bound.
 - `metal2vulkan-degrade-compressed-texel-decode` (precision). `CompressedTexelDecode`: A texture of
   a BC1 to BC5 format (`BC1_RGBA` to `BC5_RGSnorm`, the sRGB forms too) made on a device whose
   driver is not measured to decode their texels as Metal does (BC1 to BC3
-  `DriverFact::ColorBlockDecodeIsMetals`: MoltenVK 1.4.1 on Apple's GPUs, RADV from Mesa 26.2.4 on
-  the 780M; BC4 and BC5 `DriverFact::ChannelBlockDecodeIsMetals`: MoltenVK 1.4.1 on Apple's GPUs).
+  `DriverFact::ColorBlockDecodeIsMetals`: MoltenVK 1.4.1 on Apple's GPUs and 1.4.2 on the M3 Max,
+  RADV from Mesa 26.2.4 on the 780M; BC4 and BC5 `DriverFact::ChannelBlockDecodeIsMetals`: MoltenVK
+  1.4.1 on Apple's GPUs and 1.4.2 on the M3 Max).
   Cost: a read, sample or gather of its texels answers the device's decode of its blocks (an sRGB
   form's code through Metal's table), where Metal interpolates with 6-bit weights: NVIDIA's
   (615.71.09, the RTX 3090 and RTX 5080 Laptop GPU) answers a BC1 to BC3 channel up to 3/255 off

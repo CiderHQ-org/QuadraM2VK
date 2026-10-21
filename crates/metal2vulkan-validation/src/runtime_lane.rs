@@ -1062,6 +1062,11 @@ fn driver_keeps_pipeline_cache(device: &Device) -> bool {
     binary.internal_cache_control != vk::TRUE
 }
 
+/// The MoltenVK releases (`driverVersion`) whose argument-buffer state the runtime reads from
+/// their limits: 1.4.1 and 1.4.2, the releases whose source sets those limits as the runtime reads
+/// them.
+pub(crate) const MOLTENVK_ARGUMENT_BUFFERS_READ: [u32; 2] = [10401, 10402];
+
 /// The kinds a device the lane makes announces as it is made, each from what the lane reads of
 /// the device and its host apart from the runtime, and nothing else: `metal-level-not-macos` off
 /// macOS and `metal-level-below-host` on a macOS release that is no measured level, where the
@@ -1081,11 +1086,12 @@ pub fn creation_kinds(device: &Device, level_named: bool) -> BTreeSet<Degradatio
         kinds.insert(Degradation::FloatTininessAfterRounding);
     }
     let properties = device.properties();
-    // MoltenVK 1.4.1's argument-buffer state read from its limits: on, or off on an Apple GPU.
+    // The argument-buffer state of a release the runtime reads, from its limits: on, or off on an
+    // Apple GPU.
     let description = &properties.description;
     let limits = &description.limits;
     let uab = limits.max_per_stage_descriptor_update_after_bind_sampled_images;
-    let read = description.driver_version == 10401
+    let read = MOLTENVK_ARGUMENT_BUFFERS_READ.contains(&description.driver_version)
         && (uab == 1_000_000
             || (description.vendor_id == 0x106b
                 && uab == limits.max_per_stage_descriptor_sampled_images));
