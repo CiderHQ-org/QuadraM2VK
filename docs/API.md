@@ -1334,8 +1334,9 @@ fast forms record, and each `PrecisionNote`'s rustdoc states its bound.
   reads its range from a buffer; or it lies inside a block of command predication. The runtime
   records such an execution on the CPU then where the GPU cannot run it alone. A render execution:
   where its records may hold, at the commit or as its batch is ready, more than draws of one
-  primitive type under the encoder's state, or what its check looks for. A compute execution: with
-  the caller's check (`execute_commands_in_buffer_checked`); with its range read from a buffer; of a
+  primitive type under the encoder's state, or what its check looks for; its notice names the first
+  rule that kept it from the GPU alone. A compute execution: with the caller's check
+  (`execute_commands_in_buffer_checked`); with its range read from a buffer; of a
   buffer that inherits the encoder's buffers; where its records may name a pipeline state whose
   kernel observes its threadgroup partition or fetches `[[stage_in]]` attributes, or a state the CPU
   set that the program released since; and, on a device without `VK_EXT_device_generated_commands`,

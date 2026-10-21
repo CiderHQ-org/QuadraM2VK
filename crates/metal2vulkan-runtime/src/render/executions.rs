@@ -302,6 +302,7 @@ use crate::written_commands::{Writers, WrittenCommands};
 use crate::Device;
 use ahead::Ahead;
 use ash::vk;
+use cause::HostStepCause;
 use gpu::GpuForm;
 pub(super) use gpu::ReplayedDraws;
 use metal2vulkan::bind::indirect_commands::{Action, BufferStage, CommandRecord};
@@ -316,6 +317,7 @@ use std::ops::Range;
 use std::sync::{Arc, Mutex, OnceLock};
 
 mod ahead;
+mod cause;
 mod gpu;
 
 /// The call an execution's refusals name.
@@ -2441,6 +2443,10 @@ pub(crate) struct DeferredPass {
     /// since that adds to it sends the pass to the host step ([`outgrown`](Self::outgrown)),
     /// which empties it.
     on_gpu: Mutex<Vec<(Arc<WrittenCommands>, CommandWrites)>>,
+    /// The rule that sent the pass to the host step last ([`HostStepCause`]): set where `commit`
+    /// does not record it on the GPU alone, and where a route outgrew that decision. Its notice
+    /// names it.
+    cause: Mutex<Option<HostStepCause>>,
 }
 
 /// One render pass instance of a [`DeferredPass`].
@@ -2509,6 +2515,7 @@ impl DeferredPass {
             shadowed,
             ahead: OnceLock::new(),
             on_gpu: Mutex::new(Vec::new()),
+            cause: Mutex::new(None),
         }
     }
 
@@ -2650,8 +2657,16 @@ impl DeferredPass {
         &self,
         command_buffer: &CommandBuffer,
     ) -> Result<Option<RecordedSegment>, Error> {
-        if self.shadowed || self.executions.iter().any(|e| e.range.indirect()) {
-            return Ok(None);
+        let declined = |cause: HostStepCause| {
+            *lock(&self.cause) = Some(cause);
+            Ok(None)
+        };
+        if self.shadowed {
+            return declined(HostStepCause::Rule("the pass has a shadowed texture"));
+        }
+        if self.executions.iter().any(|e| e.range.indirect()) {
+            let rule = "an execution of the pass reads its range from a buffer";
+            return declined(HostStepCause::Rule(rule));
         }
         let residency = command_buffer.residency()?;
         let mut core = EncoderCore::segment(command_buffer, false)?;
@@ -2664,14 +2679,15 @@ impl DeferredPass {
             let (back, form) = execution.gpu_form(core, (self.storage.clone(), &residency));
             core = back;
             match form {
-                Some(form) => forms.push(Some(form)),
-                None => return Ok(None),
+                Ok(form) => forms.push(Some(form)),
+                Err(cause) => return declined(cause),
             }
         }
         drop(core);
         self.wait_made();
         if self.making() || self.failed() {
-            return Ok(None);
+            let rule = "a pipeline state the pass draws with is being made or failed to make";
+            return declined(HostStepCause::Rule(rule));
         }
         let recorded = self.record_forms(command_buffer, false, &forms)?;
         let decided = (self.executions.iter().zip(&forms)).filter_map(|(execution, form)| {
@@ -2703,8 +2719,14 @@ impl DeferredPass {
         forms: &[Option<GpuForm>],
     ) -> Result<RecordedSegment, Error> {
         if step {
-            // The host step records what a GPU form left to it, for good.
-            lock(&self.on_gpu).clear();
+            // The host step records what a GPU form left to it, for good: a route outgrew the
+            // decision where one was made.
+            let mut on_gpu = lock(&self.on_gpu);
+            if !on_gpu.is_empty() {
+                *lock(&self.cause) = Some(HostStepCause::Outgrown);
+            }
+            on_gpu.clear();
+            drop(on_gpu);
             self.degrade_repeated_start(command_buffer.device())?;
         }
         // The executions resolve and bind against the command buffer's resident resources,
@@ -3085,7 +3107,8 @@ impl DeferredPass {
         made
     }
 
-    /// Announce, once per device, that a host step records the pass.
+    /// Announce, once per device, that a host step records the pass, naming the rule that kept
+    /// it from the GPU alone where one did ([`HostStepCause`]).
     pub(crate) fn degrade(&self, device: &Device) {
         let Some(execution) = self
             .executions
@@ -3102,13 +3125,18 @@ impl DeferredPass {
              (executeCommandsInBuffer:indirectBuffer:indirectBufferOffset:), which the GPU may \
              write: its render pass is recorded once the work before it completed"
         };
+        let cause = lock(&self.cause).clone();
         device.degrade(Degradation::HostReplayedIndirectCommands, || {
+            let why = match cause {
+                Some(cause) => format!("{why}, not on the GPU alone, as {cause}"),
+                None => why.to_owned(),
+            };
             (
                 format!(
                     "an indirect command buffer of {} render commands",
                     execution.icb.size()
                 ),
-                why.to_owned(),
+                why,
             )
         });
     }

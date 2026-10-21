@@ -2,7 +2,8 @@
 //! to the host. `commit` records the pass for good where every such execution of it takes this
 //! form ([`DeferredPass::record_on_gpu`](super::DeferredPass::record_on_gpu)); otherwise a host
 //! step records the pass from the records as the GPU and the CPU left them (the module docs of
-//! `render/executions.rs`), which the device announces (`Degradation::HostReplayedIndirectCommands`).
+//! `render/executions.rs`), which the device announces (`Degradation::HostReplayedIndirectCommands`),
+//! naming the first rule below that the pass broke ([`HostStepCause`]).
 //!
 //! - **What takes it** ([`RenderExecution::gpu_form`]), decided at commit from the call and from
 //!   what the buffer's records may hold (`written_commands.rs`), never from the records: an
@@ -57,7 +58,7 @@ use std::sync::Arc;
 use super::super::bound::{Bound, Recorded};
 use super::super::pass_start_reads::PassStartTables;
 use super::super::{Assembly, DrawBuffers, Recording, RenderCommandEncoder};
-use super::{PassStorage, RenderExecution, Rendered, CALL};
+use super::{HostStepCause, PassStorage, RenderExecution, Rendered, CALL};
 use crate::binding::PushWrite;
 use crate::blit::{reads_by, writes_by};
 use crate::command_buffer::CommandBuffer;
@@ -231,20 +232,27 @@ impl ReplayedDraws {
 
 impl RenderExecution {
     /// The execution's GPU form, settled through an encoder of `core` that records nothing, over
-    /// the pass's `storage`, with `residency`, the command buffer's (the module docs); `None`
-    /// where it takes the host step. Returns the core. Announces nothing: it draws nothing.
+    /// the pass's `storage`, with `residency`, the command buffer's (the module docs); else the
+    /// first rule that sends it to the host step. Returns the core. Announces nothing: it draws
+    /// nothing.
     pub(super) fn gpu_form(
         &self,
         core: EncoderCore,
         (storage, residency): (PassStorage, &Residency),
-    ) -> (EncoderCore, Option<GpuForm>) {
-        let (Some((decided, primitive_type, range)), Some(pipeline)) =
-            (self.gpu_commands(), &self.pipeline)
-        else {
-            return (core, None);
+    ) -> (EncoderCore, Result<GpuForm, HostStepCause>) {
+        let (decided, primitive_type, range) = match self.gpu_commands() {
+            Ok(commands) => commands,
+            Err(cause) => return (core, Err(cause)),
+        };
+        let Some(pipeline) = &self.pipeline else {
+            return (
+                core,
+                Err(HostStepCause::Rule("the encoder has no pipeline state")),
+            );
         };
         let RenderStateKind::Graphics(state) = pipeline.kind() else {
-            return (core, None);
+            let rule = "the inherited state is a mesh or a tile state";
+            return (core, Err(HostStepCause::Rule(rule)));
         };
         let snapshot = &self.snapshot;
         let visibility = Visibility::settling(snapshot.layout.visibility.clone(), None);
@@ -260,73 +268,110 @@ impl RenderExecution {
         });
         let RenderCommandEncoder { core, .. } = encoder;
         let form = match slots {
-            Ok(Some(slots)) => {
+            Ok(Ok(slots)) => {
                 let commands = (decided, primitive_type, range);
                 self.preprocess(core.device(), residency, commands, slots)
             }
-            Ok(None) | Err(_) => None,
+            Ok(Err(rule)) => Err(HostStepCause::Rule(rule)),
+            Err(error) => Err(HostStepCause::Refused(error.to_string())),
         };
         (core, form)
     }
 
     /// What the buffer's records may hold, the primitive type and the range of an execution that
-    /// may take the GPU form, from the call and that alone (the module docs); `None` for any
-    /// other.
-    fn gpu_commands(&self) -> Option<(CommandWrites, PrimitiveType, Range<u32>)> {
+    /// may take the GPU form, from the call and that alone (the module docs); else the first rule
+    /// that sends it to the host step.
+    fn gpu_commands(&self) -> Result<(CommandWrites, PrimitiveType, Range<u32>), HostStepCause> {
+        let rule = |holds: bool, rule: &'static str| match holds {
+            true => Ok(()),
+            false => Err(HostStepCause::Rule(rule)),
+        };
         let ExecutionRange::Fixed(range) = &self.range else {
-            return None;
+            return Err(HostStepCause::Rule(
+                "the execution reads its range from a buffer",
+            ));
         };
         let descriptor = self.icb.descriptor();
         let written = self.icb.written().writes();
-        let takes = !range.is_empty()
-            && self.check_has_nothing_to_see(written)
-            && self.lent.is_none()
-            && descriptor.command_types == IndirectCommandType::DRAW
-            && descriptor.inherit_pipeline_state
-            && !descriptor.inherit_buffers
-            && written.operations & !GPU_FORM_WRITES == 0
-            && written.may(CommandWrites::DRAW)
-            && written.primitive_types.count_ones() == 1
-            && !self.reaches_tile_memory()
-            && self.shadows.is_empty()
-            && !self.snapshot.pass_start.fragment_wrote();
-        if !takes {
-            return None;
+        rule(!range.is_empty(), "the execution's range is empty")?;
+        rule(self.lent.is_none(), "the encoder counts visibility results")?;
+        rule(
+            descriptor.command_types == IndirectCommandType::DRAW,
+            "the buffer's command types are not draws of primitives alone",
+        )?;
+        rule(
+            descriptor.inherit_pipeline_state,
+            "the buffer's commands set their own pipeline states",
+        )?;
+        rule(
+            !descriptor.inherit_buffers,
+            "the buffer's commands inherit the encoder's buffers",
+        )?;
+        let past = written.operations & !GPU_FORM_WRITES;
+        if past != 0 {
+            return Err(HostStepCause::Operations(past));
         }
+        rule(
+            written.may(CommandWrites::DRAW),
+            "the buffer's records hold no draws",
+        )?;
+        let primitive_type = match written.primitive_types.count_ones() {
+            1 => PrimitiveType::try_from(written.primitive_types.trailing_zeros()).ok(),
+            _ => None,
+        };
         let primitive_type =
-            PrimitiveType::try_from(written.primitive_types.trailing_zeros()).ok()?;
-        Some((written, primitive_type, range.clone()))
+            primitive_type.ok_or(HostStepCause::PrimitiveTypes(written.primitive_types))?;
+        self.check_has_nothing_to_see(written)?;
+        rule(!self.reaches_tile_memory(), "the pass reaches tile memory")?;
+        rule(
+            self.shadows.is_empty(),
+            "the execution reaches a shadowed texture",
+        )?;
+        rule(
+            !self.snapshot.pass_start.fragment_wrote(),
+            "the pass's fragment functions wrote memory before the execution",
+        )?;
+        Ok((written, primitive_type, range.clone()))
     }
 
     /// Whether the caller's check, if any, has nothing to see among commands whose records may
     /// hold `written`, under the encoder's state, which the buffer inherits: neither draws of
     /// points (a primitive type the writes do not state counts as one) nor a state that may encode
-    /// indirect commands where it looks for them (`IndirectCommandCheckNeeds`).
-    fn check_has_nothing_to_see(&self, written: CommandWrites) -> bool {
+    /// indirect commands where it looks for them (`IndirectCommandCheckNeeds`); else which of
+    /// those it may see.
+    fn check_has_nothing_to_see(&self, written: CommandWrites) -> Result<(), HostStepCause> {
         let needs = self.needs;
         let points = written.may_draw_primitive_type(PrimitiveType::Point.as_raw());
         let encodes = self
             .pipeline
             .as_ref()
             .is_none_or(|pipeline| pipeline.can_encode_indirect_commands());
-        self.check.is_none()
-            || !((needs.point_draws && points) || (needs.encoding_states && encodes))
+        let (points, encodes) = (
+            needs.point_draws && points,
+            needs.encoding_states && encodes,
+        );
+        match self.check.is_some() && (points || encodes) {
+            true => Err(HostStepCause::Check { points, encodes }),
+            false => Ok(()),
+        }
     }
 
     /// The replay's preprocess of commands `range` drawing `primitive_type`, each stage's slot
     /// table holding `slots` (the vertex function's, then the fragment function's), over
     /// `residency`'s resident resources and the device's live buffers, decided on the records'
-    /// `decided` writes; `None` where the binder refuses it (a device without device addresses
-    /// among others).
+    /// `decided` writes; else why it cannot run (the binder's refusal, a device without device
+    /// addresses among others).
     fn preprocess(
         &self,
         device: &Device,
         residency: &Residency,
         (decided, primitive_type, range): (CommandWrites, PrimitiveType, Range<u32>),
         (vertex_slots, fragment_slots): (u32, u32),
-    ) -> Option<GpuForm> {
-        let capacity = u32::try_from(self.icb.size()).ok()?;
-        let live = device.shared().live_buffers.table(device).ok()?;
+    ) -> Result<GpuForm, HostStepCause> {
+        let capacity = u32::try_from(self.icb.size())
+            .map_err(|_| HostStepCause::Rule("the buffer holds 2^32 commands or more"))?;
+        let live = (device.shared().live_buffers.table(device))
+            .map_err(|error| HostStepCause::Refused(error.to_string()))?;
         let mut state = BindState::default();
         state.used_resources = residency.used_resources();
         state.resident_ranges = live.ranges().collect();
@@ -336,8 +381,9 @@ impl RenderExecution {
         replay.inheritance = self.icb.inheritance();
         replay.vertex_slots = vertex_slots;
         replay.fragment_slots = fragment_slots;
-        let pre = draw_replay_preprocess(device.compile_device(), &state, &replay).ok()?;
-        Some(GpuForm {
+        let pre = draw_replay_preprocess(device.compile_device(), &state, &replay)
+            .map_err(|error| HostStepCause::Refused(error.to_string()))?;
+        Ok(GpuForm {
             decided,
             primitive_type,
             pre,
@@ -521,34 +567,73 @@ fn scratch_head(pre: &DrawReplayPreprocess, sink: u64) -> Result<Vec<u8>, Error>
 impl RenderCommandEncoder {
     /// The buffer slots the vertex and fragment functions of a command's draw of `state` as
     /// `primitive_type` read, through this encoder (an execution's at its call, in the replay
-    /// form), where that draw records as the GPU form's draws do (the module docs); `None` where
-    /// it does not. Announces nothing: it draws nothing.
+    /// form), where that draw records as the GPU form's draws do (the module docs); else the rule
+    /// it breaks, as the host-step notice words it. Announces nothing: it draws nothing.
     fn replay_draw_of(
         &self,
         state: &crate::pipeline::GraphicsState,
         primitive_type: PrimitiveType,
-    ) -> Result<Option<(u32, u32)>, Error> {
+    ) -> Result<Result<(u32, u32), &'static str>, Error> {
         let graphics = &state.base().graphics;
-        if crate::tessellation::patches(graphics).is_some()
-            || state.descriptor().vertex().is_none()
-            || state.reads_tile_memory()
-            || (graphics.vertex_writes_memory && !graphics.rasterizer_discard)
-            || graphics.fragment_writes_memory
-            || graphics.fragment_imageblock.is_some()
-            || graphics.shadow_stencil.is_some()
-            || graphics.shader_tests.is_some()
-            || !graphics.input_attachments.is_empty()
-            || !self.storage_attachments(graphics)?.is_empty()
-            || self.rate_map.is_some()
-        {
-            return Ok(None);
+        let rules = [
+            (
+                crate::tessellation::patches(graphics).is_some(),
+                "the inherited state tessellates",
+            ),
+            (
+                state.descriptor().vertex().is_none(),
+                "the inherited state has no vertex function",
+            ),
+            (
+                state.reads_tile_memory(),
+                "the inherited state reads tile memory",
+            ),
+            (
+                graphics.vertex_writes_memory && !graphics.rasterizer_discard,
+                "the inherited state's vertex function writes memory and it rasterizes",
+            ),
+            (
+                graphics.fragment_writes_memory,
+                "the inherited state's fragment function writes memory",
+            ),
+            (
+                graphics.fragment_imageblock.is_some(),
+                "the inherited state has a fragment imageblock",
+            ),
+            (
+                graphics.shadow_stencil.is_some(),
+                "the inherited state tests stencil in its shaders",
+            ),
+            (
+                graphics.shader_tests.is_some(),
+                "the inherited state tests depth or stencil in its shaders",
+            ),
+            (
+                !graphics.input_attachments.is_empty(),
+                "the inherited state reads its attachments",
+            ),
+            (
+                self.rate_map.is_some(),
+                "the pass has a rasterization rate map",
+            ),
+        ];
+        if let Some((_, rule)) = rules.iter().find(|(breaks, _)| *breaks) {
+            return Ok(Err(rule));
+        }
+        if !self.storage_attachments(graphics)?.is_empty() {
+            return Ok(Err("the inherited state writes an attachment as storage"));
         }
         let settings =
             self.draw_settings(CALL, state, Assembly::Primitives(primitive_type), false)?;
-        if *self.current.shape.locations != *settings.routing.locations
-            || !self.reformats(state, &settings.routing)?.is_empty()
-        {
-            return Ok(None);
+        if *self.current.shape.locations != *settings.routing.locations {
+            return Ok(Err(
+                "the inherited state's color outputs go to other locations than the pass's",
+            ));
+        }
+        if !self.reformats(state, &settings.routing)?.is_empty() {
+            return Ok(Err(
+                "the inherited state writes a color in another format than its attachment's",
+            ));
         }
         let mut argument_samplers = ArgumentSamplers::taken(self.core.device());
         let function_tables = state.function_tables();
@@ -577,17 +662,38 @@ impl RenderCommandEncoder {
             }
             _ => true,
         });
-        if commands.indirect_needs_arguments
-            || commands.index_bounds_pass
-            || commands.mesh_dispatch.is_some()
-            || commands.tessellation_dispatch.is_some()
-            || !commands.amplifications.is_empty()
-            || plan.views != ViewSetup::default()
-            || !plan.vertex_buffers.is_empty()
-            || variant.key().primitive_id_indices.is_some()
-            || !one_function
-        {
-            return Ok(None);
+        let rules = [
+            (
+                commands.indirect_needs_arguments,
+                "the inherited state's indirect draw needs its arguments on the CPU",
+            ),
+            (
+                commands.index_bounds_pass,
+                "the inherited state's draw bounds its indices",
+            ),
+            (
+                commands.mesh_dispatch.is_some() || commands.tessellation_dispatch.is_some(),
+                "the inherited state's draw dispatches before it draws",
+            ),
+            (
+                !commands.amplifications.is_empty() || plan.views != ViewSetup::default(),
+                "the inherited state's draw is amplified or draws views",
+            ),
+            (
+                !plan.vertex_buffers.is_empty(),
+                "the inherited state's vertex function fetches attributes",
+            ),
+            (
+                variant.key().primitive_id_indices.is_some(),
+                "the inherited state's fragment function reads the primitive ID of an indexed draw",
+            ),
+            (
+                !one_function,
+                "the inherited state's functions share a slot table",
+            ),
+        ];
+        if let Some((_, rule)) = rules.iter().find(|(breaks, _)| *breaks) {
+            return Ok(Err(rule));
         }
         let slots = |stage: Stage| {
             (variant.pipeline().interface.slots.keys())
@@ -596,6 +702,6 @@ impl RenderCommandEncoder {
                 .max()
                 .unwrap_or(0)
         };
-        Ok(Some((slots(Stage::Vertex), slots(Stage::Fragment))))
+        Ok(Ok((slots(Stage::Vertex), slots(Stage::Fragment))))
     }
 }

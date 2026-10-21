@@ -24,15 +24,15 @@
 use super::degrade_notices::{assert_made_once, on_device};
 use super::indirect_host_steps::{self, complete, HOST_STEPS};
 use super::render_executions::{expected, forced_with, icb, pass, Drawn, Setup, WINDOW};
-use super::{buffer_with, read_buffer, WAIT};
+use super::{buffer_with, read_buffer, Messages, WAIT};
 use crate::air_library::AirLibrary;
 use metal2vulkan::bind::ReplayFaults;
 use metal2vulkan::metal::{IndirectCommandType, PrimitiveType, ResourceUsage};
 use metal2vulkan::pipeline::{ComputePipelineDescriptor, StageSource};
 use metal2vulkan_devtools::{fixtures_dir, llvm_assemble};
 use metal2vulkan_runtime::{
-    Buffer, CommandBuffer, CommandBufferStatus, ComputePipelineState, Device, EventRef,
-    IndirectCommandBuffer, IndirectCommandBufferDescriptor, IndirectCommandCheckNeeds,
+    Buffer, CommandBuffer, CommandBufferStatus, ComputePipelineState, Degradation, Device,
+    EventRef, IndirectCommandBuffer, IndirectCommandBufferDescriptor, IndirectCommandCheckNeeds,
     PipelineOptions, Size,
 };
 use std::sync::{Arc, Mutex};
@@ -220,6 +220,18 @@ fn for_triangles(device: &Device, setup: &Setup) -> IndirectCommandBuffer {
     icb
 }
 
+/// The reason the host-step notice delivered so far gives (the rule that kept the pass from the
+/// GPU alone), the notices put back for [`assert_made_once`]; empty where none was delivered.
+fn host_step_reason(messages: &Messages) -> String {
+    let notices = messages.take_notices();
+    let reason = (notices.iter())
+        .filter_map(|message| message.degradation.as_ref())
+        .find(|notice| notice.degradation == Degradation::HostReplayedIndirectCommands)
+        .map(|notice| notice.reason.clone());
+    messages.restore_notices(notices);
+    reason.unwrap_or_default()
+}
+
 /// The commands' GPU form and host reads across `run`: commands recorded in the GPU form, and
 /// records the host read.
 fn counted(device: &Device, run: impl FnOnce()) -> (u64, u64) {
@@ -288,6 +300,11 @@ fn the_gpu_form_draws_what_the_host_step_draws() {
         assert_eq!(*seen.lock().unwrap(), [0, 1, 2, 3], "each command checked");
         assert_eq!(outputs[0], expected(&written_draws()), "the host step");
         assert_eq!(outputs[1], outputs[0], "the GPU form");
+        let reason = host_step_reason(messages);
+        assert!(
+            reason.contains("check looks for draws of points, which"),
+            "{reason}"
+        );
         assert_made_once(messages, &HOST_STEPS, &forced_with(device, &[]));
     });
 }
@@ -356,6 +373,8 @@ fn facts_that_grow_before_the_batch_is_ready_take_the_host_step() {
         assert!(read >= 4, "the host step read the records: {read}");
         assert_eq!(*seen.lock().unwrap(), [0, 1, 2, 3], "each command checked");
         assert_eq!(setup.output(), expected(&[drawn(0, 0, 6), drawn(2, 0, 4)]));
+        let reason = host_step_reason(messages);
+        assert!(reason.contains("grew after the commit"), "{reason}");
         assert_made_once(messages, &HOST_STEPS, &forced_with(device, &[]));
     });
 }
@@ -414,6 +433,8 @@ fn a_buffer_that_may_hold_a_barrier_takes_the_host_step() {
         assert_eq!(setup.output(), expected(&written_draws()));
         assert_eq!(gpu, 0);
         assert!(read >= 4, "{read}");
+        let reason = host_step_reason(messages);
+        assert!(reason.contains("records may hold barriers"), "{reason}");
         assert_made_once(messages, &HOST_STEPS, &forced_with(device, &[]));
     });
 }
