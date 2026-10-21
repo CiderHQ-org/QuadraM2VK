@@ -120,6 +120,7 @@ mod engine_sampler_unk;
 mod engine_selected_indices;
 mod engine_separate_samplers;
 mod engine_seq_cst;
+mod engine_settled_sums;
 mod engine_shared_switch;
 mod engine_simd;
 mod engine_simd_emulated;

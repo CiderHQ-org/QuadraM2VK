@@ -37,6 +37,23 @@
 //! `PrecisionNote::FastMathRewrites` for them. A sum of two leaves that joins no other sum, lane
 //! by lane, is Metal's grouping as written ([`Sums::pair`]) and is settled alike.
 //!
+//! **Alone** ([`Sums::alone`]): such a sum that gives a device nothing to fuse or regroup it with
+//! is left as written instead, every flag kept, so the lowering leaves it undecorated. Each
+//! operand, through lane selections, insertions, extractions and negations, is a parameter, a load
+//! from memory a thread does not own (device, constant or threadgroup), or a texture operation's
+//! result; and each use, through lane selections, insertions and extractions, takes the sum where
+//! no compiler combines it with anything: a texture operation's coordinate, a conversion to an
+//! integer, or the value of a store to device or threadgroup memory. A negation is exact, and a
+//! compiler that folds it into the sum makes the subtraction of the same value, which rounds
+//! alike; where one lies on the way the two operands read no value in common, since a value added
+//! to its own negation may fold to a zero. Any other operation on either side keeps the settled
+//! form: a float operation, a comparison (Mesa's inexact rules rewrite `a + b < c`), a constant
+//! lane, a select or phi, a negation of the sum, and a load from or store to thread memory
+//! (forwarded into the arithmetic that reads it). Such a sum rounds once on every device whether
+//! or not it is decorated, and the decoration is not free: MoltenVK's SPIRV-Cross writes a
+//! `NoContraction` addition as a call to an `optnone` helper, which the Metal compiler does not
+//! inline.
+//!
 //! **Not rewritten** (kept as written, with the note): a sum that is not pinned; a vector sum of
 //! three leaves or more; one whose operations do not carry every fast-math flag (the probes
 //! measured `fast`); one that reaches another block; one with a constant, repeated, negated or
@@ -45,9 +62,11 @@
 //! place (a division, a call outside the AIR and LLVM intrinsics); a leaf negated in a sum that is
 //! not modeled or in an earlier sum not rewritten.
 
+use crate::air::intrinsics::{AirIntrinsic, NumKind, TexRole};
 use crate::air::ir::{
-    BinOp as AirBin, Block, BlockId, Body, Call, Callee, Const, FastMath, FuncId, Idx, Inst,
-    InstId, InstKind, IntFlags, MemoryEffects, ModRef, Module, Type, TypeId, Value,
+    AddrSpace, BinOp as AirBin, Block, BlockId, Body, Call, Callee, CastOp, Const, FastMath,
+    FuncId, Idx, Inst, InstId, InstKind, IntFlags, MemoryEffects, ModRef, Module, Type, TypeId,
+    Value,
 };
 use crate::air::Entry;
 use crate::budget::Meter;
@@ -73,6 +92,10 @@ const MOST_LEAVES: usize = 64;
 
 /// The deepest operand chain a rank follows; a leaf whose rank reads deeper is not modeled.
 const DEPTH: u32 = 2048;
+
+/// The most lane selections, insertions and extractions [`Sums::alone`] follows from a sum, on
+/// either side; a sum reached through more keeps the settled form.
+const LANE_STEPS: u32 = 4;
 
 fn invariant(what: &'static str) -> Error {
     Error::Internal(InternalError::new(InternalKind::Invariant, what))
@@ -444,6 +467,7 @@ enum Expr {
 /// The facts of the function a sum is read in.
 struct Sums<'a> {
     module: &'a Module,
+    func: FuncId,
     body: &'a Body,
     /// Each instruction's users, once per operand.
     users: Users,
@@ -472,7 +496,7 @@ struct Sum {
 }
 
 impl<'a> Sums<'a> {
-    fn new(module: &'a Module, body: &'a Body, m: &mut Meter) -> Result<Self, Error> {
+    fn new(module: &'a Module, func: FuncId, body: &'a Body, m: &mut Meter) -> Result<Self, Error> {
         let mut block = vec![None; body.insts.len()];
         for (b, blk) in body.blocks.iter() {
             for id in blk.inst_ids() {
@@ -486,6 +510,7 @@ impl<'a> Sums<'a> {
         let users = Users::of(body);
         Ok(Sums {
             module,
+            func,
             body,
             users,
             block,
@@ -636,6 +661,138 @@ impl<'a> Sums<'a> {
         } else {
             Expr::Sub(x, y)
         })
+    }
+
+    /// Whether the settled pair `root` (`a + b` or `a - b`) gives a device nothing to fuse or
+    /// regroup it with (module docs): every operand and every use takes it where no compiler
+    /// combines it with another operation.
+    fn alone(&self, root: InstId) -> bool {
+        let Some(InstKind::BinOp { a, b, .. }) = self.body.insts.get(root).map(|i| &i.kind) else {
+            return false;
+        };
+        let (mut x, mut y) = (BTreeSet::new(), BTreeSet::new());
+        let (Some(nx), Some(ny)) = (
+            self.opaque_sources(*a, LANE_STEPS, &mut x),
+            self.opaque_sources(*b, LANE_STEPS, &mut y),
+        ) else {
+            return false;
+        };
+        // A value added to its own negation may fold to a zero.
+        if (nx || ny) && !x.is_disjoint(&y) {
+            return false;
+        }
+        self.opaque_uses(root, LANE_STEPS)
+    }
+
+    /// The values `v` reads, added to `out`, where each is one no compiler combines an addition
+    /// with, through at most `depth` lane selections, insertions, extractions and negations: a
+    /// parameter, a load from memory a thread does not own, or a texture operation's result; with
+    /// whether a negation lies on the way. `None` for any other. An `undef` or `poison` lane
+    /// source selects nothing.
+    fn opaque_sources(&self, v: Value, depth: u32, out: &mut BTreeSet<Value>) -> Option<bool> {
+        let id = match v {
+            Value::Arg(_) => {
+                out.insert(v);
+                return Some(false);
+            }
+            Value::Const(c) => {
+                return matches!(
+                    self.module.consts().get(c).map(|c| &c.value),
+                    Some(Const::Undef | Const::Poison)
+                )
+                .then_some(false)
+            }
+            Value::Inst(id) => id,
+        };
+        let mut through = |sources: &[Value], negates: bool| -> Option<bool> {
+            let depth = depth.checked_sub(1)?;
+            let mut negated = negates;
+            for s in sources {
+                negated |= self.opaque_sources(*s, depth, out)?;
+            }
+            Some(negated)
+        };
+        match self.body.insts.get(id).map(|i| &i.kind)? {
+            InstKind::Load { ptr, .. }
+                if self.space(*ptr).is_some_and(|s| s != AddrSpace::Thread) =>
+            {
+                out.insert(v);
+                Some(false)
+            }
+            InstKind::ExtractValue { agg, .. } if self.texture_call(*agg) => {
+                out.insert(v);
+                Some(false)
+            }
+            InstKind::FNeg { v: x, .. } => through(&[*x], true),
+            InstKind::ExtractElement { vec, .. } => through(&[*vec], false),
+            InstKind::InsertElement { vec, elt, .. } => through(&[*vec, *elt], false),
+            InstKind::ShuffleVector { a, b, .. } => through(&[*a, *b], false),
+            _ => None,
+        }
+    }
+
+    /// Whether every use of `id` takes it where no compiler combines it with another operation,
+    /// through at most `depth` lane selections, insertions and extractions: a texture operation's
+    /// coordinate, a conversion to an integer, or the value of a store to device or threadgroup
+    /// memory.
+    fn opaque_uses(&self, id: InstId, depth: u32) -> bool {
+        let v = Value::Inst(id);
+        self.users
+            .get(id)
+            .iter()
+            .all(|&u| match self.body.insts.get(u).map(|i| &i.kind) {
+                Some(
+                    InstKind::ExtractElement { .. }
+                    | InstKind::InsertElement { .. }
+                    | InstKind::ShuffleVector { .. },
+                ) => depth > 0 && self.opaque_uses(u, depth - 1),
+                Some(InstKind::Cast {
+                    op: CastOp::FPToSI | CastOp::FPToUI,
+                    ..
+                }) => true,
+                Some(InstKind::Store { val, ptr, .. }) => {
+                    *val == v
+                        && *ptr != v
+                        && self.space(*ptr).is_some_and(|s| {
+                            matches!(s, AddrSpace::Device | AddrSpace::Threadgroup)
+                        })
+                }
+                Some(InstKind::Call(call)) => match &call.callee {
+                    Callee::Air {
+                        op: AirIntrinsic::Convert(c),
+                        ..
+                    } => c.dst_kind != NumKind::Float,
+                    Callee::Air {
+                        op: AirIntrinsic::Texture(t),
+                        ..
+                    } => {
+                        let coord = t.layout().index(TexRole::Coord);
+                        (call.args.iter().enumerate()).all(|(i, a)| *a != v || Some(i) == coord)
+                    }
+                    _ => false,
+                },
+                _ => false,
+            })
+    }
+
+    /// The address space of pointer `ptr`.
+    fn space(&self, ptr: Value) -> Option<AddrSpace> {
+        let ty = self.module.value_ty(self.func, ptr)?;
+        self.module.types().ptr_space(ty)
+    }
+
+    /// Whether `v` is a call of a texture operation.
+    fn texture_call(&self, v: Value) -> bool {
+        matches!(
+            self.kind(v),
+            Some(InstKind::Call(call)) if matches!(
+                call.callee,
+                Callee::Air {
+                    op: AirIntrinsic::Texture(_),
+                    ..
+                }
+            )
+        )
     }
 
     /// `(op, fmf, a, b)` of an addition or subtraction `v` of a `half` or `float` scalar.
@@ -979,7 +1136,7 @@ type Visited = (Option<(Sum, Vec<Leaf>)>, BTreeSet<Value>);
 /// order.
 fn plan(module: &Module, func: FuncId, body: &Body, m: &mut Meter) -> Result<Planned, Error> {
     let mut ranks = Ranks::new(module, func, body, m)?;
-    let sums = Sums::new(module, body, m)?;
+    let sums = Sums::new(module, func, body, m)?;
     let mut seen: Vec<Visited> = Vec::new();
     let mut pairs: Planned = BTreeMap::new();
     for block in reverse_post_order(body, m)? {
@@ -989,7 +1146,10 @@ fn plan(module: &Module, func: FuncId, body: &Body, m: &mut Meter) -> Result<Pla
         for id in b.inst_ids() {
             m.tick(1)?;
             if let Some(e) = sums.pair(id) {
-                pairs.insert(id, (e, BTreeSet::from([id])));
+                // A pair alone keeps its flags: no device can combine it with a neighbour.
+                if !sums.alone(id) {
+                    pairs.insert(id, (e, BTreeSet::from([id])));
+                }
                 continue;
             }
             match sums.sum(id, &mut ranks, m)? {
