@@ -178,6 +178,25 @@ pub(crate) struct LoweringSlot {
     handed_back: Condvar,
 }
 
+// SAFETY: a slot is `Send` and `Sync` exactly when `SlotState` and `Lowerer` are `Send`: each is
+// held only inside a `Mutex`, and `Mutex<T>` is `Send` and `Sync` for every `T: Send`; the
+// slot's other field, a `Condvar`, is both. The constant below makes the compiler prove those
+// two, so these impls claim nothing it does not check. Written out, they end the compiler's
+// walk of a slot's fields where a program's crate proves its own objects' `Send` and `Sync`: the
+// walk from a `Device` or an encoder through a slot's lowering, down to the translator's
+// reflection, ran past rustc's default recursion limit (`E0275`), which a program's crate keeps
+// (`tests/consumer_auto_traits.rs`).
+unsafe impl Send for LoweringSlot {}
+// SAFETY: as for `Send` above.
+unsafe impl Sync for LoweringSlot {}
+
+// The compiler's proof of what `LoweringSlot`'s `Send` and `Sync` impls rest on.
+const _: () = {
+    const fn sent<T: Send>() {}
+    sent::<SlotState>();
+    sent::<Lowerer>();
+};
+
 /// A slot's lowering, and whether it refused a call.
 struct Lowerer {
     /// Its encoder's lowering: `None` once the encoder ended, and in a slot not taken.
