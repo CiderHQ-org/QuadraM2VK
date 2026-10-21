@@ -223,14 +223,16 @@ fn used_resources_are_listed_when_the_pipeline_reaches_them() {
         metal::ResourceUsage::READ | metal::ResourceUsage::WRITE
     );
     let compute = |_| vk::PipelineStageFlags2::COMPUTE_SHADER;
+    // The kernel may write memory.
+    let all = vk::PipelineStageFlags2::COMPUTE_SHADER;
     let tokens = |uses: &[ResourceUse]| -> Vec<(UseTarget, AccessSet, AccessClass)> {
         uses.iter()
             .map(|u| (u.resource, u.access, u.class))
             .collect()
     };
-    assert!(used_uses(&shape.used, false, false, compute).is_empty());
+    assert!(used_uses(&shape.used, false, false, compute, all).is_empty());
     assert_eq!(
-        tokens(&used_uses(&shape.used, true, false, compute)),
+        tokens(&used_uses(&shape.used, true, false, compute, all)),
         vec![
             (
                 UseTarget::Used(1),
@@ -245,7 +247,7 @@ fn used_resources_are_listed_when_the_pipeline_reaches_them() {
         ]
     );
     assert_eq!(
-        tokens(&used_uses(&shape.used, false, true, compute)),
+        tokens(&used_uses(&shape.used, false, true, compute, all)),
         vec![
             (
                 UseTarget::Used(2),
@@ -256,6 +258,7 @@ fn used_resources_are_listed_when_the_pipeline_reaches_them() {
         ]
     );
     // A render plan lists a resource only in the stages it is used in.
+    let vertex = vk::PipelineStageFlags2::VERTEX_SHADER;
     let vertex_only = |s: metal::RenderStages| {
         if s.contains(metal::RenderStages::VERTEX) {
             vk::PipelineStageFlags2::VERTEX_SHADER
@@ -264,12 +267,73 @@ fn used_resources_are_listed_when_the_pipeline_reaches_them() {
         }
     };
     assert_eq!(
-        tokens(&used_uses(&shape.used, true, true, vertex_only)),
+        tokens(&used_uses(&shape.used, true, true, vertex_only, vertex)),
         vec![(
             UseTarget::Used(2),
             AccessSet::READ_WRITE,
             AccessClass::Storage
         )]
+    );
+}
+
+/// A used resource the usage lets a function write is written only in the stages whose function
+/// may write memory, and read in the others: a draw whose vertex function stores nothing reads a
+/// buffer an earlier compute encoder made resident for writing, as its fragment function, which
+/// stores, writes it. One only read keeps a single use; one no stage writes is read everywhere.
+#[test]
+fn used_resources_are_written_only_by_stages_that_write_memory() {
+    let mut state = BindState::default();
+    let mut written = UsedResource::new(ResourceClass::Buffer, 1);
+    written.usage = metal::ResourceUsage::WRITE;
+    written.stages = metal::RenderStages::VERTEX.union(metal::RenderStages::FRAGMENT);
+    let mut read = UsedResource::new(ResourceClass::Buffer, 2);
+    read.usage = metal::ResourceUsage::READ;
+    read.stages = written.stages;
+    state.used_resources = vec![written, read];
+    let shape = state.shape();
+    let vertex = vk::PipelineStageFlags2::VERTEX_SHADER;
+    let fragment = vk::PipelineStageFlags2::FRAGMENT_SHADER;
+    let reach = |s: metal::RenderStages| {
+        let mut f = vk::PipelineStageFlags2::empty();
+        if s.contains(metal::RenderStages::VERTEX) {
+            f |= vertex;
+        }
+        if s.contains(metal::RenderStages::FRAGMENT) {
+            f |= fragment;
+        }
+        f
+    };
+    let listed = |writers| -> Vec<(UseTarget, AccessSet, vk::PipelineStageFlags2)> {
+        used_uses(&shape.used, true, false, reach, writers)
+            .iter()
+            .map(|u| (u.resource, u.access, u.stages))
+            .collect()
+    };
+    let write = AccessSet {
+        read: false,
+        write: true,
+    };
+    assert_eq!(
+        listed(fragment),
+        vec![
+            (UseTarget::Used(1), write, fragment),
+            (UseTarget::Used(1), AccessSet::READ, vertex),
+            (UseTarget::Used(2), AccessSet::READ, vertex | fragment),
+        ]
+    );
+    assert_eq!(
+        listed(vk::PipelineStageFlags2::empty()),
+        vec![
+            (UseTarget::Used(1), AccessSet::READ, vertex | fragment),
+            (UseTarget::Used(2), AccessSet::READ, vertex | fragment),
+        ]
+    );
+    assert_eq!(
+        listed(vertex | fragment),
+        vec![
+            (UseTarget::Used(1), write, vertex | fragment),
+            (UseTarget::Used(2), AccessSet::READ, vertex | fragment),
+        ]
     );
 }
 

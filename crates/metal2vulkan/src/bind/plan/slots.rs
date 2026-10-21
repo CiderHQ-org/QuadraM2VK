@@ -756,14 +756,19 @@ pub(crate) fn buffer_use(b: &PlannedBuffer, stages: vk::PipelineStageFlags2) -> 
 /// The `uses` of the used resources a pipeline can reach (the handback): buffers and heaps when a
 /// function reads the resident root table (`pointer`), textures and heaps when one resolves handles
 /// (`handle`). The access is the guest's declared `MTLResourceUsage` (`Read` and `Sample` read,
-/// `Write` writes; no usage is `READ_WRITE`), since nothing proves a narrower one; `stages` maps a
-/// used resource's render stages to the pipeline stages that reach it (a compute plan maps every
-/// resource to `COMPUTE_SHADER`), and a resource reaching none is not listed.
+/// `Write` writes; no usage is `READ_WRITE`), since nothing proves a narrower one, but in the
+/// stages whose function writes no memory: there a resource the usage lets the function write is
+/// read, in a use of its own, as such a function stores to no buffer or texture and updates none
+/// atomically (`StageInterface::writes_memory`). `writers` holds the pipeline stages whose function
+/// may write memory. `stages` maps a used resource's render stages to the pipeline stages that
+/// reach it (a compute plan maps every resource to `COMPUTE_SHADER`), and a resource reaching none
+/// is not listed.
 pub(crate) fn used_uses(
     used: &BTreeMap<u32, UsedShape>,
     pointer: bool,
     handle: bool,
     stages: impl Fn(metal::RenderStages) -> vk::PipelineStageFlags2,
+    writers: vk::PipelineStageFlags2,
 ) -> Vec<ResourceUse> {
     let mut out = Vec::new();
     for (&token, u) in used {
@@ -789,13 +794,24 @@ pub(crate) fn used_uses(
             UsedClass::Texture(_) => AccessClass::Sampled,
             UsedClass::Buffer | UsedClass::Heap => AccessClass::Storage,
         };
-        out.push(ResourceUse {
-            resource: UseTarget::Used(token),
-            access,
-            class,
-            stages,
-            range: None,
-        });
+        let (writing, reading) = match access.write {
+            true => (
+                stages.intersection(writers),
+                vk::PipelineStageFlags2::from_raw(stages.as_raw() & !writers.as_raw()),
+            ),
+            false => (stages, vk::PipelineStageFlags2::empty()),
+        };
+        for (stages, access) in [(writing, access), (reading, AccessSet::READ)] {
+            if !stages.is_empty() {
+                out.push(ResourceUse {
+                    resource: UseTarget::Used(token),
+                    access,
+                    class,
+                    stages,
+                    range: None,
+                });
+            }
+        }
     }
     out
 }

@@ -132,7 +132,8 @@
 //!   all. Per frame, as `many_draws`; `icb_draws_any_type_*`: the same, the kernel reading the
 //!   draws' primitive type (triangles) from a buffer, where the runtime cannot tell the type from
 //!   the kernel's code and so reads the records on the host. On the runtime's side, the commands
-//!   drawn on the GPU alone and the records read on the host per frame (`rt_*`).
+//!   drawn on the GPU alone, the records read on the host, and the draws and pipeline barriers
+//!   recorded per frame (`rt_*`).
 //!
 //! Options: `--rounds N` (3), `--draws N` (2000), `--timed N` (30), `--latency N` (200),
 //! `--heavy-iterations N` (64), `--heavy-runs N` (15), `--many-draws N` (6000), `--frames N`

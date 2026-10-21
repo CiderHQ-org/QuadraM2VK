@@ -51,9 +51,13 @@
 //!   stand. Its usage is the joined one, and so are its render stages in a render encoder.
 //! - **Ordering.** A plan lists a used resource's use where its function reads loaded pointers
 //!   (a buffer or a heap) or resolves handles (a texture or a heap), over the whole resource,
-//!   reading or writing as the usage says (no usage does both), and the tracker orders it as it
-//!   orders a bound one (`binding::command_uses`): a heap as the one resource its tracked buffers
-//!   are (`heap.rs`). A shadowed texture is copied in and back as at a slot.
+//!   reading or writing as the usage says (no usage does both), but reading alone in a stage
+//!   whose function stores to no buffer or texture and updates none atomically (the pipeline's
+//!   `vertex_writes_memory` and `fragment_writes_memory`): a draw of such functions writes no
+//!   resource another encoder made resident for writing, such as an indirect command buffer a
+//!   compute encoder writes. The tracker orders it as it orders a bound one
+//!   (`binding::command_uses`): a heap as the one resource its tracked buffers are (`heap.rs`). A
+//!   shadowed texture is copied in and back as at a slot.
 //! - **Tokens.** A resource has one token in the encoder, its position in the order the encoder
 //!   first used it, and the union of every usage it was used with; so a plan's shape changes
 //!   only when the encoder uses another resource or widens a usage.

@@ -2296,7 +2296,11 @@ pub fn icb_draws<G: Gpu>(g: &G, library: &G::Library, sizes: &Sizes) {
         for ((counted, before), (_, now)) in counts.iter().zip(&after) {
             if matches!(
                 *counted,
-                "gpu_form_commands" | "merged_draw_commands" | "indirect_records_read"
+                "gpu_form_commands"
+                    | "merged_draw_commands"
+                    | "indirect_records_read"
+                    | "draws"
+                    | "pipeline_barriers"
             ) {
                 let per_frame = (now - before) / sizes.timed as f64;
                 emit(name, &format!("rt_{counted}"), "count", &mut [per_frame]);

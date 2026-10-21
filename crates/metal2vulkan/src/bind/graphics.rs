@@ -2377,11 +2377,25 @@ fn plan(p: &RenderPipeline, device: &Device, shape: &BindShape) -> Result<Bindin
         }
         f
     };
+    // The stages whose function may write memory: a vertex or fragment function the compile
+    // found storing nothing writes no used resource (`GraphicsState::vertex_writes_memory`,
+    // `fragment_writes_memory`); an object or mesh function has no such fact.
+    let writers = stages
+        .iter()
+        .filter(|stage| match stage {
+            Stage::Vertex => p.graphics.vertex_writes_memory,
+            Stage::Fragment => p.graphics.fragment_writes_memory,
+            _ => true,
+        })
+        .fold(vk::PipelineStageFlags2::empty(), |all, &stage| {
+            all | stage_flags(stage)
+        });
     uses.extend(used_uses(
         &shape.used,
         p.interface.needs_pointer_translation,
         p.interface.needs_handle_translation,
         reach,
+        writers,
     ));
 
     let mut diagnostics = resources.diagnostics;

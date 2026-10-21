@@ -765,6 +765,7 @@ fn plan(p: &ComputePipeline, device: &Device, shape: &BindShape) -> Result<Bindi
         p.interface.needs_pointer_translation,
         p.interface.needs_handle_translation,
         |_| compute_stage,
+        compute_stage,
     ));
     uses.append(&mut resources.uses);
     let mut diagnostics = resources.diagnostics;
