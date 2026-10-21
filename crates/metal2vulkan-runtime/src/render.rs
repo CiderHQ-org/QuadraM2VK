@@ -5246,6 +5246,14 @@ impl RenderCommandEncoder {
                 continue;
             }
             counts.stage_table_read();
+            // Only the slots calls changed since it was read, where the table keeps them.
+            if let Some(read) = live.read_from.read_under(at).filter(|_| same && views_held) {
+                let read = (&mut *kept, read);
+                if table.refresh_changed(read, (stage, interface), (maps, views), &mut reshape) {
+                    counts.stage_table_read_in_part();
+                    continue;
+                }
+            }
             table.refresh_reading(kept, (stage, interface), (maps, views), &mut reshape);
         }
         let stamps = tables.map(|(_, table)| table.stamp());

@@ -29,8 +29,9 @@
 //!   its own.
 //! - **Stage tables.** A draw reads into its encoder's bind state only the stage tables a call
 //!   changed since a draw read them, through the same pipeline state's interface
-//!   (`WorkCounts::stage_tables_read`), and looks at where a no-copy buffer a table binds lies
-//!   once for its binding and once for its descriptor (`WorkCounts::no_copy_lies_read`).
+//!   (`WorkCounts::stage_tables_read`), of each only the slots its calls changed where it keeps
+//!   them (`WorkCounts::stage_tables_read_in_part`), and looks at where a no-copy buffer a table
+//!   binds lies once for its binding and once for its descriptor (`WorkCounts::no_copy_lies_read`).
 //! - **Pipelines.** A draw of a pipeline state one of whose last draws found its `VkPipeline`
 //!   made, of the same variant and an equal key, finds that entry again without looking the key
 //!   up (`WorkCounts::graphics_pipelines_looked_up`), states and keys switched between included.
@@ -69,7 +70,7 @@ use metal2vulkan::library::{FunctionConstantValue, FunctionConstantValues};
 use metal2vulkan::metal::state::DepthStencilDescriptor;
 use metal2vulkan::metal::{
     BlendFactor, CompareFunction, DataType, DepthClipMode, PixelFormat, PrimitiveType,
-    SamplerMinMagFilter, TextureUsage,
+    SamplerMinMagFilter, SamplerMipFilter, TextureUsage,
 };
 use metal2vulkan::pipeline::{ColorAttachmentDescriptor, RenderPipelineDescriptor, StageSource};
 use metal2vulkan_devtools::{engine_dir, llvm_assemble};
@@ -410,11 +411,124 @@ fn a_pass_that_draws_as_the_one_before_makes_no_render_pass() {
     });
 }
 
+/// Draws each after a call of another setter form, its column's corners and its texel's color
+/// set by the calls alone: a draw that reads its tables in part (`WorkCounts::
+/// stage_tables_read_in_part`) brings in every slot such a call changed. The vertex slot's
+/// corners come from a buffer of every column's at the column's offset (`set_vertex_buffer`,
+/// `set_vertex_buffer_offset`, `set_vertex_buffers`) or from bytes (`set_vertex_bytes`); the color
+/// from the texture bound (`set_fragment_texture`, `set_fragment_textures`) and from the level a
+/// sampler's LOD clamps pick of a two-level texture, red then green (`set_fragment_sampler_state`,
+/// `set_fragment_sampler_states` with clamps and without, the same state again). A slot a call
+/// changed that the read left as it was would draw a column elsewhere, or in the other color.
+#[test]
+fn a_draw_reading_its_tables_in_part_brings_in_each_setters_slot() {
+    on_device(|device, _| {
+        let scene = Scene::new(device);
+        let corners: Vec<u8> = (0..SIDE).flat_map(column).collect();
+        let corners = buffer_with(device, &corners).unwrap();
+        let at = |c: u64| c * 16;
+        // Two levels: red, then green.
+        let mut levels = TextureDescriptor::texture_2d(
+            PixelFormat::RGBA8Unorm,
+            TEXTURE_SIDE,
+            TEXTURE_SIDE,
+            true,
+        );
+        levels.usage = TextureUsage::SHADER_READ;
+        levels.resource_options = ResourceOptions::shared();
+        let levels = device.new_texture(&levels).unwrap();
+        for (level, color) in [(0, RED), (1, GREEN), (2, GREEN)] {
+            let side = (TEXTURE_SIDE >> level).max(1);
+            let texels: Vec<u8> = (0..side * side).flat_map(|_| color).collect();
+            levels
+                .replace_region(
+                    Region::new_2d(0, 0, side, side),
+                    level,
+                    0,
+                    &texels,
+                    4 * side,
+                    0,
+                )
+                .unwrap();
+        }
+        let green = solid(device, PixelFormat::RGBA8Unorm, GREEN);
+        // Each samples one level: the target is twice the texture's side, so the draws' LOD is
+        // below 0 and the clamps decide it.
+        let sampler = |lod: f32| {
+            let mut descriptor = SamplerDescriptor::new();
+            descriptor.mip_filter = SamplerMipFilter::Nearest;
+            descriptor.lod_min_clamp = lod;
+            descriptor.lod_max_clamp = lod;
+            device.new_sampler_state(&descriptor).unwrap()
+        };
+        let (first, second) = (sampler(0.0), sampler(1.0));
+        let (command_buffer, mut encoder) = scene.encoder(device);
+        encoder.set_vertex_buffer(Some(&corners), at(0), 0).unwrap();
+        encoder.set_fragment_texture(Some(&levels), 0).unwrap();
+        encoder.set_fragment_sampler_state(Some(&first), 0).unwrap();
+        draw(&mut encoder);
+        let before = device.work_counts();
+        for c in 1..SIDE {
+            match c {
+                1 => {
+                    encoder.set_vertex_buffer_offset(at(1), 0).unwrap();
+                    encoder
+                        .set_fragment_sampler_state(Some(&second), 0)
+                        .unwrap();
+                }
+                2 => {
+                    encoder.set_vertex_bytes(&column(2), 0).unwrap();
+                    encoder.set_fragment_sampler_state(Some(&first), 0).unwrap();
+                }
+                3 => {
+                    encoder
+                        .set_vertex_buffers(&[Some(&corners)], &[at(3)], 0)
+                        .unwrap();
+                    encoder.set_fragment_textures(&[Some(&green)], 0).unwrap();
+                }
+                4 => {
+                    encoder.set_vertex_buffer(Some(&corners), at(4), 0).unwrap();
+                    encoder.set_fragment_texture(Some(&levels), 0).unwrap();
+                }
+                5 => {
+                    encoder.set_vertex_buffer_offset(at(5), 0).unwrap();
+                    let clamps: (&[f32], &[f32]) = (&[1.0], &[1.0]);
+                    (encoder.set_fragment_sampler_states(&[Some(&first)], Some(clamps), 0))
+                        .unwrap();
+                }
+                6 => {
+                    encoder.set_vertex_buffer_offset(at(6), 0).unwrap();
+                    (encoder.set_fragment_sampler_states(&[Some(&first)], None, 0)).unwrap();
+                }
+                _ => encoder.set_vertex_buffer_offset(at(c), 0).unwrap(),
+            }
+            draw(&mut encoder);
+        }
+        let after = device.work_counts();
+        encoder.end_encoding().unwrap();
+        let colors = [RED, GREEN, RED, GREEN, RED, GREEN, RED, RED];
+        let pixels = scene.pixels(&command_buffer);
+        for (i, &pixel) in pixels.iter().enumerate() {
+            let want = colors[i % SIDE as usize];
+            assert_eq!(pixel, want, "pixel {i}: {pixels:?}");
+        }
+        // Every later draw reads the vertex table in part; those that changed a fragment slot, the
+        // fragment table too.
+        let fragment_reads = 6;
+        assert_eq!(
+            grew(&before, &after, |c| c.stage_tables_read_in_part),
+            (SIDE - 1) + fragment_reads
+        );
+    });
+}
+
 /// Draws read into their encoder's kept bind state only the stage tables a call changed since a
 /// draw read them (`WorkCounts::stage_tables_read`): each column's first draw the vertex table,
 /// whose bytes it sets, and the fragment table too where it binds another texture; its second
 /// draw, with no call before it, none; and every table at the draw after another pipeline state
-/// is set, whose interface they are read through. Each second draw's uses are its first's, which
+/// is set, whose interface they are read through. A table read through the same interface reads
+/// only the slot its call changed (`WorkCounts::stage_tables_read_in_part`); the encoder's first
+/// draw and the draw through another interface read theirs whole. Each second draw's uses are its first's, which
 /// its encoder noted already (`WorkCounts::commands_noted_as_before`); so are each first draw's
 /// the draw's before it, inline bytes being no use (they lie in the command buffer's upload
 /// arena, which hazard tracking leaves alone), another pipeline state of the same stages too, but
@@ -431,8 +545,10 @@ fn draws_read_only_the_stage_tables_a_call_changed() {
         encoder.set_fragment_texture(Some(&red), 0).unwrap();
         let read = || device.work_counts().stage_tables_read;
         let noted = || device.work_counts().commands_noted_as_before;
+        let parted = || device.work_counts().stage_tables_read_in_part;
         let mut counts = Vec::new();
         let mut notes = Vec::new();
+        let mut parts = Vec::new();
         for c in 0..SIDE {
             match c {
                 3 => encoder.set_fragment_texture(Some(&green), 0).unwrap(),
@@ -440,12 +556,14 @@ fn draws_read_only_the_stage_tables_a_call_changed() {
                 _ => {}
             }
             encoder.set_vertex_bytes(&column(c), 0).unwrap();
-            let (before, noted_before) = (read(), noted());
+            let (before, noted_before, parted_before) = (read(), noted(), parted());
             draw(&mut encoder);
             let (first, noted_first) = (read() - before, noted() - noted_before);
+            let parted_first = parted() - parted_before;
             draw(&mut encoder);
             counts.push((first, read() - before - first));
             notes.push((noted_first, noted() - noted_before - noted_first));
+            parts.push((parted_first, parted() - parted_before - parted_first));
         }
         encoder.end_encoding().unwrap();
         let as_before = [
@@ -471,6 +589,17 @@ fn draws_read_only_the_stage_tables_a_call_changed() {
             (1, 0),
         ];
         assert_eq!(counts, reads, "{counts:?}");
+        let in_part = [
+            (0, 0),
+            (1, 0),
+            (1, 0),
+            (2, 0),
+            (1, 0),
+            (0, 0),
+            (1, 0),
+            (1, 0),
+        ];
+        assert_eq!(parts, in_part, "{parts:?}");
         let pixels = scene.pixels(&command_buffer);
         for (i, &pixel) in pixels.iter().enumerate() {
             let want = match i as u64 % SIDE >= 3 {

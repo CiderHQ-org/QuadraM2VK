@@ -53,6 +53,7 @@ use metal2vulkan::pipeline::{
 use std::any::Any;
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
+use std::ops::Range;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -161,6 +162,8 @@ pub(super) struct ArgumentTable {
     retained: Retained,
     /// Its contents' stamp, drawn afresh by every call that may change them.
     stamp: Stamp,
+    /// The slots its last calls changed, by the stamps they took ([`Changes`]).
+    changes: Changes,
 }
 
 /// A copy binds what the table binds, under a stamp of its own: a copy changed in place (a
@@ -178,6 +181,7 @@ impl Clone for ArgumentTable {
             bytes: self.bytes.clone(),
             retained: self.retained.clone(),
             stamp: Stamp::fresh(),
+            changes: Changes::default(),
         }
     }
 }
@@ -201,6 +205,58 @@ impl Stamp {
 impl Default for Stamp {
     fn default() -> Stamp {
         Stamp::fresh()
+    }
+}
+
+/// The most slots a table keeps of its last calls' changes ([`Changes`]): a reader that read it
+/// before those reads it whole.
+const CHANGES_KEPT: usize = 16;
+
+/// The slots a table's last calls changed (or may have: a refused call's too), each with the
+/// stamp the table took at that call, oldest first, and the stamp before the oldest: a reader that
+/// read the table under one of those stamps brings in the slots changed since alone
+/// ([`ArgumentTable::refresh_changed`]); a reader under any other stamp reads it whole. A copy of
+/// a table keeps none (its stamp is its own).
+#[derive(Default)]
+struct Changes {
+    since: Option<Stamp>,
+    slots: Vec<(Stamp, SlotClass, u32)>,
+}
+
+impl Changes {
+    /// Note a call that took the table from `before` to `after`, changing the slots of `class`
+    /// at `indices`: of more slots than are kept, it leaves none to read from.
+    fn note(&mut self, (before, after): (Stamp, Stamp), class: SlotClass, indices: Range<u32>) {
+        if indices.len() > CHANGES_KEPT {
+            self.since = None;
+            self.slots.clear();
+            return;
+        }
+        if self.slots.is_empty() {
+            self.since = Some(before);
+        }
+        self.slots
+            .extend(indices.map(|index| (after, class, index)));
+        // The oldest calls go whole: a reader under the stamp one of them took saw its slots.
+        while self.slots.len() > CHANGES_KEPT {
+            let oldest = self.slots[0].0;
+            let gone = self.slots.partition_point(|&(stamp, ..)| stamp == oldest);
+            self.slots.drain(..gone);
+            self.since = Some(oldest);
+        }
+    }
+
+    /// The slots changed since the table's stamp was `read`, where it keeps them.
+    fn since(&self, read: Stamp) -> Option<impl Iterator<Item = (SlotClass, u32)> + '_> {
+        let from = match self.since == Some(read) {
+            true => 0,
+            false => self.slots.iter().rposition(|&(stamp, ..)| stamp == read)? + 1,
+        };
+        Some(
+            self.slots[from..]
+                .iter()
+                .map(|&(_, class, index)| (class, index)),
+        )
     }
 }
 
@@ -435,6 +491,15 @@ impl ArgumentTable {
         self.stamp
     }
 
+    /// A call that may change the slots of `class` at `indices` (before its checks: a refused one
+    /// may have changed nothing, which a reader then reads again): a fresh stamp, and the slots
+    /// noted ([`Changes`]).
+    fn changed(&mut self, class: SlotClass, indices: Range<u32>) {
+        let before = self.stamp;
+        self.stamp = Stamp::fresh();
+        self.changes.note((before, self.stamp), class, indices);
+    }
+
     /// Refuse `buffer` at `offset` in `call` of an encoder of `core`: a buffer of another device,
     /// and, in a render stage's table, an offset past its length (a compute table holds it).
     fn check_buffer(
@@ -478,7 +543,7 @@ impl ArgumentTable {
         stride: u64,
         index: u32,
     ) -> Result<(), Error> {
-        self.stamp = Stamp::fresh();
+        self.changed(SlotClass::Buffer, index..index.saturating_add(1));
         check_index(call, index, BUFFER_SLOTS)?;
         let stride = attribute_stride(stride);
         if let Some(buffer) = buffer {
@@ -521,7 +586,7 @@ impl ArgumentTable {
         strides: Option<&[u64]>,
         first: u32,
     ) -> Result<(), Error> {
-        self.stamp = Stamp::fresh();
+        self.changed(SlotClass::Buffer, span(first, buffers.len()));
         if buffers.len() != offsets.len() || strides.is_some_and(|s| s.len() != buffers.len()) {
             return Err(invalid(call, Problem::LengthMismatch));
         }
@@ -582,7 +647,7 @@ impl ArgumentTable {
         stride: u64,
         index: u32,
     ) -> Result<(), Error> {
-        self.stamp = Stamp::fresh();
+        self.changed(SlotClass::Buffer, index..index.saturating_add(1));
         check_index(call, index, BUFFER_SLOTS)?;
         let stride = attribute_stride(stride);
         if let Some(len) = self.bytes.get(&index).map(|bytes| bytes.len) {
@@ -648,7 +713,7 @@ impl ArgumentTable {
         stride: Option<u64>,
         index: u32,
     ) -> Result<(), Error> {
-        self.stamp = Stamp::fresh();
+        self.changed(SlotClass::Buffer, index..index.saturating_add(1));
         check_index(call, index, BUFFER_SLOTS)?;
         let length = bytes.len() as u64;
         if length > INLINE_BYTES_LIMIT {
@@ -698,7 +763,7 @@ impl ArgumentTable {
         textures: &[Option<&Texture>],
         first: u32,
     ) -> Result<(), Error> {
-        self.stamp = Stamp::fresh();
+        self.changed(SlotClass::Texture, span(first, textures.len()));
         check_range(call, first, textures.len(), TEXTURE_SLOTS)?;
         for texture in textures.iter().flatten() {
             core.check_device(call, texture.device())?;
@@ -724,7 +789,7 @@ impl ArgumentTable {
         clamps: Option<(&[f32], &[f32])>,
         first: u32,
     ) -> Result<(), Error> {
-        self.stamp = Stamp::fresh();
+        self.changed(SlotClass::Sampler, span(first, samplers.len()));
         if let Some((min, max)) = clamps {
             if min.len() != samplers.len() || max.len() != samplers.len() {
                 return Err(invalid(call, Problem::LengthMismatch));
@@ -754,7 +819,7 @@ impl ArgumentTable {
         tables: &[Option<&VisibleFunctionTable>],
         first: u32,
     ) -> Result<(), Error> {
-        self.stamp = Stamp::fresh();
+        self.changed(SlotClass::Buffer, span(first, tables.len()));
         check_range(call, first, tables.len(), BUFFER_SLOTS)?;
         for table in tables.iter().flatten() {
             core.check_device(call, table.device())?;
@@ -1032,6 +1097,103 @@ impl ArgumentTable {
         self.check_reading(kept, read, (maps, views));
     }
 
+    /// [`refresh_reading`](Self::refresh_reading) of `kept`, read last under the stamp `read`
+    /// through the same interface and maps: only the slots the table's calls changed since, where
+    /// it keeps them ([`Changes`]) and its slots that tell the view base alignment apart are as
+    /// `kept` holds them, so every other slot's binding and shape are as read then. Whether it
+    /// brought them in; else nothing is changed, and the table is to be read whole.
+    pub(super) fn refresh_changed(
+        &self,
+        (kept, read): (&mut StageTable, Stamp),
+        (stage, interface): (Stage, &PipelineInterface),
+        (maps, views): (&SamplerMaps, &AtBindViews),
+        reshape: &mut Reshape,
+    ) -> bool {
+        let Some(changed) = self.changes.since(read) else {
+            return false;
+        };
+        // A buffer's shape reads these slots: where they changed, every buffer is read again.
+        if self.at_bind_views(stage, views) != kept.at_bind_views {
+            return false;
+        }
+        let alignment = views.alignment;
+        for (class, index) in changed {
+            match class {
+                SlotClass::Buffer => {
+                    self.refresh_buffer((kept, index), (stage, interface), alignment, reshape)
+                }
+                SlotClass::Texture => match self.textures.get(&index) {
+                    Some(texture) => reshape.slot(
+                        &mut kept.textures,
+                        index,
+                        bound_texture(texture),
+                        BoundTexture::shape,
+                    ),
+                    None => {
+                        if kept.textures.remove(&index).is_some() {
+                            reshape.unbound();
+                        }
+                    }
+                },
+                SlotClass::Sampler => match self.samplers.get(&index) {
+                    Some((sampler, clamps)) => {
+                        let slot = SlotRef {
+                            stage,
+                            class: SlotClass::Sampler,
+                            index,
+                        };
+                        let desc = maps.sampler(slot, bound_sampler(sampler, *clamps));
+                        reshape.slot(
+                            &mut kept.samplers,
+                            index,
+                            BoundSampler::new(desc),
+                            BoundSampler::shape,
+                        );
+                    }
+                    None => {
+                        if kept.samplers.remove(&index).is_some() {
+                            reshape.unbound();
+                        }
+                    }
+                },
+            }
+        }
+        #[cfg(debug_assertions)]
+        self.check_reading(kept, (stage, interface), (maps, views));
+        true
+    }
+
+    /// Buffer slot `index` of `kept` brought in place as [`refresh_reading`](Self::refresh_reading)
+    /// brings it: unbound where the function reads it unbound or nothing within its length is
+    /// bound there, else its inline bytes or buffer, its shape of the class `alignment` tells it.
+    fn refresh_buffer(
+        &self,
+        (kept, index): (&mut StageTable, u32),
+        read: (Stage, &PipelineInterface),
+        alignment: u32,
+        reshape: &mut Reshape,
+    ) {
+        let bound = !self.reads_unbound(read, index)
+            && (self.bytes.contains_key(&index)
+                || (self.buffers.get(&index))
+                    .is_some_and(|(buffer, offset)| *offset <= buffer.length()));
+        if !bound {
+            if kept.buffers.remove(&index).is_some() {
+                reshape.unbound();
+            }
+            return;
+        }
+        let a = kept.class_alignment(index, alignment);
+        if let Some(bytes) = self.bytes.get(&index) {
+            reshape.slot(&mut kept.buffers, index, bound_bytes(bytes), |b| b.shape(a));
+        } else if let Some((buffer, offset)) = self.buffers.get(&index) {
+            let stride = self.attribute_strides.get(&index).copied();
+            if let Some(bound) = bound_buffer(buffer, *offset, stride) {
+                reshape.slot(&mut kept.buffers, index, bound, |b| b.shape(a));
+            }
+        }
+    }
+
     /// That `kept`, brought in place by [`refresh_reading`](Self::refresh_reading) (or kept unread
     /// while nothing it reads changed: `live_bind::ReadFrom`), is the table `stage`'s function of
     /// `interface` reads whole ([`stage_table_reading`](Self::stage_table_reading)), each sampler
@@ -1261,6 +1423,11 @@ fn retain_into(
     if taken > 0 {
         core.device().shared().counts.argument_table_retained(taken);
     }
+}
+
+/// The `count` indices from `first`, as many as lie below `u32::MAX`.
+fn span(first: u32, count: usize) -> Range<u32> {
+    first..first.saturating_add(u32::try_from(count).unwrap_or(u32::MAX))
 }
 
 /// The objects a table's `buffers`, `textures` and `samplers` bind, in the table's order: its

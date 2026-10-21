@@ -172,6 +172,7 @@ pub(crate) struct Counters {
     argument_samplers_taken: AtomicU64,
     bind_views_worked_out: AtomicU64,
     stage_tables_read: AtomicU64,
+    stage_tables_read_in_part: AtomicU64,
     no_copy_lies_read: AtomicU64,
     commands_noted_as_before: AtomicU64,
     draws_settled: AtomicU64,
@@ -1249,6 +1250,13 @@ impl Counters {
     /// (`ArgumentTable::refresh_reading`).
     pub(crate) fn stage_table_read(&self) {
         self.stage_tables_read.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// One of those reads brought in only the slots calls changed since the table was read
+    /// (`ArgumentTable::refresh_changed`).
+    pub(crate) fn stage_table_read_in_part(&self) {
+        self.stage_tables_read_in_part
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     /// A look at where a no-copy buffer's bytes lie, which takes its pages' lock
@@ -2922,6 +2930,9 @@ pub struct WorkCounts {
     /// interface, with the same samplers' address-mode maps, while no no-copy buffer was rebound
     /// or detached (`live_bind::ReadFrom`).
     pub stage_tables_read: u64,
+    /// Those reads that brought in only the slots calls changed since the table was read, the
+    /// table keeping them (`ArgumentTable::refresh_changed`): every other slot is as it was read.
+    pub stage_tables_read_in_part: u64,
     /// Looks at where a no-copy buffer's bytes lie, each of which takes its pages' lock
     /// (`buffer::HostCell`): a draw's read of a table binding one takes one for the binding, its
     /// base and device address read together (`argument_table::bound_buffer`), and a descriptor
@@ -3817,6 +3828,7 @@ impl Device {
             argument_samplers_taken: counters.argument_samplers_taken.load(Ordering::Relaxed),
             bind_views_worked_out: counters.bind_views_worked_out.load(Ordering::Relaxed),
             stage_tables_read: counters.stage_tables_read.load(Ordering::Relaxed),
+            stage_tables_read_in_part: counters.stage_tables_read_in_part.load(Ordering::Relaxed),
             no_copy_lies_read: counters.no_copy_lies_read.load(Ordering::Relaxed),
             commands_noted_as_before: counters.commands_noted_as_before.load(Ordering::Relaxed),
             draws_settled: counters.draws_settled.load(Ordering::Relaxed),

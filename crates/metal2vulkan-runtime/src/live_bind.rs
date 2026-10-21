@@ -10,7 +10,10 @@
 //!   (`argument_table::AtBindViews`, which another table's offsets may shrink), and that no rebind
 //!   or detach of a no-copy buffer may have changed (which changes a bound buffer's binding with
 //!   no call: `buffer::host_cells_moved`), is not read again ([`ReadFrom`]; checked whole in debug
-//!   builds).
+//!   builds). Where only calls changed it since it was so read, and the table keeps the slots
+//!   they changed (`ArgumentTable::refresh_changed`), only those slots are brought in: every
+//!   other slot's binding is a function of what the table bound under the stamp read, the
+//!   interface, the maps and the moves, none of which changed (checked whole in debug builds).
 //!   Every other field is computed as before and compared ([`Reshape::field`]), as much of it as
 //!   the shape reads ([`Reshape::shaped`]; a value no shape reads, such as the depth/stencil state,
 //!   the stencil references or the blend color, is stored uncompared). The new value is always
@@ -247,6 +250,12 @@ impl ReadFrom {
     /// Whether the table at `at` in the reading order, stamped `stamp`, is the one read.
     pub(super) fn unchanged(&self, at: usize, stamp: Stamp) -> bool {
         self.tables[at] == Some(stamp)
+    }
+
+    /// The stamp the table at `at` in the reading order was read under, if any: one whose calls
+    /// since it keeps brings in their slots alone (`ArgumentTable::refresh_changed`).
+    pub(super) fn read_under(&self, at: usize) -> Option<Stamp> {
+        self.tables[at]
     }
 
     /// The tables of `stamps` read now through `interface` (of the drawing state `state` gives)
