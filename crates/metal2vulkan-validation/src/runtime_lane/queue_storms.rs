@@ -133,9 +133,9 @@ const TRIES: usize = 3;
 
 /// The MoltenVK releases (`driverVersion`) whose encoding [`moltenvk_fences`] was read at: 1.4.1,
 /// and 1.4.2, whose fence code (`barrierWait`, `barrierUpdate`, `syncFences` and the residency
-/// set's making) is 1.4.1's, measured by this lane on the M3 Max under macOS 27.0.1 (a light
-/// burst's median 1.93 busy command buffers judged against Metal's unfenced storm, as the fenced
-/// probe's 1.91 to 1.95).
+/// set's making) is 1.4.1's. On the M3 Max under macOS 27.0.1 at 1.4.2, this lane judged without
+/// the fences saw a light burst's median of 1.93 busy command buffers, within the fenced probe's
+/// 1.91 to 1.95 above, and it passes judged with them.
 const MOLTENVK_READ: [u32; 2] = [10401, 10402];
 
 /// `maxPerStageDescriptorUpdateAfterBindSampledImages` where MoltenVK binds through tier-2 Metal
