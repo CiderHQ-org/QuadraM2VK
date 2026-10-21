@@ -11,8 +11,10 @@
 //!   copies the records' bytes ([`BlitCommandEncoder::copy_from_buffer_to_buffer`], which moves
 //!   overlapping ranges of one buffer as `memmove` does); a record the destination's descriptor
 //!   does not allow runs nothing where an execution meets it (`ReplayFaults::RECORD`), the defined
-//!   answer for Metal's garbled one. A reset copies a reset record (`CommandRecord::default`'s
-//!   bytes, in the command buffer's upload arena) over each command. Both write the destination's
+//!   answer for Metal's garbled one. A reset writes a reset record (`CommandRecord::default`'s
+//!   bytes) over each command: one fill of the range's records where those bytes are all zero,
+//!   as the record format makes them, and otherwise a copy of them from the command buffer's
+//!   upload arena to each command. Both write the destination's
 //!   records on the GPU as the command buffer runs, so the call marks it written by the GPU
 //!   (`IndirectCommandBuffer::written_by_gpu`): its executions run the records as they stand once
 //!   the work before them completed. An optimize records nothing.
@@ -115,18 +117,34 @@ impl BlitCommandEncoder {
         CommandRecord::default()
             .encode_into(&mut reset)
             .map_err(|_| internal("a reset record does not encode"))?;
-        let device = self.core().device().clone();
-        let upload = self.core().command_buffer().state().uploads.upload(
-            &device,
-            &reset,
-            COMMAND_BYTES as u64,
-        )?;
         buffer.written_by_gpu();
         let bytes = IndirectCommandBuffer::record_bytes(range.clone());
         let overflow = buffer
             .overflow()
             .map(|overflow| (overflow, overflow.bytes(range.clone())));
         let storage = buffer.storage();
+        if reset.iter().all(|&b| b == 0) {
+            // One fill of the records: a copy region per command costs the device a copy each.
+            let (raw, at) = storage.at(bytes.start);
+            let size = bytes.end - bytes.start;
+            self.command(&[writes(storage, bytes)], |device, command_buffer| {
+                // SAFETY: the encoder's command buffer is recording; the storage is live and
+                // retained until it completes; the range lies inside it, its offset and size
+                // multiples of 4 (whole records after the 16-byte header).
+                unsafe { device.cmd_fill_buffer(command_buffer, raw, at, size, 0) };
+            })?;
+            self.core().retain(storage.clone());
+            if let Some((overflow, bytes)) = overflow {
+                self.clear_overflow(overflow, bytes)?;
+            }
+            return Ok(());
+        }
+        let device = self.core().device().clone();
+        let upload = self.core().command_buffer().state().uploads.upload(
+            &device,
+            &reset,
+            COMMAND_BYTES as u64,
+        )?;
         let (raw, _) = storage.at(0);
         let regions: Vec<vk::BufferCopy> = range
             .map(|index| {

@@ -1126,8 +1126,9 @@ pub(super) const PAST_RECORD: [Degradation; 1] = [Degradation::IndirectValuePast
 /// a reset (on an M4: `0x20`, `0x40`, 1 and 2, then 0). A buffer slot past the 32 a record holds,
 /// below the descriptor's count, reads back as set, as Metal's getters answer every slot below the
 /// count (slots 0 to 63 of 64): a buffer at slot 40 and a nil buffer at 0x30 at slot 63 of a
-/// descriptor of 64, carried by a GPU copy within the buffer, cleared by a GPU reset and by the
-/// command's reset, and announcing nothing. A copy into a buffer of another count carries the slots
+/// descriptor of 64, carried by a GPU copy within the buffer, cleared by a GPU reset (one fill of
+/// the records and one of the slots past them, no copy) and by the command's reset, and announcing
+/// nothing. A copy into a buffer of another count carries the slots
 /// both hold and clears the destination's past the source's. A threadgroup length at index 40,
 /// which Metal keeps in storage not measured past about index 38, announces
 /// `indirect-value-past-record` once a device and reads back as fresh.
@@ -1196,7 +1197,17 @@ fn commands_read_back_their_type_and_slots_past_the_record() {
                 .unwrap()
         });
         assert_eq!(slots(&command(&made, 1)), kept, "carried by a GPU copy");
+        let before = device.work_counts().commands_replayed;
         blit(&|blit| blit.reset_commands_in_buffer(&made, 1..2).unwrap());
+        let after = device.work_counts().commands_replayed;
+        assert_eq!(
+            (
+                after.cmd_copy_buffer - before.cmd_copy_buffer,
+                after.cmd_fill_buffer - before.cmd_fill_buffer
+            ),
+            (0, 2),
+            "a GPU reset fills the records and the slots past them, copying nothing"
+        );
         let fresh = [Some(0), Some(0), Some(0), None];
         assert_eq!(slots(&command(&made, 1)), fresh, "cleared by a GPU reset");
         assert_eq!(slots(&command(&made, 0)), kept, "the source kept");
