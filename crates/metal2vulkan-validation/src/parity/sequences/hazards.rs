@@ -202,13 +202,26 @@ fn handle(text: &str) -> Option<u64> {
 }
 
 /// The hazard a message of id name `id_name` and text `text` reports, when it is one the lane
-/// reads: "`<call>`(): `<KIND>` hazard detected. `<command>` [...] reads `<VkBuffer|VkImage>
+/// reads: "`<call>`(): `<KIND>` hazard detected. `<initiator>` [...] reads `<VkBuffer|VkImage>
 /// 0x...`[, ...] which was previously written by [another ]`<command>`", as the layer words a
-/// hazard at recording and at a submission (`sync_error_messages.cpp`).
+/// hazard at recording and at a submission (`sync_reporting.cpp`, `sync_error_messages.cpp`).
+/// The initiator is the later command, or from 1.4.363 for a shader's access through a
+/// descriptor "Shader stage `<stage>` in `<command>`" at a submission and "Shader stage
+/// `<stage>`" at recording, where the later command is the call.
 pub(crate) fn parse(id_name: &str, text: &str) -> Option<Hazard> {
     let (later_writes, earlier_writes) = kinds(id_name)?;
     let (_, rest) = text.split_once(" hazard detected. ")?;
-    let later = command(rest).to_owned();
+    let (later, rest) = match rest.strip_prefix("Shader stage ") {
+        Some(staged) => {
+            let after = &staged[staged.find(' ')?..];
+            match after.strip_prefix(" in ") {
+                Some(initiated) => (command(initiated), initiated),
+                None => (command(text), after),
+            }
+        }
+        None => (command(rest), rest),
+    };
+    let later = later.to_owned();
     let verb = if later_writes {
         " writes to "
     } else {

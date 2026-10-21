@@ -938,6 +938,38 @@ fn the_lane_reads_the_layers_hazards() {
     let image = parse("SYNC-HAZARD-WRITE-AFTER-WRITE", recorded).unwrap();
     assert_eq!(image.later, "vkCmdCopyBufferToImage");
     assert_eq!(image.memory, Named::Image(0x5600_0000_0056));
+    // Layer 1.4.363 names a shader's access through a descriptor by its stage: before its command
+    // at a submission (seen on MoltenVK 1.4.2), alone at recording, where the call is the command.
+    let staged_recorded = "vkCmdDispatch(): WRITE_AFTER_WRITE hazard detected. Shader stage \
+        VK_SHADER_STAGE_COMPUTE_BIT writes to VkBuffer 0x4c000000004c, which was previously \
+        written by vkCmdCopyBuffer.";
+    assert_eq!(
+        parse("SYNC-HAZARD-WRITE-AFTER-WRITE", staged_recorded),
+        Some(Hazard {
+            later_writes: true,
+            earlier_writes: true,
+            later: "vkCmdDispatch".to_owned(),
+            earlier: "vkCmdCopyBuffer".to_owned(),
+            memory: Named::Buffer(0x4c00_0000_004c),
+            one_cb: true,
+        })
+    );
+    let staged = "vkQueueSubmit(): pSubmits[0].pCommandBuffers[4] READ_AFTER_WRITE hazard \
+        detected. Shader stage VK_SHADER_STAGE_COMPUTE_BIT in vkCmdDispatch (from VkCommandBuffer \
+        0x7733041018 submitted on the current VkQueue 0x7732cfef98) reads VkBuffer 0x4c000000004c, \
+        which was previously written by another vkCmdDispatch command (from VkCommandBuffer \
+        0x7733040618 submitted on VkQueue 0x7732cfef98).";
+    assert_eq!(
+        parse("SYNC-HAZARD-READ-AFTER-WRITE", staged),
+        Some(Hazard {
+            later_writes: false,
+            earlier_writes: true,
+            later: "vkCmdDispatch".to_owned(),
+            earlier: "vkCmdDispatch".to_owned(),
+            memory: Named::Buffer(0x4c00_0000_004c),
+            one_cb: false,
+        })
+    );
     // At a recording, or with no barrier at all after an earlier write, the two commands are in
     // one command buffer; a read with none may be in an earlier batch.
     assert!(image.one_cb && !read.one_cb);
