@@ -14,19 +14,21 @@ fn native_bc_storage_keeps_no_twin_and_exact_keeps_the_measured_decode() {
         ("exact", BlockDecodePolicy::Exact),
     ] {
         let scratch = Scratch::new(name);
-        let mut options = DeviceOptions::default();
-        options.kinds = if cfg!(m2v_cpu_icd) {
-            vec![DeviceKind::Cpu]
-        } else {
-            vec![
-                DeviceKind::Discrete,
-                DeviceKind::Integrated,
-                DeviceKind::Virtual,
-            ]
-        };
-        options.shader_cache = ShaderCacheOptions {
-            directory: Some(scratch.0.clone()),
-            ..ShaderCacheOptions::default()
+        let mut options = DeviceOptions {
+            kinds: if cfg!(m2v_cpu_icd) {
+                vec![DeviceKind::Cpu]
+            } else {
+                vec![
+                    DeviceKind::Discrete,
+                    DeviceKind::Integrated,
+                    DeviceKind::Virtual,
+                ]
+            },
+            shader_cache: ShaderCacheOptions {
+                directory: Some(scratch.0.clone()),
+                ..ShaderCacheOptions::default()
+            },
+            ..DeviceOptions::default()
         };
         options.policy.block_decode = policy;
         let device = Device::system_default_with(&options).unwrap();

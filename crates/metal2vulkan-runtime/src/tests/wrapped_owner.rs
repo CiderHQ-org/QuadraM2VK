@@ -47,7 +47,7 @@ fn a_wrapped_image_keeps_its_owner_through_views_and_commands() {
     .unwrap();
     blit.end_encoding().unwrap();
     initialized.commit().unwrap();
-    initialized.wait_until_completed_timeout(WAIT).unwrap();
+    initialized.wait_until_completed_for(WAIT).unwrap();
     drop(initialized);
     let plan = image.image_plan().unwrap().clone();
     let formats = plan.ash_view_formats();
@@ -96,7 +96,7 @@ fn a_wrapped_image_keeps_its_owner_through_views_and_commands() {
         "encoded work retains its image owner"
     );
     command.commit().unwrap();
-    command.wait_until_completed_timeout(WAIT).unwrap();
+    command.wait_until_completed_for(WAIT).unwrap();
     drop(command);
     let deadline = std::time::Instant::now() + WAIT;
     while drops.load(Ordering::SeqCst) == 0 {
