@@ -200,6 +200,7 @@ mod serde_round_trips {
             ycbcr_textures: BTreeSet::from([slot(Stage::Kernel, SlotClass::Texture, 6)]),
             flat_grid: true,
             replay_bindings: true,
+            merged_draws: true,
             amplification_draws: Some(AmplificationDraws::new(true, false)),
             viewport_compensation: Some(ViewportCompensation::new(true)),
             folded_groups: true,
@@ -295,6 +296,7 @@ mod serde_round_trips {
             ])),
             multisampled: true,
             replay_bindings: true,
+            merged_draws: true,
             framebuffer_fetch: Some(FramebufferFetchInputs {
                 attachments: BTreeMap::from([
                     (

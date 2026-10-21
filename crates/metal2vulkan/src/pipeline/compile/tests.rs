@@ -645,6 +645,7 @@ fn the_inputs_encoding_is_the_earlier_derived_debug() {
                 .replace(", tile_attachments: None", "")
                 .replace(", multisampled: false", "")
                 .replace(", replay_bindings: false", "")
+                .replace(", merged_draws: false", "")
                 .replace(", framebuffer_fetch: None", "")
                 .replace(", srgb_textures: {}", "")
                 .replace(", srgb_twins: {}", "")
@@ -3041,6 +3042,101 @@ fn a_fragment_reads_the_viewport_index_its_vertex_function_wrote() {
         assert_eq!(
             dev.compile_render_pipeline(&d, &budget).err(),
             Some(Error::NeedsInput(RuntimeInput::ViewportIndex))
+        );
+    }
+}
+
+/// A merged draw replay's vertex function (`VariantKey::merged_draws`) reads its command's slot
+/// table from the header at its `MergedDrawAddress`, a hole of the vertex stage, in place of a
+/// `RootTableAddress`, and its plan states the variant. A fragment function that reads a buffer
+/// or `[[primitive_id]]`, which a merged draw does not keep per command, is refused, as is a
+/// merged key without replay bindings.
+#[test]
+fn a_merged_draw_reads_its_command_s_table_from_its_header() {
+    use crate::cache::VariantKey;
+    use crate::pipeline::sym::PushField;
+    let dev = device("moltenvk-m3");
+    let mut key = VariantKey::new();
+    key.replay_bindings = true;
+    key.merged_draws = true;
+    let compile = |vertex: (&str, &str),
+                   fragment: Option<(&str, &str, metal::PixelFormat)>,
+                   key: &VariantKey| {
+        let function = |(file, name): (&str, &str)| {
+            let bc = fixture(file)?;
+            Some(FunctionDescriptor::new(
+                Library::from_air(&bc)
+                    .expect("library")
+                    .function(name)
+                    .expect("function"),
+            ))
+        };
+        let mut d = RenderPipelineDescriptor::new(StageSource::Function(function(vertex)?));
+        match fragment {
+            Some((file, name, format)) => {
+                d.fragment = Some(StageSource::Function(function((file, name))?));
+                d.color_attachments[0] = Some(ColorAttachmentDescriptor::new(format));
+            }
+            None => d.rasterization_enabled = false,
+        }
+        Some(dev.compile_render_variant(&d, key, &Budget::standard()))
+    };
+    let Some(merged) = compile(("primitive_ids", "pi_place"), None, &key) else {
+        return;
+    };
+    let merged = merged.expect("merged");
+    let fields: Vec<PushField> = merged
+        .interface
+        .push
+        .iter()
+        .flat_map(|p| p.fields.iter().map(|f| f.field))
+        .collect();
+    assert!(fields.contains(&PushField::MergedDrawAddress), "{fields:?}");
+    assert!(!fields.contains(&PushField::RootTableAddress), "{fields:?}");
+    assert!(
+        !fields.contains(&PushField::BaseVertexInstance),
+        "{fields:?}"
+    );
+    let plan = merged
+        .plan(&dev, &crate::bind::BindShape::default())
+        .expect("plan");
+    assert!(plan.variant.replay_bindings && plan.variant.merged_draws);
+    let placed: Vec<_> = plan
+        .push
+        .fields
+        .iter()
+        .filter(|f| f.field == PushField::MergedDrawAddress)
+        .map(|f| f.stage)
+        .collect();
+    assert_eq!(placed, [crate::pipeline::sym::Stage::Vertex]);
+    let mut unreplayed = VariantKey::new();
+    unreplayed.merged_draws = true;
+    let plain = compile(("primitive_ids", "pi_place"), None, &unreplayed)
+        .expect("fixture")
+        .expect("merged alone is no variant");
+    assert!(!plain.interface.push.iter().any(|p| p
+        .fields
+        .iter()
+        .any(|f| f.field == PushField::MergedDrawAddress)));
+    for (vertex, fragment) in [
+        (
+            ("primitive_ids", "pi_place"),
+            ("primitive_ids", "pi_ids", metal::PixelFormat::RGBA32Uint),
+        ),
+        (
+            ("a8r_targets", "a8r_vertex"),
+            ("a8r_targets", "a8r_fill", metal::PixelFormat::RGBA8Unorm),
+        ),
+    ] {
+        compile(vertex, Some(fragment), &VariantKey::new())
+            .expect("fixture")
+            .expect("plain");
+        let refused = compile(vertex, Some(fragment), &key)
+            .expect("fixture")
+            .expect_err("a fragment's command values under a merged draw");
+        assert!(
+            format!("{refused:?}").contains("GpuEncodedIndirectCommands"),
+            "{fragment:?}: {refused:?}"
         );
     }
 }

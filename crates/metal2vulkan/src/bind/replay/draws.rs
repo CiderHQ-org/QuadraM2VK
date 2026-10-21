@@ -57,6 +57,10 @@
 
 use std::sync::Arc;
 
+use super::merged::{
+    block_commands, corners_per_primitive, header as merged_header, MergedLayout, MERGED_CHUNK,
+    MERGED_HEADER_BYTES,
+};
 use super::{
     at, count_loop, counter, flag, k32, k64, load32, load64, refused, report, section, store32,
     store64, wide, ReplayRefusal, Types, PARAMS_BYTES,
@@ -133,6 +137,11 @@ pub struct DrawReplay {
     pub primitive_types: Vec<u32>,
     pub vertex_slots: u32,
     pub fragment_slots: u32,
+    /// Draw every command in one merged draw (`merged.rs`), its vertex function the merged
+    /// variant (`VariantKey::merged_draws`), rather than one draw per command: for one list type
+    /// or points (`primitive_types`), where no fragment function reads a command's buffers
+    /// (`fragment_slots` 0).
+    pub merged: bool,
 }
 
 impl DrawReplay {
@@ -154,6 +163,7 @@ impl DrawReplay {
             primitive_types,
             vertex_slots: BINDING_COUNT as u32,
             fragment_slots: BINDING_COUNT as u32,
+            merged: false,
         }
     }
 }
@@ -186,6 +196,8 @@ pub struct DrawReplayLayout {
     pub arguments_offset: u64,
     /// The scratch's size.
     pub bytes: u64,
+    /// A merged replay's sections ([`DrawReplay::merged`]); `None` for draws per command.
+    pub merged: Option<MergedLayout>,
 }
 
 impl DrawReplayLayout {
@@ -236,6 +248,9 @@ pub struct DrawReplayPreprocess {
     pub extents: Vec<u8>,
     /// The encoder's vertex and fragment buffers in a record's layout, at `layout.parent_offset`.
     pub parent: Vec<u8>,
+    /// A merged replay's header, at its `layout.merged`'s `header_offset`
+    /// ([`MERGED_HEADER_BYTES`]); empty for draws per command.
+    pub header: Vec<u8>,
     /// The push bytes ([`DrawReplayModule::PUSH_BYTES`], `COMPUTE`, offset 0), zero at the
     /// `push_holes`.
     pub push_constants: Vec<u8>,
@@ -276,6 +291,14 @@ pub fn draw_replay_preprocess(
     if !one_class(&replay.primitive_types) {
         return Err(refused(ReplayRefusal::DrawPrimitiveTypes));
     }
+    let corners = match (replay.merged, replay.primitive_types.as_slice()) {
+        (false, _) => None,
+        (true, &[t]) if replay.fragment_slots == 0 => match corners_per_primitive(t) {
+            Some(c) => Some(c),
+            None => return Err(refused(ReplayRefusal::DrawPrimitiveTypes)),
+        },
+        (true, _) => return Err(refused(ReplayRefusal::DrawPrimitiveTypes)),
+    };
     let most = BINDING_COUNT as u32;
     if replay.vertex_slots > most || replay.fragment_slots > most {
         return Err(refused(ReplayRefusal::NotReplayVariant));
@@ -302,10 +325,33 @@ pub fn draw_replay_preprocess(
     let resident_offset = PARAMS_BYTES;
     let extents_offset = section(resident_offset + resident.bytes.len() as u64);
     let parent_offset = section(extents_offset + extents.len() as u64);
-    let uploaded = parent_offset + COMMAND_BYTES as u64;
+    let header_offset = section(parent_offset + COMMAND_BYTES as u64);
+    let uploaded = match corners {
+        Some(_) => header_offset + MERGED_HEADER_BYTES,
+        None => parent_offset + COMMAND_BYTES as u64,
+    };
     let tables_offset = section(uploaded);
     let arguments_offset = section(tables_offset + commands * tables);
-    let bytes = section(arguments_offset + commands * types * DRAW_ARGUMENT_BYTES);
+    let arguments_end = section(arguments_offset + commands * types * DRAW_ARGUMENT_BYTES);
+    let merged = corners.map(|_| {
+        let block_commands = block_commands(replay.count);
+        let blocks = replay.count.div_ceil(block_commands);
+        let prefix_offset = arguments_end;
+        let sums_offset = section(prefix_offset + 8 * commands);
+        let draws_offset = section(sums_offset + 8 * u64::from(blocks));
+        MergedLayout {
+            header_offset,
+            prefix_offset,
+            sums_offset,
+            draws_offset,
+            block_commands,
+            blocks,
+        }
+    });
+    let bytes = match &merged {
+        Some(m) => section(m.draws_offset + 2 * DRAW_ARGUMENT_BYTES),
+        None => arguments_end,
+    };
     // Every offset a parameter states is relative to the resident root table; a range whose
     // tables or arguments lie past 2^32 bytes of it is refused.
     let as_param = |v: u64| {
@@ -327,6 +373,11 @@ pub fn draw_replay_preprocess(
         tables_offset,
         arguments_offset,
         bytes,
+        merged,
+    };
+    let header = match (&layout.merged, corners) {
+        (Some(m), Some(c)) => merged_header(replay, &layout, m, (c, MERGED_CHUNK)),
+        _ => Vec::new(),
     };
     let flags = if replay.inheritance.buffers == StateSource::Parent {
         INHERIT_BUFFERS
@@ -357,6 +408,7 @@ pub fn draw_replay_preprocess(
         resident,
         extents,
         parent,
+        header,
         push_constants: vec![0; DrawReplayModule::PUSH_BYTES as usize],
         push_holes: vec![
             PushHole::RootTableAddress {

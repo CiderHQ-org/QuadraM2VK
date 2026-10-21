@@ -1649,6 +1649,7 @@ fn finish(
         .into());
     }
 
+    stage_io::finish_merged(&mut cx)?;
     let placement = push::place(stage, &cx.push);
     access::accept_placement(&cx, &placement)?;
 

@@ -168,7 +168,8 @@ use crate::spirv::ir::{
 };
 
 pub(crate) use plan::{
-    amplification_count_form, note_device_point_size, output_types, view_index_enabled,
+    amplification_count_form, finish_merged, note_device_point_size, output_types,
+    view_index_enabled,
 };
 pub use plan::{DrawBase, Link, Place, Shape};
 
@@ -254,6 +255,10 @@ pub enum Source {
     /// A vertex function's `[[base_vertex]]` in the indexed capture form: the draw's base vertex,
     /// lane 3 of `PushField::CaptureLayout`, into an integer of this form.
     CapturedBaseVertex(Form),
+    /// A merged draw's vertex function's `[[vertex_id]]`, `[[instance_id]]`, `[[base_vertex]]` or
+    /// `[[base_instance]]` (`LoweringInputs::merged_draws`): its corner's command's, which the
+    /// entry finds ([`MergedRead`]), into an integer of this form.
+    Merged { value: MergedValue, form: Form },
     /// A `float` or `half` varying the fragment function reads flat because its vertex function
     /// writes it the same at every vertex of a primitive (`LoweringInputs::uniform_varyings`):
     /// the variable, declared `Flat`, read as Metal's interpolation returns such a value
@@ -439,10 +444,40 @@ pub struct StageIoPlan {
     /// vertex from the draw's index buffer ([`CapturedIndex`]): planned where the function reads
     /// it (`[[vertex_id]]`, a per-vertex attribute, or its record's restart flag).
     pub captured_index: Option<CapturedIndex>,
+    /// A vertex function compiled under `LoweringInputs::merged_draws` finds its corner's command
+    /// at entry ([`MergedRead`]).
+    pub merged: Option<MergedRead>,
     /// A vertex function compiled under `LoweringInputs::primitive_id_varying` writes the
     /// primitive ID of each vertex's primitive to its varying ([`PrimitiveIdStore`]).
     pub primitive_id: Option<PrimitiveIdStore>,
 }
+
+/// How a vertex function compiled under `LoweringInputs::merged_draws` finds the command its
+/// corner falls in: at entry, before the body, from its `VertexIndex` and `InstanceIndex` (the
+/// input builtins' objects `vertex` and `instance`) and the header at
+/// `PushField::MergedDrawAddress` (`bind::replay`'s `merged.rs`, `bind::merged_vertex`). Its
+/// `[[vertex_id]]`, `[[instance_id]]`, `[[base_vertex]]` and `[[base_instance]]` read the
+/// command's ([`Source::Merged`]), and its `RootTableAddress` is the command's vertex slot table.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct MergedRead {
+    pub vertex: usize,
+    pub instance: usize,
+}
+
+/// Which of a merged draw's command's values a vertex function reads ([`Source::Merged`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum MergedValue {
+    Vertex,
+    Instance,
+    BaseVertex,
+    BaseInstance,
+}
+
+/// The words a merged draw's vertex function adds at entry: the two input builtins' variables,
+/// decorations and interface entries and their loads, the header's loads, the corner's 64-bit
+/// arithmetic, the search's loop (its variables, test, halving, load and selection), the
+/// command's draw's loads, the division and remainder, and the slot table's address.
+pub(super) const MERGED_WORDS: u64 = 600;
 
 /// How a vertex function compiled under `LoweringInputs::primitive_id_varying` writes the
 /// primitive ID a fragment function reads from its varying on a device without a fragment
@@ -1080,6 +1115,21 @@ pub fn emit_entry(cx: &mut EmitCx<'_>, fb: &mut FunctionBuilder<'_>) -> BResult<
         let raw = cx.captured_index(fb)?;
         skip_restart(cx, fb, c, raw)?;
     }
+    // A merged draw's vertex finds its corner's command before the body, which every read of the
+    // command's values and slot table follows.
+    if let Some(m) = cx.plan.families.stage_io.merged {
+        let header = cx.push_field(fb, PushField::MergedDrawAddress)?;
+        let mut index = [None; 2];
+        for (x, object) in index.iter_mut().zip([m.vertex, m.instance]) {
+            let g = global(cx, object)?;
+            let p = fb.module().global_value(g)?;
+            *x = Some(fb.load(p, MemAccess::default())?);
+        }
+        let [Some(vertex), Some(instance)] = index else {
+            return Err(cx.fail("a merged draw's vertex without its index builtins"));
+        };
+        cx.merged_draw = Some(crate::bind::merged_vertex(fb, header, (vertex, instance))?);
+    }
     let pulled: Vec<(u32, fetch::PulledRead)> = cx
         .plan
         .families
@@ -1100,6 +1150,7 @@ pub fn emit_entry(cx: &mut EmitCx<'_>, fb: &mut FunctionBuilder<'_>) -> BResult<
             | Source::StageInRegion { .. }
             | Source::CapturedVertex(_)
             | Source::CapturedBaseVertex(_)
+            | Source::Merged { .. }
             | Source::Uniform(_) => None,
         })
         .collect();
@@ -1180,6 +1231,18 @@ pub fn param_value(
         Some(Source::CapturedBaseVertex(form)) => {
             let layout = cx.push_field(fb, PushField::CaptureLayout)?;
             let x = fb.composite_extract(layout, &[0, 3])?;
+            return ops::mask(fb, form, x);
+        }
+        Some(Source::Merged { value, form }) => {
+            let Some(m) = cx.merged_draw else {
+                return Err(cx.fail("a merged draw's value read before its entry found it"));
+            };
+            let x = match value {
+                MergedValue::Vertex => m.vertex,
+                MergedValue::Instance => m.instance,
+                MergedValue::BaseVertex => m.base_vertex,
+                MergedValue::BaseInstance => m.base_instance,
+            };
             return ops::mask(fb, form, x);
         }
         Some(Source::StageInRegion { size, projection }) => {

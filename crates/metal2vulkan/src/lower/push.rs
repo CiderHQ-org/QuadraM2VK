@@ -72,6 +72,7 @@ pub const fn shape(f: PushField) -> FieldShape {
         | PushField::ExecutionStatusAddress
         | PushField::CaptureAddress
         | PushField::CaptureIndexAddress
+        | PushField::MergedDrawAddress
         | PushField::CommandRecordsAddress
         | PushField::ReplayRegionAddress => FieldShape::U64,
         // A Metal address, low word first: the same eight bytes as a `u64`, readable without

@@ -70,7 +70,7 @@ pub const SEMANTICS_VERSION: u32 = 1808;
 /// re-typed in an encoded type, its `codec` body or its `envelope`. A variant removed while its tag
 /// stays unused needs no bump: an entry holding it fails to decode, which is a miss. The commit that
 /// bumps it says what changed; this comment keeps no history.
-pub const ARTIFACT_FORMAT_VERSION: u32 = 435;
+pub const ARTIFACT_FORMAT_VERSION: u32 = 436;
 
 /// The version of what this crate's runtime does with a compiled pipeline: instantiating a binding
 /// plan (`BindingPlan::instantiate_*`: descriptor ranges, push bytes, root, argument, and handle
@@ -240,6 +240,12 @@ pub struct VariantKey {
     /// the state an execution of GPU-written draws inherits, its draws' buffers the records'.
     #[cfg_attr(feature = "serde", serde(default))]
     pub replay_bindings: bool,
+    /// With `replay_bindings`, the render pipeline's vertex and fragment functions run a draw
+    /// replay merged into one draw (`LoweringInputs::merged_draws`): the variant the runtime
+    /// compiles where an execution of GPU-written draws of one list type or points draws as one
+    /// draw. The plan of a pipeline compiled under it states it.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub merged_draws: bool,
     /// The render pipeline draws each vertex amplification as a draw of its own
     /// (`LoweringInputs::amplification_draws` for its vertex and fragment functions): the
     /// variant a shape whose amplification Vulkan multiview cannot draw as Metal renders it asks
@@ -520,6 +526,7 @@ impl VariantKey {
             && self.address_maps.is_empty()
             && !self.flat_grid
             && !self.replay_bindings
+            && !self.merged_draws
             && self.amplification_draws.is_none()
             && self.viewport_compensation.is_none()
             && !self.folded_groups
@@ -588,6 +595,12 @@ impl VariantKey {
                 crate::pipeline::sym::Stage::Kernel
                     | crate::pipeline::sym::Stage::Vertex
                     | crate::pipeline::sym::Stage::Fragment
+            );
+        out.merged_draws = self.merged_draws
+            && self.replay_bindings
+            && matches!(
+                stage,
+                crate::pipeline::sym::Stage::Vertex | crate::pipeline::sym::Stage::Fragment
             );
         out.dropped_vertex_layer =
             self.dropped_vertex_layer && stage == crate::pipeline::sym::Stage::Vertex;

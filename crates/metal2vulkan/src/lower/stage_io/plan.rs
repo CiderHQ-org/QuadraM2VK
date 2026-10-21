@@ -13,8 +13,8 @@ use crate::lower::arith::legal::{form_on, refuse_bfloat_color, refuse_int64_inte
 use crate::lower::arith::{FloatFmt, Form, Held};
 use crate::lower::select::SelectCx;
 use crate::lower::stage_io::{
-    fetch, not_lowered, AmplifiedOutput, Compensation, DepthClamp, IoObject, PlannedOutput,
-    PlannedParam, Returned, RotatedSecond, Source, StageIoPlan,
+    fetch, not_lowered, AmplifiedOutput, Compensation, DepthClamp, IoObject, MergedRead,
+    MergedValue, PlannedOutput, PlannedParam, Returned, RotatedSecond, Source, StageIoPlan,
 };
 use crate::pipeline::artifact::PrecisionNote;
 use crate::pipeline::facts::RuntimeFact;
@@ -431,6 +431,29 @@ pub fn param(cx: &mut SelectCx<'_>, b: &ParamBinding) -> Result<(), Error> {
     let mut at_loop_sample = false;
     let mut uniform = false;
     let link = match (&b.role, stage) {
+        // A merged draw's vertex reads its corner's command's draw values.
+        (
+            ParamRole::Builtin(
+                bi @ (Builtin::VertexId
+                | Builtin::InstanceId
+                | Builtin::BaseVertex
+                | Builtin::BaseInstance),
+            ),
+            Stage::Vertex,
+        ) if cx.inputs.merged_draws => {
+            let value = match bi {
+                Builtin::VertexId => MergedValue::Vertex,
+                Builtin::InstanceId => MergedValue::Instance,
+                Builtin::BaseVertex => MergedValue::BaseVertex,
+                _ => MergedValue::BaseInstance,
+            };
+            return merged_param(cx, b, ty, value);
+        }
+        // A merged draw counts its primitives across its commands, where Metal counts each
+        // command's.
+        (ParamRole::Builtin(Builtin::PrimitiveId), Stage::Fragment) if cx.inputs.merged_draws => {
+            return Err(Unsupported::not_implemented(Feature::GpuEncodedIndirectCommands).into());
+        }
         (ParamRole::VertexInput { location }, Stage::Vertex) => {
             let AbiInt::Const(index) = location.index else {
                 return Err(not_lowered());
@@ -1909,6 +1932,9 @@ pub(crate) fn output_types(cx: &SelectCx<'_>) -> Result<(Returned, Vec<AirTypeId
 /// vertex function's outputs are a vertex function's; its inputs and patch domain are
 /// `lower::tessellation`'s.
 pub fn entry(cx: &mut SelectCx<'_>) -> Result<(), Error> {
+    if cx.inputs.merged_draws && cx.stage == Stage::Vertex {
+        merged(cx)?;
+    }
     let (returned, tys) = output_types(cx)?;
     cx.families.stage_io.returned = returned;
     // A fragment function of one of its pipeline's color groups (`LoweringInputs::color_group`),
@@ -2566,6 +2592,84 @@ fn captured_param(
         param: b.param,
         source,
     });
+    Ok(())
+}
+
+/// Plan a merged draw's vertex function (`LoweringInputs::merged_draws`, [`MergedRead`]): its
+/// index builtins, the header's address, and its fact. Refused
+/// (`Unsupported{GpuEncodedIndirectCommands, NotImplemented}`): one compiled without
+/// `replay_bindings`, or under an input that reads the draw's own vertex or instance indices or
+/// draws it more than once (the primitive ID's varying or de-indexed form, the capture form,
+/// amplifications drawn apart, tessellation).
+fn merged(cx: &mut SelectCx<'_>) -> Result<(), Error> {
+    let i = cx.inputs;
+    if !i.replay_bindings
+        || i.primitive_id_varying
+        || i.primitive_id_indices.is_some()
+        || i.captured_positions.is_some()
+        || i.amplification_draws.is_some()
+        || i.tessellation.is_some()
+    {
+        return Err(Unsupported::not_implemented(Feature::GpuEncodedIndirectCommands).into());
+    }
+    let sp = &mut cx.families.stage_io;
+    let vertex = builtin(
+        sp,
+        B::VertexIndex,
+        IoDir::Input,
+        Shape::U32,
+        StageBuiltin::VertexIndex,
+    );
+    let instance = builtin(
+        sp,
+        B::InstanceIndex,
+        IoDir::Input,
+        Shape::U32,
+        StageBuiltin::InstanceIndex,
+    );
+    sp.merged = Some(MergedRead { vertex, instance });
+    sp.words = sp.words.saturating_add(super::MERGED_WORDS);
+    cx.push.insert(PushField::MergedDrawAddress);
+    cx.facts.insert(RuntimeFact::MergedDraws);
+    Ok(())
+}
+
+/// Plan builtin parameter `b` of AIR type `ty`, a scalar integer, of a merged draw's vertex
+/// function: the `value` of its corner's command ([`Source::Merged`]).
+fn merged_param(
+    cx: &mut SelectCx<'_>,
+    b: &ParamBinding,
+    ty: AirTypeId,
+    value: MergedValue,
+) -> Result<(), Error> {
+    refuse_int64_interface(cx.entry, ty)?;
+    let form = form_on(cx.entry, cx.profile, ty)?;
+    int_scalar(form)?;
+    cx.families.stage_io.params.push(PlannedParam {
+        param: b.param,
+        source: Source::Merged { value, form },
+    });
+    Ok(())
+}
+
+/// The push fields of a function compiled under `LoweringInputs::merged_draws`, once every family
+/// planned its own: a vertex function reads its command's slot table from the header
+/// ([`MergedRead`]), so `RootTableAddress` is no push field of it; a fragment function reads no
+/// command's buffer, which a merged draw does not keep per command, and one that does is
+/// `Unsupported{GpuEncodedIndirectCommands, NotImplemented}`.
+pub(crate) fn finish_merged(cx: &mut SelectCx<'_>) -> Result<(), Error> {
+    if !cx.inputs.merged_draws {
+        return Ok(());
+    }
+    match cx.stage {
+        Stage::Vertex => {
+            cx.push.remove(&PushField::RootTableAddress);
+        }
+        Stage::Fragment if cx.push.contains(&PushField::RootTableAddress) => {
+            return Err(Unsupported::not_implemented(Feature::GpuEncodedIndirectCommands).into());
+        }
+        _ => {}
+    }
     Ok(())
 }
 
@@ -3265,7 +3369,8 @@ fn param_words(cx: &SelectCx<'_>) -> u64 {
             | Source::DrawBase { .. }
             | Source::StageInRegion { .. }
             | Source::CapturedVertex(_)
-            | Source::CapturedBaseVertex(_) => loaded.push((p.param, USE_WORDS)),
+            | Source::CapturedBaseVertex(_)
+            | Source::Merged { .. } => loaded.push((p.param, USE_WORDS)),
             Source::PixelCenter(_) | Source::LoopSample(_) | Source::AtLoopSample(_) => {
                 loaded.push((p.param, USE_WORDS + PIXEL_WORDS))
             }

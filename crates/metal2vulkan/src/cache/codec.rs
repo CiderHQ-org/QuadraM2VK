@@ -846,6 +846,7 @@ codec_enum! {
         SnapshotPhase,
         VerticesPerPrimitive,
         TessellationChunk,
+        MergedDrawAddress,
     }
     Symbol { Binding(f0), DescriptorSet(f0), Location(f0), Component(f0), SpecId(f0) }
 }
@@ -1223,6 +1224,7 @@ codec_enum! {
             rounding_order,
             half_blend
         },
+        MergedDraws,
     }
     UniformViewChoice { Viewed, Spare, Kept }
     Mechanism {

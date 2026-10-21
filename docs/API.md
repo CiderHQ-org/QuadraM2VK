@@ -769,7 +769,12 @@ the device has it (`replay_preprocess_generated`). Draws of primitives under the
 pipeline replay on the device through `draw_replay_preprocess`: one indirect draw per command
 and primitive type the execution names, the pipeline compiled as its replay variant
 (`VariantKey::replay_bindings`), whose vertex and fragment functions read each command's buffers
-from the slot tables the preprocess writes. A kernel that encodes commands writes the records at
+from the slot tables the preprocess writes. Draws of one list type or points whose fragment function
+reads no buffer and no `[[primitive_id]]` may instead merge into one draw (`DrawReplay::merged`):
+two merge passes (`draw_merge_module`) write each command's first vertex in the merged draw, and
+the vertex function, compiled as its merged variant (`VariantKey::merged_draws`), finds its
+command by that prefix and runs the command's vertex, instance and buffers, in the commands'
+order. A kernel that encodes commands writes the records at
 `bind::indirect_commands::records_address` of the buffer's ID, outside every Metal address.
 
 ## 7. Caching

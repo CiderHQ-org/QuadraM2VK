@@ -1625,6 +1625,7 @@ fn plan(p: &RenderPipeline, device: &Device, shape: &BindShape) -> Result<Bindin
                     | PushField::ExecutionStatusAddress
                     | PushField::CaptureAddress
                     | PushField::CaptureIndexAddress
+                    | PushField::MergedDrawAddress
                     | PushField::SnapshotPhase
             );
             match field.field {
@@ -1638,6 +1639,8 @@ fn plan(p: &RenderPipeline, device: &Device, shape: &BindShape) -> Result<Bindin
                 | PushField::CaptureLayout
                     if stage == Stage::Vertex => {}
                 PushField::BaseVertexInstance if stage == Stage::Vertex => {}
+                // A merged draw replay's header: the consumer's hole.
+                PushField::MergedDrawAddress if stage == Stage::Vertex => {}
                 // The draw's vertices per primitive, which instantiation writes from its
                 // primitive type.
                 PushField::VerticesPerPrimitive if stage == Stage::Vertex => {}
@@ -2435,6 +2438,10 @@ fn plan(p: &RenderPipeline, device: &Device, shape: &BindShape) -> Result<Bindin
         .dependencies
         .iter()
         .any(|d| d.fact == RuntimeFact::ReplayBindings);
+    variant.merged_draws = p
+        .dependencies
+        .iter()
+        .any(|d| d.fact == RuntimeFact::MergedDraws);
     // The pipeline compiled under other zeroed or dropped colors (or none) is the other variant.
     let other_colors = compiled_zeroed != zeroed_colors
         || compiled_dropped != dropped_colors
@@ -4167,6 +4174,7 @@ fn instantiate(
                 | PushField::ExecutionStatusAddress
                 | PushField::CaptureAddress
                 | PushField::CaptureIndexAddress
+                | PushField::MergedDrawAddress
                 | PushField::SnapshotPhase => {
                     let PushLoc::Push { offset } = f.loc else {
                         return Err(not_implemented(Feature::Lowering(LowerFamily::StageIo)));
@@ -4181,6 +4189,9 @@ fn instantiate(
                         }
                         PushField::CaptureAddress => PushHole::CaptureAddress { stages, offset },
                         PushField::SnapshotPhase => PushHole::SnapshotPhase { stages, offset },
+                        PushField::MergedDrawAddress => {
+                            PushHole::MergedDrawAddress { stages, offset }
+                        }
                         _ => PushHole::CaptureIndexAddress { stages, offset },
                     });
                     continue;

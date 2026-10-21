@@ -204,6 +204,10 @@ pub struct EmitCx<'a> {
     /// The sampling routines the function's samples call, each defined at its first call
     /// (`sampler::routine`).
     pub(crate) sampling: crate::lower::sampler::routine::Routines,
+    /// A merged draw's vertex function's command, vertex, instance and slot table, which
+    /// `stage_io::emit_entry` finds before the body (`stage_io::MergedRead`): defined in the
+    /// function's straight-line entry, so every later block of the function may read them.
+    pub(crate) merged_draw: Option<crate::bind::MergedVertex>,
 }
 
 /// A value that is the same wherever an invocation computes it, so a block computes it once, and
@@ -247,6 +251,7 @@ impl<'a> EmitCx<'a> {
             localized: None,
             fault: None,
             sampling: Default::default(),
+            merged_draw: None,
         }
     }
 
@@ -393,6 +398,13 @@ impl<'a> EmitCx<'a> {
             .as_ref()
             .is_some_and(|d| d.flat_grid || d.folded_groups);
         match field {
+            // A merged draw's vertex function reads its command's slot table.
+            PushField::RootTableAddress if self.plan.families.stage_io.merged.is_some() => {
+                return match self.merged_draw {
+                    Some(m) => Ok(m.table),
+                    None => Err(self.fail("a merged draw's slot table read before its entry")),
+                };
+            }
             PushField::SlotGuestBase(slot) if self.plan.families.access.replay => {
                 return access::replay_guest_base(self, fb, slot)
             }
@@ -627,6 +639,7 @@ impl<'a> Emitter<'a> {
                 localized: None,
                 fault: None,
                 sampling: Default::default(),
+                merged_draw: None,
             },
             vars: None,
             phis,

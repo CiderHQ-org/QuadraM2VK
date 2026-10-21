@@ -254,6 +254,10 @@ pub use rate_map::{
     RateMapRegion, RateMapRegions, RegionError, RegionLimits, UnpinnedCompile, MAX_SCREEN_EXTENT,
 };
 pub use replay::{
+    draw_merge_module, DrawMergeModule, MergePhase, MergedLayout, MERGED_CHUNK,
+    MERGED_HEADER_BYTES, MERGED_REST_FIRST,
+};
+pub use replay::{
     draw_replay_module, draw_replay_preprocess, DrawReplay, DrawReplayLayout, DrawReplayModule,
     DrawReplayPreprocess, DRAW_ARGUMENT_BYTES, MAX_DRAW_REPLAY_TYPES,
 };
@@ -264,6 +268,7 @@ pub use replay::{
     ReplayPreprocessModule, ReplayRefusal, ReplayVariant, MAX_REPLAY_DISPATCHES,
     MAX_REPLAY_REGIONS, MAX_REPLAY_SLOTS, MAX_REPLAY_VARIANTS,
 };
+pub(crate) use replay::{merged_vertex, MergedVertex};
 pub use replay::{
     predication_step_module, PredicationCompare, PredicationOp, PredicationStep,
     PredicationStepModule,

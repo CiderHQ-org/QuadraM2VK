@@ -113,6 +113,19 @@ pub struct LoweringInputs {
     /// compute dispatch with no stage-in region, or a draw whose buffers no fetch reads).
     #[cfg_attr(feature = "serde", serde(default))]
     pub replay_bindings: bool,
+    /// With `replay_bindings`, the vertex function of a draw replay merged into one draw
+    /// (`bind::replay`'s `merged.rs`, `DrawReplay::merged`): it reads its header's device address
+    /// at `PushField::MergedDrawAddress` in place of `RootTableAddress`, finds the command its
+    /// corner (`InstanceIndex` and `VertexIndex`) falls in, and runs that command's vertex: its
+    /// `[[vertex_id]]`, `[[instance_id]]`, `[[base_vertex]]` and `[[base_instance]]` are the
+    /// command's draw's, and its buffers are in the command's vertex slot table. A fragment
+    /// function under it reads no buffer and no `[[primitive_id]]`, which a merged draw does not
+    /// keep per command: one that does is `Unsupported{GpuEncodedIndirectCommands,
+    /// NotImplemented}`, and so is a vertex function that writes the primitive ID's varying,
+    /// draws amplifications as draws of their own or captures its positions. The vertex function
+    /// states `RuntimeFact::MergedDraws`. Any other stage compiles as without it.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub merged_draws: bool,
     /// The render pipeline state a fragment function's framebuffer fetch takes its form from, on
     /// a device that orders a fetch only through the ordered pixel interlock (no
     /// `rasterizationOrderColorAttachmentAccess`, with `fragmentShaderPixelInterlock`): there each

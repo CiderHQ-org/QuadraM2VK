@@ -188,6 +188,10 @@ pub fn function_key(
     if inputs.replay_bindings {
         h.bytes(b"replay-bindings");
     }
+    // Appended only when set.
+    if inputs.merged_draws {
+        h.bytes(b"merged-draws");
+    }
     // Appended only when set, in its derived `Debug` form (ordered maps of plain enums, flags, and
     // booleans, a total encoding as `inputs_encoding`'s).
     if let Some(f) = &inputs.framebuffer_fetch {

@@ -417,6 +417,11 @@ pub enum RuntimeFact {
     /// stage's `PushField::RootTableAddress`, which a draw replay's preprocess writes per
     /// replayed command (`bind::draw_replay_preprocess`). Its plans state the variant.
     ReplayBindings,
+    /// The vertex function was compiled under `VariantKey::merged_draws`
+    /// (`LoweringInputs::merged_draws`): it runs a merged draw replay's corners, reading its
+    /// command, vertex, instance and slot table from the header at its
+    /// `PushField::MergedDrawAddress` (`bind::replay`'s `merged.rs`). Its plans state the variant.
+    MergedDraws,
     /// The `stage` function may read an argument its pipeline's function constants removed (a
     /// texture's read, sample, gather, query, or atomic, or a sample through a removed sampler),
     /// a read Metal gives no value. Where one runs, the function takes zero for it and sets

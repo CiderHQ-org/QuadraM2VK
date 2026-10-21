@@ -301,6 +301,10 @@ impl ReplayFaults {
     /// The command of a replay of draws sets its barrier: the replay draws every command in one
     /// render pass instance, which no barrier splits on the GPU.
     pub const BARRIER: ReplayFaults = ReplayFaults(1 << 11);
+    /// A replay of draws merged into one draw (`DrawReplay::merged`) whose commands' vertices,
+    /// over their instances, reach `2^32` times `MERGED_CHUNK` (above `2^62`), which its two
+    /// draws cannot hold: no command of the execution draws.
+    pub const VERTICES: ReplayFaults = ReplayFaults(1 << 12);
 
     /// Every bit in `other` is set in `self`.
     pub const fn contains(self, other: ReplayFaults) -> bool {

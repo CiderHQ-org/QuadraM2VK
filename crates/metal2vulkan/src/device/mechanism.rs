@@ -181,6 +181,8 @@ pub fn mechanism(fact: &RuntimeFact, profile: &DeviceProfile) -> Mechanism {
         RuntimeFact::FoldedGroups => Mechanism::Variant,
         // A render pipeline compiled under the replay-bindings variant; its plans state it.
         RuntimeFact::ReplayBindings => Mechanism::Variant,
+        // A render pipeline compiled under the merged-draws variant; its plans state it.
+        RuntimeFact::MergedDraws => Mechanism::Variant,
         // The function marks the `ExecutionStatus` buffer its `ExecutionStatus` fact binds; the
         // consumer reads the bit after the command buffer.
         RuntimeFact::AbsentArgumentRead { .. } => Mechanism::None,

@@ -153,6 +153,7 @@ fn every_fact() -> Vec<RuntimeFact> {
         },
         RuntimeFact::FoldedGroups,
         RuntimeFact::ReplayBindings,
+        RuntimeFact::MergedDraws,
         RuntimeFact::AbsentArgumentRead {
             stage: Stage::Fragment,
         },
@@ -375,6 +376,7 @@ fn variant(f: &RuntimeFact) -> usize {
         RuntimeFact::ExactFormsOverCompilerLimit { .. } => 90,
         RuntimeFact::WordInputMerge { .. } => 91,
         RuntimeFact::ReplayBindings => 92,
+        RuntimeFact::MergedDraws => 93,
     }
 }
 
@@ -382,7 +384,7 @@ fn variant(f: &RuntimeFact) -> usize {
 fn mechanism_is_total_over_every_fact_and_profile() {
     let facts = every_fact();
     let covered: std::collections::BTreeSet<usize> = facts.iter().map(variant).collect();
-    assert_eq!(covered, (0..93).collect(), "every_fact misses a variant");
+    assert_eq!(covered, (0..94).collect(), "every_fact misses a variant");
     for (stem, _) in super::committed_profiles() {
         let dev = device(&stem);
         let p = dev.profile();
@@ -453,6 +455,7 @@ fn mechanism_is_total_over_every_fact_and_profile() {
                 | RuntimeFact::ViewportCompensation { .. }
                 | RuntimeFact::FoldedGroups
                 | RuntimeFact::ReplayBindings
+                | RuntimeFact::MergedDraws
                 | RuntimeFact::ZeroedColor { .. }
                 | RuntimeFact::DroppedColor { .. }
                 | RuntimeFact::DepthClampRange

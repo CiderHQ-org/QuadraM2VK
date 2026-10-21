@@ -106,6 +106,13 @@ pub enum PushHole {
         stages: vk::ShaderStageFlags,
         offset: u32,
     },
+    /// The device address of a merged draw replay's header (`MergedLayout::header_offset` in the
+    /// replay's scratch), as a `u64` at `offset` of a merged variant's vertex push bytes
+    /// (`VariantKey::merged_draws`, `PushField::MergedDrawAddress`).
+    MergedDrawAddress {
+        stages: vk::ShaderStageFlags,
+        offset: u32,
+    },
     /// Which draw of a snapshot variant (`VariantKey::snapshot_textures`,
     /// `PushField::SnapshotPhase`) runs, as a `u32` at `offset` of the variant's fragment push
     /// bytes: 1 in the draw that takes the snapshot (every color write mask 0), 0 in the draw that

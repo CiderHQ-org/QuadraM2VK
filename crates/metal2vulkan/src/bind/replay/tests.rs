@@ -311,6 +311,7 @@ fn run_preprocess(
                 panic!("the preprocess captures no vertex")
             }
             PushHole::SnapshotPhase { .. } => panic!("the preprocess draws no snapshot"),
+            PushHole::MergedDrawAddress { .. } => panic!("the preprocess draws no merged draw"),
         };
         push[offset as usize..offset as usize + 8].copy_from_slice(&address.to_le_bytes());
     }

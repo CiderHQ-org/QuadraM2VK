@@ -926,6 +926,12 @@ pub enum PushField {
     /// position's raw index there: a hole the consumer fills (`PushHole::CaptureIndexAddress`),
     /// placed beside `CaptureAddress`.
     CaptureIndexAddress,
+    /// Device address (`u64`) of a merged draw replay's header (`bind::replay`'s `merged.rs`),
+    /// which a vertex function compiled under `LoweringInputs::merged_draws` reads its corner's
+    /// command, vertex and instance from, and its command's slot table, in place of
+    /// `RootTableAddress`: a hole the consumer fills (`PushHole::MergedDrawAddress`), placed with
+    /// the other addresses. The merge passes read the header there too.
+    MergedDrawAddress,
     /// Which draw of a fragment function compiled under `LoweringInputs::snapshot_textures` runs
     /// (`u32`): a hole the consumer fills (`PushHole::SnapshotPhase`), placed beside the addresses
     /// so the fragment window always holds it. 1 in the draw that takes the snapshot, whose

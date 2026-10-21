@@ -522,3 +522,380 @@ fn the_host_side_refuses_what_it_cannot_set_up() {
         l.tables_offset + 28 * roots::ENTRY_BYTES
     );
 }
+
+// ---- A replay merged into one draw (`merged.rs`) ----
+
+use super::super::merged::{merged_vertex, typed_module as merge_module, MergePhase};
+use crate::bind::{draw_merge_module, DrawMergeModule, MERGED_REST_FIRST};
+
+const OUT: u64 = 0x0000_0040_0000_0000;
+const REST_OUT: u64 = 0x0000_0041_0000_0000;
+/// Bytes of one decoded corner: Metal's vertex, instance, base vertex and base instance, and the
+/// slot table's address.
+const DECODED: usize = 24;
+
+/// `ran`'s scratch after the merged replay's header (its chunk replaced by `chunk`) and both
+/// merge passes, in both scheduling orders, and the status the passes left.
+fn merge(ran: &Ran, chunk: u32) -> (Vec<u8>, StatusReport) {
+    let m = ran.pre.layout.merged.expect("a merged layout");
+    let mut scratch = ran.scratch.clone();
+    let at = m.header_offset as usize;
+    scratch[at..at + ran.pre.header.len()].copy_from_slice(&ran.pre.header);
+    scratch[at + 16..at + 20].copy_from_slice(&chunk.to_le_bytes());
+    let push = DrawMergeModule::push_constants(SCRATCH + m.header_offset, STATUS);
+    let mut status = ExecutionStatus::initial().to_vec();
+    for phase in [MergePhase::Blocks, MergePhase::Starts] {
+        let module = merge_module(phase).expect("merge module");
+        let mut outs = Vec::new();
+        for order in [Order::Forward, Order::Reverse] {
+            let res = Resources {
+                buffers: vec![
+                    Buffer {
+                        slot: None,
+                        address: Some(SCRATCH),
+                        bytes: scratch.clone(),
+                    },
+                    Buffer {
+                        slot: None,
+                        address: Some(STATUS),
+                        bytes: status.clone(),
+                    },
+                ],
+                push: push.clone(),
+                spec: Default::default(),
+            };
+            let cfg = Config {
+                workgroups: m.group_count(),
+                order,
+                ..Config::default()
+            };
+            outs.push(run(&module, &cfg, res).expect("run").buffers);
+        }
+        assert_eq!(
+            outs[0], outs[1],
+            "{phase:?}: the two scheduling orders agree"
+        );
+        let mut out = outs.swap_remove(0);
+        status = out.swap_remove(1);
+        scratch = out.swap_remove(0);
+    }
+    let status: [u8; ExecutionStatus::BYTES] = status.as_slice().try_into().expect("status");
+    (scratch, ExecutionStatus::decode(&status))
+}
+
+/// A vertex entry that decodes its corner (`merged_vertex`) from the header at its
+/// `MergedDrawAddress` and stores what it found at its corner's place: `OUT + 24 corner` in the
+/// first draw, `REST_OUT + 24 (VertexIndex - MERGED_REST_FIRST)` in the second.
+fn decoding_module(chunk: u32) -> TypedModule {
+    let mut b = ModuleBuilder::new();
+    let u32_ = b
+        .ty(Type::Int {
+            width: 32,
+            signed: false,
+        })
+        .expect("u32");
+    let u64_ = b
+        .ty(Type::Int {
+            width: 64,
+            signed: false,
+        })
+        .expect("u64");
+    let t = Types { u32_, u64_ };
+    let m_header = b
+        .push_member(PushField::MergedDrawAddress, u64_, 0)
+        .expect("header");
+    let push = b.push_global().expect("push");
+    let vertex_index = b
+        .builtin(crate::spv::BuiltIn::VertexIndex, IoDir::Input, u32_)
+        .expect("vertex");
+    let instance_index = b
+        .builtin(crate::spv::BuiltIn::InstanceIndex, IoDir::Input, u32_)
+        .expect("instance");
+    let void = b.ty(Type::Void).expect("void");
+    let mut f = b.function(void).expect("function");
+    let fb = &mut f;
+    let push_value = fb.module().global_value(push).expect("push value");
+    let i = k32(fb, m_header.index).expect("index");
+    let p = fb.access_chain(push_value, &[i]).expect("chain");
+    let header = fb.load(p, MemAccess::default()).expect("header");
+    let vi = fb.module().global_value(vertex_index).expect("vi");
+    let vi = fb.load(vi, MemAccess::default()).expect("vi");
+    let ii = fb.module().global_value(instance_index).expect("ii");
+    let ii = fb.load(ii, MemAccess::default()).expect("ii");
+    let v = merged_vertex(fb, header, (vi, ii)).expect("decode");
+    let rest_first = k32(fb, MERGED_REST_FIRST).expect("k");
+    let second = fb
+        .binary(BinOp::UGreaterThanEqual, vi, rest_first)
+        .expect("second");
+    let chunk = k32(fb, chunk).expect("chunk");
+    let first_slot = fb.binary(BinOp::IMul, ii, chunk).expect("mul");
+    let first_slot = fb.binary(BinOp::IAdd, first_slot, vi).expect("add");
+    let rest_slot = fb.binary(BinOp::ISub, vi, rest_first).expect("sub");
+    let slot = fb.select(second, rest_slot, first_slot).expect("slot");
+    let out = k64(fb, OUT).expect("out");
+    let rest_out = k64(fb, REST_OUT).expect("rest out");
+    let base = fb.select(second, rest_out, out).expect("base");
+    let slot = wide(fb, t, slot).expect("wide");
+    let bytes = k64(fb, DECODED as u64).expect("bytes");
+    let rel = fb.binary(BinOp::IMul, slot, bytes).expect("rel");
+    let at_slot = fb.binary(BinOp::IAdd, base, rel).expect("at");
+    for (i, w) in [v.vertex, v.instance, v.base_vertex, v.base_instance]
+        .into_iter()
+        .enumerate()
+    {
+        let a = at(fb, at_slot, 4 * i as u64).expect("at");
+        store32(fb, t, a, w).expect("store");
+    }
+    let a = at(fb, at_slot, 16).expect("at");
+    store64(fb, t, a, v.table).expect("store");
+    fb.ret(None).expect("ret");
+    let id = f.finish().expect("finish");
+    b.entry(ExecModel::Vertex, id, Vec::new()).expect("entry");
+    b.finalize().expect("module")
+}
+
+/// What one corner of a merged draw runs: Metal's vertex, instance, base vertex and base
+/// instance, and the command's vertex slot table's address.
+type Corner = (u32, u32, u32, u32, u64);
+
+/// Every corner the merged draws of `scratch` run (both draws, in their order), decoded by
+/// `merged_vertex` with chunks of `chunk` vertices.
+fn decoded(ran: &Ran, scratch: &[u8], chunk: u32) -> Vec<Corner> {
+    let m = ran.pre.layout.merged.expect("merged");
+    let draw = |i: u32| -> [u32; 4] {
+        let at = m.draw_offset(i) as usize;
+        std::array::from_fn(|k| word(scratch, at + 4 * k))
+    };
+    let [first_vertices, chunks, first_first, first_base] = draw(0);
+    let [rest, rest_instances, rest_first, rest_base] = draw(1);
+    assert_eq!((first_vertices, first_first, first_base), (chunk, 0, 0));
+    assert_eq!(
+        (rest_instances, rest_first, rest_base),
+        (1, MERGED_REST_FIRST, 0)
+    );
+    let module = decoding_module(chunk);
+    let mut push = vec![0u8; 8];
+    push.copy_from_slice(&(SCRATCH + m.header_offset).to_le_bytes());
+    let mut corners = Vec::new();
+    for (out, workgroups, first, count) in [
+        (
+            OUT,
+            [chunk, chunks, 1],
+            [0, 0],
+            chunk as usize * chunks as usize,
+        ),
+        (
+            REST_OUT,
+            [rest, 1, 1],
+            [MERGED_REST_FIRST, 0],
+            rest as usize,
+        ),
+    ] {
+        if count == 0 {
+            continue;
+        }
+        let res = Resources {
+            buffers: vec![
+                Buffer {
+                    slot: None,
+                    address: Some(SCRATCH),
+                    bytes: scratch.to_vec(),
+                },
+                Buffer {
+                    slot: None,
+                    address: Some(out),
+                    bytes: vec![0; count * DECODED],
+                },
+            ],
+            push: push.clone(),
+            spec: Default::default(),
+        };
+        let cfg = Config {
+            workgroups,
+            first,
+            ..Config::default()
+        };
+        let buffers = run(&module, &cfg, res).expect("run").buffers;
+        assert_eq!(buffers[0], scratch, "the decode only reads the scratch");
+        for c in buffers[1].as_chunks::<DECODED>().0 {
+            corners.push((
+                word(c, 0),
+                word(c, 4),
+                word(c, 8),
+                word(c, 12),
+                u64::from_le_bytes(c[16..24].try_into().expect("u64")),
+            ));
+        }
+    }
+    corners
+}
+
+/// What Metal's draws of `draws` (`(vertex start, vertex count, instance count, base
+/// instance)`, `None` for a command that draws nothing) of `per` vertices per primitive run,
+/// command by command, instance by instance, vertex by vertex, as a merged draw's corners.
+fn metal_corners(ran: &Ran, draws: &[Option<[u32; 4]>], per: u32) -> Vec<Corner> {
+    let mut out = Vec::new();
+    for (c, d) in draws.iter().enumerate() {
+        let Some([start, count, instances, base]) = *d else {
+            continue;
+        };
+        let table = SCRATCH + ran.pre.layout.vertex_table_offset(c as u32);
+        for i in 0..instances {
+            for v in 0..count - count % per {
+                out.push((start + v, base + i, start, base, table));
+            }
+        }
+    }
+    out
+}
+
+/// A replay merged into one draw runs what Metal's draws of its commands run, in their order:
+/// each command's whole primitives' vertices (a list's trailing vertices draw nothing), in each
+/// of its instances, with its own vertex start, base instance and slot table; a command that
+/// draws nothing (empty, no instance, no whole primitive, or refused) has no corner. Both of the
+/// merged draws carry corners here (chunks of 6, so 3 whole chunks and 3 corners left), and both
+/// passes run several blocks.
+#[test]
+fn a_merged_replay_runs_each_command_s_whole_primitives_in_order() {
+    let mut replay = DrawReplay::new(9, 0, 9, vec![3]);
+    replay.merged = true;
+    replay.vertex_slots = 1;
+    replay.fragment_slots = 0;
+    let mut barrier = record(draw(3, 0, 3, [1, 0]), &[], &[]);
+    barrier.barrier = true;
+    let draws = [
+        Some([0, 3, 1, 0]),
+        Some([5, 7, 1, 2]),
+        None,
+        Some([1, 3, 2, 9]),
+        Some([0, 2, 4, 0]),
+        Some([0, 6, 0, 3]),
+        Some([10, 4, 1, 7]),
+        None,
+        Some([2, 3, 1, 1]),
+    ];
+    let mut records: Vec<CommandRecord> = draws
+        .iter()
+        .map(|d| match d {
+            Some([s, n, k, b]) => record(draw(3, *s, *n, [*k, *b]), &[(0, A.0)], &[]),
+            None => record(Action::Empty, &[], &[]),
+        })
+        .collect();
+    records[7] = barrier;
+    let ran = preprocess(&replay, &records, clean(9));
+    assert_eq!(ran.status.replay_faults, ReplayFaults::BARRIER);
+    let m = ran.pre.layout.merged.expect("merged");
+    assert_eq!((m.block_commands, m.blocks), (3, 3));
+    let (scratch, status) = merge(&ran, 6);
+    assert!(
+        !status.replay_fault,
+        "the passes report nothing: {status:?}"
+    );
+    let expected = metal_corners(&ran, &draws, 3);
+    assert_eq!(expected.len(), 21);
+    assert_eq!(decoded(&ran, &scratch, 6), expected);
+    // With Metal's chunk, every corner is in the second draw.
+    let (scratch, _) = merge(&ran, MERGED_CHUNK);
+    let at = m.draw_offset(1) as usize;
+    assert_eq!(word(&scratch, at), 21);
+    assert_eq!(word(&scratch, m.draw_offset(0) as usize + 4), 0);
+}
+
+/// Points and lines merge as triangles do, a corner per point and two per line.
+#[test]
+fn merged_points_and_lines_run_each_vertex_of_a_whole_primitive() {
+    for (ty, per) in [(0u32, 1u32), (1, 2)] {
+        let mut replay = DrawReplay::new(3, 0, 3, vec![ty]);
+        replay.merged = true;
+        replay.vertex_slots = 0;
+        replay.fragment_slots = 0;
+        let draws = [Some([4, 5, 2, 1]), Some([0, 1, 1, 0]), Some([7, 3, 1, 6])];
+        let records: Vec<CommandRecord> = draws
+            .iter()
+            .flatten()
+            .map(|[s, n, k, b]| record(draw(ty, *s, *n, [*k, *b]), &[], &[]))
+            .collect();
+        let ran = preprocess(&replay, &records, clean(3));
+        assert!(!ran.status.replay_fault, "{ty}: {:?}", ran.status);
+        let (scratch, _) = merge(&ran, 6);
+        assert_eq!(
+            decoded(&ran, &scratch, 6),
+            metal_corners(&ran, &draws, per),
+            "{ty}"
+        );
+    }
+}
+
+/// Corners past what two draws hold (`2^32` chunks) draw nothing and say why.
+#[test]
+fn a_merged_replay_past_its_draws_draws_nothing_and_says_why() {
+    let mut replay = DrawReplay::new(1, 0, 1, vec![3]);
+    replay.merged = true;
+    replay.fragment_slots = 0;
+    let records = [record(draw(3, 0, u32::MAX, [u32::MAX, 0]), &[], &[])];
+    let ran = preprocess(&replay, &records, clean(1));
+    assert!(!ran.status.replay_fault);
+    let (scratch, status) = merge(&ran, MERGED_CHUNK);
+    assert_eq!(status.replay_faults, ReplayFaults::VERTICES);
+    let m = ran.pre.layout.merged.expect("merged");
+    for i in 0..2 {
+        let at = m.draw_offset(i) as usize;
+        assert_eq!(
+            [0, 4, 8, 12].map(|k| word(&scratch, at + k)),
+            [0; 4],
+            "draw {i}"
+        );
+    }
+}
+
+/// The merge passes are valid where device addresses are; a merged replay refuses strips,
+/// two types and fragment slots; its header and sections follow the arguments.
+#[test]
+fn merged_replays_are_set_up_for_one_list_type_or_points() {
+    for (stem, dev) in devices() {
+        if !addressed(&dev) {
+            assert!(
+                draw_merge_module(&dev, MergePhase::Blocks).is_err(),
+                "{stem}"
+            );
+            continue;
+        }
+        for phase in [MergePhase::Blocks, MergePhase::Starts] {
+            assert_valid(merge_module(phase).expect("module"), dev.profile());
+            let m = draw_merge_module(&dev, phase).unwrap_or_else(|e| panic!("{stem}: {e}"));
+            assert_eq!(
+                m.layout.push_constants[0].size,
+                DrawMergeModule::PUSH_BYTES,
+                "{stem}"
+            );
+        }
+    }
+    let dev = device();
+    let pre = |r: &DrawReplay| draw_replay_preprocess(&dev, &state(), r);
+    let refused = Err(BindError::InvalidReplay {
+        reason: ReplayRefusal::DrawPrimitiveTypes,
+    });
+    for (types, fragment_slots) in [(vec![2], 0), (vec![4], 0), (vec![3, 4], 0), (vec![3], 1)] {
+        let mut r = DrawReplay::new(4, 0, 4, types.clone());
+        r.merged = true;
+        r.fragment_slots = fragment_slots;
+        assert_eq!(pre(&r), refused, "{types:?} {fragment_slots}");
+    }
+    let mut r = DrawReplay::new(10, 0, 10, vec![1]);
+    r.merged = true;
+    r.fragment_slots = 0;
+    let p = pre(&r).expect("merged");
+    let m = p.layout.merged.expect("layout");
+    assert_eq!((m.block_commands, m.blocks), (4, 3));
+    assert_eq!(p.header.len() as u64, MERGED_HEADER_BYTES);
+    assert_eq!(p.layout.uploaded, m.header_offset + MERGED_HEADER_BYTES);
+    assert!(p.layout.arguments_offset < m.prefix_offset);
+    assert!(m.prefix_offset + 80 <= m.sums_offset);
+    assert!(m.sums_offset + 24 <= m.draws_offset);
+    assert_eq!(p.layout.bytes, (m.draws_offset + 32).next_multiple_of(64));
+    assert!(pre(&DrawReplay::new(10, 0, 10, vec![1]))
+        .expect("plain")
+        .layout
+        .merged
+        .is_none());
+}

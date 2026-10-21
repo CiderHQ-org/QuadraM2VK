@@ -149,6 +149,12 @@ pub use draws::{
 };
 mod flat;
 pub use flat::{flat_dispatch_module, FlatArguments, FlatDispatchModule, FlatIndirect};
+mod merged;
+pub use merged::{
+    draw_merge_module, DrawMergeModule, MergePhase, MergedLayout, MERGED_CHUNK,
+    MERGED_HEADER_BYTES, MERGED_REST_FIRST,
+};
+pub(crate) use merged::{merged_vertex, MergedVertex};
 mod predication;
 pub use predication::{
     predication_step_module, PredicationCompare, PredicationOp, PredicationStep,
@@ -380,7 +386,9 @@ pub enum ReplayRefusal {
     /// states: it draws under the encoder's.
     OwnPipelines,
     /// A draw replay's primitive types are not one of Metal's five, or a list type and its strip:
-    /// draws one pipeline's topology class holds ([`DrawReplay::primitive_types`]).
+    /// draws one pipeline's topology class holds ([`DrawReplay::primitive_types`]); or a merged
+    /// replay's ([`DrawReplay::merged`]) are not one list type or points, or its fragment slot
+    /// tables hold slots.
     DrawPrimitiveTypes,
 }
 

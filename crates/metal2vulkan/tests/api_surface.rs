@@ -578,6 +578,13 @@ surface! {
         struct DrawReplayPreprocess N;
         const DRAW_ARGUMENT_BYTES;
         const MAX_DRAW_REPLAY_TYPES;
+        fn draw_merge_module;
+        struct DrawMergeModule N;
+        enum MergePhase E;
+        struct MergedLayout N;
+        const MERGED_CHUNK;
+        const MERGED_HEADER_BYTES;
+        const MERGED_REST_FIRST;
         fn flat_dispatch_module;
         enum FlatArguments N;
         struct FlatDispatchModule N;
