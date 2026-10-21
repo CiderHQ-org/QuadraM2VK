@@ -35,7 +35,7 @@
 //! view or image of its own, so a texture's storage form taking another image after the command
 //! buffer commits (`texture/storage_form.rs`) changes nothing it records.
 
-use super::{Assembly, DrawBuffers, Next, RenderCommandEncoder};
+use super::{Assembly, DrawBuffers, Next, RenderLowering};
 use crate::amplification::Amplification;
 use crate::argument_table::ArgumentTable;
 use crate::draw_source::{DrawSource, KeptSource};
@@ -94,7 +94,7 @@ struct Held {
     amplification: Amplification,
 }
 
-impl RenderCommandEncoder {
+impl RenderLowering {
     /// Keep the draw just recorded into the current instance (`call` of `assembly` and `draw`,
     /// its indices from `index`) for recording again where `again` (the module docs) and the
     /// instance keeps fewer than `MAX_DRAWS`; otherwise the instance's draws record again no

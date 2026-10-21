@@ -21,7 +21,7 @@
 //!   32-bit indices, or an indirect draw, that pulls an attribute at a stride from such a buffer
 //!   is refused whatever its indices or arguments hold: they are GPU memory.
 
-use super::RenderCommandEncoder;
+use super::RenderLowering;
 use crate::error::{Error, RuntimeGap};
 use crate::fetch_reach::{format_bytes, reach, REACHED};
 use metal2vulkan::bind::DrawCall;
@@ -29,7 +29,7 @@ use metal2vulkan::metal::VertexStepFunction;
 use metal2vulkan::pipeline::{PulledAttribute, VertexStride};
 use metal2vulkan::vk;
 
-impl RenderCommandEncoder {
+impl RenderLowering {
     /// Refuse `draw` (`NotImplemented(VertexFetchPast4GiB)`, the module docs) where it may
     /// read an attribute of `pulled`, its pipeline variant's pulled attributes, past `2^32` bytes
     /// of the bind offset of a buffer of the encoder's vertex table that runs past them.

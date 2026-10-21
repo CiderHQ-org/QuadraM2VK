@@ -43,7 +43,7 @@
 use super::bound::Bound;
 use super::reroute::Rerecord;
 use super::shadows::InstanceShadows;
-use super::{Assembly, Instance, InterlockedStorage, RenderCommandEncoder};
+use super::{Assembly, Instance, InterlockedStorage, RenderLowering};
 use crate::attachmentless;
 use crate::binding::CommandUses;
 use crate::clear_reach::{DrawnArea, DrawnTiles, PassReach};
@@ -182,7 +182,7 @@ struct Placed {
     culls: bool,
 }
 
-impl RenderCommandEncoder {
+impl RenderLowering {
     /// Keep the draw just recorded (`call` of `assembly` and `draw`, its indices from `index`)
     /// for capture replay where the pass keeps its draws and `capturable` (the module docs);
     /// otherwise the pass keeps none from here on. A draw recorded again (a reroute's, or a

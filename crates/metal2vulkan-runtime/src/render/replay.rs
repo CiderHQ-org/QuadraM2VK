@@ -15,7 +15,7 @@
 //!   buffer, where an encoding again would leave the first one's beside its own.
 //! - **Per-stage calls** share a variant, with the [`Table`] they set.
 
-use super::RenderCommandEncoder;
+use super::RenderLowering;
 use crate::amplification::VertexAmplificationViewMapping;
 use crate::buffer::Buffer;
 use crate::command_buffer::CommandBuffer;
@@ -103,7 +103,7 @@ impl RenderLog {
     /// (`render/color_groups.rs`). A call refused there was refused in the first group's
     /// encoder, whose answer the program had, or is a divergence the later group's encoder notes
     /// (`RenderCommandEncoder::group_outcome`): either way the calls after it run.
-    pub(crate) fn replay_into(&self, encoder: &mut RenderCommandEncoder) {
+    pub(crate) fn replay_into(&self, encoder: &mut RenderLowering) {
         for call in &self.calls.calls {
             let _ = render(encoder, (&self.calls, &self.indexed), call);
         }
@@ -115,8 +115,7 @@ impl RenderLog {
         command_buffer: &CommandBuffer,
         residency: Residency,
     ) -> Result<(Replayed, Option<Residency>), Error> {
-        let mut encoder =
-            RenderCommandEncoder::replaying(command_buffer, &self.descriptor, residency)?;
+        let mut encoder = RenderLowering::replaying(command_buffer, &self.descriptor, residency)?;
         for call in &self.calls.calls {
             render(&mut encoder, (&self.calls, &self.indexed), call)?;
         }
@@ -345,7 +344,7 @@ pub(crate) struct DrawIndexedPatchesIndirect {
     pub(super) indirect_buffer_offset: u64,
 }
 
-impl RenderCommandEncoder {
+impl RenderLowering {
     /// Log the call `call` makes of the log, before it runs, where the encoder logs (the module
     /// docs).
     pub(crate) fn log(&mut self, call: impl FnOnce(&mut CallLog<RenderCall>) -> RenderCall) {
@@ -376,7 +375,7 @@ impl RenderCommandEncoder {
 /// Run `call` again on `encoder`, its slices in `log`'s arenas and an indexed draw's arguments in
 /// `indexed`.
 fn render(
-    encoder: &mut RenderCommandEncoder,
+    encoder: &mut RenderLowering,
     (log, indexed): (&CallLog<RenderCall>, &[DrawIndexed]),
     call: &RenderCall,
 ) -> Result<(), Error> {

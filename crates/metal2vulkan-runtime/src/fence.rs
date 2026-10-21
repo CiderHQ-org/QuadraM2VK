@@ -64,6 +64,7 @@ use super::error::Error;
 use super::predication::Event;
 use super::render::RenderCall;
 use super::render::RenderCommandEncoder;
+use super::render::RenderLowering;
 use super::render::{FRAGMENT_DRAW_STAGES, GEOMETRY_DRAW_STAGES};
 use super::replay::{BlitCall, ComputeCall, Resource};
 use super::resource::{ResourceKey, ResourceRef};
@@ -276,11 +277,13 @@ const UP_TO_FRAGMENT: RenderStages = RenderStages::VERTEX
     .union(RenderStages::MESH)
     .union(RenderStages::FRAGMENT);
 
-impl RenderCommandEncoder {
-    /// `updateFence:afterStages:`: the fence is updated after the encoder's draws' work in
-    /// `after_stages` and every stage before them (the module docs), and its work outside its
-    /// draws; Metal's `Tile` stage, or no stage, after all of its work.
-    pub fn update_fence(&mut self, fence: &Fence, after_stages: RenderStages) -> Result<(), Error> {
+impl RenderLowering {
+    /// The lowering of [`RenderCommandEncoder::update_fence`].
+    pub(crate) fn update_fence(
+        &mut self,
+        fence: &Fence,
+        after_stages: RenderStages,
+    ) -> Result<(), Error> {
         self.log(|_| RenderCall::UpdateFence(fence.clone(), after_stages));
         // The update follows the encoder's work, its later color groups' passes too, which
         // record in its core after the first group's: their encoders' calls change nothing
@@ -292,13 +295,8 @@ impl RenderCommandEncoder {
             .update_fence("update_fence", fence, after_stages_of(after_stages))
     }
 
-    /// `waitForFence:beforeStages:`: the encoder's draws' work in `before_stages` and every stage
-    /// after them waits for the fence's last update before the encoder in the queue's commit
-    /// order, also after the encoder updated the fence, as the compute encoder's does, and so
-    /// does its work outside its draws (the module docs); its draws' earlier stages may run
-    /// before the update. A wait before the vertex, object or mesh stage, or before no stage,
-    /// orders all of its work.
-    pub fn wait_for_fence(
+    /// The lowering of [`RenderCommandEncoder::wait_for_fence`].
+    pub(crate) fn wait_for_fence(
         &mut self,
         fence: &Fence,
         before_stages: RenderStages,
@@ -313,18 +311,8 @@ impl RenderCommandEncoder {
             .wait_for_fence("wait_for_fence", fence, before_stages_of(before_stages))
     }
 
-    /// `memoryBarrierWithScope:afterStages:beforeStages:`: the writes of the encoder's draws
-    /// before the barrier to the kinds of resource `scope` names (buffers, textures, render
-    /// targets) are visible to its draws after it (the module docs). A scope of the render
-    /// targets alone, after the fragment stage and before a stage at or before it (the vertex,
-    /// object, mesh or fragment stage), orders the fragment stage's writes before the later
-    /// draws' fragment stages, which run after their earlier stages, inside the render pass
-    /// instance; another scope splits the pass there. An empty scope, no stage before or after,
-    /// or a scope of the render targets alone after no fragment stage or before none of those
-    /// stages orders nothing more than the pass does: only the fragment stage writes a render
-    /// target, and a tile dispatch runs between render pass instances
-    /// (`render/tile_dispatch.rs`).
-    pub fn memory_barrier_with_scope(
+    /// The lowering of [`RenderCommandEncoder::memory_barrier_with_scope`].
+    pub(crate) fn memory_barrier_with_scope(
         &mut self,
         scope: BarrierScope,
         after_stages: RenderStages,
@@ -345,12 +333,8 @@ impl RenderCommandEncoder {
         self.barrier_before_next_draw();
     }
 
-    /// `memoryBarrierWithResources:count:afterStages:beforeStages:`: as
-    /// [`memory_barrier_with_scope`](Self::memory_barrier_with_scope) over buffers and textures,
-    /// for the writes to `resources`, which splits the pass; an empty list orders nothing.
-    ///
-    /// Refused, changing nothing (`Invalid`): a resource of another device.
-    pub fn memory_barrier_with_resources(
+    /// The lowering of [`RenderCommandEncoder::memory_barrier_with_resources`].
+    pub(crate) fn memory_barrier_with_resources(
         &mut self,
         resources: &[ResourceRef<'_>],
         after_stages: RenderStages,
@@ -367,5 +351,64 @@ impl RenderCommandEncoder {
             self.barrier_before_next_draw();
         }
         Ok(())
+    }
+}
+
+impl RenderCommandEncoder {
+    /// `updateFence:afterStages:`: the fence is updated after the encoder's draws' work in
+    /// `after_stages` and every stage before them (the module docs), and its work outside its
+    /// draws; Metal's `Tile` stage, or no stage, after all of its work.
+    pub fn update_fence(&mut self, fence: &Fence, after_stages: RenderStages) -> Result<(), Error> {
+        self.lowering.update_fence(fence, after_stages)
+    }
+
+    /// `waitForFence:beforeStages:`: the encoder's draws' work in `before_stages` and every stage
+    /// after them waits for the fence's last update before the encoder in the queue's commit
+    /// order, also after the encoder updated the fence, as the compute encoder's does, and so
+    /// does its work outside its draws (the module docs); its draws' earlier stages may run
+    /// before the update. A wait before the vertex, object or mesh stage, or before no stage,
+    /// orders all of its work.
+    pub fn wait_for_fence(
+        &mut self,
+        fence: &Fence,
+        before_stages: RenderStages,
+    ) -> Result<(), Error> {
+        self.lowering.wait_for_fence(fence, before_stages)
+    }
+
+    /// `memoryBarrierWithScope:afterStages:beforeStages:`: the writes of the encoder's draws
+    /// before the barrier to the kinds of resource `scope` names (buffers, textures, render
+    /// targets) are visible to its draws after it (the module docs). A scope of the render
+    /// targets alone, after the fragment stage and before a stage at or before it (the vertex,
+    /// object, mesh or fragment stage), orders the fragment stage's writes before the later
+    /// draws' fragment stages, which run after their earlier stages, inside the render pass
+    /// instance; another scope splits the pass there. An empty scope, no stage before or after,
+    /// or a scope of the render targets alone after no fragment stage or before none of those
+    /// stages orders nothing more than the pass does: only the fragment stage writes a render
+    /// target, and a tile dispatch runs between render pass instances
+    /// (`render/tile_dispatch.rs`).
+    pub fn memory_barrier_with_scope(
+        &mut self,
+        scope: BarrierScope,
+        after_stages: RenderStages,
+        before_stages: RenderStages,
+    ) {
+        self.lowering
+            .memory_barrier_with_scope(scope, after_stages, before_stages)
+    }
+
+    /// `memoryBarrierWithResources:count:afterStages:beforeStages:`: as
+    /// [`memory_barrier_with_scope`](Self::memory_barrier_with_scope) over buffers and textures,
+    /// for the writes to `resources`, which splits the pass; an empty list orders nothing.
+    ///
+    /// Refused, changing nothing (`Invalid`): a resource of another device.
+    pub fn memory_barrier_with_resources(
+        &mut self,
+        resources: &[ResourceRef<'_>],
+        after_stages: RenderStages,
+        before_stages: RenderStages,
+    ) -> Result<(), Error> {
+        self.lowering
+            .memory_barrier_with_resources(resources, after_stages, before_stages)
     }
 }

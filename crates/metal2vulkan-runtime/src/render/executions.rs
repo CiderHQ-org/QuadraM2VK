@@ -257,9 +257,10 @@ use super::pending_tile::TilePipelines;
 use super::shadows::InstanceShadows;
 use super::tile_memory::TileMemory;
 use super::RenderCall;
+use super::RenderCommandEncoder;
 use super::{
     index_size, Assembly, Before, DrawBuffers, DrawingState, IndexedDraw, Instance,
-    InterlockedStorage, Next, PatchDraw, PendingDraw, Piece, RenderCommandEncoder, RenderStateKind,
+    InterlockedStorage, Next, PatchDraw, PendingDraw, Piece, RenderLowering, RenderStateKind,
     PASS_DRAW_STAGES,
 };
 use crate::amplification::Amplification;
@@ -337,31 +338,9 @@ enum Inherited {
     Faults,
 }
 
-impl RenderCommandEncoder {
-    /// `executeCommandsInBuffer:withRange:`: run render commands `range` of `icb` here, as their
-    /// records stand when the command buffer is committed, or, where an encoder made `icb`
-    /// resident for writing, once the work before them completed (a host step the device
-    /// announces once, `Degradation::HostReplayedIndirectCommands`). Each draws as this
-    /// encoder's `draw_primitives`, `draw_indexed_primitives` or `draw_patches` would, with the
-    /// encoder's state as it is now, and its own pipeline state and buffers, or the encoder's
-    /// where `icb` inherits them (the module docs).
-    /// The encoder's draws before run before them and its draws after run after them.
-    ///
-    /// Refused, changing nothing (`Invalid`): a buffer of another device, a range that ends past
-    /// its size (`IndirectCommandBufferProblem::Range`), and, for a range that is not empty, an
-    /// inherited pipeline state that is unset (`NoPipelineState`), at which Metal's process ends.
-    /// For a range that is not empty, an inherited state made without
-    /// `supportIndirectCommandBuffers` faults Metal's GPU at the encoder: the call is taken, the
-    /// encoder runs nothing, not even its load, clear or store actions, and the command buffer
-    /// completes with [`CommandBufferError::PageFault`](crate::CommandBufferError::PageFault), the
-    /// other encoders run and every event signal fires. A buffer of no command types, or of
-    /// dispatches beside draws of primitives, runs nothing, as plain Metal's; one of dispatches
-    /// alone, or beside other draws (unmeasured in a pass), is
-    /// `NotImplemented(IndirectRenderCommands)`. An empty range runs nothing, whatever the
-    /// encoder's pipeline state, as plain Metal's. What a command's draw would be
-    /// refused refuses the commit ([`CommandBuffer::commit`]). Where a visibility result mode is
-    /// set, the commands' draws count in it (the module docs).
-    pub fn execute_commands_in_buffer(
+impl RenderLowering {
+    /// The lowering of [`RenderCommandEncoder::execute_commands_in_buffer`].
+    pub(crate) fn execute_commands_in_buffer(
         &mut self,
         icb: &IndirectCommandBuffer,
         range: Range<u64>,
@@ -369,18 +348,8 @@ impl RenderCommandEncoder {
         self.execute_range(icb, range, None)
     }
 
-    /// [`execute_commands_in_buffer`](Self::execute_commands_in_buffer) with a check of the
-    /// commands its host step runs (a runtime extension; Metal has none), which looks for `needs`:
-    /// where a host step records the pass from the records as the GPU and the CPU left them (an
-    /// encoder made `icb` resident for writing, `IndirectCommandBuffer::gpu_written`), the step
-    /// first calls `check` with each command of the range it will record, in order, before it
-    /// records any of them ([`IndirectCommandCheck`]). An execution `commit` records from the CPU's
-    /// records never calls it; nor does one that runs on the GPU alone (`render/executions/gpu.rs`),
-    /// which it may only where what `icb`'s records may hold, at the commit and again as the
-    /// pass's batch is ready to submit, rules out every kind `needs` names
-    /// ([`IndirectCommandCheckNeeds`], [`IndirectCommandCheckNeeds::ALL`] included). Refused as
-    /// [`execute_commands_in_buffer`](Self::execute_commands_in_buffer) refuses.
-    pub fn execute_commands_in_buffer_checked(
+    /// The lowering of [`RenderCommandEncoder::execute_commands_in_buffer_checked`].
+    pub(crate) fn execute_commands_in_buffer_checked(
         &mut self,
         icb: &IndirectCommandBuffer,
         range: Range<u64>,
@@ -424,31 +393,8 @@ impl RenderCommandEncoder {
         self.defer_execution(icb, ExecutionRange::Fixed(range), pipeline, check)
     }
 
-    /// `executeCommandsInBuffer:indirectBuffer:indirectBufferOffset:`: run the render commands
-    /// of `icb` that the `MTLIndirectCommandBufferExecutionRange` at `offset` of `range_buffer`
-    /// (`location`, then `length`, each a `u32`) names as the execution runs, as
-    /// [`execute_commands_in_buffer`](Self::execute_commands_in_buffer) runs a range given. The
-    /// range is taken as Metal's execution takes it (a probe, an M3 Max and an M4): from the
-    /// location, clamped at the buffer's size, so a length of 0 or a location at the size runs
-    /// nothing and a length past it runs to its end; a location past the size, or a range past
-    /// `2^32 - 1`, at which Metal's GPU faults the command buffer, runs nothing, and the command
-    /// buffer's execution report states `ReplayFaults::RANGE`. The encoder copies the range where
-    /// it is encoded, behind a barrier from everything before, so the range a kernel of an earlier
-    /// encoder wrote is read; a host step records the pass once the work before it completed, which
-    /// the device announces once (`Degradation::HostReplayedIndirectCommands`).
-    ///
-    /// Refused, changing nothing: what
-    /// [`execute_commands_in_buffer`](Self::execute_commands_in_buffer) refuses but a range (an
-    /// unset inherited state whatever the range); a range buffer of another device, and a range
-    /// Metal's reading of is not defined (`Invalid`, `IndirectCommandBufferProblem::RangeBuffer`):
-    /// an offset that is not a multiple of 4 bytes, at which Metal's GPU faulted, or 8 bytes that
-    /// run past `range_buffer`, which Metal reads from whatever follows it. A range a draw of the
-    /// encoder before the call may write is `NotImplemented(IndirectRenderCommands)`: Metal's
-    /// execution reads that draw's write, where the runtime's copy, made before the pass, would
-    /// not; as for the index bounds pass, an untracked buffer's writes are not seen. Under an
-    /// inherited state made without `supportIndirectCommandBuffers`, whatever the range, `{0, 0}`
-    /// included, the encoder faults as `execute_commands_in_buffer`'s does.
-    pub fn execute_commands_in_buffer_indirect(
+    /// The lowering of [`RenderCommandEncoder::execute_commands_in_buffer_indirect`].
+    pub(crate) fn execute_commands_in_buffer_indirect(
         &mut self,
         icb: &IndirectCommandBuffer,
         range_buffer: &Buffer,
@@ -457,14 +403,8 @@ impl RenderCommandEncoder {
         self.execute_indirect_range(icb, range_buffer, offset, None)
     }
 
-    /// [`execute_commands_in_buffer_indirect`](Self::execute_commands_in_buffer_indirect) with a
-    /// check of the commands its host step runs, which always records the pass: the step first
-    /// calls `check` with each command of the range it read that it will record, in order, before
-    /// it records any of them, as
-    /// [`execute_commands_in_buffer_checked`](Self::execute_commands_in_buffer_checked)'s does
-    /// ([`IndirectCommandCheck`]). Refused as
-    /// [`execute_commands_in_buffer_indirect`](Self::execute_commands_in_buffer_indirect) refuses.
-    pub fn execute_commands_in_buffer_indirect_checked(
+    /// The lowering of [`RenderCommandEncoder::execute_commands_in_buffer_indirect_checked`].
+    pub(crate) fn execute_commands_in_buffer_indirect_checked(
         &mut self,
         icb: &IndirectCommandBuffer,
         range_buffer: &Buffer,
@@ -788,6 +728,113 @@ impl RenderCommandEncoder {
         // Its commands may name any pipeline state, reading handles in any stage.
         self.command_encoded(every_render_stage());
         Ok(())
+    }
+}
+
+impl RenderCommandEncoder {
+    /// `executeCommandsInBuffer:withRange:`: run render commands `range` of `icb` here, as their
+    /// records stand when the command buffer is committed, or, where an encoder made `icb`
+    /// resident for writing, once the work before them completed (a host step the device
+    /// announces once, `Degradation::HostReplayedIndirectCommands`). Each draws as this
+    /// encoder's `draw_primitives`, `draw_indexed_primitives` or `draw_patches` would, with the
+    /// encoder's state as it is now, and its own pipeline state and buffers, or the encoder's
+    /// where `icb` inherits them (the module docs).
+    /// The encoder's draws before run before them and its draws after run after them.
+    ///
+    /// Refused, changing nothing (`Invalid`): a buffer of another device, a range that ends past
+    /// its size (`IndirectCommandBufferProblem::Range`), and, for a range that is not empty, an
+    /// inherited pipeline state that is unset (`NoPipelineState`), at which Metal's process ends.
+    /// For a range that is not empty, an inherited state made without
+    /// `supportIndirectCommandBuffers` faults Metal's GPU at the encoder: the call is taken, the
+    /// encoder runs nothing, not even its load, clear or store actions, and the command buffer
+    /// completes with [`CommandBufferError::PageFault`](crate::CommandBufferError::PageFault), the
+    /// other encoders run and every event signal fires. A buffer of no command types, or of
+    /// dispatches beside draws of primitives, runs nothing, as plain Metal's; one of dispatches
+    /// alone, or beside other draws (unmeasured in a pass), is
+    /// `NotImplemented(IndirectRenderCommands)`. An empty range runs nothing, whatever the
+    /// encoder's pipeline state, as plain Metal's. What a command's draw would be
+    /// refused refuses the commit ([`CommandBuffer::commit`]). Where a visibility result mode is
+    /// set, the commands' draws count in it (the module docs).
+    pub fn execute_commands_in_buffer(
+        &mut self,
+        icb: &IndirectCommandBuffer,
+        range: Range<u64>,
+    ) -> Result<(), Error> {
+        self.lowering.execute_commands_in_buffer(icb, range)
+    }
+
+    /// [`execute_commands_in_buffer`](Self::execute_commands_in_buffer) with a check of the
+    /// commands its host step runs (a runtime extension; Metal has none), which looks for `needs`:
+    /// where a host step records the pass from the records as the GPU and the CPU left them (an
+    /// encoder made `icb` resident for writing, `IndirectCommandBuffer::gpu_written`), the step
+    /// first calls `check` with each command of the range it will record, in order, before it
+    /// records any of them ([`IndirectCommandCheck`]). An execution `commit` records from the CPU's
+    /// records never calls it; nor does one that runs on the GPU alone (`render/executions/gpu.rs`),
+    /// which it may only where what `icb`'s records may hold, at the commit and again as the
+    /// pass's batch is ready to submit, rules out every kind `needs` names
+    /// ([`IndirectCommandCheckNeeds`], [`IndirectCommandCheckNeeds::ALL`] included). Refused as
+    /// [`execute_commands_in_buffer`](Self::execute_commands_in_buffer) refuses.
+    pub fn execute_commands_in_buffer_checked(
+        &mut self,
+        icb: &IndirectCommandBuffer,
+        range: Range<u64>,
+        check: IndirectCommandCheck,
+        needs: IndirectCommandCheckNeeds,
+    ) -> Result<(), Error> {
+        self.lowering
+            .execute_commands_in_buffer_checked(icb, range, check, needs)
+    }
+
+    /// `executeCommandsInBuffer:indirectBuffer:indirectBufferOffset:`: run the render commands
+    /// of `icb` that the `MTLIndirectCommandBufferExecutionRange` at `offset` of `range_buffer`
+    /// (`location`, then `length`, each a `u32`) names as the execution runs, as
+    /// [`execute_commands_in_buffer`](Self::execute_commands_in_buffer) runs a range given. The
+    /// range is taken as Metal's execution takes it (a probe, an M3 Max and an M4): from the
+    /// location, clamped at the buffer's size, so a length of 0 or a location at the size runs
+    /// nothing and a length past it runs to its end; a location past the size, or a range past
+    /// `2^32 - 1`, at which Metal's GPU faults the command buffer, runs nothing, and the command
+    /// buffer's execution report states `ReplayFaults::RANGE`. The encoder copies the range where
+    /// it is encoded, behind a barrier from everything before, so the range a kernel of an earlier
+    /// encoder wrote is read; a host step records the pass once the work before it completed, which
+    /// the device announces once (`Degradation::HostReplayedIndirectCommands`).
+    ///
+    /// Refused, changing nothing: what
+    /// [`execute_commands_in_buffer`](Self::execute_commands_in_buffer) refuses but a range (an
+    /// unset inherited state whatever the range); a range buffer of another device, and a range
+    /// Metal's reading of is not defined (`Invalid`, `IndirectCommandBufferProblem::RangeBuffer`):
+    /// an offset that is not a multiple of 4 bytes, at which Metal's GPU faulted, or 8 bytes that
+    /// run past `range_buffer`, which Metal reads from whatever follows it. A range a draw of the
+    /// encoder before the call may write is `NotImplemented(IndirectRenderCommands)`: Metal's
+    /// execution reads that draw's write, where the runtime's copy, made before the pass, would
+    /// not; as for the index bounds pass, an untracked buffer's writes are not seen. Under an
+    /// inherited state made without `supportIndirectCommandBuffers`, whatever the range, `{0, 0}`
+    /// included, the encoder faults as `execute_commands_in_buffer`'s does.
+    pub fn execute_commands_in_buffer_indirect(
+        &mut self,
+        icb: &IndirectCommandBuffer,
+        range_buffer: &Buffer,
+        offset: u64,
+    ) -> Result<(), Error> {
+        self.lowering
+            .execute_commands_in_buffer_indirect(icb, range_buffer, offset)
+    }
+
+    /// [`execute_commands_in_buffer_indirect`](Self::execute_commands_in_buffer_indirect) with a
+    /// check of the commands its host step runs, which always records the pass: the step first
+    /// calls `check` with each command of the range it read that it will record, in order, before
+    /// it records any of them, as
+    /// [`execute_commands_in_buffer_checked`](Self::execute_commands_in_buffer_checked)'s does
+    /// ([`IndirectCommandCheck`]). Refused as
+    /// [`execute_commands_in_buffer_indirect`](Self::execute_commands_in_buffer_indirect) refuses.
+    pub fn execute_commands_in_buffer_indirect_checked(
+        &mut self,
+        icb: &IndirectCommandBuffer,
+        range_buffer: &Buffer,
+        offset: u64,
+        check: IndirectCommandCheck,
+    ) -> Result<(), Error> {
+        self.lowering
+            .execute_commands_in_buffer_indirect_checked(icb, range_buffer, offset, check)
     }
 }
 
@@ -1642,7 +1689,7 @@ fn reads_vertex_stride(pipeline: &RenderPipelineState, index: u32) -> bool {
 /// it. The command buffer holds them until it completes.
 pub(crate) type SettledDraw = (Arc<RenderVariant>, Option<Arc<RawPipeline>>);
 
-impl RenderCommandEncoder {
+impl RenderLowering {
     /// Make, into `made`, what a command's draw of `pipeline` under the encoder's state (an
     /// execution's at its call, `RenderExecution::settle`) compiles at the host step: for each
     /// primitive type its input primitive topology class holds (every type for the unspecified
@@ -2040,7 +2087,7 @@ impl RenderExecution {
     /// commands ran as several, and each run's steps.
     fn finish(
         &self,
-        mut encoder: RenderCommandEncoder,
+        mut encoder: RenderLowering,
         found: &mut Found,
         rendered: &mut Rendered,
         device: &Device,
@@ -2051,7 +2098,7 @@ impl RenderExecution {
         // left begins and ends there, empty.
         encoder.visibility.end(raw, encoder.current.draws);
         encoder.visibility.close_spares(raw, encoder.current.draws);
-        let RenderCommandEncoder {
+        let RenderLowering {
             core,
             earlier,
             current,
@@ -2147,12 +2194,12 @@ impl RenderExecution {
         (draws, visibility): (vk::CommandBuffer, Visibility),
         (storage, layout, residency): (PassStorage, PassLayout, &Residency),
         forms: BufferForms,
-    ) -> RenderCommandEncoder {
+    ) -> RenderLowering {
         let snapshot = &self.snapshot;
         // The draws use only the shadowed textures the call gathered.
         let mut shadows = InstanceShadows::default();
         shadows.add(&self.shadows, &[]);
-        RenderCommandEncoder {
+        RenderLowering {
             core,
             earlier: Vec::new(),
             current: Instance {
@@ -2316,7 +2363,7 @@ impl RenderExecution {
         for pipeline in named {
             encoder.settle_draws(pipeline, made);
         }
-        let RenderCommandEncoder { core, .. } = encoder;
+        let RenderLowering { core, .. } = encoder;
         core
     }
 

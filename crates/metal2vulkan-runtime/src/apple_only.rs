@@ -48,6 +48,7 @@ use super::compute::ComputeCommandEncoder;
 use super::error::Error;
 use super::render::RenderCall;
 use super::render::RenderCommandEncoder;
+use super::render::RenderLowering;
 use super::replay::BlitCall;
 use super::texture::Texture;
 
@@ -281,63 +282,109 @@ impl ComputeCommandEncoder {
     pub fn insert_compressed_texture_reinterpretation_flush(&mut self) {}
 }
 
+impl RenderLowering {
+    /// The lowering of [`RenderCommandEncoder::set_alpha_test_reference_value`].
+    pub(crate) fn set_alpha_test_reference_value(&mut self, value: f32) -> Result<(), Error> {
+        self.log(|_| RenderCall::AlphaTestReferenceValue(value));
+        answer(AppleOnlyCall::SetAlphaTestReferenceValue(value))
+    }
+
+    /// The lowering of [`RenderCommandEncoder::set_line_width`].
+    pub(crate) fn set_line_width(&mut self, width: f32) -> Result<(), Error> {
+        self.log(|_| RenderCall::LineWidth(width));
+        answer(AppleOnlyCall::SetLineWidth(width))
+    }
+
+    /// The lowering of [`RenderCommandEncoder::set_point_size`].
+    pub(crate) fn set_point_size(&mut self, size: f32) -> Result<(), Error> {
+        self.log(|_| RenderCall::PointSize(size));
+        answer(AppleOnlyCall::SetPointSize(size))
+    }
+
+    /// The lowering of [`RenderCommandEncoder::set_provoking_vertex_mode`].
+    pub(crate) fn set_provoking_vertex_mode(&mut self, mode: u64) -> Result<(), Error> {
+        self.log(|_| RenderCall::ProvokingVertexMode(mode));
+        answer(AppleOnlyCall::SetProvokingVertexMode(mode))
+    }
+
+    /// The lowering of [`RenderCommandEncoder::set_viewport_transform_enabled`].
+    pub(crate) fn set_viewport_transform_enabled(&mut self, enabled: bool) -> Result<(), Error> {
+        self.log(|_| RenderCall::ViewportTransformEnabled(enabled));
+        answer(AppleOnlyCall::SetViewportTransformEnabled(enabled))
+    }
+
+    /// The lowering of [`RenderCommandEncoder::set_vertex_amplification_mode`].
+    pub(crate) fn set_vertex_amplification_mode(
+        &mut self,
+        mode: u64,
+        value: u64,
+    ) -> Result<(), Error> {
+        self.log(|_| RenderCall::VertexAmplificationMode(mode, value));
+        answer(AppleOnlyCall::SetVertexAmplificationMode { mode, value })
+    }
+
+    /// The lowering of [`RenderCommandEncoder::set_depth_cleared`].
+    pub(crate) fn set_depth_cleared(&mut self) -> Result<(), Error> {
+        self.log(|_| RenderCall::DepthCleared);
+        answer(AppleOnlyCall::SetDepthCleared)
+    }
+
+    /// The lowering of [`RenderCommandEncoder::set_stencil_cleared`].
+    pub(crate) fn set_stencil_cleared(&mut self) -> Result<(), Error> {
+        self.log(|_| RenderCall::StencilCleared);
+        answer(AppleOnlyCall::SetStencilCleared)
+    }
+}
+
 impl RenderCommandEncoder {
     /// `setAlphaTestReferenceValue:` (SPI): a no-op. No pipeline the runtime builds has a
     /// fixed-function alpha test, so the reference has no effect, as on Metal with the test off.
     pub fn set_alpha_test_reference_value(&mut self, value: f32) -> Result<(), Error> {
-        self.log(|_| RenderCall::AlphaTestReferenceValue(value));
-        answer(AppleOnlyCall::SetAlphaTestReferenceValue(value))
+        self.lowering.set_alpha_test_reference_value(value)
     }
 
     /// `setLineWidth:` (SPI): accepted at Metal's default width of 1, which every line the
     /// runtime draws has; any other width is refused ([`AppleOnly::LineWidth`]): Apple's
     /// wide-line rule is unmeasured.
     pub fn set_line_width(&mut self, width: f32) -> Result<(), Error> {
-        self.log(|_| RenderCall::LineWidth(width));
-        answer(AppleOnlyCall::SetLineWidth(width))
+        self.lowering.set_line_width(width)
     }
 
     /// `setPointSize:` (SPI): a no-op. On an M4 it changes nothing Metal draws at any size (0,
     /// 0.5, 1, 3, 5, 100, -2, NaN, infinity), whether the vertex function writes `[[point_size]]`
     /// or not and whether the pipeline's private `pointSizeOutputVS` is set.
     pub fn set_point_size(&mut self, size: f32) -> Result<(), Error> {
-        self.log(|_| RenderCall::PointSize(size));
-        answer(AppleOnlyCall::SetPointSize(size))
+        self.lowering.set_point_size(size)
     }
 
     /// `setProvokingVertexMode:` (SPI): accepted at Metal's default, mode 0, the first vertex,
     /// from which every runtime draw takes a flat varying; any other mode is refused
     /// ([`AppleOnly::ProvokingVertexMode`]).
     pub fn set_provoking_vertex_mode(&mut self, mode: u64) -> Result<(), Error> {
-        self.log(|_| RenderCall::ProvokingVertexMode(mode));
-        answer(AppleOnlyCall::SetProvokingVertexMode(mode))
+        self.lowering.set_provoking_vertex_mode(mode)
     }
 
     /// `setViewportTransformEnabled:` (SPI): accepted on, Metal's default and every runtime
     /// draw's; off is refused ([`AppleOnly::ViewportTransformDisabled`]): Vulkan has no form for
     /// it.
     pub fn set_viewport_transform_enabled(&mut self, enabled: bool) -> Result<(), Error> {
-        self.log(|_| RenderCall::ViewportTransformEnabled(enabled));
-        answer(AppleOnlyCall::SetViewportTransformEnabled(enabled))
+        self.lowering.set_viewport_transform_enabled(enabled)
     }
 
     /// `setVertexAmplificationMode:value:` (SPI): refused
     /// ([`AppleOnly::VertexAmplificationMode`]), its meaning unmeasured.
     pub fn set_vertex_amplification_mode(&mut self, mode: u64, value: u64) -> Result<(), Error> {
-        self.log(|_| RenderCall::VertexAmplificationMode(mode, value));
-        answer(AppleOnlyCall::SetVertexAmplificationMode { mode, value })
+        self.lowering.set_vertex_amplification_mode(mode, value)
     }
 
     /// `setDepthCleared` (SPI): refused ([`AppleOnly::DepthCleared`]), its meaning unmeasured.
     pub fn set_depth_cleared(&mut self) -> Result<(), Error> {
-        self.log(|_| RenderCall::DepthCleared);
-        answer(AppleOnlyCall::SetDepthCleared)
+        self.lowering.set_depth_cleared()
     }
 
     /// `setStencilCleared` (SPI): refused ([`AppleOnly::StencilCleared`]), its meaning
     /// unmeasured.
     pub fn set_stencil_cleared(&mut self) -> Result<(), Error> {
-        self.log(|_| RenderCall::StencilCleared);
-        answer(AppleOnlyCall::SetStencilCleared)
+        self.lowering.set_stencil_cleared()
     }
 }

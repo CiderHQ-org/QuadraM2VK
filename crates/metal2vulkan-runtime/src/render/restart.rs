@@ -22,7 +22,8 @@
 //! rewrite pass writes (`index_rewrite.rs`), with the class's list topology.
 
 use super::RenderCall;
-use super::{Assembly, RenderCommandEncoder};
+use super::RenderCommandEncoder;
+use super::{Assembly, RenderLowering};
 use metal2vulkan::bind::{DrawCall, RewriteProgram};
 use metal2vulkan::metal::PrimitiveType;
 
@@ -45,16 +46,9 @@ impl Restarted {
     }
 }
 
-impl RenderCommandEncoder {
-    /// `setPrimitiveRestartEnabled:index:` (SPI): the encoder's indexed line and triangle strips
-    /// drawn after the call restart at `index` as Metal takes it for their index type (`k mod
-    /// 2^32` for 32-bit indices, the lesser of that and `0xffff` for 16-bit ones), and only
-    /// there: the all-ones index then draws as a vertex unless it is that index. `_enabled`
-    /// changes nothing, as on Metal. Lists, points, draws without indices and executions of
-    /// indirect render commands are as before; the last call wins until the encoder ends (an M4). A
-    /// strip restarting elsewhere than at the all-ones index is drawn as a list a GPU pass writes
-    /// before the pass; a draw it cannot draw so is refused (`NotImplemented(RestartedStrip)`).
-    pub fn set_primitive_restart_enabled(&mut self, _enabled: bool, index: u64) {
+impl RenderLowering {
+    /// The lowering of [`RenderCommandEncoder::set_primitive_restart_enabled`].
+    pub(crate) fn set_primitive_restart_enabled(&mut self, _enabled: bool, index: u64) {
         self.log(|_| RenderCall::PrimitiveRestartEnabled(_enabled, index));
         self.restart = Some(index);
     }
@@ -84,6 +78,20 @@ impl RenderCommandEncoder {
             restart,
             index_size: if wide { 4 } else { 2 },
         })
+    }
+}
+
+impl RenderCommandEncoder {
+    /// `setPrimitiveRestartEnabled:index:` (SPI): the encoder's indexed line and triangle strips
+    /// drawn after the call restart at `index` as Metal takes it for their index type (`k mod
+    /// 2^32` for 32-bit indices, the lesser of that and `0xffff` for 16-bit ones), and only
+    /// there: the all-ones index then draws as a vertex unless it is that index. `_enabled`
+    /// changes nothing, as on Metal. Lists, points, draws without indices and executions of
+    /// indirect render commands are as before; the last call wins until the encoder ends (an M4). A
+    /// strip restarting elsewhere than at the all-ones index is drawn as a list a GPU pass writes
+    /// before the pass; a draw it cannot draw so is refused (`NotImplemented(RestartedStrip)`).
+    pub fn set_primitive_restart_enabled(&mut self, _enabled: bool, index: u64) {
+        self.lowering.set_primitive_restart_enabled(_enabled, index)
     }
 }
 

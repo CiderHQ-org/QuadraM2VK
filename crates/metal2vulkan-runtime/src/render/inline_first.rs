@@ -129,7 +129,7 @@
 
 use super::extended_shadow::ExtendedShadows;
 use super::inline_splits::Later;
-use super::{Instance, Next, RenderCommandEncoder, ViewSetup};
+use super::{Instance, Next, RenderLowering, ViewSetup};
 use crate::clear_reach;
 use crate::device::Device;
 use crate::error::Error;
@@ -298,7 +298,7 @@ fn inline_area(layout: &PassLayout) -> [u32; 2] {
     }
 }
 
-impl RenderCommandEncoder {
+impl RenderLowering {
     /// Begin the current instance's secondary where the pass left it unbegun (`Instance::draws`):
     /// a pass that may record its first instance inline begins none at its opening, and one only
     /// where a command records into that instance's secondary or a split keeps the instance. An

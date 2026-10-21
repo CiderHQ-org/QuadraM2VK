@@ -74,7 +74,7 @@ use std::sync::Arc;
 
 use super::super::bound::{Bound, Recorded};
 use super::super::pass_start_reads::PassStartTables;
-use super::super::{Assembly, DrawBuffers, Recording, RenderCommandEncoder};
+use super::super::{Assembly, DrawBuffers, Recording, RenderLowering};
 use super::{HostStepCause, PassStorage, RenderExecution, Rendered, CALL};
 use crate::binding::PushWrite;
 use crate::blit::{reads_by, writes_by};
@@ -351,7 +351,7 @@ impl RenderExecution {
             encoder.pipeline = Some(pipeline.clone());
             encoder.replay_draw_of(state, primitive_type)
         });
-        let RenderCommandEncoder { core, .. } = encoder;
+        let RenderLowering { core, .. } = encoder;
         let form = match slots {
             Ok(Ok(slots)) => {
                 let commands = (decided, primitive_type, range);
@@ -485,7 +485,7 @@ impl RenderExecution {
         (command_buffer, residency): (&CommandBuffer, &Residency),
         form: &GpuForm,
         (storage, rendered): (PassStorage, &mut Rendered),
-    ) -> Result<RenderCommandEncoder, Error> {
+    ) -> Result<RenderLowering, Error> {
         let snapshot = &self.snapshot;
         let device = command_buffer.device().clone();
         let pipeline = (self.pipeline.as_ref())
@@ -689,7 +689,7 @@ fn scratch_head(pre: &DrawReplayPreprocess, sink: u64) -> Result<Vec<u8>, Error>
     Ok(bytes)
 }
 
-impl RenderCommandEncoder {
+impl RenderLowering {
     /// The buffer slots the vertex and fragment functions of a command's draw of `state` as
     /// `primitive_type` read, through this encoder (an execution's at its call, in the replay
     /// form or the merged one, its `forms`), where that draw records as the GPU form's draws do

@@ -78,7 +78,7 @@
 use super::capture;
 use super::extended_shadow::ExtendedShadows;
 use super::{
-    reads_handles, DrawingState, Opening, RenderCommandEncoder, RenderLog, RenderPipelineState,
+    reads_handles, DrawingState, Opening, RenderLog, RenderLowering, RenderPipelineState,
     RenderStateKind,
 };
 use crate::attachment_stand_in::{self, StandInCopies};
@@ -444,7 +444,7 @@ impl Ended {
                 .as_ref()
                 .ok_or_else(|| internal("a pass of several color groups without its log"))?;
             for group in 1..later.group.groups() {
-                let mut encoder = RenderCommandEncoder::later_group(core, &later, group, log)?;
+                let mut encoder = RenderLowering::later_group(core, &later, group, log)?;
                 log.replay_into(&mut encoder);
                 if encoder.group_diverged() {
                     return Err(internal(
@@ -461,7 +461,7 @@ impl Ended {
     }
 }
 
-impl RenderCommandEncoder {
+impl RenderLowering {
     /// The encoder of later group `group` of the pass `later` and `log` describe, over `core`
     /// (the module docs).
     fn later_group(
@@ -469,7 +469,7 @@ impl RenderCommandEncoder {
         later: &Later,
         group: u32,
         log: &RenderLog,
-    ) -> Result<RenderCommandEncoder, Error> {
+    ) -> Result<RenderLowering, Error> {
         const CALL: &str = "end_encoding";
         let grouping = ColorGroup::of(later.group.present.clone(), later.group.width, group)
             .ok_or_else(|| internal("a later color group of a pass in one"))?;
@@ -500,7 +500,7 @@ impl RenderCommandEncoder {
                 counting: false,
             })),
         );
-        Ok(RenderCommandEncoder::assemble(core, draws, opening))
+        Ok(RenderLowering::assemble(core, draws, opening))
     }
 
     /// Whether a later group's decisive call ran otherwise than the first group's.

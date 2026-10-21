@@ -25,6 +25,7 @@
 //!   dispatch (`render/shadows.rs`).
 
 use super::RenderCommandEncoder;
+use super::RenderLowering;
 use super::{RenderCall, Table};
 use crate::error::Error;
 use crate::function_table::VisibleFunctionTable;
@@ -34,13 +35,9 @@ use crate::replay::Resource;
 use crate::resource::ResourceRef;
 use metal2vulkan::metal::{RenderStages, ResourceUsage};
 
-impl RenderCommandEncoder {
-    /// `useResource:usage:stages:`: the encoder's later draws and tile dispatches may reach
-    /// `resource` in render `stages` through an address or a resource ID held in memory, reading
-    /// or writing as `usage` says (the module docs).
-    ///
-    /// Refused, changing nothing: a resource of another device (`Invalid`).
-    pub fn use_resource(
+impl RenderLowering {
+    /// The lowering of [`RenderCommandEncoder::use_resource`].
+    pub(crate) fn use_resource(
         &mut self,
         resource: ResourceRef<'_>,
         usage: ResourceUsage,
@@ -50,9 +47,8 @@ impl RenderCommandEncoder {
         self.use_all("use_resource", &[resource], usage, stages)
     }
 
-    /// `useResources:count:usage:stages:`: [`use_resource`](Self::use_resource) of each of
-    /// `resources`, refused, changing nothing, as it is for any of them.
-    pub fn use_resources(
+    /// The lowering of [`RenderCommandEncoder::use_resources`].
+    pub(crate) fn use_resources(
         &mut self,
         resources: &[ResourceRef<'_>],
         usage: ResourceUsage,
@@ -85,23 +81,14 @@ impl RenderCommandEncoder {
         Ok(())
     }
 
-    /// `useHeap:stages:`: the encoder's later draws and tile dispatches may read every buffer
-    /// placed in `heap` in render `stages` through an address held in memory, and every texture
-    /// made in it or over a buffer placed in it through its resource ID, as Metal's contract makes
-    /// a heap's resources resident for reading only (`residency.rs`): the textures that live now,
-    /// and each made later, from the first command encoded after it is made.
-    ///
-    /// A sparse heap's live sparse textures are made resident, as on a compute encoder.
-    ///
-    /// Refused, changing nothing (`Invalid`): a heap of another device.
-    pub fn use_heap(&mut self, heap: &Heap, stages: RenderStages) -> Result<(), Error> {
+    /// The lowering of [`RenderCommandEncoder::use_heap`].
+    pub(crate) fn use_heap(&mut self, heap: &Heap, stages: RenderStages) -> Result<(), Error> {
         self.log(|_| RenderCall::UseHeap(heap.clone(), stages));
         self.use_heaps_of("use_heap", &[heap], stages)
     }
 
-    /// `useHeaps:count:stages:`: [`use_heap`](Self::use_heap) of each of `heaps`, refused,
-    /// changing nothing, as it is for any of them.
-    pub fn use_heaps(&mut self, heaps: &[&Heap], stages: RenderStages) -> Result<(), Error> {
+    /// The lowering of [`RenderCommandEncoder::use_heaps`].
+    pub(crate) fn use_heaps(&mut self, heaps: &[&Heap], stages: RenderStages) -> Result<(), Error> {
         self.log(|_| {
             RenderCall::UseHeaps(heaps.iter().map(|&heap| heap.clone()).collect(), stages)
         });
@@ -166,13 +153,54 @@ impl RenderCommandEncoder {
 }
 
 impl RenderCommandEncoder {
-    /// `setVertexVisibleFunctionTable:atBufferIndex:` (`None` unbinds the index): the table at
-    /// the vertex stage's buffer index `index`, in place of any buffer there, as a compute
-    /// encoder's `set_visible_function_table` binds one (`function_table.rs`). Refused: an index
-    /// past the buffer table, a table of another device. A draw whose vertex function reads a
-    /// buffer at the index, or a table where a buffer is bound, is refused
-    /// (`Invalid(FunctionTable)`), as Metal's validation stops it.
-    pub fn set_vertex_visible_function_table(
+    /// `useResource:usage:stages:`: the encoder's later draws and tile dispatches may reach
+    /// `resource` in render `stages` through an address or a resource ID held in memory, reading
+    /// or writing as `usage` says (the module docs).
+    ///
+    /// Refused, changing nothing: a resource of another device (`Invalid`).
+    pub fn use_resource(
+        &mut self,
+        resource: ResourceRef<'_>,
+        usage: ResourceUsage,
+        stages: RenderStages,
+    ) -> Result<(), Error> {
+        self.lowering.use_resource(resource, usage, stages)
+    }
+
+    /// `useResources:count:usage:stages:`: [`use_resource`](Self::use_resource) of each of
+    /// `resources`, refused, changing nothing, as it is for any of them.
+    pub fn use_resources(
+        &mut self,
+        resources: &[ResourceRef<'_>],
+        usage: ResourceUsage,
+        stages: RenderStages,
+    ) -> Result<(), Error> {
+        self.lowering.use_resources(resources, usage, stages)
+    }
+
+    /// `useHeap:stages:`: the encoder's later draws and tile dispatches may read every buffer
+    /// placed in `heap` in render `stages` through an address held in memory, and every texture
+    /// made in it or over a buffer placed in it through its resource ID, as Metal's contract makes
+    /// a heap's resources resident for reading only (`residency.rs`): the textures that live now,
+    /// and each made later, from the first command encoded after it is made.
+    ///
+    /// A sparse heap's live sparse textures are made resident, as on a compute encoder.
+    ///
+    /// Refused, changing nothing (`Invalid`): a heap of another device.
+    pub fn use_heap(&mut self, heap: &Heap, stages: RenderStages) -> Result<(), Error> {
+        self.lowering.use_heap(heap, stages)
+    }
+
+    /// `useHeaps:count:stages:`: [`use_heap`](Self::use_heap) of each of `heaps`, refused,
+    /// changing nothing, as it is for any of them.
+    pub fn use_heaps(&mut self, heaps: &[&Heap], stages: RenderStages) -> Result<(), Error> {
+        self.lowering.use_heaps(heaps, stages)
+    }
+}
+
+impl RenderLowering {
+    /// The lowering of [`RenderCommandEncoder::set_vertex_visible_function_table`].
+    pub(crate) fn set_vertex_visible_function_table(
         &mut self,
         table: Option<&VisibleFunctionTable>,
         index: u32,
@@ -183,11 +211,8 @@ impl RenderCommandEncoder {
             .set_function_tables(&mut self.core, CALL, &[table], index)
     }
 
-    /// `setVertexVisibleFunctionTables:withBufferRange:`: `tables[i]` at the vertex stage's
-    /// buffer index `first + i`, refused as
-    /// [`set_vertex_visible_function_table`](Self::set_vertex_visible_function_table) is; a
-    /// refusal binds none of them.
-    pub fn set_vertex_visible_function_tables(
+    /// The lowering of [`RenderCommandEncoder::set_vertex_visible_function_tables`].
+    pub(crate) fn set_vertex_visible_function_tables(
         &mut self,
         tables: &[Option<&VisibleFunctionTable>],
         first: u32,
@@ -204,10 +229,8 @@ impl RenderCommandEncoder {
             .set_function_tables(&mut self.core, CALL, tables, first)
     }
 
-    /// `setFragmentVisibleFunctionTable:atBufferIndex:`: as
-    /// [`set_vertex_visible_function_table`](Self::set_vertex_visible_function_table), at the
-    /// fragment stage's buffer index.
-    pub fn set_fragment_visible_function_table(
+    /// The lowering of [`RenderCommandEncoder::set_fragment_visible_function_table`].
+    pub(crate) fn set_fragment_visible_function_table(
         &mut self,
         table: Option<&VisibleFunctionTable>,
         index: u32,
@@ -218,10 +241,8 @@ impl RenderCommandEncoder {
             .set_function_tables(&mut self.core, CALL, &[table], index)
     }
 
-    /// `setFragmentVisibleFunctionTables:withBufferRange:`: as
-    /// [`set_vertex_visible_function_tables`](Self::set_vertex_visible_function_tables), at the
-    /// fragment stage's buffer indices.
-    pub fn set_fragment_visible_function_tables(
+    /// The lowering of [`RenderCommandEncoder::set_fragment_visible_function_tables`].
+    pub(crate) fn set_fragment_visible_function_tables(
         &mut self,
         tables: &[Option<&VisibleFunctionTable>],
         first: u32,
@@ -238,10 +259,8 @@ impl RenderCommandEncoder {
             .set_function_tables(&mut self.core, CALL, tables, first)
     }
 
-    /// `setTileVisibleFunctionTable:atBufferIndex:`: as
-    /// [`set_vertex_visible_function_table`](Self::set_vertex_visible_function_table), at the
-    /// tile stage's buffer index, which tile dispatches read.
-    pub fn set_tile_visible_function_table(
+    /// The lowering of [`RenderCommandEncoder::set_tile_visible_function_table`].
+    pub(crate) fn set_tile_visible_function_table(
         &mut self,
         table: Option<&VisibleFunctionTable>,
         index: u32,
@@ -252,10 +271,8 @@ impl RenderCommandEncoder {
             .set_function_tables(&mut self.core, CALL, &[table], index)
     }
 
-    /// `setTileVisibleFunctionTables:withBufferRange:`: as
-    /// [`set_vertex_visible_function_tables`](Self::set_vertex_visible_function_tables), at the
-    /// tile stage's buffer indices.
-    pub fn set_tile_visible_function_tables(
+    /// The lowering of [`RenderCommandEncoder::set_tile_visible_function_tables`].
+    pub(crate) fn set_tile_visible_function_tables(
         &mut self,
         tables: &[Option<&VisibleFunctionTable>],
         first: u32,
@@ -270,5 +287,82 @@ impl RenderCommandEncoder {
         const CALL: &str = "set_tile_visible_function_tables";
         self.tile
             .set_function_tables(&mut self.core, CALL, tables, first)
+    }
+}
+
+impl RenderCommandEncoder {
+    /// `setVertexVisibleFunctionTable:atBufferIndex:` (`None` unbinds the index): the table at
+    /// the vertex stage's buffer index `index`, in place of any buffer there, as a compute
+    /// encoder's `set_visible_function_table` binds one (`function_table.rs`). Refused: an index
+    /// past the buffer table, a table of another device. A draw whose vertex function reads a
+    /// buffer at the index, or a table where a buffer is bound, is refused
+    /// (`Invalid(FunctionTable)`), as Metal's validation stops it.
+    pub fn set_vertex_visible_function_table(
+        &mut self,
+        table: Option<&VisibleFunctionTable>,
+        index: u32,
+    ) -> Result<(), Error> {
+        self.lowering
+            .set_vertex_visible_function_table(table, index)
+    }
+
+    /// `setVertexVisibleFunctionTables:withBufferRange:`: `tables[i]` at the vertex stage's
+    /// buffer index `first + i`, refused as
+    /// [`set_vertex_visible_function_table`](Self::set_vertex_visible_function_table) is; a
+    /// refusal binds none of them.
+    pub fn set_vertex_visible_function_tables(
+        &mut self,
+        tables: &[Option<&VisibleFunctionTable>],
+        first: u32,
+    ) -> Result<(), Error> {
+        self.lowering
+            .set_vertex_visible_function_tables(tables, first)
+    }
+
+    /// `setFragmentVisibleFunctionTable:atBufferIndex:`: as
+    /// [`set_vertex_visible_function_table`](Self::set_vertex_visible_function_table), at the
+    /// fragment stage's buffer index.
+    pub fn set_fragment_visible_function_table(
+        &mut self,
+        table: Option<&VisibleFunctionTable>,
+        index: u32,
+    ) -> Result<(), Error> {
+        self.lowering
+            .set_fragment_visible_function_table(table, index)
+    }
+
+    /// `setFragmentVisibleFunctionTables:withBufferRange:`: as
+    /// [`set_vertex_visible_function_tables`](Self::set_vertex_visible_function_tables), at the
+    /// fragment stage's buffer indices.
+    pub fn set_fragment_visible_function_tables(
+        &mut self,
+        tables: &[Option<&VisibleFunctionTable>],
+        first: u32,
+    ) -> Result<(), Error> {
+        self.lowering
+            .set_fragment_visible_function_tables(tables, first)
+    }
+
+    /// `setTileVisibleFunctionTable:atBufferIndex:`: as
+    /// [`set_vertex_visible_function_table`](Self::set_vertex_visible_function_table), at the
+    /// tile stage's buffer index, which tile dispatches read.
+    pub fn set_tile_visible_function_table(
+        &mut self,
+        table: Option<&VisibleFunctionTable>,
+        index: u32,
+    ) -> Result<(), Error> {
+        self.lowering.set_tile_visible_function_table(table, index)
+    }
+
+    /// `setTileVisibleFunctionTables:withBufferRange:`: as
+    /// [`set_vertex_visible_function_tables`](Self::set_vertex_visible_function_tables), at the
+    /// tile stage's buffer indices.
+    pub fn set_tile_visible_function_tables(
+        &mut self,
+        tables: &[Option<&VisibleFunctionTable>],
+        first: u32,
+    ) -> Result<(), Error> {
+        self.lowering
+            .set_tile_visible_function_tables(tables, first)
     }
 }

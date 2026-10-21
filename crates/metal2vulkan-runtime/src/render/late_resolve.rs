@@ -31,6 +31,7 @@
 
 use super::RenderCall;
 use super::RenderCommandEncoder;
+use super::RenderLowering;
 use crate::argument_table::check_index;
 use crate::command_buffer::CommandBuffer;
 use crate::error::{invalid, Error, Problem};
@@ -95,12 +96,9 @@ fn wanted(target: Option<&ResolveTarget>, store: StoreAction) -> Wanted<'_> {
     }
 }
 
-impl RenderCommandEncoder {
-    /// The color attachment at `index` resolves into `target` (`None`: nowhere), whatever the
-    /// descriptor named (the module docs). Refused (`Invalid`): an index past the attachments,
-    /// an attachment without a texture, and a target the descriptor's resolve texture would be
-    /// refused as (Metal's validation stops another pixel format or size, measured).
-    pub fn set_color_resolve_target(
+impl RenderLowering {
+    /// The lowering of [`RenderCommandEncoder::set_color_resolve_target`].
+    pub(crate) fn set_color_resolve_target(
         &mut self,
         target: Option<ResolveTarget>,
         index: u32,
@@ -152,18 +150,17 @@ impl RenderCommandEncoder {
         Ok(())
     }
 
-    /// The depth attachment resolves into `target` (`None`: nowhere), whatever the descriptor
-    /// named. Refused as [`RenderCommandEncoder::set_color_resolve_target`] is, and as the
-    /// descriptor's depth resolve is where the stencil attachment is the same texture (both
-    /// aspects into one texture, the stencil stored while the depth resolves).
-    pub fn set_depth_resolve_target(&mut self, target: Option<ResolveTarget>) -> Result<(), Error> {
+    /// The lowering of [`RenderCommandEncoder::set_depth_resolve_target`].
+    pub(crate) fn set_depth_resolve_target(
+        &mut self,
+        target: Option<ResolveTarget>,
+    ) -> Result<(), Error> {
         self.log(|_| RenderCall::DepthResolveTarget(target.clone().map(Box::new)));
         self.set_aspect_resolve_target("set_depth_resolve_target", Attachment::Depth, target)
     }
 
-    /// The stencil attachment resolves into `target` (`None`: nowhere). Refused as
-    /// [`RenderCommandEncoder::set_depth_resolve_target`] is, the aspects swapped.
-    pub fn set_stencil_resolve_target(
+    /// The lowering of [`RenderCommandEncoder::set_stencil_resolve_target`].
+    pub(crate) fn set_stencil_resolve_target(
         &mut self,
         target: Option<ResolveTarget>,
     ) -> Result<(), Error> {
@@ -236,6 +233,37 @@ impl RenderCommandEncoder {
         }
         ds.resolve = resolve;
         Ok(())
+    }
+}
+
+impl RenderCommandEncoder {
+    /// The color attachment at `index` resolves into `target` (`None`: nowhere), whatever the
+    /// descriptor named (the module docs). Refused (`Invalid`): an index past the attachments,
+    /// an attachment without a texture, and a target the descriptor's resolve texture would be
+    /// refused as (Metal's validation stops another pixel format or size, measured).
+    pub fn set_color_resolve_target(
+        &mut self,
+        target: Option<ResolveTarget>,
+        index: u32,
+    ) -> Result<(), Error> {
+        self.lowering.set_color_resolve_target(target, index)
+    }
+
+    /// The depth attachment resolves into `target` (`None`: nowhere), whatever the descriptor
+    /// named. Refused as [`RenderCommandEncoder::set_color_resolve_target`] is, and as the
+    /// descriptor's depth resolve is where the stencil attachment is the same texture (both
+    /// aspects into one texture, the stencil stored while the depth resolves).
+    pub fn set_depth_resolve_target(&mut self, target: Option<ResolveTarget>) -> Result<(), Error> {
+        self.lowering.set_depth_resolve_target(target)
+    }
+
+    /// The stencil attachment resolves into `target` (`None`: nowhere). Refused as
+    /// [`RenderCommandEncoder::set_depth_resolve_target`] is, the aspects swapped.
+    pub fn set_stencil_resolve_target(
+        &mut self,
+        target: Option<ResolveTarget>,
+    ) -> Result<(), Error> {
+        self.lowering.set_stencil_resolve_target(target)
     }
 }
 

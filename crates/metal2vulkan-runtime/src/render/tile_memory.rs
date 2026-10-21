@@ -48,6 +48,7 @@
 
 use super::RenderCall;
 use super::RenderCommandEncoder;
+use super::RenderLowering;
 use crate::argument_table::{check_index, BUFFER_SLOTS};
 use crate::buffer::Buffer;
 use crate::error::{internal, invalid, Error, Problem};
@@ -119,14 +120,9 @@ impl TileMemory {
     }
 }
 
-impl RenderCommandEncoder {
-    /// `setThreadgroupMemoryLength:offset:atIndex:`: a tile or fragment function's threadgroup
-    /// argument `index` is `length` bytes at byte `offset` of its tile's threadgroup memory, for
-    /// the encoder's later tile dispatches and draws (the module docs). Refused (`Invalid`), as Metal's
-    /// validation refuses it: an index past the table (`IndexOutOfRange`), and a length or an
-    /// offset that is not a multiple of 16 bytes, or an argument that ends past the pass's
-    /// `threadgroupMemoryLength` (`TileThreadgroupArgument`).
-    pub fn set_threadgroup_memory_length(
+impl RenderLowering {
+    /// The lowering of [`RenderCommandEncoder::set_threadgroup_memory_length`].
+    pub(crate) fn set_threadgroup_memory_length(
         &mut self,
         length: u64,
         offset: u64,
@@ -155,5 +151,23 @@ impl RenderCommandEncoder {
         };
         self.tile_memory.arguments.insert(index, argument);
         Ok(())
+    }
+}
+
+impl RenderCommandEncoder {
+    /// `setThreadgroupMemoryLength:offset:atIndex:`: a tile or fragment function's threadgroup
+    /// argument `index` is `length` bytes at byte `offset` of its tile's threadgroup memory, for
+    /// the encoder's later tile dispatches and draws (the module docs). Refused (`Invalid`), as Metal's
+    /// validation refuses it: an index past the table (`IndexOutOfRange`), and a length or an
+    /// offset that is not a multiple of 16 bytes, or an argument that ends past the pass's
+    /// `threadgroupMemoryLength` (`TileThreadgroupArgument`).
+    pub fn set_threadgroup_memory_length(
+        &mut self,
+        length: u64,
+        offset: u64,
+        index: u32,
+    ) -> Result<(), Error> {
+        self.lowering
+            .set_threadgroup_memory_length(length, offset, index)
     }
 }

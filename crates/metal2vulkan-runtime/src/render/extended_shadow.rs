@@ -38,7 +38,7 @@
 //!   so `extended-range-blends-stored-codes` names only the colors a draw read from the codes
 //!   (`degrade_extended_range_blends`, `ExtendedShadows::held`).
 
-use super::RenderCommandEncoder;
+use super::RenderLowering;
 use crate::blit::TRANSFER;
 use crate::command_buffer::CommandBuffer;
 use crate::device::functions::Vk;
@@ -411,7 +411,7 @@ fn color(
         .and_then(Option::as_ref)
 }
 
-impl RenderCommandEncoder {
+impl RenderLowering {
     /// The shadows a draw binds: the held ones, none while the encoder records an execution's
     /// commands or a capture draw.
     pub(super) fn extended_shadows_bound(&self) -> &BTreeSet<u32> {

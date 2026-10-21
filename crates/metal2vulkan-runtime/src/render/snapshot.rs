@@ -102,7 +102,7 @@
 //!   share of their colors' pixels and texel bytes, a line at 64 of them, each power of two
 //!   after, and as the device ends (`metal2vulkan-snapshot-readers`, `reader_sizes.rs`).
 
-use super::{Reformat, RenderCommandEncoder};
+use super::{Reformat, RenderLowering};
 use crate::copy_plan::block_bytes;
 use crate::dynamic_state::ColorWriteMasks;
 use crate::pipeline::{GraphicsState as DrawingState, Settled};
@@ -248,7 +248,7 @@ pub(super) fn phase_hole(holes: &[PushHole]) -> Option<(vk::ShaderStageFlags, u3
     })
 }
 
-impl RenderCommandEncoder {
+impl RenderLowering {
     /// What a draw of `pipeline` (its state's base) through `reformats` asks to read through
     /// snapshots, where it can ask (the module docs' checks that come before the plan); `None`
     /// where it reads no attachment so or takes the split.

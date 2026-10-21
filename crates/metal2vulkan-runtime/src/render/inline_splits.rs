@@ -73,9 +73,7 @@
 
 use super::bound::{Bound, Recorded};
 use super::pending::OwnedRecording;
-use super::{
-    inline_first, shadows, Clears, Instance, Next, Recording, RenderCommandEncoder, ViewSetup,
-};
+use super::{inline_first, shadows, Clears, Instance, Next, Recording, RenderLowering, ViewSetup};
 use crate::attachment_stand_in::Cause;
 use crate::clear_reach;
 use crate::color_list::ColorList;
@@ -242,7 +240,7 @@ pub(super) struct SplitBegin {
     clears: Option<Clears>,
 }
 
-impl RenderCommandEncoder {
+impl RenderLowering {
     /// Whether the draw about to record into `next` begins a new instance that records inline
     /// after the current one (the module docs; `records`: the draw records, `made` its pipeline,
     /// `capture` a capture draw, `stood` a stand-in arriving with it); where it does, the current

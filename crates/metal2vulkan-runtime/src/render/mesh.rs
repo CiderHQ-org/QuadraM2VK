@@ -73,6 +73,7 @@
 
 use super::replay::Samplers;
 use super::RenderCommandEncoder;
+use super::RenderLowering;
 use super::{check_arguments, draw_problem, Assembly, DrawBuffers, DrawProblem};
 use super::{RenderCall, Table};
 use crate::binding::{MeshRegions, PushWrite};
@@ -123,10 +124,9 @@ const METAL_THREADGROUP_THREADS: u64 = 1024;
 /// `VkDrawMeshTasksIndirectCommandEXT`'s.
 const INDIRECT_BYTES: u64 = 12;
 
-impl RenderCommandEncoder {
-    /// `setObjectBuffer:offset:atIndex:` (`None` unbinds the index). Refused as
-    /// [`set_vertex_buffer`](Self::set_vertex_buffer) is.
-    pub fn set_object_buffer(
+impl RenderLowering {
+    /// The lowering of [`RenderCommandEncoder::set_object_buffer`].
+    pub(crate) fn set_object_buffer(
         &mut self,
         buffer: Option<&Buffer>,
         offset: u64,
@@ -140,9 +140,8 @@ impl RenderCommandEncoder {
             .set_buffer(&mut self.core, "set_object_buffer", buffer, offset, index)
     }
 
-    /// `setObjectBuffers:offsets:withRange:`. Refused as
-    /// [`set_vertex_buffers`](Self::set_vertex_buffers) is.
-    pub fn set_object_buffers(
+    /// The lowering of [`RenderCommandEncoder::set_object_buffers`].
+    pub(crate) fn set_object_buffers(
         &mut self,
         buffers: &[Option<&Buffer>],
         offsets: &[u64],
@@ -165,25 +164,26 @@ impl RenderCommandEncoder {
         )
     }
 
-    /// `setObjectBufferOffset:atIndex:`. Refused as
-    /// [`set_vertex_buffer_offset`](Self::set_vertex_buffer_offset) is.
-    pub fn set_object_buffer_offset(&mut self, offset: u64, index: u32) -> Result<(), Error> {
+    /// The lowering of [`RenderCommandEncoder::set_object_buffer_offset`].
+    pub(crate) fn set_object_buffer_offset(
+        &mut self,
+        offset: u64,
+        index: u32,
+    ) -> Result<(), Error> {
         self.log(|_| RenderCall::BufferOffset(Table::Object, offset, index));
         self.object
             .set_buffer_offset(&mut self.core, "set_object_buffer_offset", offset, index)
     }
 
-    /// `setObjectBytes:length:atIndex:`: as [`set_vertex_bytes`](Self::set_vertex_bytes), in
-    /// the object stage's table. Refused as that is.
-    pub fn set_object_bytes(&mut self, bytes: &[u8], index: u32) -> Result<(), Error> {
+    /// The lowering of [`RenderCommandEncoder::set_object_bytes`].
+    pub(crate) fn set_object_bytes(&mut self, bytes: &[u8], index: u32) -> Result<(), Error> {
         self.log(|log| RenderCall::Bytes(Table::Object, log.byte_span(bytes), index));
         self.object
             .set_bytes(&mut self.core, "set_object_bytes", bytes, None, index)
     }
 
-    /// `setObjectTexture:atIndex:` (`None` unbinds the index). Refused as
-    /// [`set_vertex_texture`](Self::set_vertex_texture) is.
-    pub fn set_object_texture(
+    /// The lowering of [`RenderCommandEncoder::set_object_texture`].
+    pub(crate) fn set_object_texture(
         &mut self,
         texture: Option<&Texture>,
         index: u32,
@@ -196,9 +196,8 @@ impl RenderCommandEncoder {
             .set_textures(&mut self.core, "set_object_texture", &[texture], index)
     }
 
-    /// `setObjectTextures:withRange:`. Refused as
-    /// [`set_vertex_textures`](Self::set_vertex_textures) is.
-    pub fn set_object_textures(
+    /// The lowering of [`RenderCommandEncoder::set_object_textures`].
+    pub(crate) fn set_object_textures(
         &mut self,
         textures: &[Option<&Texture>],
         first: u32,
@@ -208,9 +207,8 @@ impl RenderCommandEncoder {
             .set_textures(&mut self.core, "set_object_textures", textures, first)
     }
 
-    /// `setObjectSamplerState:atIndex:` (`None` unbinds the index). Refused as
-    /// [`set_vertex_sampler_state`](Self::set_vertex_sampler_state) is.
-    pub fn set_object_sampler_state(
+    /// The lowering of [`RenderCommandEncoder::set_object_sampler_state`].
+    pub(crate) fn set_object_sampler_state(
         &mut self,
         sampler: Option<&SamplerState>,
         index: u32,
@@ -228,10 +226,8 @@ impl RenderCommandEncoder {
         )
     }
 
-    /// `setObjectSamplerStates:withRange:`, or with `clamps`
-    /// `setObjectSamplerStates:lodMinClamps:lodMaxClamps:withRange:`. Refused as
-    /// [`set_vertex_sampler_states`](Self::set_vertex_sampler_states) is.
-    pub fn set_object_sampler_states(
+    /// The lowering of [`RenderCommandEncoder::set_object_sampler_states`].
+    pub(crate) fn set_object_sampler_states(
         &mut self,
         samplers: &[Option<&SamplerState>],
         clamps: Option<(&[f32], &[f32])>,
@@ -247,17 +243,8 @@ impl RenderCommandEncoder {
         )
     }
 
-    /// `setObjectThreadgroupMemoryLength:atIndex:`: the length of the object function's
-    /// `[[threadgroup(index)]]` argument in the encoder's later mesh draws, whichever pipeline
-    /// state they use; until it is set an argument's length is 0. A length that is not a multiple
-    /// of 16 bytes is rounded up to 16 at the draw, as a kernel's
-    /// (`ComputeCommandEncoder::set_threadgroup_memory_length`) is. Refused: an index past the
-    /// table (`Invalid`). The object function's arena with these lengths must fit the device's
-    /// workgroup memory for the object stage, checked at the draw
-    /// (`Unsupported{ThreadgroupMemorySize}` naming the limit). An indirect command's mesh draw
-    /// takes none of these: one whose object function reads them is
-    /// `NotImplemented(IndirectRenderCommands)`.
-    pub fn set_object_threadgroup_memory_length(
+    /// The lowering of [`RenderCommandEncoder::set_object_threadgroup_memory_length`].
+    pub(crate) fn set_object_threadgroup_memory_length(
         &mut self,
         length: u32,
         index: u32,
@@ -269,9 +256,8 @@ impl RenderCommandEncoder {
         Ok(())
     }
 
-    /// `setMeshBuffer:offset:atIndex:` (`None` unbinds the index). Refused as
-    /// [`set_vertex_buffer`](Self::set_vertex_buffer) is.
-    pub fn set_mesh_buffer(
+    /// The lowering of [`RenderCommandEncoder::set_mesh_buffer`].
+    pub(crate) fn set_mesh_buffer(
         &mut self,
         buffer: Option<&Buffer>,
         offset: u64,
@@ -285,9 +271,8 @@ impl RenderCommandEncoder {
             .set_buffer(&mut self.core, "set_mesh_buffer", buffer, offset, index)
     }
 
-    /// `setMeshBuffers:offsets:withRange:`. Refused as
-    /// [`set_vertex_buffers`](Self::set_vertex_buffers) is.
-    pub fn set_mesh_buffers(
+    /// The lowering of [`RenderCommandEncoder::set_mesh_buffers`].
+    pub(crate) fn set_mesh_buffers(
         &mut self,
         buffers: &[Option<&Buffer>],
         offsets: &[u64],
@@ -305,25 +290,26 @@ impl RenderCommandEncoder {
             .set_buffers(&mut self.core, "set_mesh_buffers", buffers, offsets, first)
     }
 
-    /// `setMeshBufferOffset:atIndex:`. Refused as
-    /// [`set_vertex_buffer_offset`](Self::set_vertex_buffer_offset) is.
-    pub fn set_mesh_buffer_offset(&mut self, offset: u64, index: u32) -> Result<(), Error> {
+    /// The lowering of [`RenderCommandEncoder::set_mesh_buffer_offset`].
+    pub(crate) fn set_mesh_buffer_offset(&mut self, offset: u64, index: u32) -> Result<(), Error> {
         self.log(|_| RenderCall::BufferOffset(Table::Mesh, offset, index));
         self.mesh
             .set_buffer_offset(&mut self.core, "set_mesh_buffer_offset", offset, index)
     }
 
-    /// `setMeshBytes:length:atIndex:`: as [`set_vertex_bytes`](Self::set_vertex_bytes), in the
-    /// mesh stage's table. Refused as that is.
-    pub fn set_mesh_bytes(&mut self, bytes: &[u8], index: u32) -> Result<(), Error> {
+    /// The lowering of [`RenderCommandEncoder::set_mesh_bytes`].
+    pub(crate) fn set_mesh_bytes(&mut self, bytes: &[u8], index: u32) -> Result<(), Error> {
         self.log(|log| RenderCall::Bytes(Table::Mesh, log.byte_span(bytes), index));
         self.mesh
             .set_bytes(&mut self.core, "set_mesh_bytes", bytes, None, index)
     }
 
-    /// `setMeshTexture:atIndex:` (`None` unbinds the index). Refused as
-    /// [`set_vertex_texture`](Self::set_vertex_texture) is.
-    pub fn set_mesh_texture(&mut self, texture: Option<&Texture>, index: u32) -> Result<(), Error> {
+    /// The lowering of [`RenderCommandEncoder::set_mesh_texture`].
+    pub(crate) fn set_mesh_texture(
+        &mut self,
+        texture: Option<&Texture>,
+        index: u32,
+    ) -> Result<(), Error> {
         self.log(|log| {
             let texture = texture.map(|texture| log.hold_texture(texture));
             RenderCall::Texture(Table::Mesh, texture, index)
@@ -332,9 +318,8 @@ impl RenderCommandEncoder {
             .set_textures(&mut self.core, "set_mesh_texture", &[texture], index)
     }
 
-    /// `setMeshTextures:withRange:`. Refused as
-    /// [`set_vertex_textures`](Self::set_vertex_textures) is.
-    pub fn set_mesh_textures(
+    /// The lowering of [`RenderCommandEncoder::set_mesh_textures`].
+    pub(crate) fn set_mesh_textures(
         &mut self,
         textures: &[Option<&Texture>],
         first: u32,
@@ -344,9 +329,8 @@ impl RenderCommandEncoder {
             .set_textures(&mut self.core, "set_mesh_textures", textures, first)
     }
 
-    /// `setMeshSamplerState:atIndex:` (`None` unbinds the index). Refused as
-    /// [`set_vertex_sampler_state`](Self::set_vertex_sampler_state) is.
-    pub fn set_mesh_sampler_state(
+    /// The lowering of [`RenderCommandEncoder::set_mesh_sampler_state`].
+    pub(crate) fn set_mesh_sampler_state(
         &mut self,
         sampler: Option<&SamplerState>,
         index: u32,
@@ -364,10 +348,8 @@ impl RenderCommandEncoder {
         )
     }
 
-    /// `setMeshSamplerStates:withRange:`, or with `clamps`
-    /// `setMeshSamplerStates:lodMinClamps:lodMaxClamps:withRange:`. Refused as
-    /// [`set_vertex_sampler_states`](Self::set_vertex_sampler_states) is.
-    pub fn set_mesh_sampler_states(
+    /// The lowering of [`RenderCommandEncoder::set_mesh_sampler_states`].
+    pub(crate) fn set_mesh_sampler_states(
         &mut self,
         samplers: &[Option<&SamplerState>],
         clamps: Option<(&[f32], &[f32])>,
@@ -383,10 +365,8 @@ impl RenderCommandEncoder {
         )
     }
 
-    /// `drawMeshThreadgroups:threadsPerObjectThreadgroup:threadsPerMeshThreadgroup:`: `groups`
-    /// mesh threadgroups of `threads_per_mesh_group` threads (the module docs). Refused as the
-    /// module docs say, and for a size past 32 bits on an axis (`Invalid(SizeOutOfRange)`).
-    pub fn draw_mesh_threadgroups(
+    /// The lowering of [`RenderCommandEncoder::draw_mesh_threadgroups`].
+    pub(crate) fn draw_mesh_threadgroups(
         &mut self,
         groups: Size,
         threads_per_object_group: Size,
@@ -406,10 +386,8 @@ impl RenderCommandEncoder {
         self.draw_mesh(CALL, grid, object, mesh)
     }
 
-    /// `drawMeshThreads:threadsPerObjectThreadgroup:threadsPerMeshThreadgroup:`: the whole mesh
-    /// threadgroups of `threads_per_mesh_group` threads that `threads` fill (the module docs).
-    /// Refused as [`draw_mesh_threadgroups`](Self::draw_mesh_threadgroups) is.
-    pub fn draw_mesh_threads(
+    /// The lowering of [`RenderCommandEncoder::draw_mesh_threads`].
+    pub(crate) fn draw_mesh_threads(
         &mut self,
         threads: Size,
         threads_per_object_group: Size,
@@ -462,15 +440,8 @@ impl RenderCommandEncoder {
         self.draw(call, Assembly::Meshes, draw, DrawBuffers::default(), empty)
     }
 
-    /// `drawMeshThreadgroupsWithIndirectBuffer:indirectBufferOffset:threadsPerObjectThreadgroup:
-    /// threadsPerMeshThreadgroup:`: Metal's `MTLDispatchThreadgroupsIndirectArguments` at
-    /// `indirect_buffer_offset`, the threadgroups' counts. Refused as
-    /// [`draw_mesh_threadgroups`](Self::draw_mesh_threadgroups) is, as an indirect draw's
-    /// arguments are (`render.rs`'s module docs), and for an indirect buffer of another device.
-    /// On a device with `VK_EXT_mesh_shader` the draw is `NotImplemented(IndirectDrawArguments)`,
-    /// and on one without it, of a pipeline with an object function, `NotImplemented(MeshShading)`
-    /// (the module docs).
-    pub fn draw_mesh_threadgroups_indirect(
+    /// The lowering of [`RenderCommandEncoder::draw_mesh_threadgroups_indirect`].
+    pub(crate) fn draw_mesh_threadgroups_indirect(
         &mut self,
         indirect_buffer: &Buffer,
         indirect_buffer_offset: u64,
@@ -564,6 +535,229 @@ impl RenderCommandEncoder {
             }
             Some(super::RenderStateKind::Graphics(_)) => Ok(()),
         }
+    }
+}
+
+impl RenderCommandEncoder {
+    /// `setObjectBuffer:offset:atIndex:` (`None` unbinds the index). Refused as
+    /// [`set_vertex_buffer`](Self::set_vertex_buffer) is.
+    pub fn set_object_buffer(
+        &mut self,
+        buffer: Option<&Buffer>,
+        offset: u64,
+        index: u32,
+    ) -> Result<(), Error> {
+        self.lowering.set_object_buffer(buffer, offset, index)
+    }
+
+    /// `setObjectBuffers:offsets:withRange:`. Refused as
+    /// [`set_vertex_buffers`](Self::set_vertex_buffers) is.
+    pub fn set_object_buffers(
+        &mut self,
+        buffers: &[Option<&Buffer>],
+        offsets: &[u64],
+        first: u32,
+    ) -> Result<(), Error> {
+        self.lowering.set_object_buffers(buffers, offsets, first)
+    }
+
+    /// `setObjectBufferOffset:atIndex:`. Refused as
+    /// [`set_vertex_buffer_offset`](Self::set_vertex_buffer_offset) is.
+    pub fn set_object_buffer_offset(&mut self, offset: u64, index: u32) -> Result<(), Error> {
+        self.lowering.set_object_buffer_offset(offset, index)
+    }
+
+    /// `setObjectBytes:length:atIndex:`: as [`set_vertex_bytes`](Self::set_vertex_bytes), in
+    /// the object stage's table. Refused as that is.
+    pub fn set_object_bytes(&mut self, bytes: &[u8], index: u32) -> Result<(), Error> {
+        self.lowering.set_object_bytes(bytes, index)
+    }
+
+    /// `setObjectTexture:atIndex:` (`None` unbinds the index). Refused as
+    /// [`set_vertex_texture`](Self::set_vertex_texture) is.
+    pub fn set_object_texture(
+        &mut self,
+        texture: Option<&Texture>,
+        index: u32,
+    ) -> Result<(), Error> {
+        self.lowering.set_object_texture(texture, index)
+    }
+
+    /// `setObjectTextures:withRange:`. Refused as
+    /// [`set_vertex_textures`](Self::set_vertex_textures) is.
+    pub fn set_object_textures(
+        &mut self,
+        textures: &[Option<&Texture>],
+        first: u32,
+    ) -> Result<(), Error> {
+        self.lowering.set_object_textures(textures, first)
+    }
+
+    /// `setObjectSamplerState:atIndex:` (`None` unbinds the index). Refused as
+    /// [`set_vertex_sampler_state`](Self::set_vertex_sampler_state) is.
+    pub fn set_object_sampler_state(
+        &mut self,
+        sampler: Option<&SamplerState>,
+        index: u32,
+    ) -> Result<(), Error> {
+        self.lowering.set_object_sampler_state(sampler, index)
+    }
+
+    /// `setObjectSamplerStates:withRange:`, or with `clamps`
+    /// `setObjectSamplerStates:lodMinClamps:lodMaxClamps:withRange:`. Refused as
+    /// [`set_vertex_sampler_states`](Self::set_vertex_sampler_states) is.
+    pub fn set_object_sampler_states(
+        &mut self,
+        samplers: &[Option<&SamplerState>],
+        clamps: Option<(&[f32], &[f32])>,
+        first: u32,
+    ) -> Result<(), Error> {
+        self.lowering
+            .set_object_sampler_states(samplers, clamps, first)
+    }
+
+    /// `setObjectThreadgroupMemoryLength:atIndex:`: the length of the object function's
+    /// `[[threadgroup(index)]]` argument in the encoder's later mesh draws, whichever pipeline
+    /// state they use; until it is set an argument's length is 0. A length that is not a multiple
+    /// of 16 bytes is rounded up to 16 at the draw, as a kernel's
+    /// (`ComputeCommandEncoder::set_threadgroup_memory_length`) is. Refused: an index past the
+    /// table (`Invalid`). The object function's arena with these lengths must fit the device's
+    /// workgroup memory for the object stage, checked at the draw
+    /// (`Unsupported{ThreadgroupMemorySize}` naming the limit). An indirect command's mesh draw
+    /// takes none of these: one whose object function reads them is
+    /// `NotImplemented(IndirectRenderCommands)`.
+    pub fn set_object_threadgroup_memory_length(
+        &mut self,
+        length: u32,
+        index: u32,
+    ) -> Result<(), Error> {
+        self.lowering
+            .set_object_threadgroup_memory_length(length, index)
+    }
+
+    /// `setMeshBuffer:offset:atIndex:` (`None` unbinds the index). Refused as
+    /// [`set_vertex_buffer`](Self::set_vertex_buffer) is.
+    pub fn set_mesh_buffer(
+        &mut self,
+        buffer: Option<&Buffer>,
+        offset: u64,
+        index: u32,
+    ) -> Result<(), Error> {
+        self.lowering.set_mesh_buffer(buffer, offset, index)
+    }
+
+    /// `setMeshBuffers:offsets:withRange:`. Refused as
+    /// [`set_vertex_buffers`](Self::set_vertex_buffers) is.
+    pub fn set_mesh_buffers(
+        &mut self,
+        buffers: &[Option<&Buffer>],
+        offsets: &[u64],
+        first: u32,
+    ) -> Result<(), Error> {
+        self.lowering.set_mesh_buffers(buffers, offsets, first)
+    }
+
+    /// `setMeshBufferOffset:atIndex:`. Refused as
+    /// [`set_vertex_buffer_offset`](Self::set_vertex_buffer_offset) is.
+    pub fn set_mesh_buffer_offset(&mut self, offset: u64, index: u32) -> Result<(), Error> {
+        self.lowering.set_mesh_buffer_offset(offset, index)
+    }
+
+    /// `setMeshBytes:length:atIndex:`: as [`set_vertex_bytes`](Self::set_vertex_bytes), in the
+    /// mesh stage's table. Refused as that is.
+    pub fn set_mesh_bytes(&mut self, bytes: &[u8], index: u32) -> Result<(), Error> {
+        self.lowering.set_mesh_bytes(bytes, index)
+    }
+
+    /// `setMeshTexture:atIndex:` (`None` unbinds the index). Refused as
+    /// [`set_vertex_texture`](Self::set_vertex_texture) is.
+    pub fn set_mesh_texture(&mut self, texture: Option<&Texture>, index: u32) -> Result<(), Error> {
+        self.lowering.set_mesh_texture(texture, index)
+    }
+
+    /// `setMeshTextures:withRange:`. Refused as
+    /// [`set_vertex_textures`](Self::set_vertex_textures) is.
+    pub fn set_mesh_textures(
+        &mut self,
+        textures: &[Option<&Texture>],
+        first: u32,
+    ) -> Result<(), Error> {
+        self.lowering.set_mesh_textures(textures, first)
+    }
+
+    /// `setMeshSamplerState:atIndex:` (`None` unbinds the index). Refused as
+    /// [`set_vertex_sampler_state`](Self::set_vertex_sampler_state) is.
+    pub fn set_mesh_sampler_state(
+        &mut self,
+        sampler: Option<&SamplerState>,
+        index: u32,
+    ) -> Result<(), Error> {
+        self.lowering.set_mesh_sampler_state(sampler, index)
+    }
+
+    /// `setMeshSamplerStates:withRange:`, or with `clamps`
+    /// `setMeshSamplerStates:lodMinClamps:lodMaxClamps:withRange:`. Refused as
+    /// [`set_vertex_sampler_states`](Self::set_vertex_sampler_states) is.
+    pub fn set_mesh_sampler_states(
+        &mut self,
+        samplers: &[Option<&SamplerState>],
+        clamps: Option<(&[f32], &[f32])>,
+        first: u32,
+    ) -> Result<(), Error> {
+        self.lowering
+            .set_mesh_sampler_states(samplers, clamps, first)
+    }
+
+    /// `drawMeshThreadgroups:threadsPerObjectThreadgroup:threadsPerMeshThreadgroup:`: `groups`
+    /// mesh threadgroups of `threads_per_mesh_group` threads (the module docs). Refused as the
+    /// module docs say, and for a size past 32 bits on an axis (`Invalid(SizeOutOfRange)`).
+    pub fn draw_mesh_threadgroups(
+        &mut self,
+        groups: Size,
+        threads_per_object_group: Size,
+        threads_per_mesh_group: Size,
+    ) -> Result<(), Error> {
+        self.lowering.draw_mesh_threadgroups(
+            groups,
+            threads_per_object_group,
+            threads_per_mesh_group,
+        )
+    }
+
+    /// `drawMeshThreads:threadsPerObjectThreadgroup:threadsPerMeshThreadgroup:`: the whole mesh
+    /// threadgroups of `threads_per_mesh_group` threads that `threads` fill (the module docs).
+    /// Refused as [`draw_mesh_threadgroups`](Self::draw_mesh_threadgroups) is.
+    pub fn draw_mesh_threads(
+        &mut self,
+        threads: Size,
+        threads_per_object_group: Size,
+        threads_per_mesh_group: Size,
+    ) -> Result<(), Error> {
+        self.lowering
+            .draw_mesh_threads(threads, threads_per_object_group, threads_per_mesh_group)
+    }
+
+    /// `drawMeshThreadgroupsWithIndirectBuffer:indirectBufferOffset:threadsPerObjectThreadgroup:
+    /// threadsPerMeshThreadgroup:`: Metal's `MTLDispatchThreadgroupsIndirectArguments` at
+    /// `indirect_buffer_offset`, the threadgroups' counts. Refused as
+    /// [`draw_mesh_threadgroups`](Self::draw_mesh_threadgroups) is, as an indirect draw's
+    /// arguments are (`render.rs`'s module docs), and for an indirect buffer of another device.
+    /// On a device with `VK_EXT_mesh_shader` the draw is `NotImplemented(IndirectDrawArguments)`,
+    /// and on one without it, of a pipeline with an object function, `NotImplemented(MeshShading)`
+    /// (the module docs).
+    pub fn draw_mesh_threadgroups_indirect(
+        &mut self,
+        indirect_buffer: &Buffer,
+        indirect_buffer_offset: u64,
+        threads_per_object_group: Size,
+        threads_per_mesh_group: Size,
+    ) -> Result<(), Error> {
+        self.lowering.draw_mesh_threadgroups_indirect(
+            indirect_buffer,
+            indirect_buffer_offset,
+            threads_per_object_group,
+            threads_per_mesh_group,
+        )
     }
 }
 
