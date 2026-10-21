@@ -350,6 +350,9 @@ impl DeviceProfile {
                 .enabled
                 .properties
                 .contains(&VkProperty::MetalFirstVertexIndices),
+            DriverDeviation::MetalFullQuads => {
+                f.enabled.properties.contains(&VkProperty::MetalFullQuads)
+            }
         }
     }
 

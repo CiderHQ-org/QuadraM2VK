@@ -251,6 +251,11 @@ pub struct SimdPlan {
     /// The fragment entry declares `RequireFullQuadsKHR`, so every quad starts with its four
     /// invocations and the helpers take part in the group operations, as Metal's do.
     pub full_quads: bool,
+    /// The fragment entry's quads run whole because the device runs a fragment function's helper
+    /// threads as Metal does though it lacks `shaderQuadControl`
+    /// (`DriverDeviation::MetalFullQuads`): it declares no mode, and the module requires
+    /// `VkProperty::MetalFullQuads` ([`full_quads`]).
+    pub metal_full_quads: bool,
     /// A fragment's `[[thread_index_in_quadgroup]]` on a profile without the fragment quad tier:
     /// the stage interface's `FragCoord` object the lane is derived from ([`select_param`]). `None`
     /// where the lane is the subgroup lane's low two bits.
@@ -434,25 +439,35 @@ pub fn finish(cx: &mut SelectCx<'_>) -> Result<(), Error> {
 
 /// Complete a fragment function's plan once its tier is chosen: where its group operations
 /// read, combine, or count other lanes ([`SimdPlan::observes_lanes`]), the entry runs full quads
-/// ([`SimdPlan::full_quads`]), and a profile without `shaderQuadControl` refuses it. Metal runs the
-/// helpers of a quad the primitive or the target cuts, and they take part: a fill or shuffle reads
-/// a helper's value, a reduction folds it in (measured on the M3 Max and the M4). Vulkan launches
-/// and activates them for every group operation only under `RequireFullQuadsKHR`; without it a
-/// helper may be absent or inactive, and no other form gives its value. After the tier, so a stage
-/// without the classes is refused as before.
+/// ([`SimdPlan::full_quads`]); a profile without `shaderQuadControl` whose device runs a fragment
+/// function's helpers as Metal does (`DriverDeviation::MetalFullQuads`) runs them whole without
+/// the mode ([`SimdPlan::metal_full_quads`]), and any other profile without the feature refuses
+/// it. Metal runs the helpers of a quad the primitive or the target cuts, and they take part: a
+/// fill or shuffle reads a helper's value, a reduction folds it in (measured on the M3 Max and the
+/// M4). Vulkan launches and activates them for every group operation only under
+/// `RequireFullQuadsKHR`; without it a helper may be absent or inactive, and no other form gives
+/// its value but a driver that hands the function to Metal. After the tier, so a stage without
+/// the classes is refused as before.
 pub fn full_quads(cx: &mut SelectCx<'_>) -> Result<(), Error> {
     if cx.stage != Stage::Fragment || !cx.families.simd.observes_lanes {
         return Ok(());
     }
-    if !cx.profile.fields().subgroup.quad_control {
-        return Err(Unsupported::needs(
-            Feature::SubgroupOperations,
-            Capability::Feature(VkFeature::ShaderQuadControl),
-        )
-        .into());
+    if cx.profile.fields().subgroup.quad_control {
+        cx.families.simd.full_quads = true;
+        return Ok(());
     }
-    cx.families.simd.full_quads = true;
-    Ok(())
+    if cx
+        .profile
+        .takes_driver_deviation(crate::error::DriverDeviation::MetalFullQuads)
+    {
+        cx.families.simd.metal_full_quads = true;
+        return Ok(());
+    }
+    Err(Unsupported::needs(
+        Feature::SubgroupOperations,
+        Capability::Feature(VkFeature::ShaderQuadControl),
+    )
+    .into())
 }
 
 /// Whether the profile's vertex stage groups vertices otherwise than Apple's GPUs with nothing to

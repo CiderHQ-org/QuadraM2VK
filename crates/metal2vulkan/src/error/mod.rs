@@ -780,6 +780,16 @@ pub enum DriverDeviation {
     /// pipeline's synthesized geometry stages, which store the first vertex's at every vertex,
     /// and is refused on a device without `geometryShader`.
     MetalFirstVertexIndices,
+    /// The device runs a fragment function's quads whole, its helper invocations taking part in
+    /// every group operation, as Metal runs a fragment function's helper threads
+    /// (`VkProperty::MetalFullQuads`): the driver hands the fragment function to Metal, whose
+    /// simdgroup functions read, combine and count a quad's helpers wherever the primitive or the
+    /// target cuts the quad. Vulkan gives that only under `RequireFullQuadsKHR`
+    /// (`shaderQuadControl`). Where the profile takes it and lacks `shaderQuadControl`, a
+    /// fragment function whose group operations observe other lanes declares no such mode and
+    /// requires the property in place of the feature. Unmeasured, such a function needs the
+    /// feature.
+    MetalFullQuads,
 }
 
 /// A defect of a device's driver in a command the runtime records for itself, never in a

@@ -924,6 +924,9 @@ fn enabled_caps(
     if deviations.contains_key(&DriverDeviation::MetalFirstVertexIndices) {
         properties.insert(VkProperty::MetalFirstVertexIndices);
     }
+    if deviations.contains_key(&DriverDeviation::MetalFullQuads) {
+        properties.insert(VkProperty::MetalFullQuads);
+    }
     let l = &desc.limits;
     let sample_counts: [(vk::SampleCountFlags, fn(u32) -> VkProperty); 6] = [
         (

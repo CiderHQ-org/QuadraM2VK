@@ -2393,6 +2393,13 @@ fn compile_kept<K>(
             .properties
             .insert(crate::device::requirements::VkProperty::MetalFragmentSimdgroups);
     }
+    // A fragment's quads run whole without `RequireFullQuadsKHR` because the device runs its
+    // helpers as Metal does.
+    if plan.families.simd.metal_full_quads {
+        requirements
+            .properties
+            .insert(crate::device::requirements::VkProperty::MetalFullQuads);
+    }
     // `float` denormals left to the device because it reads them as Metal does.
     if plan.families.arith.device_denormals {
         requirements

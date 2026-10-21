@@ -761,6 +761,14 @@ pub enum VkProperty {
     /// vertices to its builtin requires it; without it, the index goes through the pipeline's
     /// synthesized geometry stages.
     MetalFirstVertexIndices,
+    /// The device runs a fragment shader's quads whole, its helper invocations taking part in
+    /// every group operation, as Metal runs a fragment function's helper threads (the driver's
+    /// measured deviation
+    /// [`DriverDeviation::MetalFullQuads`](crate::error::DriverDeviation::MetalFullQuads)).
+    /// No Vulkan query reports it: Vulkan gives it only under `RequireFullQuadsKHR`. A fragment
+    /// module whose group operations observe other lanes requires it in place of
+    /// `shaderQuadControl` on a device without that feature.
+    MetalFullQuads,
 }
 
 /// One depth or stencil resolve mode (`VkResolveModeFlagBits`), named by

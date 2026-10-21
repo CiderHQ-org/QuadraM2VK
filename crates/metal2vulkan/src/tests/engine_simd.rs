@@ -1626,3 +1626,80 @@ fn fragment_group_operations_run_full_quads() {
         "no profile refused a fragment function for quad control"
     );
 }
+
+/// MoltenVK 1.4.2 drops `VK_KHR_shader_quad_control` (`shaderQuadControl`) on Apple's GPUs, where
+/// it still hands the fragment function to Metal, whose helpers take part in every simdgroup
+/// operation (`DriverDeviation::MetalFullQuads`). The committed `moltenvk-m3` description at
+/// 1.4.2 without the feature and its extension (the device as it now reports itself) compiles
+/// each fragment function whose group operations observe other lanes: it declares no
+/// `RequireFullQuadsKHR` and no `QuadControlKHR`, requires `VkProperty::MetalFullQuads` and not
+/// the feature, still reads every lane through the ballot of the live lanes, and passes L3. The
+/// same description without the deviation refuses each, needing the feature.
+#[test]
+fn a_device_that_runs_metal_s_helpers_runs_full_quads_without_quad_control() {
+    use crate::error::{Capability, DriverDeviation, Unsupported};
+    let Some(quads) = assemble("gsm2_quad_ops") else {
+        return;
+    };
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../metal2vulkan-validation/profiles/moltenvk-m3.json");
+    let text = std::fs::read_to_string(&path).expect("read the MoltenVK description");
+    let mut desc = DeviceDescription::from_khronos_json(&text, None).expect("description");
+    desc.driver_version = crate::device::driver_facts::moltenvk(1, 4, 2);
+    assert!(desc.features.remove(&VkFeature::ShaderQuadControl));
+    assert!(desc.extensions.remove(&VkExtension::KhrShaderQuadControl));
+    let device = |taken: bool| {
+        Device::with_deviation(
+            desc.clone(),
+            DevicePolicy::default(),
+            DriverDeviation::MetalFullQuads,
+            taken,
+        )
+        .expect("device")
+        .profile()
+        .clone()
+    };
+    let (metals, without) = (device(true), device(false));
+    assert!(!metals.fields().subgroup.quad_control);
+    assert!(metals.takes_driver_deviation(DriverDeviation::MetalFullQuads));
+    assert!(!without.takes_driver_deviation(DriverDeviation::MetalFullQuads));
+    for entry in [
+        "fragment_quad_fills",
+        "fragment_quad_fills_and_rotations",
+        "fragment_simd_fills",
+        "fragment_quad_scans",
+    ] {
+        let a = compile(&quads, entry, &metals).unwrap_or_else(|e| panic!("{entry}: {e}"));
+        assert!(
+            a.requirements
+                .properties
+                .contains(&VkProperty::MetalFullQuads),
+            "{entry}: the property"
+        );
+        assert!(
+            !a.requirements
+                .features
+                .contains(&VkFeature::ShaderQuadControl),
+            "{entry}: no feature"
+        );
+        let (_, words) = link_and_validate(&a, &metals).expect("valid");
+        let text = spirv_dis(&words);
+        assert!(
+            !text.contains("RequireFullQuadsKHR")
+                && !text.contains("QuadControlKHR")
+                && !text.contains("OpGroupNonUniformQuadBroadcast")
+                && !text.contains("OpGroupNonUniformQuadSwap"),
+            "{entry}"
+        );
+        let want = Unsupported::needs(
+            Feature::SubgroupOperations,
+            Capability::Feature(VkFeature::ShaderQuadControl),
+        );
+        match compile(&quads, entry, &without) {
+            Err(Error::Unsupported(u)) => {
+                assert_eq!((u.feature, u.needs), (want.feature, want.needs), "{entry}")
+            }
+            other => panic!("{entry} without the deviation: {:?}", other.map(|_| ())),
+        }
+    }
+}
