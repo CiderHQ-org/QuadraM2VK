@@ -92,8 +92,9 @@ known. The rest of the differences are docs/API.md section 9's precision notes.
 - `render_lowering = RenderLoweringPolicy::AtCall` (the default) lowers each render encoder call
   inside the call, which returns every refusal. `render_lowering = RenderLoweringPolicy::Worker`
   logs the call once its checks at the call pass, and lowers it later: in batches of 32 calls on
-  the device's lowering thread while the program goes on (a program 16 batches ahead waits), and
-  what that thread has not taken on the program's thread as the encoder ends. A refusal only the
+  the device's lowering thread while the program goes on (a program 16 batches ahead waits), the
+  encoder's end there too, and what that thread has not taken on the program's thread at the next
+  call that follows the end in its command buffer (the commit among them). A refusal only the
   lowering finds then fails the command buffer, naming the call (`CommandBufferError::CallRefused`),
   rather than returning from it (docs/API.md section 1). The runtime's choice: no pipeline differs.
 - `pointer_domain`, `handle_domain`, `containment` and `isolation` choose how resources resolve and

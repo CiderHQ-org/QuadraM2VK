@@ -412,7 +412,7 @@ mod vertex_strides;
 
 use bound::{Bound, EqualShapes, Now, Recorded};
 use deferral::Logged;
-pub(crate) use deferral::{lowering, DeferredEncoders};
+pub(crate) use deferral::{lowering, DeferredEncoders, EndInFlight};
 #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
 pub(crate) use deferral::{BATCH_CALLS, HANDED_BATCHES};
 pub(crate) use inline_splits::SpareKept;
@@ -1500,6 +1500,8 @@ impl CommandBuffer {
         &self,
         descriptor: &RenderPassDescriptor,
     ) -> Result<RenderCommandEncoder, Error> {
+        // The last render encoder's end, where its call left it to the device's lowering thread.
+        self.settle_end();
         self.open_render(descriptor, None)
             .map(RenderCommandEncoder::new)
     }

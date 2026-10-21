@@ -22,9 +22,13 @@
 //!   its offset (`render/vertex_reach.rs`) or a visible-function table is bound
 //!   (`ArgumentTable::check_function_tables`); and any call while a buffer of the device is
 //!   detached (`detach.rs`), whose skips judge the detachment as of the call.
+//! - **The end.** The encoder's end checks the depth/stencil attachment's store actions and its
+//!   stencil's store action options as they stand then; where it may, it is lowered inside
+//!   `end_encoding`, which returns the refusal (`CallChecks::ends_at_call`), and is lowered after
+//!   the call otherwise (`render/deferral.rs`).
 //! - **Found only as lowered.** What the lowering finds of its own (a runtime gap of the draw's
 //!   variant, its instance or its resources; out of memory; a Vulkan error) fails the command
-//!   buffer, naming the call (`CommandBufferError::CallRefused`).
+//!   buffer, naming the call (`CommandBufferError::CallRefused`), the end's as `endEncoding`.
 
 use super::draw_shape::ShapeInputs;
 use super::replay::{DrawIndexed, Table};
@@ -37,8 +41,9 @@ use crate::error::Error;
 use crate::fetch_reach::REACHED;
 use crate::pipeline::{GraphicsState as DrawingState, RenderPipelineState, RenderStateKind};
 use crate::rate_mapped_pass::RateMappedPass;
-use crate::render_pass::PassLayout;
+use crate::render_pass::{AspectTarget, PassLayout};
 use crate::render_state::{depth_ranges_refused, EncoderState};
+use crate::render_values::{StoreAction, StoreActionOptions};
 use crate::replay::CallLog;
 use crate::versioned::Versioned;
 
@@ -68,6 +73,9 @@ pub(crate) struct CallChecks {
     /// The pipeline state, assembly and state versions of the last draw whose settings passed:
     /// a draw of the same inputs passes them too.
     settled: Option<(DrawingState, Assembly, [u64; 2])>,
+    /// A call set a store action, its options or a resolve target, which these checks do not
+    /// hold: the encoder's end checks them, so it ends at its call ([`Self::ends_at_call`]).
+    stores_set: bool,
 }
 
 impl CallChecks {
@@ -81,6 +89,7 @@ impl CallChecks {
             layout: (*lowering.layout).clone(),
             rate_map: lowering.rate_map.clone(),
             settled: None,
+            stores_set: false,
         }
     }
 
@@ -96,6 +105,26 @@ impl CallChecks {
         self.layout.clone_from(&lowering.layout);
         self.rate_map.clone_from(&lowering.rate_map);
         self.settled = None;
+        self.stores_set = false;
+    }
+
+    /// Whether the encoder's end is to be lowered inside `end_encoding`, which then returns its
+    /// refusal: where the end makes one of Metal's checks of its own, which the call returns. The
+    /// end checks the depth/stencil attachment's store actions as they stand then (one still
+    /// `Unknown` settles to `DontCare` and its resolve is made again, `render/late_resolve.rs`)
+    /// and its stencil's store action options against them (`sample_positions::check_options`):
+    /// so where the attachment has a store action `Unknown` or options, or a call set any store
+    /// action, its options or a resolve target. Every other end is lowered after the call, its
+    /// refusals the lowering's (`CommandBufferError::CallRefused`).
+    pub(super) fn ends_at_call(&self) -> bool {
+        let checked = |aspect: Option<AspectTarget>| {
+            aspect.is_some_and(|aspect| {
+                aspect.store == StoreAction::Unknown || aspect.options != StoreActionOptions::NONE
+            })
+        };
+        self.stores_set
+            || (self.layout.depth_stencil.as_ref())
+                .is_some_and(|ds| checked(ds.depth) || checked(ds.stencil))
     }
 
     /// Let go of every object the checks hold, their lists' room kept: their encoder ended, and
@@ -351,7 +380,7 @@ impl CallChecks {
                 }
                 Ok(Checked::Logged)
             }
-            // The pass's attachments as the lowering keeps them.
+            // The pass's attachments as the lowering keeps them, which the end checks too.
             C::ColorStoreAction(..)
             | C::DepthStoreAction(_)
             | C::StencilStoreAction(_)
@@ -360,7 +389,10 @@ impl CallChecks {
             | C::StencilStoreActionOptions(_)
             | C::ColorResolveTarget(..)
             | C::DepthResolveTarget(_)
-            | C::StencilResolveTarget(_) => NOW,
+            | C::StencilResolveTarget(_) => {
+                self.stores_set = true;
+                NOW
+            }
             // The encoder's queries, threadgroup lengths and fences, which these checks do not
             // hold; patch and mesh draws, whose pipeline states lower every call at its call.
             C::VisibilityResultMode(..)

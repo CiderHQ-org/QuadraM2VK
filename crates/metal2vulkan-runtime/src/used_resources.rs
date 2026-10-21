@@ -442,6 +442,7 @@ impl CommandBuffer {
     /// For an indirect command buffer the GPU may write, what its commands reach is listed once
     /// the host step before its batch recorded them.
     pub fn used_resources(&self) -> UsedResources {
+        self.settle_end();
         let ended = self.state().read_ended(None);
         let used = union_of(self.device().shared(), &ended);
         // Released without the lock: what it holds may be a resource's last handle.
@@ -463,6 +464,7 @@ impl CommandBuffer {
     /// an indirect command buffer an encoder executes reach is listed from the commit on (for one
     /// the GPU may write, from its host step on), not before.
     pub fn ended_encoders(&self) -> Vec<EndedEncoder> {
+        self.settle_end();
         let ended = self.state().read_ended(None);
         let shared = self.device().shared();
         let listed = ended

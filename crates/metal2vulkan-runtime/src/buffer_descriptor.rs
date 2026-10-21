@@ -572,6 +572,9 @@ impl Device {
         if self.is_lost() {
             return Err(Error::DeviceLost);
         }
+        // The render encoders' calls and ends that their calls left to the device's lowering
+        // thread, as the rebind finds them where each call lowers itself (`render/deferral.rs`).
+        self.shared().deferred.lower_all();
         let key = buffer.identity().key;
         let encoded = || invalid(call, Problem::Rebind(RebindProblem::EncodedUses));
         if self.rebind_pending(key) {

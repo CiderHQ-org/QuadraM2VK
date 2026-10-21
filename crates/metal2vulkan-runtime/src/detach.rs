@@ -129,6 +129,9 @@ impl Device {
             return Err(Error::DeviceLost);
         }
         let shared = self.shared();
+        // The render encoders' calls and ends that their calls left to the device's lowering
+        // thread, as the detach finds them where each call lowers itself (`render/deferral.rs`).
+        shared.deferred.lower_all();
         let rebinds = &shared.rebinds;
         let key = buffer.identity().key;
         // A submitted command buffer took it: a buffer's call waits for each, a heap's not.

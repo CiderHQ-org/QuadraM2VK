@@ -57,8 +57,9 @@ use super::device::lock;
 use super::device::relay::Relayed;
 use super::encoder::{Recorded, Segment};
 use super::error::{
-    internal, invalid, vulkan, CommandBufferError, DeadlockCause, Error, FailedPipeline,
-    MeshRecordsOverflow, PipelineCreationCause, Problem, TessellationRecordsOverflow, TimedOut,
+    internal, invalid, vulkan, CommandBufferError, DeadlockCause, EncoderCall, Error,
+    FailedPipeline, MeshRecordsOverflow, PipelineCreationCause, Problem,
+    TessellationRecordsOverflow, TimedOut,
 };
 use super::event::{EventRef, EventShared};
 use super::execution::Execution;
@@ -76,6 +77,7 @@ use super::program_objects;
 use super::queue::Slot;
 use super::rebind::{Holds, SubmittedHolds, Taken};
 use super::recorder::{self, Replays};
+use super::render::EndInFlight;
 use super::replay::Replay;
 use super::residency::Residency;
 use super::resource::ResourceKey;
@@ -142,6 +144,16 @@ impl std::fmt::Debug for CommandBuffer {
         f.debug_struct("CommandBuffer")
             .field("status", &self.status())
             .finish()
+    }
+}
+
+/// A command buffer that a holder does not keep ([`CommandBuffer::downgrade`]).
+pub(crate) struct WeakCommandBuffer(std::sync::Weak<CommandBufferShared>);
+
+impl WeakCommandBuffer {
+    /// The command buffer, where something still holds it.
+    pub(crate) fn upgrade(&self) -> Option<CommandBuffer> {
+        self.0.upgrade().map(CommandBuffer)
     }
 }
 
@@ -412,6 +424,10 @@ pub(super) struct State {
     pub(super) encoder_open: bool,
     /// An encoder was dropped without `end_encoding`.
     pub(super) abandoned: bool,
+    /// A render encoder's end, which its call left to the device's lowering thread
+    /// (`render/deferral.rs`): the encoder stays open until it is lowered, and what follows the
+    /// end in the command buffer lowers it first ([`CommandBuffer::settle_end`]).
+    ending: Option<EndInFlight>,
     /// `commit` is recording the encoders' segments (`encoder.rs`), outside this lock: nothing
     /// else may encode or commit meanwhile.
     committing: bool,
@@ -1009,6 +1025,19 @@ impl State {
         self.refusal.get_or_insert(error);
     }
 
+    /// The open render encoder's end, lowered after its call, refused for `error`
+    /// (`render/deferral.rs`): the encoder, which its end's refusal dropped unended, ends here
+    /// with nothing of it run, and the command buffer fails from it on as a refusal of one of its
+    /// calls does (`CommandBufferError::CallRefused` of `call`, its error kept), commits, and
+    /// runs nothing of it or after it.
+    pub(super) fn refuse_end(&mut self, call: EncoderCall, error: Error) {
+        self.encoder_open = false;
+        self.abandoned = false;
+        let place = self.open_encoder_place();
+        self.fail_from(place, CommandBufferError::CallRefused(call));
+        self.refuse_call(error);
+    }
+
     /// Ended encoder `encoder` fails the command buffer from it on with `error` (`fails_from`).
     pub(super) fn fail_from(&mut self, encoder: usize, error: CommandBufferError) {
         self.fails_from.get_or_insert((encoder, error));
@@ -1414,6 +1443,7 @@ impl CommandBuffer {
                 error: None,
                 encoder_open: false,
                 abandoned: false,
+                ending: None,
                 committing: false,
                 pool: None,
                 replays: None,
@@ -1514,6 +1544,44 @@ impl CommandBuffer {
     /// The state, locked.
     pub(super) fn state(&self) -> MutexGuard<'_, State> {
         lock(&self.0.state)
+    }
+
+    /// A handle that does not keep the command buffer: a render encoder's, which its end in
+    /// flight hands the command buffer (`render/deferral.rs`), so that hold makes no cycle.
+    pub(crate) fn downgrade(&self) -> WeakCommandBuffer {
+        WeakCommandBuffer(Arc::downgrade(&self.0))
+    }
+
+    /// Hold `ending`, the open render encoder's end, which its call left to the device's
+    /// lowering thread, until what follows it in the command buffer lowers it
+    /// ([`settle_end`](Self::settle_end)).
+    pub(crate) fn hold_end(&self, ending: EndInFlight) {
+        let held = self.state().ending.replace(ending);
+        debug_assert!(held.is_none(), "two render encoders' ends in flight");
+    }
+
+    /// Let go of this handle on the device's lowering thread, which has just lowered a render
+    /// encoder's end (`render/deferral.rs`): where it is the command buffer's last, the command
+    /// buffer goes on one of the device's handler threads (`Device::let_go_elsewhere`), as it would
+    /// go on the program's thread that let go of it last, since its drop gives the encoder's slot
+    /// back, whose logged calls may hold the program's objects' last handles.
+    pub(crate) fn let_go_off_thread(self) {
+        let device = self.0.device.clone();
+        if let Some(shared) = Arc::into_inner(self.0) {
+            device.let_go_elsewhere(Box::new(shared));
+        }
+    }
+
+    /// Lower, on this thread, the end of the render encoder that ended last, where its call
+    /// left it to the device's lowering thread and the thread has not lowered it (with whatever
+    /// of its calls the thread has not lowered): first in each call that follows an encoder's end
+    /// in the command buffer (another encoder's opening, an event or a semaphore, the commit, a
+    /// read of what its encoders left), as if the end had been lowered inside its call.
+    pub(crate) fn settle_end(&self) {
+        let ending = self.state().ending.take();
+        if let Some(ending) = ending {
+            ending.finish();
+        }
     }
 
     /// The residency a new compute or render (`render`) encoder starts with
@@ -1742,6 +1810,7 @@ impl CommandBuffer {
         if let Some(problem) = self.0.device.binary_semaphore_problem(semaphore) {
             return Err(invalid(call, Problem::Semaphore(problem)));
         }
+        self.settle_end();
         let mut state = self.state();
         if let Some(problem) = state.refusal() {
             return Err(invalid(call, problem));
@@ -1761,6 +1830,7 @@ impl CommandBuffer {
         if !event.device().same(&self.0.device) {
             return Err(invalid(call, Problem::ForeignObject));
         }
+        self.settle_end();
         let mut state = self.state();
         if let Some(problem) = state.refusal() {
             return Err(invalid(call, problem));
@@ -1840,6 +1910,8 @@ impl CommandBuffer {
     /// [`commit`](Self::commit) for `call`, or, with `failure`,
     /// [`commit_failed`](Self::commit_failed).
     fn commit_as(&self, call: &'static str, failure: Option<CommitFailure>) -> Result<(), Error> {
+        // The last render encoder's end, where its call left it to the device's lowering thread.
+        self.settle_end();
         // The waiting fetched render targets take their storage form at this commit where it
         // allows (`storage_form.rs`): one atomic read where none waits. The scheduler's thread
         // ends the switch once it submitted the command buffer.
@@ -2125,6 +2197,7 @@ impl CommandBuffer {
     /// encoder's call refused as it was lowered would have returned at the call. No Metal
     /// counterpart.
     pub fn refusal(&self) -> Option<Error> {
+        self.settle_end();
         self.state().refusal.clone()
     }
 
@@ -2134,6 +2207,7 @@ impl CommandBuffer {
     /// made the pipeline at the draw (`FailedPipeline`). The first such draw, in encoding order:
     /// Metal reports one error per command buffer. No Metal counterpart.
     pub fn failed_pipeline(&self) -> Option<FailedPipeline> {
+        self.settle_end();
         self.state().failed_pipeline.clone()
     }
 
@@ -2161,6 +2235,7 @@ impl CommandBuffer {
     /// encoders build no record otherwise.
     #[doc(hidden)]
     pub fn executions(&self) -> Vec<Execution> {
+        self.settle_end();
         self.state().executions.clone()
     }
 

@@ -16,6 +16,7 @@
 use super::blit_holds::{busy, over_host, until, Host, Scratch, FILLED, WAIT};
 use super::encoder_holds::{bits, bytes_of, pass, render_state, words_of};
 use crate::render::{BATCH_CALLS, HANDED_BATCHES};
+use crate::StoreAction;
 use crate::{
     BlitOption, Buffer, CommandBuffer, CommandBufferError, CommandBufferStatus, Degradation,
     DegradeNotice, Device, DeviceKind, DeviceOptions, EncoderCall, Error, MessageSink, Origin,
@@ -653,4 +654,119 @@ fn a_program_that_outruns_the_lowering_thread_waits_for_it() {
         calls.div_ceil(BATCH_CALLS) as u64,
         "batches lowered"
     );
+}
+
+/// An encoder's end leaves the lowering to the device's lowering thread and returns: with the
+/// thread held, `end_encoding` returns; the command buffer's next encoder (the copy back) and its
+/// commit lower what the thread has not, and the pass ran as drawn. The end was lowered once.
+#[test]
+fn an_end_returns_before_its_lowering() {
+    let scratch = Scratch::new("deferred-end");
+    let device = device(
+        &scratch.0,
+        RenderLoweringPolicy::Worker,
+        &[],
+        &Heard::default(),
+    );
+    let (opened, open) = mpsc::channel();
+    let (go, going) = mpsc::channel::<()>();
+    let (ended, end) = mpsc::channel();
+    let encoding = std::thread::spawn({
+        let device = device.clone();
+        move || {
+            let state = rectangle_state(&device);
+            let queue = device.new_command_queue().unwrap();
+            let command_buffer = queue.command_buffer().unwrap();
+            let target = target(&device);
+            let mut encoder = command_buffer
+                .render_command_encoder(&pass(&target))
+                .unwrap();
+            opened.send(()).unwrap();
+            going.recv().unwrap();
+            rectangle(&state, &mut encoder);
+            encoder
+                .set_fragment_bytes(&bytes_of(&COLOR, f32::to_le_bytes), 0)
+                .unwrap();
+            encoder
+                .draw_primitives(PrimitiveType::Triangle, 0, 6, 1, 0)
+                .unwrap();
+            encoder.end_encoding().unwrap();
+            ended.send(()).unwrap();
+            let back = copy_back(&device, &command_buffer, &target);
+            committed(&command_buffer, &back)
+        }
+    });
+    open.recv().unwrap();
+    let slots = device.shared().deferred.taken();
+    let [slot] = &slots[..] else {
+        panic!("{} encoders' slots taken, not one", slots.len());
+    };
+    let returned = slot.while_held(|| {
+        go.send(()).unwrap();
+        end.recv_timeout(WAIT).is_ok()
+    });
+    assert!(returned, "end_encoding waited for the held lowering");
+    let words = encoding.join().unwrap();
+    assert!(
+        words.iter().all(|&word| word == PACKED),
+        "{:x?}",
+        &words[..4]
+    );
+    let counts = device.work_counts();
+    let ends = counts.render_log_ends_by_thread + counts.render_log_ends_by_program;
+    assert_eq!(ends, 1, "{counts:?}");
+}
+
+/// A kind the device refuses while lowering, met as the end is lowered after its call, refuses
+/// the end: `CallRefused` names `endEncoding` and its index, the notice its error, and the pass
+/// runs nothing. Where the device announces no such kind at the pass's end under `AtCall` (its
+/// `DONT_CARE` keeps one of Metal's answers), there is nothing to refuse.
+#[test]
+fn a_kind_refused_as_the_end_is_lowered_refuses_the_end() {
+    let scratch = Scratch::new("deferred-end-refused");
+    let kind = Degradation::DontCareStore;
+    for policy in POLICIES {
+        let heard = Heard::default();
+        let device = device(&scratch.0, policy, &[kind], &heard);
+        let state = rectangle_state(&device);
+        let queue = device.new_command_queue().unwrap();
+        let command_buffer = queue.command_buffer().unwrap();
+        let target = target(&device);
+        let mut descriptor = pass(&target);
+        descriptor.color_attachments[0].store_action = StoreAction::DontCare;
+        let mut encoder = command_buffer.render_command_encoder(&descriptor).unwrap();
+        rectangle(&state, &mut encoder);
+        encoder
+            .draw_primitives(PrimitiveType::Triangle, 0, 6, 1, 0)
+            .unwrap();
+        encoder.end_encoding().unwrap();
+        command_buffer.commit().unwrap();
+        command_buffer.wait_until_completed_for(WAIT).unwrap();
+        let announced = (heard.lock().unwrap().iter()).any(|notice| notice.degradation == kind);
+        match policy {
+            RenderLoweringPolicy::Worker => {
+                let end = EncoderCall {
+                    selector: "endEncoding",
+                    index: 3,
+                };
+                assert!(!announced, "a refused kind announced");
+                assert_eq!(
+                    command_buffer.error(),
+                    Some(CommandBufferError::CallRefused(end))
+                );
+                let Some(Error::Degraded(notice)) = command_buffer.refusal() else {
+                    panic!("{:?}", command_buffer.refusal());
+                };
+                assert_eq!(notice.degradation, kind);
+                assert_eq!(notice.call, Some(end));
+            }
+            _ => {
+                assert_eq!(command_buffer.status(), CommandBufferStatus::Completed);
+                if !announced {
+                    eprintln!("{policy:?}: {kind:?} not announced at the pass's end");
+                    return;
+                }
+            }
+        }
+    }
 }

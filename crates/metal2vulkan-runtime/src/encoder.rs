@@ -382,6 +382,8 @@ impl EncoderCore {
         call: &'static str,
         ordered: bool,
     ) -> Result<EncoderCore, Error> {
+        // The last render encoder's end, where its call left it to the device's lowering thread.
+        command_buffer.settle_end();
         let mut state = command_buffer.state();
         if let Some(problem) = state.refusal() {
             return Err(invalid(call, problem));

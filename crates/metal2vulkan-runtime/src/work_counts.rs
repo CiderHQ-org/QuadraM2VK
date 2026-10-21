@@ -325,6 +325,8 @@ pub(crate) struct Counters {
     render_log_batches_by_thread: AtomicU64,
     render_log_batches_by_program: AtomicU64,
     render_log_waits: AtomicU64,
+    render_log_ends_by_thread: AtomicU64,
+    render_log_ends_by_program: AtomicU64,
 }
 
 /// How a render pass took a shadowed texture as a color attachment
@@ -983,6 +985,17 @@ impl Counters {
     /// handed and not taken at their cap (`render/deferral.rs`).
     pub(crate) fn render_log_waited(&self) {
         self.render_log_waits.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A render encoder's end that its call left to the device's lowering thread was lowered:
+    /// on that thread (`by_thread`), or on the program's by what followed it in the command
+    /// buffer (`render/deferral.rs`).
+    pub(crate) fn render_log_end_lowered(&self, by_thread: bool) {
+        match by_thread {
+            true => &self.render_log_ends_by_thread,
+            false => &self.render_log_ends_by_program,
+        }
+        .fetch_add(1, Ordering::Relaxed);
     }
 
     /// A render pass instance of a render encoder's pass was begun at `site`.
@@ -2868,6 +2881,13 @@ pub struct WorkCounts {
     /// Render encoders' calls that waited for the device's lowering thread, the program having
     /// handed it as many of its encoder's batches as it holds untaken.
     pub render_log_waits: u64,
+    /// Render encoders' ends that `end_encoding` left to the device's lowering thread, which
+    /// lowered them after the encoders' calls, while the program went on.
+    pub render_log_ends_by_thread: u64,
+    /// Of those ends, the ones the program's thread lowered, the thread having not reached them:
+    /// at what followed the end in its command buffer (another encoder, an event, the commit),
+    /// at a read of these counts, or at a rebind or detach of host pages.
+    pub render_log_ends_by_program: u64,
     /// Render pass instances of render encoders' passes begun where the pass is recorded, each
     /// running a secondary of its draws (`render/pass_steps.rs`): an encoder's instances not
     /// recorded inline, and the runs of executions' commands. With the three fields after this
@@ -3931,6 +3951,9 @@ impl Device {
             render_log_batches_by_program: (counters.render_log_batches_by_program)
                 .load(Ordering::Relaxed),
             render_log_waits: counters.render_log_waits.load(Ordering::Relaxed),
+            render_log_ends_by_thread: (counters.render_log_ends_by_thread).load(Ordering::Relaxed),
+            render_log_ends_by_program: (counters.render_log_ends_by_program)
+                .load(Ordering::Relaxed),
             render_passes_begun_instances: pass_begun(PassBegun::Instance),
             render_passes_begun_inline: pass_begun(PassBegun::Inline),
             render_passes_begun_inline_splits: pass_begun(PassBegun::InlineSplit),

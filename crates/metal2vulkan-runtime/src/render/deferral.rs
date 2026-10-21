@@ -16,12 +16,26 @@
 //!   (`WorkCounts::render_log_waits`): an encoder's log never holds more than
 //!   `(HANDED_BATCHES + 2) * BATCH_CALLS` calls not yet lowered, the batch the thread lowers and
 //!   the one being filled counted.
-//! - **Drains.** Where the program needs what the lowering leaves (the encoder's end, the device's
-//!   work counts, a query of its pass: `tile_width`, `tile_height`) or makes a call the checks do
-//!   not cover, its own thread lowers every call the lowering thread has not taken, after the
-//!   batch that thread is lowering, if any (`WorkCounts::render_log_batches_by_program`, against
-//!   `render_log_batches_by_thread`). So does a call past the cap where the device runs no
-//!   lowering thread, or once the process exits.
+//! - **The end.** `end_encoding` hands the encoder's end to the lowering thread too, after its
+//!   calls, and returns; the encoder's command buffer holds the end ([`EndInFlight`]), and the
+//!   encoder stays open there until it is lowered. The thread lowers it after the encoder's last
+//!   batch, as `endEncoding`, the call after the encoder's last (`EncoderCall`). The command
+//!   buffer's next call that follows the end lowers on the program's thread what the thread has
+//!   not (`CommandBuffer::settle_end`): another encoder's opening, an event or a semaphore, the
+//!   commit, a read of what its encoders left (`used_resources`, `ended_encoders`, `refusal`,
+//!   `failed_pipeline`, `executions`). A rebind or detach of host pages, and a read of the work
+//!   counts, lower every encoder's first. An end that makes Metal's checks of its own
+//!   (`CallChecks::ends_at_call`) is lowered inside its call, as is the end of an encoder that
+//!   lowers its calls at their calls, where a buffer of the device is detached, or where no
+//!   lowering thread runs. A refusal only the end's lowering finds fails the command buffer,
+//!   naming the end (`State::refuse_end`).
+//! - **Drains.** Where the program needs what the lowering leaves (an end lowered at its call or
+//!   held by the command buffer, the device's work counts, a query of the pass: `tile_width`,
+//!   `tile_height`) or makes a call the checks do not cover, its own thread lowers every call the
+//!   lowering thread has not taken, after the batch that thread is lowering, if any
+//!   (`WorkCounts::render_log_batches_by_program`, against `render_log_batches_by_thread`; for
+//!   the end, `render_log_ends_by_program` against `render_log_ends_by_thread`). So does a call
+//!   past the cap where the device runs no lowering thread, or once the process exits.
 //! - **At the call.** A call the checks do not cover is lowered inside the call, the calls logged
 //!   before it first (`Checked::Now`), and from some calls on every call of the encoder is; so is
 //!   every call of an encoder whose pass the device draws in color groups
@@ -41,15 +55,18 @@
 //! - **Emptied on the program's thread.** The lowering thread hands each batch back lowered, its
 //!   calls still held; the program's thread empties it as it takes it to fill again, or as the
 //!   encoder drains, ends or goes. By then what a lowered call named is held by the encoder's
-//!   lowering or its command buffer (`ArgumentTable`'s retains).
+//!   lowering or its command buffer (`ArgumentTable`'s retains). The command buffer's last handle,
+//!   where the end's lowering held it, goes on a handler thread
+//!   (`CommandBuffer::let_go_off_thread`), not the lowering thread, nor under the slot's locks.
 //! - **Slots.** Each encoder's lowering, checks and batches lie in a slot the device keeps
-//!   ([`DeferredEncoders`]), which the encoder's end or drop gives back for the device's next
-//!   encoder, its batches' room kept.
+//!   ([`DeferredEncoders`]), which the encoder's end (or the command buffer's settling of it) or
+//!   drop gives back for the device's next encoder, its batches' room kept.
 
 use super::call_checks::{CallChecks, Checked};
 use super::lowering_worker::LoweringWorker;
 use super::replay::{render, DrawIndexed};
 use super::{RenderCall, RenderCommandEncoder, RenderLowering};
+use crate::command_buffer::{CommandBuffer, WeakCommandBuffer};
 use crate::device::{lock, Device};
 use crate::error::{internal, EncoderCall, Error};
 use crate::exit_guard;
@@ -184,9 +201,19 @@ struct SlotState {
     queued: bool,
     /// The lowering thread panicked lowering a batch of the slot (`render/lowering_worker.rs`).
     panicked: bool,
+    /// The encoder ended at its call number `n`, its end left to the lowering thread, which
+    /// lowers it after every batch handed (the module docs).
+    ending: Option<u32>,
     /// Batches lowered, their calls still held until the program's thread empties them as it
     /// takes them to fill (the module docs).
     lowered: Vec<Batch>,
+}
+
+/// What the lowering thread takes of a slot: a batch handed, or, once none is, the encoder's end
+/// (the call number of it).
+struct Turn {
+    batch: Option<Batch>,
+    end: Option<u32>,
 }
 
 impl SlotState {
@@ -198,63 +225,120 @@ impl SlotState {
         }
     }
 
-    /// Hand the batch being filled to the lowering thread, and fill a new one after it: a lowered
-    /// one emptied, else a new one. Whether the slot is to be handed to the thread: it is in no
-    /// queue.
+    /// Hand the batch being filled, where it holds a call, to the lowering thread, and fill a new
+    /// one after it: a lowered one emptied, else a new one. Whether the slot is to be handed to
+    /// the thread: it is in no queue.
     fn hand_off(&mut self) -> bool {
-        let next = self.filling.next();
-        let fresh = match self.lowered.pop() {
-            Some(mut lowered) => {
-                lowered.empty(next);
-                lowered
-            }
-            None => Batch::new(next),
-        };
-        let full = std::mem::replace(&mut self.filling, fresh);
-        self.handed.push_back(full);
+        if !self.filling.calls.calls.is_empty() {
+            let next = self.filling.next();
+            let fresh = match self.lowered.pop() {
+                Some(mut lowered) => {
+                    lowered.empty(next);
+                    lowered
+                }
+                None => Batch::new(next),
+            };
+            let full = std::mem::replace(&mut self.filling, fresh);
+            self.handed.push_back(full);
+        }
         let unqueued = !self.queued;
         self.queued = true;
         unqueued
     }
+
+    /// What the lowering thread takes next: the first batch handed, else the encoder's end;
+    /// nothing while the program's thread drains the slot.
+    fn next_turn(&mut self) -> Option<Turn> {
+        if self.draining {
+            return None;
+        }
+        let turn = match self.handed.pop_front() {
+            Some(batch) => Turn {
+                batch: Some(batch),
+                end: None,
+            },
+            None => Turn {
+                batch: None,
+                end: Some(self.ending.take()?),
+            },
+        };
+        Some(turn)
+    }
+}
+
+/// End the encoder whose lowering `lowerer` holds, as its `end_encoding`, call `at` of it, lowered
+/// after the call returned, on the lowering thread (`by_thread`) or the program's (the module
+/// docs). A refusal of the end fails the command buffer, naming it (`State::refuse_end`). The
+/// command buffer, which the lowering held: for the caller to let go of once it holds none of the
+/// slot's locks, since its drop may give the slot back (an end in flight the command buffer
+/// held, `CommandBuffer::hold_end`).
+fn end_lowering(lowerer: &mut Lowerer, at: u32, by_thread: bool) -> Option<CommandBuffer> {
+    let mut lowering = lowerer.lowering.take()?;
+    let command_buffer = lowering.core.command_buffer().clone();
+    let counts = &lowering.core.device().shared().counts;
+    counts.render_log_end_lowered(by_thread);
+    // Judged as of its call, when no buffer of the device was detached.
+    lowering.core.judges_unattached(true);
+    let identity = EncoderCall::new("endEncoding", at);
+    if let Err(error) = lowering::during(identity, || lowering.end_encoding()) {
+        // Metal's own checks of the end are made at its call (`CallChecks::ends_at_call`).
+        debug_assert!(
+            !matches!(error, Error::Invalid(_)),
+            "{identity:?}, lowered after its call, refused: {error}"
+        );
+        command_buffer.state().refuse_end(identity, error);
+    }
+    Some(command_buffer)
 }
 
 impl LoweringSlot {
     /// The lowering thread's turn at the slot: each batch handed lowered, in order, inside a
     /// section of the exit guard, as the program's calls (`render/lowering_worker.rs`), and handed
-    /// back, until none is handed or the program's thread drains the slot.
+    /// back, then the encoder's end where its call left it here; until none is left or the
+    /// program's thread drains the slot.
     pub(super) fn lower_handed(&self) {
         loop {
-            let batch = {
+            let (turn, ended) = {
                 let Some(_section) = exit_guard::enter() else {
                     // The process exits: the program's thread lowers what is handed.
                     self.left_by_thread();
                     return;
                 };
-                let batch = {
+                let turn = {
                     let mut state = lock(&self.state);
-                    let batch = match state.draining {
-                        true => None,
-                        false => state.handed.pop_front(),
-                    };
-                    let Some(batch) = batch else {
+                    let Some(turn) = state.next_turn() else {
                         state.queued = false;
                         return;
                     };
                     state.busy = true;
-                    batch
+                    turn
                 };
                 // A program that waits for room has it (`wait_for_room`).
                 self.handed_back.notify_all();
-                exit_guard::lowering_program_calls(|| batch.lower(&mut lock(&self.lowerer), true));
-                batch
+                let ended = exit_guard::lowering_program_calls(|| {
+                    let mut lowerer = lock(&self.lowerer);
+                    if let Some(batch) = &turn.batch {
+                        batch.lower(&mut lowerer, true);
+                    }
+                    (turn.end).and_then(|at| end_lowering(&mut lowerer, at, true))
+                });
+                (turn, ended)
             };
             // Handed back once its section ended: an exit that follows finds the hook registered
             // after the section's first calls (`exit_guard`).
             let mut state = lock(&self.state);
             state.busy = false;
-            state.lowered.push(batch);
+            if let Some(batch) = turn.batch {
+                state.lowered.push(batch);
+            }
             drop(state);
             self.handed_back.notify_all();
+            // The command buffer's last handle, where the program let go of the rest, goes off
+            // this thread: its drop gives the slot back, which empties the batches, whose holds
+            // may be the program's objects' last (the module docs).
+            if let Some(command_buffer) = ended {
+                command_buffer.let_go_off_thread();
+            }
         }
     }
 
@@ -282,9 +366,10 @@ impl LoweringSlot {
     }
 
     /// Lower, on this thread, every call logged that the lowering thread has not taken, after the
-    /// batch it lowers now, if any (the module docs), then run `then` of the lowering and the
-    /// batch being filled, whose arenas hold `past` calls made of them and not logged (a call
-    /// lowered at its call); every batch emptied then: its result.
+    /// batch it lowers now, if any, and the encoder's end where its call left it to the thread
+    /// (the module docs); then run `then` of the lowering and the batch being filled, whose
+    /// arenas hold `past` calls made of them and not logged (a call lowered at its call); every
+    /// batch emptied then: its result.
     fn drain_locked<T>(
         &self,
         mut guard: MutexGuard<'_, SlotState>,
@@ -305,6 +390,7 @@ impl LoweringSlot {
         for batch in state.handed.iter().chain([&state.filling]) {
             batch.lower(&mut lowerer, false);
         }
+        let ended = (state.ending.take()).and_then(|at| end_lowering(&mut lowerer, at, false));
         let then = then(&mut lowerer, &state.filling);
         drop(lowerer);
         let next = state.filling.next() + past;
@@ -317,6 +403,9 @@ impl LoweringSlot {
         }
         state.filling.empty(next);
         state.draining = false;
+        // The command buffer, once the slot's locks are free: its drop may give the slot back.
+        drop(guard);
+        drop(ended);
         then
     }
 
@@ -348,6 +437,7 @@ impl LoweringSlot {
         state.filling.empty(0);
         state.draining = false;
         state.panicked = false;
+        state.ending = None;
         state.taken = false;
         drop(guard);
         // Its drop abandons the command buffer of an encoder dropped unended, the slot's locks
@@ -385,6 +475,7 @@ impl DeferredEncoders {
                         draining: false,
                         queued: false,
                         panicked: false,
+                        ending: None,
                         lowered: Vec::new(),
                     }),
                     lowerer: Mutex::new(Lowerer {
@@ -472,6 +563,9 @@ pub(crate) struct Logged {
     slot: Arc<LoweringSlot>,
     /// The encoder's device, which its checks at the call work on.
     device: Device,
+    /// The encoder's command buffer, which holds its end in flight ([`EndInFlight`]), not kept
+    /// here: the command buffer holds this.
+    command_buffer: WeakCommandBuffer,
     /// It lowers every call inside it from now on (`Checked::Now { sticky: true }`).
     at_call: bool,
 }
@@ -481,6 +575,19 @@ impl Drop for Logged {
     /// goes, abandoning its command buffer, its calls not lowered.
     fn drop(&mut self) {
         self.slot.give_back();
+    }
+}
+
+/// A render encoder's end that its call left to the device's lowering thread, with its slot,
+/// which its command buffer holds until what follows the end lowers it
+/// (`CommandBuffer::settle_end`): the encoder stays open meanwhile.
+pub(crate) struct EndInFlight(Logged);
+
+impl EndInFlight {
+    /// Lower on this thread what the lowering thread has not lowered of the encoder, its end
+    /// included, and give its slot back.
+    pub(crate) fn finish(self) {
+        self.0.slot.drain(0, |_, _| ());
     }
 }
 
@@ -495,11 +602,13 @@ impl RenderCommandEncoder {
             false => (Some(lowering), None),
             true => {
                 let device = device.clone();
+                let command_buffer = lowering.core.command_buffer().downgrade();
                 let slot = device.shared().deferred.take(lowering);
                 let at_call = false;
                 let logged = Logged {
                     slot,
                     device,
+                    command_buffer,
                     at_call,
                 };
                 (None, Some(logged))
@@ -669,9 +778,14 @@ impl RenderCommandEncoder {
         }
     }
 
-    /// End the encoder (`end_encoding`): its calls logged lowered, then its lowering ended, inside
-    /// the call, which returns a refusal of the end itself. Notices of the end of an encoder that
-    /// logged its calls name it as `endEncoding`, after the encoder's calls.
+    /// End the encoder (`end_encoding`). An encoder that logs its calls hands its end to the
+    /// lowering thread, after its calls, and returns (the module docs): its command buffer holds
+    /// the end, and what follows it there lowers what the thread has not
+    /// (`CommandBuffer::settle_end`). It ends inside the call where the end makes Metal's checks
+    /// of its own (`CallChecks::ends_at_call`), where it lowers its calls at their calls, where a
+    /// buffer of the device is detached, and where no lowering thread runs: its calls logged
+    /// lowered, then its lowering ended, the call returning a refusal of the end itself. Notices of
+    /// the end of an encoder that logged its calls name it as `endEncoding`, after its calls.
     pub(super) fn end(self) -> Result<(), Error> {
         let logged = match (self.own, self.logged) {
             (Some(lowering), _) => return lowering.end_encoding(),
@@ -679,6 +793,24 @@ impl RenderCommandEncoder {
             (None, None) => return Err(internal("an encoder without its lowering")),
         };
         let slot = &logged.slot;
+        let shared = logged.device.shared();
+        let mut state = lock(&slot.state);
+        let checked = state.checking && state.checks.as_ref().is_some_and(|c| !c.ends_at_call());
+        let worker = shared.deferred.worker().filter(|worker| worker.runs());
+        let hands = checked && !shared.rebinds.any_detached_now() && !exit_guard::closed();
+        let held = logged.command_buffer.upgrade();
+        if let (true, Some(worker), Some(command_buffer)) = (hands, worker, held) {
+            state.stop_checking();
+            state.ending = Some(self.next);
+            let unqueued = state.hand_off();
+            drop(state);
+            if unqueued && !worker.hand(slot) {
+                lock(&slot.state).queued = false;
+            }
+            command_buffer.hold_end(EndInFlight(logged));
+            return Ok(());
+        }
+        drop(state);
         let lowering = slot.drain(0, |lowerer, _| lowerer.lowering.take());
         lock(&slot.state).stop_checking();
         let lowering = lowering.ok_or_else(|| internal("an encoder ended twice"))?;

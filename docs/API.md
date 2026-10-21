@@ -128,9 +128,15 @@ compile does. `DevicePolicy::default()` is `DevicePolicy::UNTRUSTED`:
   call works out and records its commands before it returns, and returns every refusal.
   `render_lowering = RenderLoweringPolicy::Worker` logs each call and lowers it later, in order,
   before the command buffer's submission: in batches of 32 calls on the device's lowering thread
-  while the program goes on, and what that thread has not taken on the program's thread as the
-  encoder ends. A program that runs 16 batches ahead of that thread waits for it in its next
-  call. The call still makes Metal's checks of its arguments and of the encoder's state, and returns
+  while the program goes on. A program that runs 16 batches ahead of that thread waits for it in
+  its next call. `end_encoding` hands the encoder's end to that thread too and returns; the next
+  call that follows the end in its command buffer (another encoder, an event or semaphore
+  command, the commit, `refusal`, `used_resources`, `ended_encoders`, `failed_pipeline`) lowers
+  on the program's thread what the thread has not, and a rebind or detach of host pages and
+  `Device::work_counts` lower every encoder's first. An end that checks the depth/stencil
+  attachment's store actions or store action options (one `Unknown`, options set, or any store
+  action or resolve target set by a call) is lowered inside `end_encoding`, which returns its
+  refusal. The call still makes Metal's checks of its arguments and of the encoder's state, and returns
   their refusals: the argument tables' and state setters', the objects' devices, the pipeline
   state's against the pass, and a draw's kind, arguments and settings. It copies the bytes it
   was lent and holds the objects it names. A call those checks do not cover is lowered inside
@@ -145,7 +151,8 @@ compile does. `DevicePolicy::default()` is `DevicePolicy::UNTRUSTED`:
   color groups. A refusal only the lowering finds (a runtime gap of the draw's variant or
   instance, out of memory, a Vulkan error) fails the command buffer instead:
   `CommandBufferError::CallRefused` names the call (`EncoderCall`: its Metal selector and its
-  index among the encoder's calls), `CommandBuffer::refusal` returns the error the call would
+  index among the encoder's calls; the end is `endEncoding`, the index after the encoder's last
+  call), `CommandBuffer::refusal` returns the error the call would
   have returned, and that encoder and every one after it in the command buffer run nothing.
   Notices a logged call's lowering announces name the call (`DegradeNotice::call`) and may reach
   the message sink on the lowering thread, and `DeviceOptions::lowering_refuses` turns the kinds

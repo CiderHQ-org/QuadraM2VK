@@ -612,8 +612,9 @@ pub enum BatchOrderPolicy {
 pub enum RenderLoweringPolicy {
     /// After the call returned: the call makes Metal's checks of its arguments and
     /// of the encoder's state, copies what it was lent and holds what it names, and returns; the
-    /// encoder lowers it later, in order, before its command buffer's submission (the runtime's
-    /// lowering thread while the program goes on, the rest as the encoder ends). A refusal only
+    /// encoder lowers it later, in order, before its command buffer's submission (on the
+    /// runtime's lowering thread while the program goes on, the encoder's end too, and the rest
+    /// at what follows the end in the command buffer). A refusal only
     /// the lowering finds fails the command buffer
     /// (`CommandBufferError::CallRefused`, naming the call), which then runs nothing of that
     /// encoder or of any after it.

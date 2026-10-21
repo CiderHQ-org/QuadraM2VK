@@ -82,6 +82,8 @@ impl CommandBuffer {
     /// Refused as every encoder is: the command buffer committed, or an encoder open or abandoned
     /// (`Invalid`).
     pub fn resource_state_command_encoder(&self) -> Result<ResourceStateCommandEncoder, Error> {
+        // The last render encoder's end, where its call left it to the device's lowering thread.
+        self.settle_end();
         let mut state = self.state();
         if let Some(problem) = state.refusal() {
             return Err(invalid("resource_state_command_encoder", problem));
