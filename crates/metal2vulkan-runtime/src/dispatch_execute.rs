@@ -4,7 +4,8 @@
 //!
 //! - **What runs.** After the replay's preprocess (`bind::replay_preprocess`) and its barrier, per
 //!   command of the range in order: a compute barrier before each but the first
-//!   (`Barrier::between_dispatches`), then per variant, in the variants' order, its pipeline, its
+//!   (`Barrier::between_dispatches`), where the execution's order needs it (`gpu_execute.rs`), then
+//!   per variant, in the variants' order, its pipeline, its
 //!   push bytes naming the command's slot table (`ReplayLayout::table_offset`), its region record
 //!   (`ReplayLayout::region_offset`) and the command buffer's status words, and one
 //!   `vkCmdDispatchIndirect` of the arguments the preprocess wrote for the command and the variant
@@ -18,8 +19,9 @@
 //!   its Metal compute encoder at each barrier (argument buffers and residency sets in use, its
 //!   `MVKCmdPipelineBarrier::encode`), about 20 us of the GPU's time more.
 //! - **Pipelines.** Each variant's `VkPipeline` of its one region, made once and kept with the
-//!   variant (`Variant::region_pipeline`); its layout holds no descriptor set, and its push bytes
-//!   are all it reads besides memory by device address ([`Template::of`]).
+//!   variant (`Variant::region_pipeline`); its layout holds no descriptor binding (an empty set at
+//!   most, which nothing binds), and its push bytes are all it reads besides memory by device
+//!   address ([`Template::of`]).
 
 use super::binding::PushWrite;
 use super::degradation::BoundFormats;
@@ -48,6 +50,7 @@ enum Hole {
 /// A variant's push bytes as its dispatches write them: its push writes, and where in them each
 /// command's slot table, region record and the status words go (a write's index, the bytes into
 /// it, and what goes there).
+#[derive(Clone)]
 pub(super) struct Template {
     writes: Vec<PushWrite>,
     holes: Vec<(usize, usize, Hole)>,
@@ -57,8 +60,10 @@ impl Template {
     /// The template of `p`'s variant: `None` where its commands are not one region whose group
     /// count the replay's arguments give, with no root table and no clamp, whose every hole one of
     /// its push writes of the hole's stages covers and is the command's slot table, region record
-    /// or the status words, or where its pipeline layout holds a descriptor set: the host step
-    /// remains for it.
+    /// or the status words, or where its pipeline layout holds a descriptor binding: the host step
+    /// remains for it. An empty set is bound by none: Vulkan asks a bound set only "for each set n
+    /// that is statically used by a bound shader" (VUID-vkCmdDispatch-None-08600), and a set of no
+    /// binding cannot be.
     pub(super) fn of(p: &Prepared) -> Option<Template> {
         let [region] = p.commands.regions.as_slice() else {
             return None;
@@ -66,7 +71,12 @@ impl Template {
         if region.indirect != Some(IndirectArgs::Replay)
             || p.commands.root_table.is_some()
             || p.commands.indirect_clamp.is_some()
-            || p.variant.objects().set_count() != 0
+            || p.variant
+                .pipeline()
+                .layout
+                .sets
+                .iter()
+                .any(|set| !set.bindings.is_empty())
         {
             return None;
         }
@@ -109,13 +119,13 @@ impl Template {
 
 /// Record into `core`, after the replay's preprocess `pre` and its barrier, the indirect
 /// dispatches of the commands of `prepared`'s variants, each with its `templates`' push bytes
-/// (the module docs), reading `scratch`, with `uses`, what the variants' plans reach. Each
-/// variant's objects and its pipeline's creation time, in the variants' order. Refused as the
-/// device refuses a variant's pipeline.
+/// (the module docs), reading `scratch`, a barrier between every two commands where `barriers`,
+/// with `uses`, what the variants' plans reach. Each variant's objects and its pipeline's creation
+/// time, in the variants' order. Refused as the device refuses a variant's pipeline.
 pub(super) fn record(
     core: &mut EncoderCore,
     (pre, prepared, templates): (&ReplayPreprocess, &[Prepared], Vec<Template>),
-    scratch: &Scratch,
+    (scratch, barriers): (&Scratch, bool),
     uses: &[Use<ResourceKey>],
 ) -> Result<Vec<(Arc<VariantObjects>, Duration)>, Error> {
     let layout = pre.layout;
@@ -153,7 +163,7 @@ pub(super) fn record(
         // slot tables, region records and status words the push bytes name.
         unsafe {
             for slot in 0..layout.slots {
-                if slot > 0 {
+                if slot > 0 && barriers {
                     Barrier::between_dispatches().record(raw, command_buffer);
                 }
                 for (variant, (pipeline, pipeline_layout, template)) in

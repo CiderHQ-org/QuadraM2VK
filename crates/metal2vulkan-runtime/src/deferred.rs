@@ -7,7 +7,7 @@
 use super::command_buffer::CommandBuffer;
 use super::encoder::RecordedSegment;
 use super::error::{internal, Error};
-use super::gpu_execute;
+use super::gpu_execute::{self, Rerecord};
 use super::indirect_dispatch::ArgumentDispatch;
 use super::indirect_execute::{self, Execute, Settled, Unforeseen};
 use super::pending_dispatch::PendingDispatch;
@@ -55,6 +55,18 @@ pub(super) enum StepInputs {
     /// execution; its step names states among those alive then, and compiles only what `commit`
     /// could not settle (`DeferredPass::settle`).
     RenderPass,
+    /// An execution `commit` recorded on the GPU alone with no barrier between its commands, which
+    /// its batch's submission records again with them where a route encoded since may set a
+    /// barrier in a record (`gpu_execute::Rerecord`); no work on the GPU is waited for.
+    Rerecord(Arc<Rerecord>),
+}
+
+impl StepInputs {
+    /// Whether the segment's recording must be made again before its batch is submitted, though
+    /// a recording is in place: [`Rerecord::due`].
+    pub(super) fn rerecords(&self) -> bool {
+        matches!(self, StepInputs::Rerecord(rerecord) if rerecord.due())
+    }
 }
 
 /// What `commit` made of a segment's work ([`Deferred::prepare`]).
@@ -127,11 +139,14 @@ impl Deferred {
                 // On the GPU alone where it is total (`gpu_execute.rs`): not a checked execution,
                 // whose step reads its records for the caller's check, nor one inside a block of
                 // command predication without its preprocess's gate, whose step reads the counter.
-                if let Some(recorded) = gpu_execute::record(command_buffer, execute)? {
+                if let Some((recorded, rerecord)) = gpu_execute::record(command_buffer, execute)? {
                     return Ok(Prepared {
                         recorded: Some(recorded),
                         for_good: true,
-                        inputs: StepInputs::Settled(Vec::new()),
+                        inputs: match rerecord {
+                            Some(rerecord) => StepInputs::Rerecord(rerecord),
+                            None => StepInputs::Settled(Vec::new()),
+                        },
                         retained: None,
                         pipelines: false,
                     });
@@ -253,6 +268,10 @@ impl Deferred {
                     StepInputs::Settled(states) => states.clone(),
                     StepInputs::Unforeseen(unforeseen) => {
                         unforeseen.states(command_buffer.device())
+                    }
+                    // Recorded again on the GPU alone, with the barriers: no record is read.
+                    StepInputs::Rerecord(rerecord) => {
+                        return rerecord.record(command_buffer, execute);
                     }
                     StepInputs::Dispatch | StepInputs::None | StepInputs::RenderPass => {
                         return Err(internal("an execution's host step without its states"));

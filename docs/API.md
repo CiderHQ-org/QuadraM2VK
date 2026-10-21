@@ -2709,6 +2709,10 @@ each item named states the rule in full.
   (`CommandBuffer::add_executed_commands_handler`, no Metal counterpart): a handler is called each
   time the runtime reads an execution's records, at `commit`, in a host step, or not at all for an
   execution the GPU alone runs.
+- **An execution the GPU alone runs orders its commands one after another in a serial encoder**,
+  where Metal orders them only where their uses meet: the uses are the records', which the GPU
+  writes. In a concurrent encoder its commands run together where no route that wrote the records
+  may set a barrier (`IndirectCommandBuffer::command_writes`), and one after another otherwise.
 - **Command predication** (`encode_start_if`, `encode_start_else`, `encode_end_if` and the
   while and do-while loops) runs Metal's blocks and loops. A loop is laid down as 64 copies (16
   inside another loop); one that runs past them fails its command buffer

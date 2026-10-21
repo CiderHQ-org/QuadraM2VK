@@ -116,9 +116,18 @@ pub(super) struct Segment {
 impl Segment {
     /// Whether the host step records it before its batch is submitted: the GPU may write what
     /// its work reads, whether it could at the call or only since (`Deferred::gpu_written` is
-    /// for good), or `commit` left it for the pipelines it records.
+    /// for good), or `commit` left it for the pipelines it records; or `commit`'s recording on the
+    /// GPU alone must be made again ([`rerecords`](Self::rerecords)).
     pub(super) fn needs_step(&self) -> bool {
-        !self.stepped && (self.host || self.pipelines || self.work.gpu_written())
+        (!self.stepped && (self.host || self.pipelines || self.work.gpu_written()))
+            || self.rerecords()
+    }
+
+    /// Whether `commit` recorded it on the GPU alone with no barrier between its commands and its
+    /// batch's submission records it again with them, waiting for no work on the GPU
+    /// (`gpu_execute::Rerecord`): a route encoded since may set a barrier in a record.
+    pub(super) fn rerecords(&self) -> bool {
+        self.inputs.as_ref().is_some_and(StepInputs::rerecords)
     }
 
     /// Whether its host step waits for the work submitted before it to complete: the GPU may

@@ -35,11 +35,19 @@
 //!     the command's own for the state its record names, zero for every other variant, and for a
 //!     command that runs nothing. At most [`MAX_DISPATCHES`] (commands times variants) per
 //!     execution; past it the host step remains.
-//! - **Order.** A barrier between every two commands (`Barrier::between_dispatches`): the commands
-//!   run in Metal's order, one after another, which is one schedule of a concurrent encoder's
-//!   commands and orders a serial encoder's wherever their uses meet. The generated-commands path
-//!   runs the commands of a segment its records leave without a barrier together, as Metal's
-//!   concurrent commands may run.
+//! - **Order.** In a serial encoder, a barrier between every two commands
+//!   (`Barrier::between_dispatches`): the commands run in Metal's order, one after another, which
+//!   orders them wherever their uses meet, as the records' uses are GPU data. In a concurrent
+//!   encoder, Metal orders a command only after a barrier its record sets: where no route that wrote
+//!   the buffer's records may set one (`IndirectCommandBuffer::command_writes`, no
+//!   `CommandWrites::BARRIER`), the indirect dispatches go with no barrier between them, and else
+//!   with one between every two. A route encoded after the commit can still run before the
+//!   execution only where the execution's batch waits for an event its command buffer signals, so
+//!   its batch is held until then ([`Rerecord`]): where the buffer's records may set a barrier by
+//!   the time the batch is submitted, the commands are recorded again then, with the barriers, from
+//!   what the commit found (no work on the GPU is waited for). The generated-commands path runs
+//!   the commands of a segment its records leave without a barrier together, as Metal's concurrent
+//!   commands may run.
 //! - **Command predication.** An execution inside a block runs its preprocess by
 //!   `vkCmdDispatchIndirect` from a gate the step before it writes (`predication.rs`,
 //!   `Execute::preprocess_gate`): one invocation per command where the counter is 0, else none.
@@ -67,16 +75,16 @@ use super::binding;
 use super::blit::reads;
 use super::command_buffer::CommandBuffer;
 use super::degradation::CompiledPipeline;
+use super::device::lock;
 use super::dispatch_execute::{self, Template};
 use super::encoder::{EncoderCore, RecordedSegment};
 use super::error::{internal, Error};
 use super::executed_commands::RecordsRead;
 use super::execution::{ExecutedPipeline, Execution};
 use super::fetch_reach;
-use super::generated_commands::Commands;
 use super::generated_execute;
+use super::indirect_command_buffer::IndirectCommandBuffer;
 use super::indirect_execute::{Execute, ExecutionRange};
-use super::live_buffers::LiveTable;
 use super::owned_kernel::OwnedModule;
 use super::pipeline::{ComputePipelineState, Variant, VariantObjects};
 use super::residency::Residency;
@@ -88,12 +96,12 @@ use ash::vk;
 use metal2vulkan::bind::{
     replay_preprocess, replay_preprocess_generated, BindState, BindingPlan, DispatchCommands,
     GeneratedVariant, NeutralResource, PredicationStep, PushHole, ReplayExecution,
-    ReplayPreprocess, ReplayRefusal, ReplayVariant, RootTable, StageTable,
+    ReplayPreprocess, ReplayRefusal, ReplayVariant, ResidentRange, RootTable, StageTable,
 };
 use metal2vulkan::error::BindError;
-use metal2vulkan::pipeline::Stage;
+use metal2vulkan::pipeline::{CommandWrites, Stage};
 use std::num::NonZeroU64;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 /// The threads of a flat variant's threadgroup: a wave on most devices, and within every
 /// state's maximum but the smallest, which takes its maximum.
@@ -114,25 +122,59 @@ pub(super) struct Prepared {
     registered: ReplayVariant,
 }
 
-/// How the commands run once the preprocess wrote what they read.
-pub(super) enum Recording {
+/// How the commands run once the preprocess wrote what they read. It keeps no copy of the
+/// device's functions: the generated commands' are the device's, fetched as the commands are
+/// recorded.
+pub(super) enum Form {
     /// Through the device's generated-commands extension (`generated_execute.rs`).
-    Generated(Commands),
+    Generated,
     /// By indirect dispatches (`dispatch_execute.rs`), each variant's push template in the
     /// variants' order.
     Dispatches(Vec<Template>),
 }
 
 /// What [`total`] found: the variants, the replay's preprocess, the bind state they were
-/// planned for, the live buffers its resident set holds, and the recording. The command buffer
-/// keeps the live buffers' ranges, not their pages, until its first submission, which finds whether
-/// they still lie there and holds the table then current until it completes.
+/// planned for, the ranges of the live buffers its resident set holds, and the recording. The
+/// command buffer keeps the live buffers' ranges, not their pages, until its first submission,
+/// which finds whether they still lie there and holds the table then current until it completes.
 struct Total {
     prepared: Vec<Prepared>,
     pre: ReplayPreprocess,
     state: BindState,
-    live: Arc<LiveTable>,
-    recording: Recording,
+    live: Vec<ResidentRange>,
+    form: Form,
+}
+
+/// An execution `commit` recorded on the GPU alone by indirect dispatches with no barrier
+/// between its commands, in a concurrent encoder, as no route that wrote its buffer's records
+/// could set a barrier (the module's order): what `commit` found, kept until the batch is submitted
+/// or the execution is recorded again with the barriers, where a route encoded since may set one.
+pub(super) struct Rerecord {
+    icb: IndirectCommandBuffer,
+    total: Mutex<Option<Total>>,
+}
+
+impl Rerecord {
+    /// Whether the commands must be recorded again, with a barrier between every two, before the
+    /// batch is submitted: a route encoded since the commit may set a barrier in a record, and
+    /// they were not recorded again yet.
+    pub(super) fn due(&self) -> bool {
+        self.icb.command_writes().may(CommandWrites::BARRIER) && lock(&self.total).is_some()
+    }
+
+    /// The recording of `execute` again into a segment of `command_buffer`, as `commit` found it,
+    /// with a barrier between every two commands.
+    pub(super) fn record(
+        &self,
+        command_buffer: &CommandBuffer,
+        execute: &Execute,
+    ) -> Result<RecordedSegment, Error> {
+        let total = lock(&self.total)
+            .take()
+            .ok_or_else(|| internal("an execution recorded again twice"))?;
+        let residency = command_buffer.residency()?.kernel();
+        record_total(command_buffer, execute, &residency, &total, true)
+    }
 }
 
 /// What the recordings share: the preprocess's scratch in the command buffer's arena (its device
@@ -144,12 +186,14 @@ pub(super) struct Scratch {
 }
 
 /// The recording of `execute` on the GPU alone into a segment of `command_buffer`, where the
-/// execution is total on its device (the module's rules); `None` where it takes the host step.
-/// Refused as the device refuses an object it makes, or the arena an upload.
+/// execution is total on its device (the module's rules), and, for one recorded with no barrier
+/// between its commands, what its batch's submission needs to record it again with them; `None`
+/// where it takes the host step. Refused as the device refuses an object it makes, or the arena an
+/// upload.
 pub(super) fn record(
     command_buffer: &CommandBuffer,
     execute: &Execute,
-) -> Result<Option<RecordedSegment>, Error> {
+) -> Result<Option<(RecordedSegment, Option<Arc<Rerecord>>)>, Error> {
     // A checked execution's host step runs the caller's check first; one inside a block of
     // command predication runs here only from its preprocess's gate.
     if execute.check.is_some() || (execute.predicated() && execute.preprocess_gate.is_none()) {
@@ -168,7 +212,22 @@ pub(super) fn record(
             .any(ComputePipelineState::can_encode_indirect_commands);
         (Vec::new(), encode)
     });
-    record_total(command_buffer, execute, &residency, total).map(Some)
+    // A serial encoder orders its commands wherever their uses meet; a concurrent one only after
+    // a barrier a record sets.
+    let barriers = match &total.form {
+        Form::Dispatches(_) => {
+            execute.ordered || execute.icb.command_writes().may(CommandWrites::BARRIER)
+        }
+        Form::Generated => true,
+    };
+    let recorded = record_total(command_buffer, execute, &residency, &total, barriers)?;
+    let rerecord = (!barriers).then(|| {
+        Arc::new(Rerecord {
+            icb: execute.icb.clone(),
+            total: Mutex::new(Some(total)),
+        })
+    });
+    Ok(Some((recorded, rerecord)))
 }
 
 /// `result`'s value; `None` where the binder refuses what the GPU-alone path asks for
@@ -214,11 +273,16 @@ fn total(
     // besides (`live_buffers.rs`), listed apart from the used resources: a record's buffer address
     // and a pointer its kernel loads reach them, as Metal's do, of any count (Past 2^16 entries the
     // execution took the host step).
-    let live = device.shared().live_buffers.table(device)?;
+    let live: Vec<ResidentRange> = device
+        .shared()
+        .live_buffers
+        .table(device)?
+        .ranges()
+        .collect();
     let mut state = BindState::default();
     state.stages.insert(Stage::Kernel, StageTable::default());
     state.used_resources = residency.used_resources();
-    state.resident_ranges = live.ranges().collect();
+    state.resident_ranges = live.clone();
     let shape = state.shape();
     let states = execute.states(device);
     let mut prepared = Vec::with_capacity(states.len());
@@ -236,7 +300,7 @@ fn total(
         .and_then(|pipeline| NonZeroU64::new(pipeline.gpu_resource_id().0));
     // A flat variant runs each command as one region.
     execution.regions = 1;
-    let Some((pre, recording)) = preprocess(device, &state, &execution, &prepared)? else {
+    let Some((pre, form)) = preprocess(device, &state, &execution, &prepared)? else {
         return Ok(None);
     };
     Ok(Some(Total {
@@ -244,7 +308,7 @@ fn total(
         pre,
         state,
         live,
-        recording,
+        form,
     }))
 }
 
@@ -258,9 +322,9 @@ fn preprocess(
     state: &BindState,
     execution: &ReplayExecution,
     prepared: &[Prepared],
-) -> Result<Option<(ReplayPreprocess, Recording)>, Error> {
+) -> Result<Option<(ReplayPreprocess, Form)>, Error> {
     let registered: Vec<ReplayVariant> = prepared.iter().map(|p| p.registered).collect();
-    if let Some(commands) = device.shared().generated_commands {
+    if device.shared().generated_commands.is_some() {
         let generated: Vec<GeneratedVariant<'_>> = prepared
             .iter()
             .map(|p| GeneratedVariant::new(p.variant.pipeline(), &p.plan, &p.commands))
@@ -279,7 +343,7 @@ fn preprocess(
                         "a generated-commands replay without its sequences",
                     ));
                 }
-                return Ok(Some((pre, Recording::Generated(commands))));
+                return Ok(Some((pre, Form::Generated)));
             }
             // The product refuses the generated-commands path for these variants on this
             // device: the indirect dispatches remain.
@@ -312,7 +376,7 @@ fn preprocess(
     if pre.generated.is_some() || pre.layout.generated.is_some() {
         return Err(internal("a dispatches' replay with sequences"));
     }
-    Ok(Some((pre, Recording::Dispatches(templates))))
+    Ok(Some((pre, Form::Dispatches(templates))))
 }
 
 /// The flat replay variant of `pipeline` for `state` (of `shape`), instantiated for its
@@ -394,12 +458,14 @@ fn scratch_bytes(pre: &ReplayPreprocess, sink: u64) -> Result<Vec<u8>, Error> {
 }
 
 /// Record the total execution `execute` (`total`, with `residency`, the command buffer's) into a
-/// segment of `command_buffer` (the module's rules).
+/// segment of `command_buffer` (the module's rules), indirect dispatches with a barrier between
+/// every two commands where `barriers`.
 fn record_total(
     command_buffer: &CommandBuffer,
     execute: &Execute,
     residency: &Residency,
-    total: Total,
+    total: &Total,
+    barriers: bool,
 ) -> Result<RecordedSegment, Error> {
     let device = command_buffer.device().clone();
     let Total {
@@ -407,7 +473,7 @@ fn record_total(
         pre,
         state,
         live,
-        recording,
+        form,
     } = total;
     let kernel = device.owned_kernel(OwnedModule::ReplayPreprocess)?;
     let no_address = || internal("a replay on a device without device addresses");
@@ -420,7 +486,7 @@ fn record_total(
             .upload(&device, &[], u64::from(NeutralResource::SINK_BYTES))?
             .device_address()
             .ok_or_else(no_address)?;
-        let bytes = scratch_bytes(&pre, sink)?;
+        let bytes = scratch_bytes(pre, sink)?;
         // Its root tables start at device addresses that are multiples of 32 (`upload.rs`).
         let upload = cb
             .uploads
@@ -454,7 +520,7 @@ fn record_total(
     // Inside a block of command predication the preprocess runs from its gate, made for one
     // invocation per command of the range (`Execute::preprocess_gate`), where the counter is 0.
     let gate = execute.preprocess_gate.clone();
-    let uses = variant_uses(residency, &prepared)?;
+    let uses = variant_uses(residency, prepared)?;
     let preprocess_uses = [reads(storage, 0..storage.length())];
 
     let mut core = EncoderCore::segment(command_buffer, execute.ordered)?;
@@ -491,15 +557,26 @@ fn record_total(
             }
         }
     });
-    // The preprocess's writes before the commands' preprocessing, indirect and shader reads.
+    // The preprocess's writes before the commands' preprocessing, indirect and shader reads; in a
+    // serial encoder the commands need no barrier of the tracker's after the preprocess's read of
+    // the records, which a command's resident write of the buffer would otherwise ask.
     core.barrier(Barrier::everything());
-    let made = match recording {
-        Recording::Generated(commands) => {
-            generated_execute::record(&mut core, (&commands, &pre, &prepared), &scratch, &uses)?
+    core.uses().ordered_everything();
+    let made = match form {
+        Form::Generated => {
+            let commands = device
+                .shared()
+                .generated_commands
+                .as_ref()
+                .ok_or_else(|| internal("generated commands on a device without them"))?;
+            generated_execute::record(&mut core, (commands, pre, prepared), &scratch, &uses)?
         }
-        Recording::Dispatches(templates) => {
-            dispatch_execute::record(&mut core, (&pre, &prepared, templates), &scratch, &uses)?
-        }
+        Form::Dispatches(templates) => dispatch_execute::record(
+            &mut core,
+            (pre, prepared, templates.clone()),
+            (&scratch, barriers),
+            &uses,
+        )?,
     };
     for (p, (objects, created_in)) in prepared.iter().zip(&made) {
         core.executed(|| {
@@ -514,10 +591,9 @@ fn record_total(
     // Its resident set, resolved now: the command buffer's first submission finds whether the
     // live buffers and what its encoders made resident still lie there, holding the table from
     // then on; until then a release or a rebind lets their pages go.
-    core.resolved(live.ranges().chain(residency.resident_ranges()));
-    drop(live);
+    core.resolved(live.iter().copied().chain(residency.resident_ranges()));
     core.retain(scratch.upload);
-    let variants: Vec<Arc<Variant>> = prepared.into_iter().map(|p| p.variant).collect();
+    let variants: Vec<Arc<Variant>> = prepared.iter().map(|p| Arc::clone(&p.variant)).collect();
     core.retain(variants);
     core.end_segment()
 }

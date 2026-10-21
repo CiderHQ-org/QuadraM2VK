@@ -48,7 +48,7 @@ pub(super) use group::{Group, GroupEnd, GROUP_BATCHES};
 pub(super) use submit::{BatchLists, Submitting};
 
 use super::contexts::{self, Run};
-use super::deferred::{Deferred, Prepared};
+use super::deferred::{Deferred, Prepared, StepInputs};
 use super::degradation::Degradation;
 use super::descriptor_arena::DescriptorArena;
 use super::device::lock;
@@ -2517,7 +2517,10 @@ impl CommandBufferShared {
             summaries.push(&encoder.summary);
             for segment in &encoder.segments {
                 match &segment.recorded {
-                    Some(recording) if !segment.needs_step() => summaries.push(&recording.summary),
+                    // One recorded again on the GPU alone uses what its recording does.
+                    Some(recording) if !segment.needs_step() || segment.rerecords() => {
+                        summaries.push(&recording.summary)
+                    }
                     _ => known.push(segment.known_summary(&self.device)?),
                 }
             }
@@ -2571,10 +2574,15 @@ impl CommandBufferShared {
                 .collect()
         };
         self.read_mappings(index);
-        let Some((_, first, _)) = steps.first() else {
+        if steps.is_empty() {
             return;
-        };
-        let announced = first.clone();
+        }
+        // The first segment a host step records, which the device announces: a recording on the
+        // GPU alone made again announces nothing (`gpu_execute::Rerecord`).
+        let announced = steps
+            .iter()
+            .find(|(_, _, inputs)| !matches!(inputs, Some(StepInputs::Rerecord(_))))
+            .map(|(_, work, _)| work.clone());
         let buffer = CommandBuffer(Arc::clone(self));
         for ((encoder, at), work, inputs) in steps {
             let Some(inputs) = inputs else {
@@ -2610,7 +2618,9 @@ impl CommandBufferShared {
             drop((work, inputs));
         }
         drop(buffer);
-        announced.degrade(device);
+        if let Some(announced) = announced {
+            announced.degrade(device);
+        }
     }
 
     /// The host step's reading of batch `index`'s indirect sparse updates (`sparse/indirect.rs`),
