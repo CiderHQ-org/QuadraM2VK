@@ -200,6 +200,10 @@ pub(super) struct DeviceShared {
     /// The alignment of every upload (`upload.rs`): 16 bytes, and the device's storage and
     /// uniform buffer offset alignments.
     pub(super) upload_alignment: u64,
+    /// The most dynamic uniform and storage buffers a pipeline layout takes
+    /// (`maxDescriptorSetUniformBuffersDynamic`, `maxDescriptorSetStorageBuffersDynamic`), which
+    /// the set-0 bindings a variant makes dynamic stay within (`pipeline/objects.rs`).
+    pub(super) dynamic_buffers: [u32; 2],
     /// Shared with the releases of freed memory posted to the handler threads, which hold
     /// nothing of the device (`freed_memory.rs`).
     pub(super) memory: Arc<Mutex<Memory>>,
@@ -1571,6 +1575,10 @@ impl Device {
             views_epoch: AtomicU64::new(0),
             device_address,
             upload_alignment,
+            dynamic_buffers: [
+                limits.max_descriptor_set_uniform_buffers_dynamic,
+                limits.max_descriptor_set_storage_buffers_dynamic,
+            ],
             memory: Arc::new(Mutex::new(memory)),
             addresses: Mutex::new(AddressSpace::new()),
             recycled_buffers: Mutex::new(Recycler::new(recycle::BUFFERS)),

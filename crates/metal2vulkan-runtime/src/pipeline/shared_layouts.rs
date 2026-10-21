@@ -11,8 +11,9 @@
 //! out push constants of the same bytes, where each variant's own layout made it push them whole.
 //!
 //! - **Exact.** Keyed by all that `vkCreateDescriptorSetLayout` and `vkCreatePipelineLayout` take
-//!   from a variant: each set's flags and whether its draws push it, each binding's number, type,
-//!   count, stages and flags and the samplers it bakes, and the push-constant ranges. Two variants
+//!   from a variant: each set's flags and whether its draws push it, each binding's number, type
+//!   (a set-0 buffer binding's dynamic type where the variant makes it dynamic), count, stages and
+//!   flags and the samplers it bakes, and the push-constant ranges. Two variants
 //!   share a layout only where they would create identically defined ones. The baked samplers go
 //!   by their handles: the device's set of the same descriptions (`objects::sampler_set`), or a
 //!   host step's own, which no other key holds.
@@ -88,7 +89,9 @@ struct SetKey {
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct BindingKey {
     binding: u32,
-    ty: metal2vulkan::vk::DescriptorType,
+    /// Its type as the set layout takes it: the dynamic type of a set-0 buffer binding the
+    /// variant makes dynamic (`objects::dynamic_bindings`).
+    ty: vk::DescriptorType,
     count: u32,
     stages: metal2vulkan::vk::ShaderStageFlags,
     flags: metal2vulkan::vk::DescriptorBindingFlags,
@@ -101,7 +104,8 @@ pub(crate) type SharedLayouts = ContentKeyed<LayoutKey, SharedLayout>;
 
 /// The device's layout of `layout`, a compiled pipeline's, whose bindings that bake a sampler take
 /// `samplers`' in the layout's order of sets and bindings, its set 0 pushed where
-/// `push_set_zero`: made now where the device holds none. In a program's call
+/// `push_set_zero`, and its set-0 bindings numbered in `dynamic` of their dynamic types: made now
+/// where the device holds none. In a program's call
 /// (`content_keyed::program_call`) one made here enters the device's map; elsewhere a miss makes
 /// one of the caller's own that no lookup finds, gone at a later sweep once nothing else holds it:
 /// each call here sweeps.
@@ -109,7 +113,7 @@ pub(crate) fn shared_layout(
     device: &Device,
     layout: &PipelineLayout,
     samplers: &Arc<SamplerSet>,
-    push_set_zero: bool,
+    (push_set_zero, dynamic): (bool, &[u32]),
 ) -> Result<Arc<SharedLayout>, Error> {
     let mut baked = samplers.samplers().iter().copied();
     let mut sets = Vec::with_capacity(layout.sets.len());
@@ -128,9 +132,14 @@ pub(crate) fn shared_layout(
                 }
                 None => Vec::new(),
             };
+            let ty: vk::DescriptorType = binding.ty.into();
+            let made_dynamic = index == 0 && dynamic.contains(&binding.binding);
             bindings.push(BindingKey {
                 binding: binding.binding,
-                ty: binding.ty,
+                ty: match made_dynamic {
+                    true => crate::binding::dynamic_type(ty),
+                    false => ty,
+                },
                 count: binding.count,
                 stages: binding.stages,
                 flags: binding.flags,
@@ -184,7 +193,8 @@ fn made_layout(
     for (set, set_key) in layout.sets.iter().zip(&key.sets) {
         let immutable: Vec<&[vk::Sampler]> =
             (set_key.bindings.iter()).map(|b| &b.samplers[..]).collect();
-        match create_set_layout(device, set, &immutable, set_key.pushed) {
+        let types: Vec<vk::DescriptorType> = set_key.bindings.iter().map(|b| b.ty).collect();
+        match create_set_layout(device, set, (&immutable, &types), set_key.pushed) {
             Ok(set_layout) => made.set_layouts.push(set_layout),
             Err(error) => {
                 made.destroy(shared);

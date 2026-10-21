@@ -698,6 +698,8 @@ pub(crate) struct MeshSteps {
     pub(crate) layout: vk::PipelineLayout,
     /// Set 0, the draw's, where the layout has one.
     pub(crate) sets: Vec<vk::DescriptorSet>,
+    /// The dynamic offsets the draw binds set 0 with (`binding::dynamic_writes`).
+    pub(crate) offsets: Vec<u32>,
     /// Set 1, the command buffer's heap set of the variant, where it has one.
     pub(crate) heap: Option<vk::DescriptorSet>,
     /// The draw's push writes of the compute stage.
@@ -791,7 +793,7 @@ impl MeshSteps {
                         self.layout,
                         0,
                         &self.sets,
-                        &[],
+                        &self.offsets,
                     );
                 }
                 if let Some(heap) = self.heap {

@@ -596,6 +596,7 @@ fn record_kept(
                         shape: owned.shape,
                         pipeline: *pipeline,
                         sets: &owned.sets,
+                        offsets: &owned.offsets,
                         pushed: &owned.pushed,
                         push_descriptor: shared.push_descriptor,
                         pushes_after_pipeline_binds: shared.pushes_after_pipeline_binds,

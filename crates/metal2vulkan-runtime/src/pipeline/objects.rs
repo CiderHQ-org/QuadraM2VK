@@ -351,6 +351,9 @@ pub(crate) struct VariantObjects {
     set_needs: Vec<SetNeeds>,
     /// Whether its draws push set 0 rather than allocate it (`pushes_set_zero`).
     push_set_zero: bool,
+    /// The set-0 bindings its layout makes dynamic ([`dynamic_bindings`]), by number, ascending:
+    /// each command binds its set 0 with their offsets (`binding::Dynamic`).
+    dynamic: Vec<u32>,
     /// The shape of its set 0 and push-constant ranges ([`set_zero_shape`]), which a draw's
     /// record compares with the last push's (`render/bound.rs`).
     set_zero_shape: u64,
@@ -538,7 +541,8 @@ impl VariantObjects {
         pipeline: CompiledPipeline<'_>,
     ) -> Result<VariantObjects, Error> {
         let push_set_zero = pushes_set_zero(device, layout, stages, pipeline);
-        let set_needs = needs_of(layout, push_set_zero)?;
+        let dynamic = dynamic_bindings(device, layout, push_set_zero);
+        let set_needs = needs_of(layout, push_set_zero, &dynamic)?;
         // One sampler per binding that bakes one, in the layout's order: the live set of the same
         // samplers where it holds one, else one made now (`sampler_set`).
         let descs: Vec<metal2vulkan::vk::SamplerDesc> = layout
@@ -557,7 +561,8 @@ impl VariantObjects {
             .iter()
             .map(|stage| words_digest(&stage.spirv))
             .collect();
-        let shared_layout = shared_layout(device, layout, &samplers, push_set_zero)?;
+        let shared_layout = shared_layout(device, layout, &samplers, (push_set_zero, &dynamic))?;
+        let set_zero_shape = set_zero_shape(layout, push_set_zero, &dynamic);
         let mut objects = VariantObjects {
             device: device.clone(),
             stages: Vec::with_capacity(stages.len()),
@@ -565,7 +570,8 @@ impl VariantObjects {
             layout: shared_layout,
             set_needs,
             push_set_zero,
-            set_zero_shape: set_zero_shape(layout, push_set_zero),
+            dynamic,
+            set_zero_shape,
             immutable_pushes: Vec::new(),
             specialized: stages
                 .iter()
@@ -612,7 +618,8 @@ impl VariantObjects {
         pipeline: CompiledPipeline<'_>,
     ) -> Result<(VariantObjects, Vec<(Place, RawPipeline)>), Error> {
         let push_set_zero = pushes_set_zero(device, layout, stages, pipeline);
-        let set_needs = needs_of(layout, push_set_zero)?;
+        let dynamic = dynamic_bindings(device, layout, push_set_zero);
+        let set_needs = needs_of(layout, push_set_zero, &dynamic)?;
         let shared = device.shared();
         let back = lock(&shared.kept).take(shared, compiled);
         // The kept variants' queue applied (an evicted instance's modules let go): the device's
@@ -642,7 +649,8 @@ impl VariantObjects {
             layout: back.objects.layout,
             set_needs,
             push_set_zero,
-            set_zero_shape: set_zero_shape(layout, push_set_zero),
+            set_zero_shape: set_zero_shape(layout, push_set_zero, &dynamic),
+            dynamic,
             immutable_pushes,
             specialized: stages
                 .iter()
@@ -775,6 +783,11 @@ impl VariantObjects {
     /// The shape of its set 0 and push-constant ranges ([`set_zero_shape`]).
     pub(crate) fn set_zero_shape(&self) -> u64 {
         self.set_zero_shape
+    }
+
+    /// The set-0 bindings its layout makes dynamic, by number, ascending ([`dynamic_bindings`]).
+    pub(crate) fn dynamic_bindings(&self) -> &[u32] {
+        &self.dynamic
     }
 
     /// The writes its draws push for set 0's baked samplers, where they push set 0.
@@ -1007,11 +1020,12 @@ impl VariantObjects {
 }
 
 /// The `VkDescriptorSetLayout` of `set`, each binding with its `immutable` samplers (none where
-/// its list is empty or missing).
+/// its list is empty or missing) and of its type in `types` (the set's own where the list is
+/// shorter).
 pub(crate) fn create_set_layout(
     device: &Device,
     set: &DescriptorSetLayout,
-    immutable: &[&[vk::Sampler]],
+    (immutable, types): (&[&[vk::Sampler]], &[vk::DescriptorType]),
     push: bool,
 ) -> Result<vk::DescriptorSetLayout, Error> {
     let bindings: Vec<vk::DescriptorSetLayoutBinding<'_>> = set
@@ -1019,9 +1033,10 @@ pub(crate) fn create_set_layout(
         .iter()
         .enumerate()
         .map(|(n, binding)| {
+            let ty = types.get(n).copied().unwrap_or(binding.ty.into());
             let info = vk::DescriptorSetLayoutBinding::default()
                 .binding(binding.binding)
-                .descriptor_type(binding.ty.into())
+                .descriptor_type(ty)
                 .descriptor_count(binding.count)
                 .stage_flags(binding.stages.into());
             match immutable.get(n).filter(|samplers| !samplers.is_empty()) {
@@ -1055,16 +1070,17 @@ pub(crate) fn create_set_layout(
 }
 
 /// The shape of `layout`'s set 0 and push-constant ranges, where its draws push set 0
-/// (`push_set_zero`) or not: a hash of what Vulkan's compatibility for set 0 compares (the set-0
-/// `VkDescriptorSetLayout`'s create info, each binding's number, type, count, stages, baked sampler
-/// and flags and the set's flags, and the push-constant ranges), which two variants of the same
+/// (`push_set_zero`) or not, its bindings numbered in `dynamic` of their dynamic types: a hash of
+/// what Vulkan's compatibility for set 0 compares (the set-0 `VkDescriptorSetLayout`'s create
+/// info, each binding's number, type, count, stages, baked sampler and flags and the set's flags,
+/// and the push-constant ranges), which two variants of the same
 /// shape would create identically defined, compatible for set 0 (Pipeline Layout
 /// Compatibility). Variants share a layout only where it is identically defined whole
 /// (`shared_layouts.rs`), so a draw's record compares shapes to count the pushes that carry set 0
 /// whole across a switch between two layouts of equal shapes (which differ in a later set, or
 /// bake a host step's own samplers; `WorkCounts::set_zero_equal_shape_switches`). Taken once, as
 /// the variant's objects are made.
-fn set_zero_shape(layout: &PipelineLayout, push_set_zero: bool) -> u64 {
+fn set_zero_shape(layout: &PipelineLayout, push_set_zero: bool, dynamic: &[u32]) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::hash::DefaultHasher::new();
     push_set_zero.hash(&mut hasher);
@@ -1073,6 +1089,7 @@ fn set_zero_shape(layout: &PipelineLayout, push_set_zero: bool) -> u64 {
         for binding in &set.bindings {
             binding.binding.hash(&mut hasher);
             binding.ty.hash(&mut hasher);
+            dynamic.contains(&binding.binding).hash(&mut hasher);
             binding.count.hash(&mut hasher);
             binding.stages.hash(&mut hasher);
             binding.immutable_sampler.hash(&mut hasher);
@@ -1084,20 +1101,70 @@ fn set_zero_shape(layout: &PipelineLayout, push_set_zero: bool) -> u64 {
 }
 
 /// What one set of each of `layout`'s sets takes from a pool, by set number: nothing for set 0
-/// where it is pushed (`push_set_zero`).
-fn needs_of(layout: &PipelineLayout, push_set_zero: bool) -> Result<Vec<SetNeeds>, Error> {
+/// where it is pushed (`push_set_zero`), and set 0's bindings numbered in `dynamic` of their
+/// dynamic types.
+fn needs_of(
+    layout: &PipelineLayout,
+    push_set_zero: bool,
+    dynamic: &[u32],
+) -> Result<Vec<SetNeeds>, Error> {
     layout
         .sets
         .iter()
         .enumerate()
-        .map(|(index, set)| match push_set_zero && index == 0 {
-            true => Ok(SetNeeds {
+        .map(|(index, set)| match (push_set_zero, index) {
+            (true, 0) => Ok(SetNeeds {
                 counts: Vec::new(),
                 flags: vk::DescriptorPoolCreateFlags::empty(),
             }),
-            false => set_needs(set),
+            (false, 0) => needs_typed(set, dynamic),
+            _ => set_needs(set),
         })
         .collect()
+}
+
+/// The set-0 bindings of `layout` a variant makes dynamic, by number, ascending: those whose
+/// descriptor can sit at a set that stays as it was while only the offsets its commands bind
+/// change, the offsets given as each command binds the set
+/// (`VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC`, `..._STORAGE_BUFFER_DYNAMIC`). None where its
+/// commands push set 0 (a push descriptor set layout holds no dynamic buffer). Else each uniform
+/// or storage buffer binding of one descriptor that each stage using it uses through one variable
+/// (`DescriptorBinding::variables`) and no stage the pipeline adds reads (a tessellation control
+/// or geometry stage, whose variables the layout does not count), in binding order while the
+/// device's `maxDescriptorSetUniformBuffersDynamic` and `maxDescriptorSetStorageBuffersDynamic`
+/// take them; every other binding stays of its own type. A binding of several variables stays
+/// static: MoltenVK 1.4.1's SPIRV-Cross writes Metal that does not compile for a dynamic buffer an
+/// entry point uses through more than one (it declares one variable's local alone).
+fn dynamic_bindings(device: &Device, layout: &PipelineLayout, push_set_zero: bool) -> Vec<u32> {
+    let Some(set) = layout.sets.first().filter(|_| !push_set_zero) else {
+        return Vec::new();
+    };
+    let added = vk::ShaderStageFlags::TESSELLATION_CONTROL
+        | vk::ShaderStageFlags::TESSELLATION_EVALUATION
+        | vk::ShaderStageFlags::GEOMETRY;
+    let [mut uniform, mut storage] = device.shared().dynamic_buffers;
+    let mut dynamic = Vec::new();
+    for binding in &set.bindings {
+        let stages: vk::ShaderStageFlags = binding.stages.into();
+        let flags: vk::DescriptorBindingFlags = binding.flags.into();
+        if binding.count != 1
+            || binding.variables != 1
+            || stages.intersects(added)
+            || !flags.is_empty()
+        {
+            continue;
+        }
+        let left = match binding.ty.into() {
+            vk::DescriptorType::UNIFORM_BUFFER => &mut uniform,
+            vk::DescriptorType::STORAGE_BUFFER => &mut storage,
+            _ => continue,
+        };
+        if *left > 0 {
+            *left -= 1;
+            dynamic.push(binding.binding);
+        }
+    }
+    dynamic
 }
 
 /// The descriptor types a pushed set 0 takes: those a set-0 write (`binding::Info`) carries, but
@@ -1195,6 +1262,11 @@ fn immutable_pushes(
 /// descriptor type, since a set takes every binding's whole count; and `UPDATE_AFTER_BIND` when
 /// the set layout is `UPDATE_AFTER_BIND_POOL`.
 pub(crate) fn set_needs(set: &DescriptorSetLayout) -> Result<SetNeeds, Error> {
+    needs_typed(set, &[])
+}
+
+/// [`set_needs`] of `set` with its bindings numbered in `dynamic` of their dynamic types.
+fn needs_typed(set: &DescriptorSetLayout, dynamic: &[u32]) -> Result<SetNeeds, Error> {
     let mut counts: std::collections::BTreeMap<i32, u32> = std::collections::BTreeMap::new();
     let mut flags = vk::DescriptorPoolCreateFlags::empty();
     let set_flags: vk::DescriptorSetLayoutCreateFlags = set.flags.into();
@@ -1203,6 +1275,10 @@ pub(crate) fn set_needs(set: &DescriptorSetLayout) -> Result<SetNeeds, Error> {
     }
     for binding in &set.bindings {
         let ty: vk::DescriptorType = binding.ty.into();
+        let ty = match dynamic.contains(&binding.binding) {
+            true => crate::binding::dynamic_type(ty),
+            false => ty,
+        };
         let count = counts.entry(ty.as_raw()).or_default();
         *count = count
             .checked_add(binding.count)

@@ -554,6 +554,17 @@ for dependency in &pipeline.dependencies {
   (`DescriptorCount`), and a stage that would bind it only to test its argument samplers for a
   cubic filter binds nothing, so the plan refuses a cubic sampler listed beside it
   (`SamplerBicubicFilter`).
+- Each binding's `variables` is the most variables one stage's entry point uses at it (those its
+  `OpEntryPoint` lists): a function that reaches a buffer through several types uses a variable of
+  each type at the buffer's binding. A set-0 uniform or storage buffer binding may be created as its dynamic type
+  (`VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC`, `..._STORAGE_BUFFER_DYNAMIC`), its descriptor
+  written at offset 0 and its range's offset bound as the dynamic offset: the module reads the same
+  bytes, and commands that differ only in offsets can bind one set. The runtime does so for each
+  such binding of one descriptor and one variable that no stage the pipeline adds reads, in binding
+  order within `maxDescriptorSetUniformBuffersDynamic` and `maxDescriptorSetStorageBuffersDynamic`,
+  where it does not push set 0; the rest stay of their own types. Keep a binding of several
+  variables static on MoltenVK 1.4.1: its SPIRV-Cross writes Metal that does not compile for a
+  dynamic buffer an entry point uses through more than one variable.
 - `dependencies` lists the bind-time state the pipeline depends on (`RuntimeFact`: threadgroup
   sizes, sampler coordinate modes, buffer ranges, ...) and how this profile honors each
   (`Mechanism`: a specialization constant, a push field, a plan-time check, a variant). The plan

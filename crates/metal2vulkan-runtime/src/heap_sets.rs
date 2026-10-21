@@ -960,7 +960,7 @@ impl RawLayout {
         {
             return Err(internal("a heap set with an immutable sampler"));
         }
-        let raw = super::pipeline::create_set_layout(device, layout, &[], false)?;
+        let raw = super::pipeline::create_set_layout(device, layout, (&[], &[]), false)?;
         Ok(RawLayout {
             device: device.clone(),
             raw,

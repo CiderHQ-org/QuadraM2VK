@@ -151,6 +151,8 @@ pub(super) struct TileDispatch {
     copied: [[u32; 2]; 2],
     layout: vk::PipelineLayout,
     sets: Vec<vk::DescriptorSet>,
+    /// The dynamic offsets set 0 is bound with (`binding::dynamic_writes`).
+    offsets: Vec<u32>,
     /// Set 0's writes, where the variant pushes it (`pipeline::objects::pushes_set_zero`):
     /// pushed with the device's push command (`Vk::push_descriptor`).
     pushed: Vec<binding::SetWrite>,
@@ -237,7 +239,7 @@ impl TileDispatch {
                     self.layout,
                     0,
                     &self.sets,
-                    &[],
+                    &self.offsets,
                 );
             }
             if let Some(heap) = self.heap {
@@ -1187,9 +1189,11 @@ impl RenderCommandEncoder {
         };
         let objects = Arc::clone(variant.objects());
         // Set 0 per dispatch; set 1 the device's (written below, once nothing refuses).
-        let (heap_writes, writes): (Vec<_>, Vec<_>) =
+        let (heap_writes, mut writes): (Vec<_>, Vec<_>) =
             writes.into_iter().partition(|write| write.set > 0);
         let set = objects.set_zero(&mut self.core.command_buffer().state().descriptors)?;
+        let mut offsets = Vec::new();
+        binding::dynamic_writes(&mut writes, objects.dynamic_bindings(), &mut offsets);
         let pushed = match objects.pushes_set_zero() {
             true => binding::SetWrite::pushed(&writes, objects.immutable_pushes()),
             false => {
@@ -1254,6 +1258,7 @@ impl RenderCommandEncoder {
             copied,
             layout: objects.layout(),
             sets: set.into_iter().collect(),
+            offsets,
             pushed,
             heap: heap_set,
             regions,

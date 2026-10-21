@@ -126,6 +126,8 @@ pub(super) struct Bound {
     /// The layout the descriptor sets below were bound with, and each set number's set.
     sets_layout: vk::PipelineLayout,
     sets: Vec<Option<vk::DescriptorSet>>,
+    /// The dynamic offsets set 0 was bound with, where `sets` holds it (`binding::dynamic_writes`).
+    offsets: Vec<u32>,
     /// The descriptors pushed as set 0 with `sets_layout`, where set 0 holds pushed ones.
     pushed: Vec<SetWrite>,
     /// The shape of `sets_layout`'s set 0 and push-constant ranges, as the last push gave it
@@ -254,14 +256,16 @@ impl Bound {
         true
     }
 
-    /// Whether binding `sets` from set number `first` with `layout` sets anything: noted as
-    /// bound where it does.
+    /// Whether binding `sets` from set number `first` with `layout` and the dynamic offsets
+    /// `offsets` sets anything: noted as bound where it does. A set holds its dynamic offsets as
+    /// it was bound with them, so set 0 bound again with other offsets sets them. Only set 0
+    /// holds dynamic buffers (`objects::dynamic_bindings`).
     #[inline]
     pub(super) fn sets(
         &mut self,
         layout: vk::PipelineLayout,
         first: u32,
-        sets: &[vk::DescriptorSet],
+        (sets, offsets): (&[vk::DescriptorSet], &[u32]),
     ) -> bool {
         let first = first as usize;
         let held = |at: usize| self.sets.get(at).copied().flatten();
@@ -270,8 +274,13 @@ impl Bound {
                 .iter()
                 .enumerate()
                 .all(|(i, &set)| held(first + i) == Some(set))
+            && (first > 0 || self.offsets == offsets)
         {
             return false;
+        }
+        if first == 0 {
+            self.offsets.clear();
+            self.offsets.extend_from_slice(offsets);
         }
         if self.sets_layout != layout {
             self.sets_layout = layout;

@@ -48,6 +48,8 @@ pub(super) struct Recording {
     pub(super) layout: vk::PipelineLayout,
     /// Set 0, where the variant binds one.
     pub(super) set: Option<vk::DescriptorSet>,
+    /// The dynamic offsets set 0 is bound with (`binding::dynamic_writes`).
+    pub(super) offsets: Vec<u32>,
     /// Set 0's writes, where the variant pushes it (`pipeline::objects::pushes_set_zero`):
     /// pushed with the device's push command (`Vk::push_descriptor`).
     pub(super) pushed: Vec<SetWrite>,
@@ -94,7 +96,7 @@ impl Recording {
                             self.layout,
                             0,
                             &[set],
-                            &[],
+                            &self.offsets,
                         );
                     }
                 }

@@ -29,6 +29,7 @@
 //!   more descriptors than the pool it would open ([`DescriptorArena::fitted`]), so a texture that
 //!   holds its sets for its life holds no larger pool than its own.
 
+use super::binding::SetCache;
 use super::error::{vulkan, Error};
 use super::spares::{release_in_section, DescriptorPool};
 use super::Device;
@@ -171,6 +172,10 @@ pub(crate) struct DescriptorArena {
     device: Option<Device>,
     /// Whether it takes only spares no larger than the pools it opens (the module docs).
     fitted: bool,
+    /// The sets 0 of its pools the command buffer's recorded commands wrote, by what they hold
+    /// (`binding::SetCache`), from its first command that looks one up: forgotten as the pools
+    /// go. Boxed, so a fitted arena, which keeps none, stays small.
+    sets: Option<Box<SetCache>>,
 }
 
 impl DescriptorArena {
@@ -182,6 +187,7 @@ impl DescriptorArena {
             pools: Vec::new(),
             device: None,
             fitted: true,
+            sets: None,
         }
     }
 
@@ -238,15 +244,23 @@ impl DescriptorArena {
         Ok(set)
     }
 
+    /// The sets 0 of its pools the command buffer's recorded commands wrote, by what they hold
+    /// (`binding::SetCache`).
+    pub(crate) fn sets(&mut self) -> &mut SetCache {
+        self.sets.get_or_insert_default()
+    }
+
     /// Every pool, taken out, for the caller to give back or release where it holds no lock: to
     /// the spares' list the arena takes from (fitted or not).
     pub(crate) fn take(&mut self) -> DescriptorArena {
         self.book.rooms.clear();
+        self.sets = None;
         DescriptorArena {
             book: Book::default(),
             pools: std::mem::take(&mut self.pools),
             device: self.device.clone(),
             fitted: self.fitted,
+            sets: None,
         }
     }
 
@@ -254,6 +268,7 @@ impl DescriptorArena {
     /// their sets any more.
     pub(crate) fn give_back(&mut self) {
         self.book.rooms.clear();
+        self.sets = None;
         let Some(device) = &self.device else {
             return;
         };
@@ -269,6 +284,7 @@ impl DescriptorArena {
     /// was never submitted).
     pub(crate) fn release(&mut self) {
         self.book.rooms.clear();
+        self.sets = None;
         let Some(device) = &self.device else {
             return;
         };

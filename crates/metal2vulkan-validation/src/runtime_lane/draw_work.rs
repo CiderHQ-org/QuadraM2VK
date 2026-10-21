@@ -42,7 +42,11 @@
 //!   switching pipelines, not the dynamic states both make dynamic.
 //! - **Bound sets.** Where the device binds set 0, a draw that writes the descriptors its
 //!   encoder's last draw wrote into a set of the same layout binds that set again
-//!   (`WorkCounts::set_zero_sets_reused`); any change of what set 0 holds writes a set of its own.
+//!   (`WorkCounts::set_zero_sets_reused`), and one that writes those an earlier draw of its
+//!   command buffer wrote, in any of its encoders, binds that one
+//!   (`WorkCounts::set_zero_sets_found`); a draw that writes descriptors no kept set holds writes
+//!   a set of its own. Inline bytes are bound at their dynamic offset where the variant makes
+//!   their binding dynamic, so other bytes change no descriptor.
 //! - **Pushed sets.** Where the device pushes set 0, a draw that changes some of its set's
 //!   descriptors pushes only those (`WorkCounts::set_zero_writes_pushed`). Each test of set 0 runs
 //!   with `VK_KHR_push_descriptor` withheld too, so every device runs the path of one without the
@@ -1262,10 +1266,11 @@ fn draws_of_an_unchanged_state_record_its_commands_once() {
 
 /// A draw binds the set 0 its encoder's last draw allocated and wrote only where it writes the
 /// same descriptors into a set of the same layout (`WorkCounts::set_zero_sets_reused`): a draw
-/// again of an unchanged state takes it; a draw after a change of an object set 0 names writes its
-/// own: another texture, the texture an earlier draw but not the last bound, a sampler state of
+/// again of an unchanged state takes it; a draw after a change of an object set 0 names does not:
+/// another texture, the texture an earlier draw but not the last bound, a sampler state of
 /// another descriptor, a buffer in place of bytes; and a second encoder's first draw of the first
-/// encoder's last state writes its own, the memo being its encoder's. Whether other inline bytes
+/// encoder's last state does not, the memo being its encoder's (such a draw may bind a set its
+/// command buffer keeps, `WorkCounts::set_zero_sets_found`). Whether other inline bytes
 /// or another offset of a buffer change the set's writes is the variant's (either may be push
 /// data); each column holds what its last draw drew all the same, so a set taken again held
 /// what its draw reads. Where the device pushes set 0, none binds one. Both ways
@@ -1367,6 +1372,65 @@ fn a_draw_binds_the_last_set_zero_only_where_it_writes_the_same() {
                 0 | 2..=5 => RED,
                 _ => CLEAR,
             };
+            assert_eq!(pixel, want, "pixel {at}: {pixels:?}");
+        }
+    });
+}
+
+/// Draws of other inline bytes, one column each, alternating between two textures: a draw binds
+/// the set 0 an earlier draw of its command buffer allocated and wrote where it writes the same
+/// descriptors into a set of the same layout (`WorkCounts::set_zero_sets_found`), its bytes bound
+/// at their dynamic offset, so the set holds the same descriptors whatever bytes the draw reads:
+/// past the first two, each draw binds the set its texture's last draw wrote, its encoder's last
+/// draw having bound the other texture, and so does a second encoder's first draw, whose encoder
+/// wrote none. Each column holds its own bytes' rectangle in its own texture's color, so each
+/// set found binds the bytes its draw set. Where the device pushes set 0, none binds one. Both
+/// ways ([`on_device_both_ways`]).
+#[test]
+fn draws_bind_a_set_zero_their_command_buffer_wrote_holding_the_same() {
+    on_device_both_ways(|device| {
+        let scene = Scene::new(device);
+        let textures = [
+            solid(device, PixelFormat::RGBA8Unorm, RED),
+            solid(device, PixelFormat::RGBA8Unorm, GREEN),
+        ];
+        let texture = |c: u64| &textures[(c % 2) as usize];
+        let (command_buffer, mut encoder) = scene.encoder(device);
+        let mut found = Vec::new();
+        for c in 0..SIDE - 1 {
+            encoder.set_vertex_bytes(&column(c), 0).unwrap();
+            encoder.set_fragment_texture(Some(texture(c)), 0).unwrap();
+            let before = device.work_counts();
+            draw(&mut encoder);
+            found.push(grew(&before, &device.work_counts(), |c| {
+                c.set_zero_sets_found
+            }));
+        }
+        encoder.end_encoding().unwrap();
+        // The last column in a second encoder of the command buffer.
+        let mut encoder = command_buffer
+            .render_command_encoder(&scene.pass(LoadAction::Load))
+            .unwrap();
+        encoder.set_render_pipeline_state(&scene.pipeline).unwrap();
+        encoder
+            .set_fragment_sampler_state(Some(&scene.sampler), 0)
+            .unwrap();
+        encoder.set_vertex_bytes(&column(SIDE - 1), 0).unwrap();
+        encoder
+            .set_fragment_texture(Some(texture(SIDE - 1)), 0)
+            .unwrap();
+        let before = device.work_counts();
+        draw(&mut encoder);
+        found.push(grew(&before, &device.work_counts(), |c| {
+            c.set_zero_sets_found
+        }));
+        encoder.end_encoding().unwrap();
+        let binds = u64::from(!pushes(device));
+        let want: Vec<u64> = (0..SIDE).map(|c| if c < 2 { 0 } else { binds }).collect();
+        assert_eq!(found, want);
+        let pixels = scene.pixels(&command_buffer);
+        for (at, &pixel) in pixels.iter().enumerate() {
+            let want = [RED, GREEN][(at as u64 % SIDE % 2) as usize];
             assert_eq!(pixel, want, "pixel {at}: {pixels:?}");
         }
     });

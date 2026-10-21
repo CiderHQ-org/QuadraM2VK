@@ -27,7 +27,7 @@
 //! - Encoders are `Send` but not `Sync`: every method takes `&mut self`, and the core holds a
 //!   `!Sync` marker so no encoder is shared between threads by reference.
 
-use super::binding::{self, LastSetZero, Write};
+use super::binding::{self, LastSetZero, Write, WrittenSet};
 use super::buffer::Buffer;
 use super::churn_counts::KeepBy;
 use super::command_buffer::CommandBuffer;
@@ -453,30 +453,59 @@ impl EncoderCore {
         self.open.command_buffer.device()
     }
 
-    /// Set 0 of a command of `objects`'s variant that writes `writes` (set 0's): the set the
+    /// Set 0 of a command of `objects`'s variant that writes `writes` (set 0's), and `offsets`, the
+    /// dynamic offsets the command binds it with: the writes of the bindings the variant makes
+    /// dynamic made so first (`binding::dynamic_writes`), each at offset 0 and its offset among
+    /// `offsets`, so commands that differ in those offsets alone write the same set. The set the
     /// encoder's last command allocated, where it is of the same layout and holds the same writes
-    /// (`binding::LastSetZero`), else one allocated from the command buffer's pools and written.
-    /// `None` where the variant allocates none (`VariantObjects::set_zero`), its writes then
-    /// refused as `binding::write_sets` refuses them.
+    /// (`binding::LastSetZero`), else such a set an earlier command of the command buffer
+    /// allocated (`binding::SetCache`), else one allocated from the command buffer's pools and
+    /// written, which the caller keeps for later commands once the command records
+    /// ([`keep_set_zero`](Self::keep_set_zero)). `None` where the variant allocates none
+    /// (`VariantObjects::set_zero`), its writes then refused as `binding::write_sets` refuses
+    /// them.
     pub(super) fn set_zero(
         &mut self,
         objects: &VariantObjects,
-        writes: &[Write],
-    ) -> Result<Option<vk::DescriptorSet>, Error> {
+        (writes, offsets): (&mut [Write], &mut Vec<u32>),
+    ) -> Result<(Option<vk::DescriptorSet>, Option<WrittenSet>), Error> {
+        binding::dynamic_writes(writes, objects.dynamic_bindings(), offsets);
         let layout = objects.set_zero_layout();
-        if let Some(set) = layout.and_then(|layout| self.last_set_zero.holds(layout, writes)) {
-            self.device().shared().counts.set_zero_set_reused();
-            return Ok(Some(set));
+        if let Some(layout) = layout {
+            if let Some(set) = self.last_set_zero.holds(layout, writes) {
+                self.device().shared().counts.set_zero_set_reused();
+                return Ok((Some(set), None));
+            }
+            let found = (self.command_buffer().state().descriptors.sets()).find(layout, writes);
+            if let Some(set) = found {
+                self.device().shared().counts.set_zero_set_found();
+                self.last_set_zero.keep(layout, set, writes);
+                return Ok((Some(set), None));
+            }
         }
         let set = objects.set_zero(&mut self.command_buffer().state().descriptors)?;
         // SAFETY: the set was just allocated and no command uses it yet; every buffer, view and
         // sampler written is live (the command buffer retains them, and a refusal leaves the set
         // unused in its pool).
         unsafe { binding::write_sets(self.device(), set.as_slice(), writes) }?;
-        if let (Some(layout), Some(set)) = (layout, set) {
-            self.last_set_zero.keep(layout, set, writes);
-        }
-        Ok(set)
+        let written = match (layout, set) {
+            (Some(layout), Some(set)) => Some(WrittenSet { layout, set }),
+            _ => None,
+        };
+        Ok((set, written))
+    }
+
+    /// Keep `written`, the set 0 a command that records allocated and wrote with `writes`
+    /// ([`set_zero`](Self::set_zero)), for the encoder's next command (`binding::LastSetZero`)
+    /// and the command buffer's later ones (`binding::SetCache`): kept only once the command
+    /// records, so every object its writes name is held until the command buffer completes.
+    pub(super) fn keep_set_zero(&mut self, written: WrittenSet, writes: &[Write]) {
+        self.last_set_zero.keep(written.layout, written.set, writes);
+        (self.command_buffer().state().descriptors.sets()).keep(
+            written.layout,
+            written.set,
+            writes,
+        );
     }
 
     /// The queue flags of the family its command buffer records for: its queue's `VkQueue`'s.

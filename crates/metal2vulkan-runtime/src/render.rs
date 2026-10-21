@@ -8376,14 +8376,19 @@ impl RenderCommandEncoder {
         };
         let heap_writes: Vec<_> = writes.extract_if(.., |write| write.set > 0).collect();
         // Set 0: pushed, or the encoder's last set where it holds the same writes, else one from
-        // the command buffer's arena, written (`EncoderCore::set_zero`).
-        let (set, pushed): (_, &[binding::SetWrite]) = match objects.pushes_set_zero() {
+        // the command buffer's arena, written (`EncoderCore::set_zero`), with its dynamic
+        // offsets.
+        let ((set, written), pushed): (_, &[binding::SetWrite]) = match objects.pushes_set_zero() {
             true => {
                 // Over the last draw's, in their storage (`LiveBind::pushed`).
                 binding::SetWrite::push_into(&writes, objects.immutable_pushes(), &mut live.pushed);
-                (None, &live.pushed)
+                live.offsets.clear();
+                ((None, None), &live.pushed)
             }
-            false => (self.core.set_zero(&objects, &writes)?, &[]),
+            false => {
+                let offsets = &mut live.offsets;
+                (self.core.set_zero(&objects, (&mut writes, offsets))?, &[])
+            }
         };
         // The Vulkan draws: the binder's, the index bounds pass's two, or the index rewrite
         // pass's one.
@@ -8627,6 +8632,7 @@ impl RenderCommandEncoder {
                 Some(mesh::MeshSteps {
                     layout: objects.layout(),
                     sets: set.as_slice().to_vec(),
+                    offsets: live.offsets.clone(),
                     heap: heap_set,
                     push,
                     object,
@@ -8810,6 +8816,9 @@ impl RenderCommandEncoder {
             ));
         }
         // Recording starts here: nothing below can be refused.
+        if let Some(written) = written {
+            self.core.keep_set_zero(written, &writes);
+        }
         self.driver_restarts |= tessellation.is_some_and(|t| !t.emulated);
         if !pushed.is_empty() {
             device.shared().counts.draw_pushing_set_zero();
@@ -9067,6 +9076,7 @@ impl RenderCommandEncoder {
                                 shape: objects.set_zero_shape(),
                                 pipeline: made_now.unwrap_or_default(),
                                 sets: set.as_slice(),
+                                offsets: &live.offsets,
                                 pushed,
                                 push_descriptor: device.shared().push_descriptor,
                                 pushes_after_pipeline_binds: (device.shared())
@@ -9760,6 +9770,9 @@ struct Recording<'a> {
     shape: u64,
     pipeline: vk::Pipeline,
     sets: &'a [vk::DescriptorSet],
+    /// The dynamic offsets set 0 is bound with, one per binding the variant makes dynamic
+    /// (`binding::dynamic_writes`).
+    offsets: &'a [u32],
     /// Set 0's descriptors, where the variant pushes set 0 (then `sets` is empty), and the push
     /// command.
     pushed: &'a [binding::SetWrite],
@@ -9801,6 +9814,7 @@ impl Recording<'_> {
             layout: self.layout,
             shape: self.shape,
             sets: self.sets.to_vec(),
+            offsets: self.offsets.to_vec(),
             pushed: self.pushed.to_vec(),
             heap: self.heap,
             push: self.push.to_vec(),
@@ -9827,6 +9841,7 @@ impl Recording<'_> {
         into.layout = self.layout;
         into.shape = self.shape;
         refill(&mut into.sets, self.sets);
+        refill(&mut into.offsets, self.offsets);
         refill(&mut into.pushed, self.pushed);
         into.heap = self.heap;
         into.push.truncate(self.push.len());
@@ -9898,19 +9913,20 @@ impl Recording<'_> {
                     );
                     recorded += 1;
                 }
-            } else if !self.sets.is_empty() && bound.sets(self.layout, 0, self.sets) {
+            } else if !self.sets.is_empty() && bound.sets(self.layout, 0, (self.sets, self.offsets))
+            {
                 raw.cmd_bind_descriptor_sets(
                     cb,
                     vk::PipelineBindPoint::GRAPHICS,
                     self.layout,
                     0,
                     self.sets,
-                    &[],
+                    self.offsets,
                 );
                 recorded += 1;
             }
             if let Some(heap) = self.heap {
-                if bound.sets(self.layout, 1, &[heap]) {
+                if bound.sets(self.layout, 1, (&[heap], &[])) {
                     raw.cmd_bind_descriptor_sets(
                         cb,
                         vk::PipelineBindPoint::GRAPHICS,

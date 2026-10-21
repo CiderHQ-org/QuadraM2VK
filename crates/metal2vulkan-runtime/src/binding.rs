@@ -73,7 +73,7 @@ use metal2vulkan::bind::{
 use metal2vulkan::metal::sampler::{OpaqueBlackBorder, SamplerUse};
 use metal2vulkan::pipeline::{HandleClass, SlotClass, SlotRef, Stage, StorageAttachmentView};
 use std::collections::BTreeSet;
-use std::ops::Deref;
+use std::ops::{Deref, Range};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, Weak};
 
@@ -421,6 +421,46 @@ pub(super) fn bound_sampler(state: &SamplerState, clamps: Option<[f32; 2]>) -> S
             super::sampler::metal_lod_clamps(clamps);
     }
     descriptor
+}
+
+/// The type a set-0 binding of `ty` takes where its variant makes it dynamic
+/// (`objects::dynamic_bindings`): a uniform or storage buffer's dynamic type.
+pub(crate) fn dynamic_type(ty: vk::DescriptorType) -> vk::DescriptorType {
+    match ty {
+        vk::DescriptorType::UNIFORM_BUFFER => vk::DescriptorType::UNIFORM_BUFFER_DYNAMIC,
+        vk::DescriptorType::STORAGE_BUFFER => vk::DescriptorType::STORAGE_BUFFER_DYNAMIC,
+        ty => ty,
+    }
+}
+
+/// Make the descriptors `writes` holds for the set-0 bindings numbered in `dynamic` (a variant's,
+/// ascending: `VariantObjects::dynamic_bindings`) dynamic, and their offsets `offsets`, one per
+/// binding in that order, as `vkCmdBindDescriptorSets` takes them ("ordered by the binding
+/// numbers in the descriptor set layouts"): each such write of its dynamic type at offset 0, its
+/// offset the binding's dynamic offset. The effective offset is "the sum of the dynamic offset
+/// and the offset" of the descriptor (`VkDescriptorBufferInfo`), its range unchanged: each
+/// command reaches the bytes it reached through the static descriptor, and the set holds the same
+/// descriptors whatever the offsets. Valid as the static one: a dynamic offset must be a multiple
+/// of the binding's `min*BufferOffsetAlignment`, as a static descriptor's offset must, and offset
+/// and range within the buffer likewise. An offset past 32 bits stays in its descriptor, its
+/// dynamic offset 0; a binding no write names takes 0.
+pub(super) fn dynamic_writes(writes: &mut [Write], dynamic: &[u32], offsets: &mut Vec<u32>) {
+    offsets.clear();
+    offsets.resize(dynamic.len(), 0);
+    if dynamic.is_empty() {
+        return;
+    }
+    for write in writes.iter_mut().filter(|write| write.set == 0) {
+        let (Ok(at), Info::Buffer(info)) = (dynamic.binary_search(&write.binding), &mut write.info)
+        else {
+            continue;
+        };
+        write.ty = dynamic_type(write.ty);
+        if let Ok(offset) = u32::try_from(info.offset) {
+            offsets[at] = offset;
+            info.offset = 0;
+        }
+    }
 }
 
 /// One descriptor to write: a buffer's or an image's and sampler's.
@@ -1091,18 +1131,20 @@ pub(super) unsafe fn write_sets(
     Ok(())
 }
 
-/// The set 0 an encoder's last command allocated and wrote (`EncoderCore::set_zero`): the set,
-/// its layout and the descriptors written into it. A later command of the encoder that writes the
-/// same descriptors into a set of the same layout binds this set again, and allocates and writes
-/// none (`WorkCounts::set_zero_sets_reused`). Exact:
+/// The set 0 an encoder's last command bound from its command buffer's pools
+/// (`EncoderCore::set_zero`): the set, its layout and the descriptors written into it, kept once
+/// the command records (`EncoderCore::keep_set_zero`) or as it finds the set its command buffer
+/// keeps ([`SetCache`]). A later command of the encoder that writes the same descriptors into a
+/// set of the same layout binds this set again, and allocates and writes none
+/// (`WorkCounts::set_zero_sets_reused`). Exact:
 ///
 /// - **The set holds what was written.** A set is written once, as it is allocated, and nothing
 ///   writes it again; set 0's writes hold no keeper (only the heap set's do, `Write::held`).
 /// - **No handle it holds names another object.** The set lies in its command buffer's pools,
-///   which last until the command buffer completes; so do the objects its writes name, which the
-///   command that wrote them holds (its buffers, textures, views and samplers), the command
-///   buffer's arena (uploads) or the device (neutrals). The memo lives with its encoder, inside
-///   its command buffer's life.
+///   which last until the command buffer completes; so do the objects its writes name, which a
+///   command that recorded with them holds (its buffers, textures, views and samplers), the
+///   command buffer's arena (uploads) or the device (neutrals). The memo lives with its encoder,
+///   inside its command buffer's life.
 /// - **The writes compare by value** ([`SetWrite::same`], in order: each binding, element, type
 ///   and descriptor, a buffer's offset and range, an image's view, sampler and layout), so the set
 ///   is bound again only where every descriptor written is the one the command writes.
@@ -1140,6 +1182,180 @@ impl LastSetZero {
         self.writes.clear();
         self.writes.extend(writes.iter().map(SetWrite::of));
     }
+}
+
+/// The most sets 0 one generation of a [`SetCache`] keeps.
+const SETS_KEPT: usize = 128;
+
+/// The sets 0 a command buffer's recorded commands allocated and wrote, by what they hold
+/// (`EncoderCore::set_zero`): a later command of the command buffer, in any of its encoders, that
+/// writes the same descriptors into a set of the same layout binds the set again, and allocates
+/// and writes none (`WorkCounts::set_zero_sets_found`). Kept in the command buffer's arena,
+/// whose pools hold the sets (`descriptor_arena.rs`), and gone as they go. Exact, as
+/// [`LastSetZero`] is:
+///
+/// - **A set holds what was written.** Written once, as it is allocated; nothing writes it again.
+/// - **No handle it holds names another object.** A set is kept only once its command records,
+///   so every object its writes name is held until the command buffer completes: by the command
+///   (its buffers, textures, views and samplers), the command buffer's arena (uploads) or the
+///   device (neutrals). No such object goes, nor can another take its handle, while its sets are
+///   kept; a refused command's set is never kept.
+/// - **The writes compare by value** ([`SetWrite::same`], in order), behind a hash of them
+///   ([`set_key`]), so a set is bound again only where every descriptor written is the one the
+///   command writes.
+///
+/// Bounded: two generations of at most [`SETS_KEPT`] sets each. A set found in the older
+/// generation moves to the newer one; a newer generation that fills becomes the older one, the
+/// older one's sets forgotten (they stay in their pools, unbound by later commands). So a command
+/// buffer whose commands write fewer distinct sets than a generation holds allocates each once.
+/// A generation keeps its storage as it empties, and makes it at its first set: a few
+/// allocations a command buffer, none a command.
+#[derive(Default)]
+pub(crate) struct SetCache {
+    generations: [Generation; 2],
+    /// The newer generation's place in `generations`.
+    newer: usize,
+}
+
+/// One generation of a [`SetCache`]: its sets, each's place by its key (a set of other writes
+/// under a key a set holds is not kept), and their writes one after another.
+#[derive(Default)]
+struct Generation {
+    by_key: KeyMap<u64, usize>,
+    sets: Vec<CachedSet>,
+    writes: Vec<SetWrite>,
+}
+
+/// One set 0 a [`Generation`] keeps: its layout, the set, and where the descriptors written into
+/// it lie in the generation's writes.
+struct CachedSet {
+    layout: vk::DescriptorSetLayout,
+    set: vk::DescriptorSet,
+    writes: Range<usize>,
+}
+
+impl Generation {
+    /// The set of `layout` that holds `writes` it keeps under `key`, by its place.
+    fn find(&self, key: u64, layout: vk::DescriptorSetLayout, writes: &[Write]) -> Option<usize> {
+        let &at = self.by_key.get(&key)?;
+        let kept = &self.sets[at];
+        let held = &self.writes[kept.writes.clone()];
+        let same = kept.layout == layout
+            && held.len() == writes.len()
+            && (held.iter().zip(writes)).all(|(held, write)| held.same(&SetWrite::of(write)));
+        same.then_some(at)
+    }
+
+    /// Keep `set`, of `layout`, holding `writes`, under `key`.
+    fn keep(
+        &mut self,
+        key: u64,
+        (layout, set): (vk::DescriptorSetLayout, vk::DescriptorSet),
+        writes: impl Iterator<Item = SetWrite>,
+    ) {
+        if self.sets.capacity() == 0 {
+            self.by_key.reserve(SETS_KEPT);
+            self.sets.reserve(SETS_KEPT);
+            self.writes.reserve(4 * SETS_KEPT);
+        }
+        let start = self.writes.len();
+        self.writes.extend(writes);
+        self.by_key.insert(key, self.sets.len());
+        self.sets.push(CachedSet {
+            layout,
+            set,
+            writes: start..self.writes.len(),
+        });
+    }
+
+    /// Forget its sets, keeping its storage.
+    fn clear(&mut self) {
+        self.by_key.clear();
+        self.sets.clear();
+        self.writes.clear();
+    }
+}
+
+/// The hash a [`SetCache`] keeps a set of `layout` holding `writes` under: of what
+/// [`SetWrite::same`] compares.
+fn set_key(layout: vk::DescriptorSetLayout, writes: &[Write]) -> u64 {
+    use ash::vk::Handle;
+    use std::hash::Hasher;
+    let mut hasher = crate::key_hash::KeyHasher::default();
+    hasher.write_u64(layout.as_raw());
+    for write in writes {
+        hasher.write_u64(u64::from(write.binding) << 32 | u64::from(write.element));
+        hasher.write_u64(write.ty.as_raw() as u64);
+        match write.info {
+            Info::Buffer(info) => {
+                hasher.write_u64(info.buffer.as_raw());
+                hasher.write_u64(info.offset);
+                hasher.write_u64(info.range);
+            }
+            Info::Image(info) => {
+                hasher.write_u64(info.image_view.as_raw());
+                hasher.write_u64(info.sampler.as_raw());
+                hasher.write_u64(info.image_layout.as_raw() as u64);
+            }
+            Info::Texel(view) => hasher.write_u64(view.as_raw()),
+        }
+    }
+    hasher.finish()
+}
+
+impl SetCache {
+    /// The kept set of `layout` that holds `writes` (set 0's), moved to the newer generation
+    /// where it was in the older one.
+    pub(super) fn find(
+        &mut self,
+        layout: vk::DescriptorSetLayout,
+        writes: &[Write],
+    ) -> Option<vk::DescriptorSet> {
+        let key = set_key(layout, writes);
+        let newer = &self.generations[self.newer];
+        if let Some(at) = newer.find(key, layout, writes) {
+            return Some(newer.sets[at].set);
+        }
+        let older = &self.generations[1 - self.newer];
+        let at = older.find(key, layout, writes)?;
+        let set = older.sets[at].set;
+        self.keep_under(key, (layout, set), writes);
+        Some(set)
+    }
+
+    /// Keep `set`, of `layout`, as written with `writes` (set 0's), once its command recorded.
+    pub(super) fn keep(
+        &mut self,
+        layout: vk::DescriptorSetLayout,
+        set: vk::DescriptorSet,
+        writes: &[Write],
+    ) {
+        self.keep_under(set_key(layout, writes), (layout, set), writes);
+    }
+
+    /// Keep the set in the newer generation under `key`: where it is full, it becomes the older
+    /// one first, the older one's sets forgotten.
+    fn keep_under(
+        &mut self,
+        key: u64,
+        set: (vk::DescriptorSetLayout, vk::DescriptorSet),
+        writes: &[Write],
+    ) {
+        if self.generations[self.newer].sets.len() >= SETS_KEPT {
+            self.newer = 1 - self.newer;
+            self.generations[self.newer].clear();
+        }
+        self.generations[self.newer].keep(key, set, writes.iter().map(SetWrite::of));
+    }
+}
+
+/// A set 0 a command allocated and wrote (`EncoderCore::set_zero`), which its encoder keeps for
+/// later commands once the command records (`EncoderCore::keep_set_zero`): a refused command's
+/// set is never kept.
+#[must_use]
+pub(super) struct WrittenSet {
+    pub(super) layout: vk::DescriptorSetLayout,
+    pub(super) set: vk::DescriptorSet,
 }
 
 /// The texel buffer view of `write`, a storage texel buffer's (`storage`) or a uniform one's.

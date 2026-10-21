@@ -1946,7 +1946,7 @@ fn record(
     }
     let objects = std::sync::Arc::clone(variant.objects());
     // Set 1 the device's (written below, once nothing refuses).
-    let (heap_writes, writes): (Vec<_>, Vec<_>) =
+    let (heap_writes, mut writes): (Vec<_>, Vec<_>) =
         writes.into_iter().partition(|write| write.set > 0);
     // The dispatch binds the variant: the kinds its making announces at every occurrence.
     let formats: BoundFormats<'_> = &|slot| bound_tables.bound_format(slot);
@@ -2001,13 +2001,17 @@ fn record(
         }
     };
     // Set 0: pushed, or the encoder's last set where it holds the same writes, else one from the
-    // command buffer's arena, written (`EncoderCore::set_zero`).
-    let (set, pushed) = match objects.pushes_set_zero() {
+    // command buffer's arena, written (`EncoderCore::set_zero`), with its dynamic offsets.
+    let mut offsets = Vec::new();
+    let ((set, written), pushed) = match objects.pushes_set_zero() {
         true => (
-            None,
+            (None, None),
             binding::SetWrite::pushed(&writes, objects.immutable_pushes()),
         ),
-        false => (core.set_zero(&objects, &writes)?, Vec::new()),
+        false => (
+            core.set_zero(&objects, (&mut writes, &mut offsets))?,
+            Vec::new(),
+        ),
     };
     let textures = tables
         .table
@@ -2044,6 +2048,9 @@ fn record(
     };
     // Recording starts here: nothing below can be refused (but a `VkCommandBuffer` that does not
     // end, which abandons the command buffer).
+    if let Some(written) = written {
+        core.keep_set_zero(written, &writes);
+    }
     core.shadow_copies(&copies);
     if !pushed.is_empty() {
         device.shared().counts.dispatch_pushing_set_zero();
@@ -2051,6 +2058,7 @@ fn record(
     let recording = Recording {
         layout: objects.layout(),
         set,
+        offsets,
         pushed,
         heap: heap_set,
         preprocess,

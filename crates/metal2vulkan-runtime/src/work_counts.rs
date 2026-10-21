@@ -201,6 +201,7 @@ pub(crate) struct Counters {
     set_zero_writes_if_shapes_shared: AtomicU64,
     dispatches_pushing_set_zero: AtomicU64,
     set_zero_sets_reused: AtomicU64,
+    set_zero_sets_found: AtomicU64,
     dispatches_settled_as_before: AtomicU64,
     baked_sampler_dispatches_apart: AtomicU64,
     host_deallocators_delayed: AtomicU64,
@@ -1403,6 +1404,12 @@ impl Counters {
     /// into a set of the same layout (`binding::LastSetZero`).
     pub(crate) fn set_zero_set_reused(&self) {
         self.set_zero_sets_reused.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A command that bound a set 0 an earlier command of its command buffer wrote, the same
+    /// descriptors into a set of the same layout (`binding::SetCache`).
+    pub(crate) fn set_zero_set_found(&self) {
+        self.set_zero_sets_found.fetch_add(1, Ordering::Relaxed);
     }
 
     /// A compute encoder's dispatch that took what its last dispatch settled
@@ -3085,6 +3092,14 @@ pub struct WorkCounts {
     /// set of the same layout (`binding::LastSetZero`). Their recording binds no set where the set
     /// is bound already.
     pub set_zero_sets_reused: u64,
+    /// Draws and dispatches that bound a set 0 an earlier command of their command buffer, in any
+    /// of its encoders, allocated and wrote, rather than allocating and writing their own: those
+    /// that write the same descriptors into a set of the same layout as one the command buffer
+    /// keeps (`binding::SetCache`, two generations of 128 sets), but not their encoder's last
+    /// command's (`set_zero_sets_reused`). A uniform or storage buffer the variant binds through
+    /// a dynamic descriptor takes its offset as the set is bound, so commands that differ only in
+    /// such offsets write the same set.
+    pub set_zero_sets_found: u64,
     /// Compute encoders' dispatches that took the bind state, variant, plan, commands and made
     /// `VkPipeline`s their encoder's last dispatch settled, rather than settling them again:
     /// those of the same pipeline state, dispatch, table (no call changed it since), threadgroup
@@ -3913,6 +3928,7 @@ impl Device {
             dispatches_pushing_set_zero: (counters.dispatches_pushing_set_zero)
                 .load(Ordering::Relaxed),
             set_zero_sets_reused: counters.set_zero_sets_reused.load(Ordering::Relaxed),
+            set_zero_sets_found: counters.set_zero_sets_found.load(Ordering::Relaxed),
             dispatches_settled_as_before: (counters.dispatches_settled_as_before)
                 .load(Ordering::Relaxed),
             baked_sampler_dispatches_apart: (counters.baked_sampler_dispatches_apart)

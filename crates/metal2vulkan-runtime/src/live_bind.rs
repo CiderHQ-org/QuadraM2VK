@@ -187,6 +187,9 @@ pub(super) struct LiveBind {
     pub(super) writes: Vec<Write>,
     /// The last draw's pushed set 0 (`binding::SetWrite::push_into`), kept likewise.
     pub(super) pushed: Vec<SetWrite>,
+    /// The dynamic offsets the last draw bound its set 0 with (`binding::dynamic_writes`), kept
+    /// likewise.
+    pub(super) offsets: Vec<u32>,
     /// The last draw's vertex buffers, `(binding, buffer, offset, stride)`, kept likewise.
     pub(super) vertex_buffers: Vec<(u32, vk::Buffer, u64, u64)>,
 }
