@@ -463,12 +463,20 @@ pub fn echo_validation_messages() {
 /// `DriverDeviation::MetalVertexSimdgroups` ([`MessageSink::unadvertised_vertex`]), the layer's
 /// report of a vertex module's subgroup operations outside `subgroupSupportedStages`
 /// (`candidate/unadvertised_stage.rs`) fails nothing: the translation relies on the driver's
-/// measured answer there, as the module's requirements state.
+/// measured answer there, as the module's requirements state. Nor does a driver diagnostic every
+/// pipeline making of the opened device is measured to report ([`MessageSink::making`]).
 pub(super) struct MessageSink {
     messages: Mutex<Vec<String>>,
     /// Whether the context's opened profile takes `DriverDeviation::MetalVertexSimdgroups`, set
     /// once it is derived.
     unadvertised_vertex: AtomicBool,
+    /// The diagnostics the opened device's driver facts measure every pipeline making to report,
+    /// whatever its state: its warning of each color attachment it cannot blend
+    /// (`DriverFact::BlendlessColorAttachmentsWarn`), for each format the device lists as a color
+    /// attachment without blending (`DeviceDescription::blendless_color_formats`). The driver
+    /// reports one only as it makes a render pipeline, naming the format, so a message of exactly
+    /// one of them fails no row; set once the opened description is known.
+    making: OnceLock<Vec<metal2vulkan::device::DriverDiagnostic>>,
 }
 
 impl MessageSink {
@@ -534,6 +542,17 @@ unsafe extern "system" fn record_validation_message(
             &text(data.p_message_id_name),
             &text(data.p_message),
         )
+    {
+        return vk::FALSE;
+    }
+    if severity == vk::DebugUtilsMessageSeverityFlagsEXT::WARNING
+        && types.contains(vk::DebugUtilsMessageTypeFlagsEXT::VALIDATION)
+        && sink.making.get().is_some_and(|making| {
+            let (id_name, text) = (text(data.p_message_id_name), text(data.p_message));
+            making
+                .iter()
+                .any(|d| d.id_name == id_name && d.id == data.message_id_number && d.text == text)
+        })
     {
         return vk::FALSE;
     }
@@ -663,6 +682,7 @@ fn only_errors_and_validation_warnings_fail_a_row() {
     let sink = MessageSink {
         messages: Mutex::new(Vec::new()),
         unadvertised_vertex: AtomicBool::new(false),
+        making: OnceLock::new(),
     };
     for n in 0..100 {
         sink.record(format!("m{n}"));
@@ -685,11 +705,13 @@ fn a_measured_diagnostic_fails_no_row_inside_its_call_alone() {
     use vk::DebugUtilsMessageSeverityFlagsEXT as S;
     use vk::DebugUtilsMessageTypeFlagsEXT as T;
     let warning = DriverFact::DynamicRestartWarns
-        .pipeline_creation_diagnostic(&[D::PRIMITIVE_RESTART_ENABLE], P::TRIANGLE_STRIP)
+        .pipeline_creation_diagnostics(&[D::PRIMITIVE_RESTART_ENABLE], P::TRIANGLE_STRIP, &[])
+        .pop()
         .expect("the warning of a dynamic restart");
     let sink = MessageSink {
         messages: Mutex::new(Vec::new()),
         unadvertised_vertex: AtomicBool::new(false),
+        making: OnceLock::new(),
     };
     let user = std::ptr::from_ref(&sink) as usize;
     let report = |severity: S, text: &str| {
@@ -710,22 +732,22 @@ fn a_measured_diagnostic_fails_no_row_inside_its_call_alone() {
             )
         };
     };
-    report(S::WARNING, warning.text);
+    report(S::WARNING, &warning.text);
     assert_eq!(sink.take().len(), 1, "outside the call");
-    expecting_diagnostics(vec![warning], || {
-        report(S::WARNING, warning.text);
+    expecting_diagnostics(vec![warning.clone()], || {
+        report(S::WARNING, &warning.text);
         assert_eq!(sink.take().len(), 0, "inside the call");
         std::thread::scope(|scope| {
-            scope.spawn(|| report(S::WARNING, warning.text));
+            scope.spawn(|| report(S::WARNING, &warning.text));
         });
-        report(S::ERROR, warning.text);
+        report(S::ERROR, &warning.text);
         report(
             S::WARNING,
             "VK_ERROR_FEATURE_NOT_PRESENT: Metal does not support something else.",
         );
         assert_eq!(sink.take().len(), 3, "another thread, severity or text");
     });
-    report(S::WARNING, warning.text);
+    report(S::WARNING, &warning.text);
     assert_eq!(sink.take().len(), 1, "after the call");
 }
 
@@ -1565,6 +1587,7 @@ impl VulkanContext {
         let messages: &'static MessageSink = Box::leak(Box::new(MessageSink {
             messages: Mutex::new(Vec::new()),
             unadvertised_vertex: AtomicBool::new(false),
+            making: OnceLock::new(),
         }));
         let messenger_info = vk::DebugUtilsMessengerCreateInfoEXT::default()
             .message_severity(
@@ -1771,6 +1794,19 @@ impl VulkanContext {
                 }
                 description
             });
+        if let Ok(description) = &opened_description {
+            let blendless = description.blendless_color_formats();
+            let making = (description.driver_facts().into_iter())
+                .flat_map(|fact| {
+                    fact.pipeline_creation_diagnostics(
+                        &[],
+                        metal2vulkan::vk::PrimitiveTopology::TRIANGLE_LIST,
+                        &blendless,
+                    )
+                })
+                .collect();
+            let _ = messages.making.set(making);
+        }
         let opened = opened_description
             .clone()
             .and_then(crate::acceptance::derived_profile);

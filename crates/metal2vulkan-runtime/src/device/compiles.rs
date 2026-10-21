@@ -410,7 +410,7 @@ mod tests {
             },
             id_name: warning.id_name.into(),
             id: warning.id,
-            text: warning.text.into(),
+            text: warning.text.into_owned(),
             degradation: None,
         };
         let withheld = u64::from(crate::driver_facts::withholds(&message));
@@ -421,14 +421,16 @@ mod tests {
         vk::Result::SUCCESS
     }
 
-    /// MoltenVK 1.4.1's warning of a pipeline whose restart is dynamic.
+    /// MoltenVK's warning of a pipeline whose restart is dynamic.
     fn restart_warning() -> metal2vulkan::device::DriverDiagnostic {
         use metal2vulkan::vk::{DynamicState as D, PrimitiveTopology as T};
         metal2vulkan::device::DriverFact::DynamicRestartWarns
-            .pipeline_creation_diagnostic(
+            .pipeline_creation_diagnostics(
                 &[D::PRIMITIVE_TOPOLOGY, D::PRIMITIVE_RESTART_ENABLE],
                 T::TRIANGLE_LIST,
+                &[],
             )
+            .pop()
             .expect("the warning of a dynamic restart")
     }
 
@@ -573,7 +575,7 @@ mod tests {
                 Q::QOS_CLASS_USER_INITIATED,
             ] {
                 assert_eq!(
-                    asked(at(start), expecting(vec![warning])),
+                    asked(at(start), expecting(vec![warning.clone()])),
                     (1, 1),
                     "withheld and counted, from {start:?}"
                 );
@@ -584,7 +586,7 @@ mod tests {
                 );
             }
         }
-        assert_eq!(asked(|| {}, expecting(vec![warning])), (1, 1));
+        assert_eq!(asked(|| {}, expecting(vec![warning.clone()])), (1, 1));
         assert_eq!(asked(|| {}, expecting(Vec::new())), (0, 0));
         unregister(device.handle());
     }

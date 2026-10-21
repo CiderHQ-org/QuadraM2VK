@@ -1562,10 +1562,12 @@ mod tests {
     #[test]
     fn a_measured_diagnostic_is_withheld_inside_its_call_alone() {
         let warning = DriverFact::DynamicRestartWarns
-            .pipeline_creation_diagnostic(
+            .pipeline_creation_diagnostics(
                 &[D::PRIMITIVE_TOPOLOGY, D::PRIMITIVE_RESTART_ENABLE],
                 T::TRIANGLE_LIST,
+                &[],
             )
+            .pop()
             .expect("the warning of a dynamic restart");
         let received: Arc<Mutex<Vec<String>>> = Arc::default();
         let sink = {
@@ -1580,37 +1582,38 @@ mod tests {
         let user = std::ptr::from_ref(&sink) as usize;
         use vk::DebugUtilsMessageSeverityFlagsEXT as S;
         use vk::DebugUtilsMessageTypeFlagsEXT as K;
-        let report = |severity: S, kind: K, text: &str| sent(user, warning, severity, kind, text);
+        let report = |severity: S, kind: K, text: &str| sent(user, &warning, severity, kind, text);
         let delivered = || received.lock().unwrap().len();
-        report(S::WARNING, K::VALIDATION, warning.text);
+        report(S::WARNING, K::VALIDATION, &warning.text);
         assert_eq!(delivered(), 1, "outside the call");
-        let ((), withheld) = crate::driver_facts::expecting(vec![warning], || {
-            report(S::WARNING, K::VALIDATION, warning.text);
+        let ((), withheld) = crate::driver_facts::expecting(vec![warning.clone()], || {
+            report(S::WARNING, K::VALIDATION, &warning.text);
             assert_eq!(delivered(), 1, "inside the call");
             // Another thread, started as the runtime starts its own and joined before the sink
             // goes.
+            let other = warning.clone();
             crate::exit_guard::spawn(std::thread::Builder::new(), move || {
-                sent(user, warning, S::WARNING, K::VALIDATION, warning.text)
+                sent(user, &other, S::WARNING, K::VALIDATION, &other.text)
             })
             .unwrap()
             .join()
             .unwrap();
             assert_eq!(delivered(), 2, "from another thread");
-            report(S::ERROR, K::VALIDATION, warning.text);
-            report(S::WARNING, K::GENERAL, warning.text);
+            report(S::ERROR, K::VALIDATION, &warning.text);
+            report(S::WARNING, K::GENERAL, &warning.text);
             report(
                 S::WARNING,
                 K::VALIDATION,
                 "VK_ERROR_FEATURE_NOT_PRESENT: Metal does not support something else.",
             );
             assert_eq!(delivered(), 5, "another severity, kind or text");
-            report(S::WARNING, K::VALIDATION, warning.text);
+            report(S::WARNING, K::VALIDATION, &warning.text);
         });
         assert_eq!(withheld, 2, "withheld inside the call");
-        report(S::WARNING, K::VALIDATION, warning.text);
+        report(S::WARNING, K::VALIDATION, &warning.text);
         assert_eq!(delivered(), 6, "after the call");
         let ((), withheld) = crate::driver_facts::expecting(Vec::new(), || {
-            report(S::WARNING, K::VALIDATION, warning.text);
+            report(S::WARNING, K::VALIDATION, &warning.text);
         });
         assert_eq!((withheld, delivered()), (0, 7), "a call that expects none");
     }
@@ -1639,7 +1642,7 @@ mod tests {
     /// `user`.
     fn sent(
         user: usize,
-        warning: DriverDiagnostic,
+        warning: &DriverDiagnostic,
         severity: vk::DebugUtilsMessageSeverityFlagsEXT,
         kind: vk::DebugUtilsMessageTypeFlagsEXT,
         text: &str,

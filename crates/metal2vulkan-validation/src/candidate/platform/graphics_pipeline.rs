@@ -372,7 +372,9 @@ pub(super) fn front_face(state: &DrawDepthStencil) -> vk::FrontFace {
 /// Create the graphics pipeline of `pipeline` as `consumer` decides it: the pipeline and the
 /// duration of the `vkCreateGraphicsPipelines` call alone. The caller owns (and destroys) the
 /// pipeline. The diagnostics the executing driver's `facts` measure it to report as it makes
-/// the pipeline (`DriverFact::pipeline_creation_diagnostic`) fail no row from inside that call.
+/// the pipeline (`DriverFact::pipeline_creation_diagnostics`) fail no row from inside that call;
+/// those of its color attachments the driver cannot blend fail none anywhere
+/// (`MessageSink::making`).
 pub(super) fn create_graphics_pipeline(
     device: &ash::Device,
     facts: &BTreeSet<DriverFact>,
@@ -567,7 +569,9 @@ pub(super) fn create_graphics_pipeline(
     }
     let expected = facts
         .iter()
-        .filter_map(|fact| fact.pipeline_creation_diagnostic(&graphics.dynamic_states, topology))
+        .flat_map(|fact| {
+            fact.pipeline_creation_diagnostics(&graphics.dynamic_states, topology, &[])
+        })
         .collect();
     let clock = crate::budgets::CreationClock::start();
     let created = super::device::expecting_diagnostics(expected, || {

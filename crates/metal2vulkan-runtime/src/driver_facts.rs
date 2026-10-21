@@ -164,6 +164,41 @@ pub(crate) fn expecting<T>(
     (result, withheld)
 }
 
+/// The diagnostics every pipeline making on a device of `properties` is measured to report,
+/// whatever its pipeline's state: those of its color attachments the driver cannot blend
+/// (`DriverFact::BlendlessColorAttachmentsWarn`), one for each format the device lists as a color
+/// attachment without blending ([`DeviceDescription::blendless_color_formats`]). The driver names
+/// the format, so a pipeline that attaches none of them reports none.
+///
+/// [`DeviceDescription::blendless_color_formats`]: metal2vulkan::device::DeviceDescription::blendless_color_formats
+pub(crate) fn making_diagnostics(properties: &crate::DeviceProperties) -> Vec<DriverDiagnostic> {
+    let blendless = properties.description.blendless_color_formats();
+    (properties.driver_facts.iter())
+        .flat_map(|fact| {
+            fact.pipeline_creation_diagnostics(
+                &[],
+                metal2vulkan::vk::PrimitiveTopology::TRIANGLE_LIST,
+                &blendless,
+            )
+        })
+        .collect()
+}
+
+/// [`expecting`] where this thread's current call expects nothing yet; inside an expectation,
+/// `call` alone, which the outer expectation covers.
+pub(crate) fn expecting_where_unset<T>(
+    diagnostics: Vec<DriverDiagnostic>,
+    call: impl FnOnce() -> T,
+) -> T {
+    let unset = EXPECTED
+        .try_with(|expected| expected.try_borrow().is_ok_and(|e| e.is_none()))
+        .unwrap_or(false);
+    match unset {
+        true => expecting(diagnostics, call).0,
+        false => call(),
+    }
+}
+
 /// The diagnostics this thread's current call is measured to report ([`expecting`]); none
 /// outside such a call. A thread of the runtime's that makes the driver call for this one, while
 /// it waits (`device/compiles.rs`), expects them inside that call alone.

@@ -1010,14 +1010,12 @@ impl VariantObjects {
             .text(sibling.as_ref().unwrap_or(key));
         // The diagnostics the device's driver is measured to report as it makes this pipeline,
         // withheld inside its creation alone (`driver_facts.rs`).
-        let expected: Vec<_> = self
-            .device
-            .properties()
-            .driver_facts
-            .iter()
-            .filter_map(|fact| {
-                fact.pipeline_creation_diagnostic(&graphics.dynamic_states, key.topology)
+        let properties = self.device.properties();
+        let expected: Vec<_> = (properties.driver_facts.iter())
+            .flat_map(|fact| {
+                fact.pipeline_creation_diagnostics(&graphics.dynamic_states, key.topology, &[])
             })
+            .chain(crate::driver_facts::making_diagnostics(properties))
             .collect();
         // The turn first (none where a piece's thread holds one), once no twin's making is in the
         // air (`flight.rs`): the driver's time alone is timed, not the wait for a turn or a twin.

@@ -491,8 +491,13 @@ impl DeviceShared {
         making: crate::shader_cache::driver::Making,
         create: impl FnOnce(vk::PipelineCache) -> (Result<T, E>, Option<bool>),
     ) -> Result<T, E> {
-        crate::exit_guard::driver_making(|| {
-            self.shader_cache.make_pipelines(self.vk(), making, create)
+        // What every making is measured to report, withheld inside it (`driver_facts.rs`); a
+        // render pipeline's making expects them with its own.
+        let expected = crate::driver_facts::making_diagnostics(&self.properties);
+        crate::driver_facts::expecting_where_unset(expected, || {
+            crate::exit_guard::driver_making(|| {
+                self.shader_cache.make_pipelines(self.vk(), making, create)
+            })
         })
     }
 

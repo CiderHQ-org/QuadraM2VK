@@ -43,7 +43,8 @@ use crate::device::description::APPLE_VENDOR_ID;
 use crate::device::profile::DriverWorkaround;
 use crate::device::DeviceDescription;
 use crate::error::DriverDeviation;
-use crate::vk::{DriverId, DynamicState, FormatFeatureFlags2, PrimitiveTopology};
+use crate::vk::{DriverId, DynamicState, Format, FormatFeatureFlags2, PrimitiveTopology};
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// One driver measured to have the fact `F`, over the releases measured.
@@ -1166,6 +1167,21 @@ pub enum DriverFact {
     /// this one from an unmeasured release relay as before. MoltenVK's own code on every GPU, so
     /// the row names no vendor; held on the release measured alone (the module docs).
     DynamicRestartWarns,
+    /// A driver diagnostic (the module docs): the driver reports a warning as it creates a
+    /// graphics pipeline for each color attachment whose format lacks
+    /// `VK_FORMAT_FEATURE_2_COLOR_ATTACHMENT_BLEND_BIT` in its optimal tiling, whether the
+    /// pipeline enables blending there or not: a `VALIDATION` message named `mvk-warn` (number 0),
+    /// `VK_ERROR_FEATURE_NOT_PRESENT: Blending is enabled for attachment with format <format>,
+    /// which does not support it.`, the format by its registry name
+    /// ([`DriverFact::pipeline_creation_diagnostics`]). MoltenVK 1.4.2 skips the blend state of
+    /// such an attachment, whose Metal pixel format lacks `kMVKMTLFmtCapsBlend` (the capability it
+    /// reports as that feature bit), and warns in that branch without reading the attachment's
+    /// `blendEnable` (`MVKGraphicsPipeline::addFragmentOutputToPipeline`, `MVKPipeline.mm` lines
+    /// 1961-1996 at 1.4.2). The runtime never enables blending there, as Vulkan forbids
+    /// (`VUID-VkGraphicsPipelineCreateInfo-renderPass-06041`), so the warning reports nothing the
+    /// pipeline does. On a driver with it the runtime withholds exactly those messages inside that
+    /// pipeline's creation, and counts them, as [`DriverFact::DynamicRestartWarns`]'s.
+    BlendlessColorAttachmentsWarn,
     /// A cost fact (the module docs): the driver runs `vkCmdFillBuffer` as a compute dispatch of
     /// a pipeline it compiles at the first fill each `VkCommandPool`'s command buffers encode,
     /// inside `vkQueueSubmit`, through the OS's shader compiler, which serves the process's
@@ -1548,16 +1564,20 @@ impl DriverFact {
         }
     }
 
-    /// The diagnostic a driver with this fact reports as it creates a graphics pipeline that
-    /// makes `dynamic_states` dynamic, of the input assembly topology `topology`: for
-    /// [`DriverFact::DynamicRestartWarns`], where the pipeline makes
+    /// The diagnostics a driver with this fact reports as it creates a graphics pipeline that
+    /// makes `dynamic_states` dynamic, of the input assembly topology `topology`, whose color
+    /// attachments of the formats `blendless_colors` lack `COLOR_ATTACHMENT_BLEND` in their
+    /// optimal tiling: for [`DriverFact::DynamicRestartWarns`], one where the pipeline makes
     /// `PRIMITIVE_RESTART_ENABLE` dynamic and makes `PRIMITIVE_TOPOLOGY` dynamic or takes a
-    /// strip or a fan. `None` for any other pipeline, and for every other fact.
-    pub fn pipeline_creation_diagnostic(
+    /// strip or a fan; for [`DriverFact::BlendlessColorAttachmentsWarn`], one for each format of
+    /// `blendless_colors` the registry names. None for any other pipeline, and for every other
+    /// fact.
+    pub fn pipeline_creation_diagnostics(
         self,
         dynamic_states: &[DynamicState],
         topology: PrimitiveTopology,
-    ) -> Option<DriverDiagnostic> {
+        blendless_colors: &[Format],
+    ) -> Vec<DriverDiagnostic> {
         use PrimitiveTopology as T;
         match self {
             Self::DynamicRestartWarns => {
@@ -1568,36 +1588,55 @@ impl DriverFact {
                 (dynamic_states.contains(&DynamicState::PRIMITIVE_RESTART_ENABLE)
                     && (strip || dynamic_states.contains(&DynamicState::PRIMITIVE_TOPOLOGY)))
                 .then_some(DYNAMIC_RESTART_WARNING)
+                .into_iter()
+                .collect()
             }
-            _ => None,
+            Self::BlendlessColorAttachmentsWarn => blendless_colors
+                .iter()
+                .filter_map(|format| format.name())
+                .map(|name| DriverDiagnostic {
+                    id_name: MVK_WARN,
+                    id: 0,
+                    text: Cow::Owned(format!(
+                        "VK_ERROR_FEATURE_NOT_PRESENT: Blending is enabled for attachment with \
+                         format {name}, which does not support it."
+                    )),
+                })
+                .collect(),
+            _ => Vec::new(),
         }
     }
 }
 
 /// A message a driver reports through `VK_EXT_debug_utils` where Vulkan states nothing wrong, at
 /// `WARNING` severity as a `VALIDATION` message, as a driver diagnostic fact measures it (the
-/// module docs; [`DriverFact::pipeline_creation_diagnostic`]). The runtime withholds it from the
+/// module docs; [`DriverFact::pipeline_creation_diagnostics`]). The runtime withholds it from the
 /// device's message sink only inside the call the fact names, on a release measured with the
 /// fact, where it matches every field exactly; anywhere else it relays.
 #[non_exhaustive]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct DriverDiagnostic {
     /// Its `pMessageIdName`.
     pub id_name: &'static str,
     /// Its `messageIdNumber`.
     pub id: i32,
     /// Its `pMessage`.
-    pub text: &'static str,
+    pub text: Cow<'static, str>,
 }
 
+/// The name MoltenVK gives a warning: `MVKInstance::debugReportMessage` names a warning
+/// `mvk-warn` and numbers it 0, and `MVKBaseObject::reportResult` prefixes the result's name to
+/// its text.
+const MVK_WARN: &str = "mvk-warn";
+
 /// MoltenVK's report of a pipeline whose primitive restart may be disabled
-/// ([`DriverFact::DynamicRestartWarns`]): `MVKBaseObject::reportResult` prefixes the result's
-/// name to its text, and `MVKInstance::debugReportMessage` names a warning `mvk-warn` and
-/// numbers it 0.
+/// ([`DriverFact::DynamicRestartWarns`]).
 const DYNAMIC_RESTART_WARNING: DriverDiagnostic = DriverDiagnostic {
-    id_name: "mvk-warn",
+    id_name: MVK_WARN,
     id: 0,
-    text: "VK_ERROR_FEATURE_NOT_PRESENT: Metal does not support disabling primitive restart.",
+    text: Cow::Borrowed(
+        "VK_ERROR_FEATURE_NOT_PRESENT: Metal does not support disabling primitive restart.",
+    ),
 };
 
 /// Every measured fact, by driver.
@@ -2641,6 +2680,21 @@ impl DeviceDescription {
                 && Some(m.device) == gpu
                 && m.release == self.driver_version
         })
+    }
+
+    /// The formats the device lists as color attachments of optimal tiling without
+    /// `COLOR_ATTACHMENT_BLEND`, in order: those whose pipelines a driver with
+    /// [`DriverFact::BlendlessColorAttachmentsWarn`] warns of
+    /// ([`DriverFact::pipeline_creation_diagnostics`]).
+    pub fn blendless_color_formats(&self) -> Vec<Format> {
+        let (color, blend) = (
+            FormatFeatureFlags2::COLOR_ATTACHMENT,
+            FormatFeatureFlags2::COLOR_ATTACHMENT_BLEND,
+        );
+        (self.formats.formats.iter())
+            .filter(|(_, p)| p.optimal_tiling.contains(color) && !p.optimal_tiling.contains(blend))
+            .map(|(&format, _)| format)
+            .collect()
     }
 
     /// The linear-tiling format features the device's driver may report or not
