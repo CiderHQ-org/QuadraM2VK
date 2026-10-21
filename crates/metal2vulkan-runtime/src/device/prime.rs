@@ -885,6 +885,7 @@ impl Primer<'_> {
                 .query_type(vk::QueryType::OCCLUSION)
                 .query_count(1);
             let queries = device.create_query_pool(&info, None).map_err(vulkan)?;
+            self.made(Call::CreateQueryPool);
             self.hold(queries);
 
             // A storage buffer, and a texel buffer of `R32_UINT`, whose uniform texel buffer use

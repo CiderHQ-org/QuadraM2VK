@@ -129,11 +129,20 @@ compile does. `DevicePolicy::default()` is `DevicePolicy::UNTRUSTED`:
   `render_lowering = RenderLoweringPolicy::Worker` logs each call and lowers it later, in order,
   before the command buffer's submission: in batches of 32 calls on the device's lowering thread
   while the program goes on. A program that runs 16 batches ahead of that thread waits for it in
-  its next call. `end_encoding` hands the encoder's end to that thread too and returns; the next
+  its next call, and one 4 encoders' ends ahead in its next `end_encoding`. `end_encoding` hands the encoder's end to that thread too and returns; the next
   call that follows the end in its command buffer (another encoder, an event or semaphore
-  command, the commit, `refusal`, `used_resources`, `ended_encoders`, `failed_pipeline`) lowers
-  on the program's thread what the thread has not, and a rebind or detach of host pages and
-  `Device::work_counts` lower every encoder's first. An end that checks the depth/stencil
+  command, `commit_failed`, `refusal`, `used_resources`, `ended_encoders`, `failed_pipeline`)
+  lowers on the program's thread what the thread has not, and a rebind or detach of host pages
+  and `Device::work_counts` lower every encoder's first. `commit` makes its checks at the call
+  (committed already, an encoder open, one abandoned, a predication block left open) and
+  returns, its status `Committed`, its own work left to run once the end is lowered, on the
+  thread that lowers it; while such a commit waits, every later commit of the device waits
+  behind it, so the device's scheduler still takes commits in their order across its queues. A
+  wait for the command buffer lowers on the waiting thread what that thread has not. A refusal
+  only the commit's own work finds (an executed indirect command's recording, the commit's
+  uploads) fails the command buffer, nothing of it run, with `CallRefused` of `commit` at index
+  0 where no call of it was refused before; where even that commit fails (out of memory), the
+  command buffer never completes. An end that checks the depth/stencil
   attachment's store actions or store action options (one `Unknown`, options set, or any store
   action or resolve target set by a call) is lowered inside `end_encoding`, which returns its
   refusal. The call still makes Metal's checks of its arguments and of the encoder's state, and returns

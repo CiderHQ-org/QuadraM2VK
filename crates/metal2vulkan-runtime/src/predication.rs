@@ -270,6 +270,23 @@ impl Predication {
         }
     }
 
+    /// [`commit`](Self::commit)'s refusals, made with nothing changed: those of `commit` at the
+    /// call where the commit's own work waits for a render encoder's end
+    /// (`render/queued_commits.rs`), which a render encoder's calls leave as they are.
+    pub(super) fn commit_refusal(&self) -> Result<(), Error> {
+        let live_open =
+            (self.unit.as_ref()).is_some_and(|unit| !unit.stack.is_empty() && !unit.dead);
+        if self.open_at_end || live_open {
+            return Err(Error::NotImplemented(RuntimeGap::PredicationOpenAtUnitEnd));
+        }
+        if self.across_encoders {
+            return Err(Error::NotImplemented(
+                RuntimeGap::PredicatedLoopAcrossEncoders,
+            ));
+        }
+        Ok(())
+    }
+
     /// The command buffer commits: its last unit ends, and each run's table is written into its
     /// record. Refused where a unit ended with a live block open
     /// ([`RuntimeGap::PredicationOpenAtUnitEnd`]), or as the arena refuses a table.

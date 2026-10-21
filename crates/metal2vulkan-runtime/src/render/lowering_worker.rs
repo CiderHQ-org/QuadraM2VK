@@ -16,6 +16,13 @@
 //!   drain with that panic, on the program's thread, as the call would have panicked under
 //!   `RenderLoweringPolicy::AtCall`, and from then on the program's threads lower every slot's
 //!   calls themselves.
+//! - **Ends bounded.** At most [`ENDS_IN_FLIGHT`] encoders' ends are handed to the thread and not
+//!   yet lowered: the next waits in `end_encoding` until the thread lowers one
+//!   (`WorkCounts::render_log_waits`). So a program that outruns the thread holds that many
+//!   encoders' logs, command buffers and the runtime's pools for them, not a queue's every command
+//!   buffer, which the thread lowers without the program, so the wait ends.
+//! - **Commits.** The device's commits that wait for its render encoders' ends lie here too
+//!   (`render/queued_commits.rs`): the thread that lowers such an end runs them.
 //! - **Started** with the device's first encoder that logs its calls, at the user-interactive
 //!   class (`exit_guard::spawn_user_interactive`), as the threads command buffers' work waits for;
 //!   stopped and joined with the device (`DeviceShared`'s drop). No slot handed to it holds the
@@ -23,12 +30,19 @@
 //!   its lowering then.
 
 use super::deferral::LoweringSlot;
+use super::queued_commits::QueuedCommits;
 use crate::device::lock;
 use crate::exit_guard;
 use crate::recorder::take_leaving_room;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
+
+/// The encoders' ends handed to the thread and not yet lowered at which the next end waits (the
+/// module docs): a few passes' lead over the thread, enough to keep it busy while the program
+/// encodes the next pass, each end holding at most its encoder's batches
+/// (`render/deferral.rs`).
+pub(crate) const ENDS_IN_FLIGHT: usize = 4;
 
 /// The device's lowering thread (the module docs).
 pub(crate) struct LoweringWorker {
@@ -42,6 +56,12 @@ struct WorkerShared {
     wake: Condvar,
     /// The thread ended by a panic (the module docs).
     ended: AtomicBool,
+    /// The device's commits that wait for its render encoders' ends (the module docs).
+    commits: QueuedCommits,
+    /// The ends handed to the thread, or about to be, and not yet lowered (the module docs).
+    ends: Mutex<usize>,
+    /// Signalled as one of them is lowered.
+    end_lowered: Condvar,
 }
 
 struct Queue {
@@ -65,6 +85,9 @@ impl LoweringWorker {
             }),
             wake: Condvar::new(),
             ended: AtomicBool::new(false),
+            commits: QueuedCommits::new(),
+            ends: Mutex::new(0),
+            end_lowered: Condvar::new(),
         });
         let running = Arc::clone(&shared);
         let builder = std::thread::Builder::new().name("metal2vulkan-lowering".to_owned());
@@ -87,6 +110,37 @@ impl LoweringWorker {
             self.shared.wake.notify_one();
         }
         true
+    }
+
+    /// The device's commits that wait for its render encoders' ends (the module docs).
+    pub(super) fn commits(&self) -> &QueuedCommits {
+        &self.shared.commits
+    }
+
+    /// Room for an end to hand to the thread (the module docs): wait while [`ENDS_IN_FLIGHT`]
+    /// ends are handed and not lowered, unless the thread ended or the process exits. Whether
+    /// the caller waited.
+    pub(super) fn reserve_end(&self) -> bool {
+        let mut ends = lock(&self.shared.ends);
+        let mut waited = false;
+        while *ends >= ENDS_IN_FLIGHT && self.runs() && !exit_guard::closed() {
+            waited = true;
+            ends = (self.shared.end_lowered.wait_timeout(ends, exit_guard::WAKE))
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .0;
+        }
+        *ends += 1;
+        waited
+    }
+
+    /// An end [`reserve_end`](Self::reserve_end) made room for was lowered, or will never be:
+    /// room for the next.
+    pub(super) fn end_done(&self) {
+        let mut ends = lock(&self.shared.ends);
+        debug_assert!(*ends > 0, "an end lowered that was not handed");
+        *ends -= 1;
+        drop(ends);
+        self.shared.end_lowered.notify_one();
     }
 
     /// Whether the thread lowers what it is handed: it has not ended.

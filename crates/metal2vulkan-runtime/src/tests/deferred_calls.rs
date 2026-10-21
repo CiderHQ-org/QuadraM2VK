@@ -7,7 +7,9 @@
 //! lowering (`DeviceOptions::lowering_refuses`) refuses it; the bytes a call was lent are copied at
 //! the call, and the objects it names are held from the call until its command buffer completed;
 //! a buffer detached after the call refuses nothing of it; a program that outruns the device's
-//! lowering thread waits for it at the cap of its encoder's batches, and goes on.
+//! lowering thread waits for it at the cap of its encoder's batches, and goes on; an end and a
+//! commit return before the lowering thread lowered the end, the commit's own work waiting for it,
+//! and the commits after it waiting behind it.
 //!
 //! Device tests: compiled only under the validation crate's GPU safety cfgs (`m2v_gpu`,
 //! `m2v_cpu_icd`), on the kind of device the cfg selects. The functions are the owned fixture
@@ -15,13 +17,14 @@
 
 use super::blit_holds::{busy, over_host, until, Host, Scratch, FILLED, WAIT};
 use super::encoder_holds::{bits, bytes_of, pass, render_state, words_of};
+use crate::error::invalid;
 use crate::render::{BATCH_CALLS, HANDED_BATCHES};
 use crate::StoreAction;
 use crate::{
     BlitOption, Buffer, CommandBuffer, CommandBufferError, CommandBufferStatus, Degradation,
-    DegradeNotice, Device, DeviceKind, DeviceOptions, EncoderCall, Error, MessageSink, Origin,
-    RenderCommandEncoder, RenderPipelineState, ResourceOptions, ShaderCacheOptions, Size, Texture,
-    TextureDescriptor, VertexAmplificationViewMapping, Viewport,
+    DegradeNotice, Device, DeviceKind, DeviceOptions, EncoderCall, Error, EventRef, MessageSink,
+    Origin, Problem, RenderCommandEncoder, RenderPipelineState, ResourceOptions, RuntimeGap,
+    ShaderCacheOptions, Size, Texture, TextureDescriptor, VertexAmplificationViewMapping, Viewport,
 };
 use metal2vulkan::device::RenderLoweringPolicy;
 use metal2vulkan::metal::{IndexType, PixelFormat, PrimitiveType, TextureUsage};
@@ -768,5 +771,161 @@ fn a_kind_refused_as_the_end_is_lowered_refuses_the_end() {
                 }
             }
         }
+    }
+}
+
+/// What a command buffer's `commit` answers, and the calls made of it right after: its status,
+/// a second commit, and a completed handler added.
+type AfterCommit = (CommandBufferStatus, Result<(), Error>, Result<(), Error>);
+
+/// A commit after an end the lowering thread has not lowered returns at once, under both
+/// policies with the same answers: with the slot's lowering held (Worker), `commit` returns, the
+/// status reads `Committed`, and a second commit, a completed handler and an event signal are
+/// refused, as after Metal's commit. A command buffer committed after it on the same queue, the
+/// copy back, waits behind it: it reads the pass's color, and the completed handlers run in
+/// commit order. Under Worker both commits' own work ran once, behind the end.
+#[test]
+fn a_commit_after_an_end_in_flight_returns_and_keeps_its_order() {
+    let scratch = Scratch::new("deferred-commit");
+    for policy in POLICIES {
+        let device = device(&scratch.0, policy, &[], &Heard::default());
+        let (opened, open) = mpsc::channel();
+        let (go, going) = mpsc::channel::<()>();
+        let (returned, returns) = mpsc::channel::<AfterCommit>();
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let encoding = std::thread::spawn({
+            let device = device.clone();
+            let order = Arc::clone(&order);
+            move || {
+                let state = rectangle_state(&device);
+                let queue = device.new_command_queue().unwrap();
+                let command_buffer = queue.command_buffer().unwrap();
+                let target = target(&device);
+                let event = device.new_event().unwrap();
+                let mut encoder = command_buffer
+                    .render_command_encoder(&pass(&target))
+                    .unwrap();
+                opened.send(()).unwrap();
+                going.recv().unwrap();
+                rectangle(&state, &mut encoder);
+                encoder
+                    .set_fragment_bytes(&bytes_of(&COLOR, f32::to_le_bytes), 0)
+                    .unwrap();
+                encoder
+                    .draw_primitives(PrimitiveType::Triangle, 0, 6, 1, 0)
+                    .unwrap();
+                encoder.end_encoding().unwrap();
+                let ran = Arc::clone(&order);
+                let handler = Box::new(move |_: &CommandBuffer| ran.lock().unwrap().push("pass"));
+                command_buffer.add_completed_handler(handler).unwrap();
+                command_buffer.commit().unwrap();
+                let after = (
+                    command_buffer.status(),
+                    command_buffer.commit(),
+                    command_buffer.add_completed_handler(Box::new(|_| ())),
+                );
+                let copy = queue.command_buffer().unwrap();
+                let back = copy_back(&device, &copy, &target);
+                let ran = Arc::clone(&order);
+                let handler = Box::new(move |_: &CommandBuffer| ran.lock().unwrap().push("copy"));
+                copy.add_completed_handler(handler).unwrap();
+                copy.commit().unwrap();
+                returned.send(after).unwrap();
+                let signal = command_buffer.encode_signal_event(EventRef::from(&event), 1);
+                copy.wait_until_completed_for(WAIT).unwrap();
+                command_buffer.wait_until_completed_for(WAIT).unwrap();
+                (command_buffer.status(), signal, words_of(&back))
+            }
+        });
+        open.recv().unwrap();
+        let after = match policy {
+            RenderLoweringPolicy::Worker => {
+                let slots = device.shared().deferred.taken();
+                let [slot] = &slots[..] else {
+                    panic!("{} encoders' slots taken, not one", slots.len());
+                };
+                slot.while_held(|| {
+                    go.send(()).unwrap();
+                    returns.recv_timeout(WAIT).ok()
+                })
+            }
+            _ => {
+                go.send(()).unwrap();
+                returns.recv_timeout(WAIT).ok()
+            }
+        };
+        let Some((status, again, handler)) = after else {
+            panic!("{policy:?}: commit waited for the held lowering");
+        };
+        assert_eq!(status, CommandBufferStatus::Committed, "{policy:?}");
+        assert_eq!(again, Err(invalid("commit", Problem::AlreadyCommitted)));
+        assert_eq!(
+            handler,
+            Err(invalid(
+                "add_completed_handler",
+                Problem::HandlerAfterCommit
+            ))
+        );
+        let (status, signal, words) = encoding.join().unwrap();
+        assert_eq!(
+            signal,
+            Err(invalid("encode_signal_event", Problem::AlreadyCommitted))
+        );
+        assert_eq!(status, CommandBufferStatus::Completed, "{policy:?}");
+        assert!(
+            words.iter().all(|&word| word == PACKED),
+            "{policy:?}: {:x?}",
+            &words[..4]
+        );
+        assert_eq!(*order.lock().unwrap(), ["pass", "copy"], "{policy:?}");
+        let counts = device.work_counts();
+        let commits = counts.render_log_commits_by_thread + counts.render_log_commits_by_program;
+        let expected = match policy {
+            RenderLoweringPolicy::Worker => 2,
+            _ => 0,
+        };
+        assert_eq!(commits, expected, "{policy:?}: {counts:?}");
+    }
+}
+
+/// A commit after an end in flight refuses at the call what the commit refuses there, under both
+/// policies with the same error: with a predication block left open in a compute encoder before
+/// the pass, the commit returns `PredicationOpenAtUnitEnd`, and the command buffer stays
+/// uncommitted. Where the device takes no command predication there is nothing to refuse.
+#[test]
+fn a_commit_after_an_end_in_flight_refuses_a_predication_block_left_open() {
+    let scratch = Scratch::new("deferred-commit-refused");
+    for policy in POLICIES {
+        let device = device(&scratch.0, policy, &[], &Heard::default());
+        let state = rectangle_state(&device);
+        let queue = device.new_command_queue().unwrap();
+        let command_buffer = queue.command_buffer().unwrap();
+        let word = device.new_buffer(4, ResourceOptions::shared()).unwrap();
+        let mut compute = command_buffer.compute_command_encoder().unwrap();
+        if let Err(error) = compute.encode_start_if(Some(&word), 0, 0, 0) {
+            assert!(matches!(error, Error::Unsupported(_)), "{error:?}");
+            eprintln!("{policy:?}: the device takes no command predication: {error}");
+            return;
+        }
+        compute.end_encoding().unwrap();
+        let target = target(&device);
+        let mut encoder = command_buffer
+            .render_command_encoder(&pass(&target))
+            .unwrap();
+        rectangle(&state, &mut encoder);
+        encoder
+            .draw_primitives(PrimitiveType::Triangle, 0, 6, 1, 0)
+            .unwrap();
+        encoder.end_encoding().unwrap();
+        assert_eq!(
+            command_buffer.commit(),
+            Err(Error::NotImplemented(RuntimeGap::PredicationOpenAtUnitEnd)),
+            "{policy:?}"
+        );
+        assert_eq!(
+            command_buffer.status(),
+            CommandBufferStatus::NotEnqueued,
+            "{policy:?}"
+        );
     }
 }

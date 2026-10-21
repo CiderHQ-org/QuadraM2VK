@@ -15,15 +15,18 @@
 //!   [`HANDED_BATCHES`] batches of its encoder handed and not taken, until the thread takes one
 //!   (`WorkCounts::render_log_waits`): an encoder's log never holds more than
 //!   `(HANDED_BATCHES + 2) * BATCH_CALLS` calls not yet lowered, the batch the thread lowers and
-//!   the one being filled counted.
+//!   the one being filled counted. An end waits likewise with `ENDS_IN_FLIGHT` encoders' ends
+//!   handed and not lowered (`render/lowering_worker.rs`).
 //! - **The end.** `end_encoding` hands the encoder's end to the lowering thread too, after its
 //!   calls, and returns; the encoder's command buffer holds the end ([`EndInFlight`]), and the
 //!   encoder stays open there until it is lowered. The thread lowers it after the encoder's last
 //!   batch, as `endEncoding`, the call after the encoder's last (`EncoderCall`). The command
 //!   buffer's next call that follows the end lowers on the program's thread what the thread has
-//!   not (`CommandBuffer::settle_end`): another encoder's opening, an event or a semaphore, the
-//!   commit, a read of what its encoders left (`used_resources`, `ended_encoders`, `refusal`,
-//!   `failed_pipeline`, `executions`). A rebind or detach of host pages, and a read of the work
+//!   not (`CommandBuffer::settle_end`): another encoder's opening, an event or a semaphore,
+//!   `commit_failed`, a read of what its encoders left (`used_resources`, `ended_encoders`,
+//!   `refusal`, `failed_pipeline`, `executions`). `commit` makes its checks and returns, its own
+//!   work left to run once the end is lowered, on the thread that lowers it
+//!   (`render/queued_commits.rs`). A rebind or detach of host pages, and a read of the work
 //!   counts, lower every encoder's first. An end that makes Metal's checks of its own
 //!   (`CallChecks::ends_at_call`) is lowered inside its call, as is the end of an encoder that
 //!   lowers its calls at their calls, where a buffer of the device is detached, or where no
@@ -64,6 +67,7 @@
 
 use super::call_checks::{CallChecks, Checked};
 use super::lowering_worker::LoweringWorker;
+use super::queued_commits::QueuedCommits;
 use super::replay::{render, DrawIndexed};
 use super::{RenderCall, RenderCommandEncoder, RenderLowering};
 use crate::command_buffer::{CommandBuffer, WeakCommandBuffer};
@@ -275,8 +279,11 @@ impl SlotState {
 fn end_lowering(lowerer: &mut Lowerer, at: u32, by_thread: bool) -> Option<CommandBuffer> {
     let mut lowering = lowerer.lowering.take()?;
     let command_buffer = lowering.core.command_buffer().clone();
-    let counts = &lowering.core.device().shared().counts;
-    counts.render_log_end_lowered(by_thread);
+    let shared = lowering.core.device().shared();
+    shared.counts.render_log_end_lowered(by_thread);
+    if let Some(worker) = shared.deferred.started() {
+        worker.end_done();
+    }
     // Judged as of its call, when no buffer of the device was detached.
     lowering.core.judges_unattached(true);
     let identity = EncoderCall::new("endEncoding", at);
@@ -333,11 +340,12 @@ impl LoweringSlot {
             }
             drop(state);
             self.handed_back.notify_all();
-            // The command buffer's last handle, where the program let go of the rest, goes off
-            // this thread: its drop gives the slot back, which empties the batches, whose holds
-            // may be the program's objects' last (the module docs).
+            // A commit that waits for the end runs now, on this thread; the command buffer's last
+            // handle, where the program let go of the rest, goes off this thread: its drop gives
+            // the slot back, which empties the batches, whose holds may be the program's
+            // objects' last (the module docs).
             if let Some(command_buffer) = ended {
-                command_buffer.let_go_off_thread();
+                command_buffer.end_lowered(true);
             }
         }
     }
@@ -403,9 +411,12 @@ impl LoweringSlot {
         }
         state.filling.empty(next);
         state.draining = false;
-        // The command buffer, once the slot's locks are free: its drop may give the slot back.
+        // The command buffer, once the slot's locks are free: a commit that waits for the end
+        // runs, and its drop may give the slot back.
         drop(guard);
-        drop(ended);
+        if let Some(command_buffer) = ended {
+            command_buffer.end_lowered(false);
+        }
         then
     }
 
@@ -425,6 +436,15 @@ impl LoweringSlot {
             lowerer.refused = false;
             lowerer.lowering.take()
         };
+        // An end handed and never lowered (its command buffer goes): room for the next.
+        if guard.ending.take().is_some() {
+            let shared = gone
+                .as_ref()
+                .map(|lowering| lowering.core.device().shared());
+            if let Some(worker) = shared.and_then(|shared| shared.deferred.started()) {
+                worker.end_done();
+            }
+        }
         let state = &mut *guard;
         state.stop_checking();
         for mut batch in state.handed.drain(..) {
@@ -437,7 +457,6 @@ impl LoweringSlot {
         state.filling.empty(0);
         state.draining = false;
         state.panicked = false;
-        state.ending = None;
         state.taken = false;
         drop(guard);
         // Its drop abandons the command buffer of an encoder dropped unended, the slot's locks
@@ -501,15 +520,29 @@ impl DeferredEncoders {
         slot
     }
 
+    /// The device's commits that wait for a render encoder's end (`render/queued_commits.rs`):
+    /// none where its lowering thread never started, since no end waits for it then.
+    pub(crate) fn commits(&self) -> Option<&QueuedCommits> {
+        self.started().map(LoweringWorker::commits)
+    }
+
+    /// The device's lowering thread, where it started.
+    fn started(&self) -> Option<&LoweringWorker> {
+        self.worker.get()?.as_ref()
+    }
+
     /// The device's lowering thread, started at the first call; `None` where the host starts no
     /// thread.
     fn worker(&self) -> Option<&LoweringWorker> {
         self.worker.get_or_init(LoweringWorker::start).as_ref()
     }
 
-    /// Lower the calls every open encoder of the device logged, encoder by encoder: before a read
-    /// of what their lowering leaves (`Device::work_counts`). Nothing where this thread lowers a
-    /// logged call now (a message sink that reads the counts), which would wait for itself.
+    /// Lower the calls every open encoder of the device logged, encoder by encoder, and the ends
+    /// left to the lowering thread, then wait for the commits that waited for them
+    /// (`render/queued_commits.rs`): before a read of what their lowering leaves
+    /// (`Device::work_counts`) or a rebind or detach of host pages. Nothing where this thread
+    /// lowers a logged call now (a message sink that reads the counts), which would wait for
+    /// itself.
     pub(crate) fn lower_all(&self) {
         if lowering::current().is_some() {
             return;
@@ -517,6 +550,9 @@ impl DeferredEncoders {
         let slots: Vec<Arc<LoweringSlot>> = lock(&self.slots).iter().map(Arc::clone).collect();
         for slot in slots {
             slot.drain(0, |_, _| ());
+        }
+        if let Some(commits) = self.commits() {
+            commits.settle();
         }
     }
 
@@ -792,25 +828,38 @@ impl RenderCommandEncoder {
             (None, Some(logged)) => logged,
             (None, None) => return Err(internal("an encoder without its lowering")),
         };
-        let slot = &logged.slot;
-        let shared = logged.device.shared();
-        let mut state = lock(&slot.state);
-        let checked = state.checking && state.checks.as_ref().is_some_and(|c| !c.ends_at_call());
-        let worker = shared.deferred.worker().filter(|worker| worker.runs());
-        let hands = checked && !shared.rebinds.any_detached_now() && !exit_guard::closed();
+        let slot = Arc::clone(&logged.slot);
         let held = logged.command_buffer.upgrade();
-        if let (true, Some(worker), Some(command_buffer)) = (hands, worker, held) {
+        let worker = held.as_ref().and_then(|command_buffer| {
+            let shared = command_buffer.device().shared();
+            shared.deferred.worker().filter(|worker| worker.runs())
+        });
+        let checked = {
+            let state = lock(&slot.state);
+            state.checking && state.checks.as_ref().is_some_and(|c| !c.ends_at_call())
+        };
+        let shared = logged.device.shared();
+        let hands = checked && !shared.rebinds.any_detached_now() && !exit_guard::closed();
+        let handing = (held.as_ref().zip(worker)).filter(|_| hands);
+        if let Some((command_buffer, worker)) = handing {
+            // Room for the end among those in flight, without the slot's lock, which the thread
+            // takes to lower them (`render/lowering_worker.rs`).
+            if worker.reserve_end() {
+                shared.counts.render_log_waited();
+            }
+            let mut state = lock(&slot.state);
             state.stop_checking();
             state.ending = Some(self.next);
             let unqueued = state.hand_off();
+            // Held before the thread can take the end, under the slot's lock: the end's lowering
+            // finds it held (`CommandBuffer::end_lowered`).
+            command_buffer.hold_end(EndInFlight(logged));
             drop(state);
-            if unqueued && !worker.hand(slot) {
+            if unqueued && !worker.hand(&slot) {
                 lock(&slot.state).queued = false;
             }
-            command_buffer.hold_end(EndInFlight(logged));
             return Ok(());
         }
-        drop(state);
         let lowering = slot.drain(0, |lowerer, _| lowerer.lowering.take());
         lock(&slot.state).stop_checking();
         let lowering = lowering.ok_or_else(|| internal("an encoder ended twice"))?;

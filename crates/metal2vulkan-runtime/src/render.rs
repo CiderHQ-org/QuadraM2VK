@@ -396,6 +396,7 @@ mod pass_start_reads;
 mod pass_steps;
 mod pending;
 mod pending_tile;
+mod queued_commits;
 mod replay;
 mod reroute;
 mod restart;

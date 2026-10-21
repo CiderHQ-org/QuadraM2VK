@@ -493,6 +493,9 @@ calls! {
     CreateRenderPass => c"vkCreateRenderPass",
     CreateRenderPass2 => c"vkCreateRenderPass2",
     CreateFramebuffer => c"vkCreateFramebuffer",
+    // The query pool of a commit's timestamp slots (`gpu_time.rs`), on the lowering thread where a
+    // commit's own work waited for a render encoder's end (`render/queued_commits.rs`).
+    CreateQueryPool => c"vkCreateQueryPool",
     // A mesh draw's, and an execution of commands the GPU generates: never primed
     // ([`UNPRIMED`](crate::device::prime::UNPRIMED)).
     CmdDrawMeshTasks => c"vkCmdDrawMeshTasksEXT",

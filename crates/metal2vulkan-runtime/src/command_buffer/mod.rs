@@ -147,6 +147,29 @@ impl std::fmt::Debug for CommandBuffer {
     }
 }
 
+/// A command buffer as the device's commits that wait hold it (`render/queued_commits.rs`): a
+/// trait object, whose `Send` and `Sync` its bounds give, made with no allocation. A program's
+/// crate proves the device's `Send` and `Sync` within its own recursion limit (rustc's 128 by
+/// default), which a path through the command buffer once more passes (`E0275` in the validation
+/// crate's statics).
+pub(crate) trait Waiting: Send + Sync {
+    /// The command buffer.
+    fn command_buffer(self: Arc<Self>) -> CommandBuffer;
+
+    /// The command buffer's address, which names it ([`CommandBuffer::is`]).
+    fn address(&self) -> usize;
+}
+
+impl Waiting for CommandBufferShared {
+    fn command_buffer(self: Arc<Self>) -> CommandBuffer {
+        CommandBuffer(self)
+    }
+
+    fn address(&self) -> usize {
+        CommandBufferShared::address(self)
+    }
+}
+
 /// A command buffer that a holder does not keep ([`CommandBuffer::downgrade`]).
 pub(crate) struct WeakCommandBuffer(std::sync::Weak<CommandBufferShared>);
 
@@ -428,6 +451,12 @@ pub(super) struct State {
     /// (`render/deferral.rs`): the encoder stays open until it is lowered, and what follows the
     /// end in the command buffer lowers it first ([`CommandBuffer::settle_end`]).
     ending: Option<EndInFlight>,
+    /// The device's lowering thread lowered the end it holds (`ending`).
+    end_lowered: bool,
+    /// `commit` returned with its own work left to run once a render encoder's end is lowered
+    /// (`render/queued_commits.rs`), which has not run: to the program, the command buffer is
+    /// committed.
+    queued_commit: bool,
     /// `commit` is recording the encoders' segments (`encoder.rs`), outside this lock: nothing
     /// else may encode or commit meanwhile.
     committing: bool,
@@ -647,9 +676,11 @@ struct Resident {
 }
 
 impl State {
-    /// Whether it was committed: a handler added now would not run (`Problem::HandlerAfterCommit`).
+    /// Whether it was committed, its commit's own work waiting or not
+    /// (`render/queued_commits.rs`): a handler added now would not run
+    /// (`Problem::HandlerAfterCommit`).
     pub(crate) fn enqueued(&self) -> bool {
-        self.status != CommandBufferStatus::NotEnqueued
+        self.status != CommandBufferStatus::NotEnqueued || self.queued_commit
     }
 
     /// An encoder of `kind` ended, its commands' uses and bindings having named `keys`, having
@@ -956,9 +987,19 @@ impl State {
         }
     }
 
-    /// Why nothing more can be encoded or committed now: the command buffer was committed, an
-    /// encoder is open, or one was abandoned.
+    /// Why nothing more can be encoded or committed now: the command buffer was committed (its
+    /// commit's own work waiting or not, `render/queued_commits.rs`), an encoder is open, or one
+    /// was abandoned.
     pub(super) fn refusal(&self) -> Option<Problem> {
+        match self.queued_commit {
+            true => Some(Problem::AlreadyCommitted),
+            false => self.commit_refusal(),
+        }
+    }
+
+    /// [`refusal`](Self::refusal), but of a commit whose own work waited
+    /// (`render/queued_commits.rs`), as it runs.
+    fn commit_refusal(&self) -> Option<Problem> {
         if self.status != CommandBufferStatus::NotEnqueued || self.committing {
             Some(Problem::AlreadyCommitted)
         } else if self.encoder_open {
@@ -1035,6 +1076,18 @@ impl State {
         self.abandoned = false;
         let place = self.open_encoder_place();
         self.fail_from(place, CommandBufferError::CallRefused(call));
+        self.refuse_call(error);
+    }
+
+    /// The commit's own work, which waited (`render/queued_commits.rs`), refused it for
+    /// `error`, found after `commit` returned: nothing of the command buffer runs, and it fails
+    /// as its first refused call names it (`CommandBufferError::CallRefused`): the commit, as
+    /// `commit` at index 0, where no call of its encoders was refused before. The refusal's
+    /// error is kept, as a call's is.
+    fn refuse_commit(&mut self, error: Error) {
+        let commit = CommandBufferError::CallRefused(EncoderCall::new("commit", 0));
+        let first = self.fails_from.map_or(commit, |(_, first)| first);
+        self.fails_from = Some((0, first));
         self.refuse_call(error);
     }
 
@@ -1444,6 +1497,8 @@ impl CommandBuffer {
                 encoder_open: false,
                 abandoned: false,
                 ending: None,
+                end_lowered: false,
+                queued_commit: false,
                 committing: false,
                 pool: None,
                 replays: None,
@@ -1546,6 +1601,16 @@ impl CommandBuffer {
         lock(&self.0.state)
     }
 
+    /// This command buffer as the device's commits that wait hold it ([`Waiting`]).
+    pub(crate) fn waiting(self) -> Arc<dyn Waiting> {
+        self.0
+    }
+
+    /// Whether `waiting` holds this command buffer.
+    pub(crate) fn is(&self, waiting: &dyn Waiting) -> bool {
+        self.0.address() == waiting.address()
+    }
+
     /// A handle that does not keep the command buffer: a render encoder's, which its end in
     /// flight hands the command buffer (`render/deferral.rs`), so that hold makes no cycle.
     pub(crate) fn downgrade(&self) -> WeakCommandBuffer {
@@ -1556,8 +1621,30 @@ impl CommandBuffer {
     /// lowering thread, until what follows it in the command buffer lowers it
     /// ([`settle_end`](Self::settle_end)).
     pub(crate) fn hold_end(&self, ending: EndInFlight) {
-        let held = self.state().ending.replace(ending);
+        let mut state = self.state();
+        let held = state.ending.replace(ending);
         debug_assert!(held.is_none(), "two render encoders' ends in flight");
+        state.end_lowered = false;
+    }
+
+    /// The render encoder's end the command buffer holds was lowered (`render/deferral.rs`), on
+    /// the device's lowering thread (`by_thread`) or the program's: a commit whose own work
+    /// waited for it runs now, on this thread, with those ready behind it
+    /// (`render/queued_commits.rs`). Then this handle goes, off the lowering thread where it is
+    /// the last ([`let_go_off_thread`](Self::let_go_off_thread)).
+    pub(crate) fn end_lowered(self, by_thread: bool) {
+        let queued = {
+            let mut state = self.state();
+            state.end_lowered = true;
+            state.queued_commit
+        };
+        let commits = self.0.device.shared().deferred.commits();
+        if let Some(commits) = commits.filter(|commits| queued && commits.ready(&self)) {
+            commits.run(by_thread);
+        }
+        if by_thread {
+            self.let_go_off_thread();
+        }
     }
 
     /// Let go of this handle on the device's lowering thread, which has just lowered a render
@@ -1677,7 +1764,7 @@ impl CommandBuffer {
     /// utilization floor on Linux ([`Handler`]). Refused once the command buffer is committed.
     pub fn add_scheduled_handler(&self, handler: Handler) -> Result<(), Error> {
         let mut state = self.state();
-        if state.status != CommandBufferStatus::NotEnqueued {
+        if state.enqueued() {
             return Err(invalid(
                 "add_scheduled_handler",
                 Problem::HandlerAfterCommit,
@@ -1720,7 +1807,7 @@ impl CommandBuffer {
     /// as [`add_scheduled_handler`](Self::add_scheduled_handler) is.
     pub fn add_submission_handler(&self, handler: Handler) -> Result<(), Error> {
         let mut state = self.state();
-        if state.status != CommandBufferStatus::NotEnqueued {
+        if state.enqueued() {
             return Err(invalid(
                 "add_submission_handler",
                 Problem::HandlerAfterCommit,
@@ -1845,7 +1932,7 @@ impl CommandBuffer {
     /// committed.
     pub fn add_completed_handler(&self, handler: Handler) -> Result<(), Error> {
         let mut state = self.state();
-        if state.status != CommandBufferStatus::NotEnqueued {
+        if state.enqueued() {
             return Err(invalid(
                 "add_completed_handler",
                 Problem::HandlerAfterCommit,
@@ -1875,6 +1962,16 @@ impl CommandBuffer {
     /// signals encoded before it fire, and nothing from the pass on runs or signals. One with an
     /// encoder Metal's GPU faults fails as Metal's does ([`CommandBufferError::PageFault`]): that
     /// encoder runs nothing, and the others run and every signal fires.
+    ///
+    /// Under `RenderLoweringPolicy::Worker`, where the device's lowering thread has not lowered
+    /// the last render encoder's end, or a commit of the device waits for one, it makes the
+    /// checks above that refuse at the call (committed already, an encoder open, one abandoned,
+    /// a predication block left open) and returns, its status `Committed`: its own work runs
+    /// once the end is lowered, after the commits that wait, on the thread that lowers it
+    /// (docs/API.md section 1). A refusal only that work finds (an executed indirect command's,
+    /// out of memory) fails the command buffer with nothing of it run
+    /// ([`CommandBufferError::CallRefused`] of `commit`, where no call of it was refused before;
+    /// [`refusal`](Self::refusal) keeps the error).
     pub fn commit(&self) -> Result<(), Error> {
         self.commit_as("commit", None)
     }
@@ -1910,27 +2007,123 @@ impl CommandBuffer {
     /// [`commit`](Self::commit) for `call`, or, with `failure`,
     /// [`commit_failed`](Self::commit_failed).
     fn commit_as(&self, call: &'static str, failure: Option<CommitFailure>) -> Result<(), Error> {
+        // Left to wait for the last render encoder's end, where its call left it to the device's
+        // lowering thread and the thread has not lowered it, or for the commits left so.
+        if failure.is_none() && self.queue_commit(call)? {
+            return Ok(());
+        }
         // The last render encoder's end, where its call left it to the device's lowering thread.
         self.settle_end();
+        self.commit_settled(call, failure, false)
+    }
+
+    /// Under `RenderLoweringPolicy::Worker`, where the command buffer holds a render encoder's
+    /// end the device's lowering thread has not lowered, or a commit of the device waits for one
+    /// (`render/queued_commits.rs`): make Metal's checks of `commit` at the call, of the command
+    /// buffer as the program sees it (its last encoder ended), returning their refusal, and leave
+    /// the commit's own work to run after the end, and after the commits that wait. Whether it
+    /// did.
+    fn queue_commit(&self, call: &'static str) -> Result<bool, Error> {
+        let Some(commits) = self.0.device.shared().deferred.commits() else {
+            return Ok(false);
+        };
+        let mut state = self.state();
+        let end_in_flight = state.ending.is_some() && !state.end_lowered;
+        let queued = commits.lock();
+        if !end_in_flight && queued.idle() {
+            return Ok(false);
+        }
+        // The encoder open is the one whose end is in flight, which ended.
+        let refusal = match state.refusal() {
+            Some(Problem::EncoderOpen) if end_in_flight => None,
+            refusal => refusal,
+        };
+        if let Some(problem) = refusal {
+            return Err(invalid(call, problem));
+        }
+        state.predication.commit_refusal()?;
+        state.queued_commit = true;
+        self.0.status.store(
+            status_word(CommandBufferStatus::Committed),
+            Ordering::Release,
+        );
+        let runs = queued.push(self.clone(), !end_in_flight);
+        drop(state);
+        if runs {
+            commits.run(false);
+        }
+        Ok(true)
+    }
+
+    /// Run the commit's own work, which waited for a render encoder's end
+    /// (`render/queued_commits.rs`), the end lowered: on the device's lowering thread
+    /// (`by_thread`) or the program's. A refusal it finds fails the command buffer
+    /// (`State::refuse_commit`), which then commits with nothing of it run. Where even that
+    /// commit fails (the device out of memory), the command buffer never completes; its refusal
+    /// keeps the first error.
+    pub(crate) fn commit_queued(&self, by_thread: bool) {
+        let counts = &self.0.device.shared().counts;
+        counts.render_log_commit_run(by_thread);
+        self.settle_end();
+        let Err(error) = self.commit_settled("commit", None, true) else {
+            return;
+        };
+        self.state().refuse_commit(error);
+        // A refusal of this one is already kept, as the first.
+        let _ = self.commit_settled("commit", None, true);
+    }
+
+    /// Before a wait for the command buffer: where its commit's own work waits
+    /// (`render/queued_commits.rs`), lower on this thread the ends it and the commits before it
+    /// wait for, which runs it here where the device's lowering thread has not.
+    fn settle_commit(&self) {
+        if !self.state().queued_commit {
+            return;
+        }
+        let Some(commits) = self.0.device.shared().deferred.commits() else {
+            return;
+        };
+        for command_buffer in commits.unready_through(self) {
+            command_buffer.settle_end();
+        }
+    }
+
+    /// The commit, the last render encoder's end lowered: `queued` where its own work waited
+    /// (`render/queued_commits.rs`).
+    fn commit_settled(
+        &self,
+        call: &'static str,
+        failure: Option<CommitFailure>,
+        queued: bool,
+    ) -> Result<(), Error> {
         // The waiting fetched render targets take their storage form at this commit where it
         // allows (`storage_form.rs`): one atomic read where none waits. The scheduler's thread
         // ends the switch once it submitted the command buffer.
         if !self.take_storage_forms(failure.is_some()) {
-            return self.commit_now(call, failure);
+            return self.commit_now(call, failure, queued);
         }
-        let committed = self.commit_now(call, failure);
+        let committed = self.commit_now(call, failure, queued);
         if committed.is_err() {
             self.give_up_storage_forms();
         }
         committed
     }
 
-    /// [`commit_as`](Self::commit_as) itself.
-    fn commit_now(&self, call: &'static str, failure: Option<CommitFailure>) -> Result<(), Error> {
+    /// [`commit_settled`](Self::commit_settled) itself.
+    fn commit_now(
+        &self,
+        call: &'static str,
+        failure: Option<CommitFailure>,
+        queued: bool,
+    ) -> Result<(), Error> {
         let device = &self.0.device;
         let (segments, failure, reached): (Vec<(Deferred, bool)>, _, _) = {
             let mut state = self.state();
-            if let Some(problem) = state.refusal() {
+            let refusal = match queued {
+                true => state.commit_refusal(),
+                false => state.refusal(),
+            };
+            if let Some(problem) = refusal {
                 return Err(invalid(call, problem));
             }
             let ended = state.ended.len();
@@ -2048,6 +2241,7 @@ impl CommandBuffer {
                 state.retained.push(Box::new(ticket));
             }
             state.status = CommandBufferStatus::Committed;
+            state.queued_commit = false;
             self.0.answer(&state);
             for heap in state.used_heaps.drain(..) {
                 heap.mark_used();
@@ -2412,6 +2606,7 @@ impl CommandBuffer {
             Answer::Return | Answer::Wait => None,
             Answer::Block(from) => Some(contexts::block(from, self.0.context())?),
         };
+        self.settle_commit();
         let mut state = self.state();
         while !scheduled(&state) {
             if exit_guard::closed() {
@@ -2475,6 +2670,7 @@ impl CommandBuffer {
             Answer::Wait => None,
             Answer::Block(from) => Some(contexts::block(from, self.0.context())?),
         };
+        self.settle_commit();
         self.0.waits_for_completion();
         self.0.gate.wait()?;
         self.trailed(None)
@@ -2494,6 +2690,7 @@ impl CommandBuffer {
                 Some(contexts::block(from, self.0.context()).map_err(|_| TimedOut)?)
             }
         };
+        self.settle_commit();
         self.0.waits_for_completion();
         self.0.gate.wait_until(deadline)?;
         self.trailed(Some(deadline)).map_err(|_| TimedOut)

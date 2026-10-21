@@ -270,7 +270,7 @@ impl CommandBuffer {
     /// `Problem::AlreadyCommitted`).
     pub fn set_submission_check(&self, check: SubmissionCheck) -> Result<(), Error> {
         let mut state = self.state();
-        if state.status != crate::values::CommandBufferStatus::NotEnqueued || state.committing {
+        if state.enqueued() || state.committing {
             return Err(invalid("set_submission_check", Problem::AlreadyCommitted));
         }
         state.check = Some(check);

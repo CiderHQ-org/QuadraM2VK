@@ -327,6 +327,8 @@ pub(crate) struct Counters {
     render_log_waits: AtomicU64,
     render_log_ends_by_thread: AtomicU64,
     render_log_ends_by_program: AtomicU64,
+    render_log_commits_by_thread: AtomicU64,
+    render_log_commits_by_program: AtomicU64,
 }
 
 /// How a render pass took a shadowed texture as a color attachment
@@ -994,6 +996,16 @@ impl Counters {
         match by_thread {
             true => &self.render_log_ends_by_thread,
             false => &self.render_log_ends_by_program,
+        }
+        .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A commit's own work that waited for a render encoder's end ran: on the device's lowering
+    /// thread (`by_thread`), or on the program's (`render/queued_commits.rs`).
+    pub(crate) fn render_log_commit_run(&self, by_thread: bool) {
+        match by_thread {
+            true => &self.render_log_commits_by_thread,
+            false => &self.render_log_commits_by_program,
         }
         .fetch_add(1, Ordering::Relaxed);
     }
@@ -2879,7 +2891,8 @@ pub struct WorkCounts {
     /// the lowering thread had not taken; and all of them where the device runs no such thread.
     pub render_log_batches_by_program: u64,
     /// Render encoders' calls that waited for the device's lowering thread, the program having
-    /// handed it as many of its encoder's batches as it holds untaken.
+    /// handed it as many of its encoder's batches as it holds untaken, or as many encoders' ends
+    /// as it holds unlowered (the end waiting).
     pub render_log_waits: u64,
     /// Render encoders' ends that `end_encoding` left to the device's lowering thread, which
     /// lowered them after the encoders' calls, while the program went on.
@@ -2888,6 +2901,14 @@ pub struct WorkCounts {
     /// at what followed the end in its command buffer (another encoder, an event, the commit),
     /// at a read of these counts, or at a rebind or detach of host pages.
     pub render_log_ends_by_program: u64,
+    /// Commits whose own work waited for a render encoder's end the device's lowering thread had
+    /// not lowered, or behind such a commit, run on that thread as it lowered the end, while the
+    /// program went on (`CommandBuffer::commit` returned at once).
+    pub render_log_commits_by_thread: u64,
+    /// Of those commits, the ones run on the program's threads: where one lowered the end (a
+    /// wait for the command buffer, a read of these counts, a rebind or detach of host pages),
+    /// or committed behind a ready one no thread ran.
+    pub render_log_commits_by_program: u64,
     /// Render pass instances of render encoders' passes begun where the pass is recorded, each
     /// running a secondary of its draws (`render/pass_steps.rs`): an encoder's instances not
     /// recorded inline, and the runs of executions' commands. With the three fields after this
@@ -3953,6 +3974,10 @@ impl Device {
             render_log_waits: counters.render_log_waits.load(Ordering::Relaxed),
             render_log_ends_by_thread: (counters.render_log_ends_by_thread).load(Ordering::Relaxed),
             render_log_ends_by_program: (counters.render_log_ends_by_program)
+                .load(Ordering::Relaxed),
+            render_log_commits_by_thread: (counters.render_log_commits_by_thread)
+                .load(Ordering::Relaxed),
+            render_log_commits_by_program: (counters.render_log_commits_by_program)
                 .load(Ordering::Relaxed),
             render_passes_begun_instances: pass_begun(PassBegun::Instance),
             render_passes_begun_inline: pass_begun(PassBegun::Inline),

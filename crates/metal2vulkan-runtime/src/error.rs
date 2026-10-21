@@ -1730,7 +1730,9 @@ pub enum CommandBufferError {
     /// encoder's calls ([`EncoderCall`]); [`CommandBuffer::refusal`](crate::CommandBuffer::refusal)
     /// gives the error the call would have returned under `RenderLoweringPolicy::AtCall`. The
     /// encoder and every encoder after it run nothing, and the event signals encoded from it on do
-    /// not fire. Metal's validation stops the process at such a call instead.
+    /// not fire. Metal's validation stops the process at such a call instead. A commit whose own
+    /// work refused it after `commit` returned is named `commit`
+    /// ([`CommandBuffer::commit`](crate::CommandBuffer::commit)): none of the encoders runs.
     CallRefused(EncoderCall),
 }
 
@@ -1746,7 +1748,8 @@ pub struct EncoderCall {
     /// The call's place among the encoder's calls, from 0: every call of the encoder's methods
     /// counts, `end_encoding` and the queries (`tile_width`, `tile_height`) but none. The end of an
     /// encoder that logged its calls names its notices `endEncoding`, at the place after its last
-    /// call.
+    /// call. A commit whose own work, run after it returned, refused it is `commit` at 0
+    /// (`CommandBuffer::commit`).
     pub index: u32,
 }
 
