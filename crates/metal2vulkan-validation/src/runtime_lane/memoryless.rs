@@ -284,6 +284,69 @@ fn a_memoryless_2d_level_renders() {
     });
 }
 
+/// A memoryless 4x 2D multisample array's slice 1 drawn white and resolved: every resolved texel
+/// white, as Metal resolves it (an M3 Max under macOS 27.0.1, a probe of the same pass). Metal
+/// makes no texture view of a memoryless texture (its API validation: "cannot create View from
+/// Memoryless texture."; without it the view is nil), so a driver that attaches the slice through
+/// one attaches nothing and resolves nothing: on MoltenVK
+/// (`RuntimeDriverDefect::LazilyAllocatedSubresourceViews`) the image takes device-local memory.
+/// Refused where a portability subset withholds `multisampleArrayImage`, as any multisample array
+/// is.
+#[test]
+fn a_memoryless_multisample_array_slice_resolves() {
+    let (messages, _cache, lane) = lane();
+    let rgba8 = PixelFormat::RGBA8Unorm;
+    let array = memoryless(
+        &lane,
+        TextureType::Type2DMultisampleArray,
+        rgba8,
+        Shape { slices: 2, ..MSAA },
+        TextureUsage::RENDER_TARGET,
+    );
+    let array = match array {
+        Ok(array) => array,
+        Err(Error::Unsupported(refused)) => {
+            eprintln!("refused: {:?}", refused.needs);
+            return quiet(lane, &messages);
+        }
+        Err(error) => panic!("{error:?}"),
+    };
+    let texels = (SIZE * SIZE) as usize;
+    let resolve = lane.texture(
+        rgba8,
+        Shape {
+            shared: true,
+            ..ONE
+        },
+        TextureUsage::RENDER_TARGET,
+    );
+    resolve
+        .replace_region(
+            Region::new_2d(0, 0, SIZE, SIZE),
+            0,
+            0,
+            &vec![0; 4 * texels],
+            4 * SIZE,
+            0,
+        )
+        .unwrap();
+    let white = lane.pipeline((FULL, WHITE), &[rgba8], (None, None), 4);
+    let mut pass = color_pass(
+        &array,
+        Some(&resolve),
+        StoreAction::MultisampleResolve,
+        (0, 0),
+    );
+    pass.color_attachments[0].slice = 1;
+    lane.run(&pass, |l, e, h| l.draw(e, h, &white, 0.5))
+        .unwrap();
+    assert_eq!(
+        lane.read(&resolve, (0, 0), 4, BlitOption::None),
+        repeat(&[0xff; 4], texels)
+    );
+    quiet(lane, &messages);
+}
+
 /// What Metal makes memoryless and what its validation stops of a memoryless texture (probes 6b,
 /// 6c, 6d and 6f), refused typed; the uses it takes are taken.
 #[test]

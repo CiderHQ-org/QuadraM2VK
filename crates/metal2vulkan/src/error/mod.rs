@@ -927,6 +927,14 @@ pub enum RuntimeDriverDefect {
     /// as the driver runs it, announced (`set-past-layout-support`), and Vulkan's validation layer
     /// reports it (`VUID-vkCreateDescriptorSetLayout-support-09582`).
     SetLayoutSupportUnderstated,
+    /// A view of some of the levels or layers of an image bound to lazily allocated memory (a
+    /// memoryless texture's level, slice or cube face attached to a pass) has no texture: the
+    /// driver makes such a view as a Metal texture view, and Metal makes no view of a memoryless
+    /// texture, so the pass renders without the attachment (its resolve too). Nothing is
+    /// refused: the runtime gives such an image, one of more than one level or layer,
+    /// device-local memory, where, as in a memoryless texture, nothing a pass leaves is
+    /// observable.
+    LazilyAllocatedSubresourceViews,
 }
 
 /// One device capability a refusal can name.

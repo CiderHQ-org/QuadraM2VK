@@ -124,10 +124,11 @@ pub(super) struct Affected {
 ///   storage, which is what a lazily allocated memory type is, so the view's first command
 ///   buffer dereferences a null heap and the process takes a `SIGSEGV`
 ///   (`runtime_lane::memoryless::a_memoryless_3d_depth_plane_renders` on an M4, 1.4.1,
-///   driverVersion 10401, where the other types' views pass: they view the
-///   memoryless texture itself). Read in 1.4.1's source and main's of 2026-10-05 (`fae55a18`,
-///   unchanged): known broken through 1.4.1. Nothing is refused: such an image takes
-///   device-local memory (`ImagePlan::memory_class`).
+///   driverVersion 10401, where the other types' passes ran: their views either are the
+///   memoryless texture itself or have no texture, `LazilyAllocatedSubresourceViews`). Read in
+///   1.4.1's source and main's of 2026-10-05 (`fae55a18`, unchanged): known broken through
+///   1.4.1. Nothing is refused: such an image takes device-local memory
+///   (`ImagePlan::memory_class`).
 ///
 /// `CompressedImageCopiesRewriteTexels`:
 /// - MoltenVK (`MOLTENVK`): a copy between a buffer and an image is a Metal blit of the image's
@@ -324,6 +325,27 @@ pub(super) struct Affected {
 ///   (`VUID-vkCreateDescriptorSetLayout-support-09582`). Nothing is refused: a set layout the
 ///   driver refuses is made there, announced (`set-past-layout-support`, `pipeline/objects.rs`);
 ///   on every other driver a set layout its driver refuses is refused.
+///
+/// `LazilyAllocatedSubresourceViews`:
+/// - MoltenVK (`MOLTENVK`): a view of some of an image's levels or layers is a Metal texture view
+///   of the image's texture (`newTextureViewWithPixelFormat:textureType:levels:slices:`, in
+///   `MVKImageViewPlane::newMTLTexture` at 1.4.1 and `newMTLTextureFromBaseMTLTexture` at
+///   1.4.2), and a pass attaches that view (`MVKImageView::populateMTLRenderPassAttachmentDescriptor`).
+///   An image in lazily allocated memory is a texture of Metal's memoryless storage, of which
+///   Metal makes no view: its API validation stops the call ("cannot create View from Memoryless
+///   texture."), and without it the call answers nil. A Metal probe on an M3 Max under macOS
+///   27.0.1 had nil for a 2D texture's level, a 1D array's, a 2D array's and a 2D multisample
+///   array's slice, and a cube's and a cube array's face, each made of a private texture, while a
+///   pass of the memoryless texture's own level or slice drew, and resolved, as of a private one.
+///   So the view has no texture, and a pass attaching it renders without it and resolves nothing.
+///   1.4.2 reports it as an error ("Attempting to initialize an MVKImageViewPlane with a nil
+///   MTLTexture.", `MVKImageViewPlane::initializeMTLTexture`), measured on 1.4.2 (driverVersion
+///   10402) on an M3 Max (`runtime_lane::memoryless`'s slice, face and level passes, and
+///   `a_memoryless_multisample_array_slice_resolves`); 1.4.1 makes the same call and keeps its nil
+///   silently (read in its source), so its passes of such views lost the attachment unannounced.
+///   Known broken through 1.4.2. Nothing is refused: such an image of more than one level or layer
+///   takes device-local memory (`ImagePlan::memory_class`); one of a single level and layer is
+///   viewed as its texture itself.
 pub(super) const AFFECTED: &[Affected] = &[
     Affected {
         defect: RuntimeDriverDefect::MultisampledDepthStencilColourCopies,
@@ -424,6 +446,11 @@ pub(super) const AFFECTED: &[Affected] = &[
     },
     Affected {
         defect: RuntimeDriverDefect::SetLayoutSupportUnderstated,
+        driver: DriverId::MOLTENVK,
+        clean: &[],
+    },
+    Affected {
+        defect: RuntimeDriverDefect::LazilyAllocatedSubresourceViews,
         driver: DriverId::MOLTENVK,
         clean: &[],
     },

@@ -1134,10 +1134,12 @@ fn memoryless_textures_are_transient_attachments() {
 /// device-local memory, on every committed profile, but where the driver crashes on a 2D view of
 /// a 3D image in lazily allocated memory (`RuntimeDriverDefect::LazilyAllocatedVolumePlaneViews`:
 /// MoltenVK's profiles): there a memoryless 3D texture, 2D-array compatible for its depth planes'
-/// views, takes device-local memory, and the other types, whose views MoltenVK makes of the
-/// texture itself, keep lazily allocated memory.
+/// views, takes device-local memory; and where a view of some of an image's levels or layers there
+/// has no texture (`RuntimeDriverDefect::LazilyAllocatedSubresourceViews`: MoltenVK's profiles), so
+/// does one of more than one level or layer (six per cube), mipmapped or an array. A texture of
+/// one level and layer, whose view is the texture itself, keeps lazily allocated memory.
 #[test]
-fn a_memoryless_volume_takes_device_memory_where_its_plane_views_crash() {
+fn a_memoryless_texture_takes_device_memory_where_its_views_fail() {
     let mut crashing = 0;
     for (name, desc, device) in committed() {
         let facts = facts(&desc, &device);
@@ -1145,6 +1147,11 @@ fn a_memoryless_volume_takes_device_memory_where_its_plane_views_crash() {
         let crashes = desc.driver_id == Some(DriverId::MOLTENVK);
         assert_eq!(
             defects.contains(&RuntimeDriverDefect::LazilyAllocatedVolumePlaneViews),
+            crashes,
+            "{name}"
+        );
+        assert_eq!(
+            defects.contains(&RuntimeDriverDefect::LazilyAllocatedSubresourceViews),
             crashes,
             "{name}"
         );
@@ -1157,24 +1164,39 @@ fn a_memoryless_volume_takes_device_memory_where_its_plane_views_crash() {
             (TextureType::CubeArray, 2),
             (TextureType::Type3D, 1),
         ] {
-            let l = layout(ty, PixelFormat::RGBA8Unorm, 1, array);
-            let plan = plan_image(&l, TextureUsage::RENDER_TARGET, true, &facts)
-                .unwrap_or_else(|e| panic!("{name}: {ty:?}: {e:?}"));
-            let viewed = plan
-                .flags
-                .contains(ImageCreateFlags::CREATE_2D_ARRAY_COMPATIBLE);
-            assert_eq!(viewed, ty == TextureType::Type3D, "{name}: {ty:?}");
-            let want = if crashes && viewed {
-                crashing += 1;
-                MemoryClass::Private
-            } else {
-                MemoryClass::Memoryless
-            };
-            let class = plan.memory_class(StorageMode::Memoryless, &defects);
-            assert_eq!(class, want, "{name}: {ty:?}");
-            for storage in [StorageMode::Private, StorageMode::Shared] {
-                let class = plan.memory_class(storage, &defects);
-                assert_eq!(class, MemoryClass::Private, "{name}: {ty:?}");
+            for levels in [1, 2] {
+                // Metal makes no mipmapped 1D texture.
+                if levels > 1 && matches!(ty, TextureType::Type1D | TextureType::Type1DArray) {
+                    continue;
+                }
+                let l = TextureLayout {
+                    levels,
+                    ..layout(ty, PixelFormat::RGBA8Unorm, 1, array)
+                };
+                let plan = plan_image(&l, TextureUsage::RENDER_TARGET, true, &facts)
+                    .unwrap_or_else(|e| panic!("{name}: {ty:?}: {e:?}"));
+                let viewed = plan
+                    .flags
+                    .contains(ImageCreateFlags::CREATE_2D_ARRAY_COMPATIBLE);
+                assert_eq!(viewed, ty == TextureType::Type3D, "{name}: {ty:?}");
+                let parts = plan.layers > 1 || plan.levels > 1;
+                assert_eq!(
+                    parts,
+                    levels > 1 || array > 1 || matches!(ty, TextureType::Cube),
+                    "{name}: {ty:?} of {levels} levels"
+                );
+                let want = if crashes && (viewed || parts) {
+                    crashing += 1;
+                    MemoryClass::Private
+                } else {
+                    MemoryClass::Memoryless
+                };
+                let class = plan.memory_class(StorageMode::Memoryless, &defects);
+                assert_eq!(class, want, "{name}: {ty:?} of {levels} levels");
+                for storage in [StorageMode::Private, StorageMode::Shared] {
+                    let class = plan.memory_class(storage, &defects);
+                    assert_eq!(class, MemoryClass::Private, "{name}: {ty:?}");
+                }
             }
         }
     }

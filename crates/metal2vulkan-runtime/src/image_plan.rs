@@ -336,9 +336,12 @@ impl ImagePlan {
     /// has it ([`MemoryClass::Memoryless`]), every other texture's device-local memory. Where the
     /// driver crashes on a 2D view of a 3D image in lazily allocated memory
     /// (`RuntimeDriverDefect::LazilyAllocatedVolumePlaneViews`: MoltenVK), a memoryless image
-    /// made 2D-array compatible for its depth planes' views takes device-local memory too. A pass
-    /// neither loads nor stores a memoryless attachment, so its texels are no more observable
-    /// there; a device without lazily allocated memory holds every memoryless texture so.
+    /// made 2D-array compatible for its depth planes' views takes device-local memory too, and
+    /// where a view of some of its levels or layers has no texture
+    /// (`RuntimeDriverDefect::LazilyAllocatedSubresourceViews`: MoltenVK), one of more than one
+    /// level or array layer. A pass neither loads nor stores a memoryless attachment, so its
+    /// texels are no more observable there; a device without lazily allocated memory holds every
+    /// memoryless texture so.
     pub(super) fn memory_class(
         &self,
         storage: StorageMode,
@@ -348,7 +351,9 @@ impl ImagePlan {
             .flags
             .contains(ImageCreateFlags::CREATE_2D_ARRAY_COMPATIBLE)
             && defects.contains(&RuntimeDriverDefect::LazilyAllocatedVolumePlaneViews);
-        if storage == StorageMode::Memoryless && !plane_views {
+        let part_views = (self.levels > 1 || self.layers > 1)
+            && defects.contains(&RuntimeDriverDefect::LazilyAllocatedSubresourceViews);
+        if storage == StorageMode::Memoryless && !plane_views && !part_views {
             MemoryClass::Memoryless
         } else {
             MemoryClass::Private
