@@ -141,8 +141,9 @@ compile does. `DevicePolicy::default()` is `DevicePolicy::UNTRUSTED`:
   wait for the command buffer lowers on the waiting thread what that thread has not. A refusal
   only the commit's own work finds (an executed indirect command's recording, the commit's
   uploads) fails the command buffer, nothing of it run, with `CallRefused` of `commit` at index
-  0 where no call of it was refused before; where even that commit fails (out of memory), the
-  command buffer never completes. An end that checks the depth/stencil
+  0 where no call of it was refused before: it commits again with nothing made for its commands,
+  so it completes, in its queue's order, its completed handlers run and its waits return, as
+  every committed command buffer of Metal's does. An end that checks the depth/stencil
   attachment's store actions or store action options (one `Unknown`, options set, or any store
   action or resolve target set by a call) is lowered inside `end_encoding`, which returns its
   refusal. The call still makes Metal's checks of its arguments and of the encoder's state, and returns

@@ -9,7 +9,8 @@
 //! a buffer detached after the call refuses nothing of it; a program that outruns the device's
 //! lowering thread waits for it at the cap of its encoder's batches, and goes on; an end and a
 //! commit return before the lowering thread lowered the end, the commit's own work waiting for it,
-//! and the commits after it waiting behind it.
+//! and the commits after it waiting behind it, and one whose own work fails completing with the
+//! refusal.
 //!
 //! Device tests: compiled only under the validation crate's GPU safety cfgs (`m2v_gpu`,
 //! `m2v_cpu_icd`), on the kind of device the cfg selects. The functions are the owned fixture
@@ -17,7 +18,7 @@
 
 use super::blit_holds::{busy, over_host, until, Host, Scratch, FILLED, WAIT};
 use super::encoder_holds::{bits, bytes_of, pass, render_state, words_of};
-use crate::error::invalid;
+use crate::error::{invalid, vulkan};
 use crate::render::{BATCH_CALLS, HANDED_BATCHES};
 use crate::StoreAction;
 use crate::{
@@ -26,6 +27,7 @@ use crate::{
     Origin, Problem, RenderCommandEncoder, RenderPipelineState, ResourceOptions, RuntimeGap,
     ShaderCacheOptions, Size, Texture, TextureDescriptor, VertexAmplificationViewMapping, Viewport,
 };
+use ash::vk;
 use metal2vulkan::device::RenderLoweringPolicy;
 use metal2vulkan::metal::{IndexType, PixelFormat, PrimitiveType, TextureUsage};
 use std::path::Path;
@@ -927,5 +929,78 @@ fn a_commit_after_an_end_in_flight_refuses_a_predication_block_left_open() {
             CommandBufferStatus::NotEnqueued,
             "{policy:?}"
         );
+    }
+}
+
+/// A commit whose own work fails, after it returned, fails its command buffer as Metal's committed
+/// command buffers fail: with an out of memory injected into that work twice, under Worker (the
+/// slot's lowering held, so the commit's work waits for the end), `commit` returns; the command
+/// buffer completes with `CallRefused` of `commit` and the error kept, its completed handler runs
+/// and its wait returns; a command buffer committed after it on the same queue completes after
+/// it, its fill landed. Its second injected failure never ran: the commit ran again making nothing
+/// that may fail. Under `AtCall` the commit returns the error.
+#[test]
+fn a_commit_whose_own_work_fails_completes_with_the_refusal() {
+    let scratch = Scratch::new("deferred-commit-fails");
+    let error = vulkan(vk::Result::ERROR_OUT_OF_DEVICE_MEMORY);
+    for policy in POLICIES {
+        let device = device(&scratch.0, policy, &[], &Heard::default());
+        let state = rectangle_state(&device);
+        let queue = device.new_command_queue().unwrap();
+        let target = target(&device);
+        let refused = queue.command_buffer().unwrap();
+        let mut encoder = refused.render_command_encoder(&pass(&target)).unwrap();
+        rectangle(&state, &mut encoder);
+        encoder
+            .draw_primitives(PrimitiveType::Triangle, 0, 6, 1, 0)
+            .unwrap();
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let ran = Arc::clone(&order);
+        let handler = Box::new(move |_: &CommandBuffer| ran.lock().unwrap().push("refused"));
+        refused.add_completed_handler(handler).unwrap();
+        if policy != RenderLoweringPolicy::Worker {
+            encoder.end_encoding().unwrap();
+            refused.fail_commit_work(1);
+            assert_eq!(refused.commit(), Err(error.clone()));
+            assert_eq!(refused.status(), CommandBufferStatus::NotEnqueued);
+            continue;
+        }
+        let slots = device.shared().deferred.taken();
+        let [slot] = &slots[..] else {
+            panic!("{} encoders' slots taken, not one", slots.len());
+        };
+        refused.fail_commit_work(2);
+        let committed = slot.while_held(|| {
+            encoder.end_encoding().unwrap();
+            refused.commit()
+        });
+        assert_eq!(committed, Ok(()));
+        let filled = device.new_buffer(4, ResourceOptions::shared()).unwrap();
+        let later = queue.command_buffer().unwrap();
+        let mut blit = later.blit_command_encoder().unwrap();
+        blit.fill_buffer(&filled, 0..4, 0x5a).unwrap();
+        blit.end_encoding().unwrap();
+        let ran = Arc::clone(&order);
+        let handler = Box::new(move |_: &CommandBuffer| ran.lock().unwrap().push("later"));
+        later.add_completed_handler(handler).unwrap();
+        later.commit().unwrap();
+        refused.wait_until_completed_for(WAIT).unwrap();
+        later.wait_until_completed_for(WAIT).unwrap();
+        let commit = EncoderCall {
+            selector: "commit",
+            index: 0,
+        };
+        assert_eq!(refused.status(), CommandBufferStatus::Error);
+        assert_eq!(
+            refused.error(),
+            Some(CommandBufferError::CallRefused(commit))
+        );
+        assert_eq!(refused.refusal(), Some(error.clone()));
+        assert_eq!(later.status(), CommandBufferStatus::Completed);
+        assert_eq!(words_of(&filled), vec![u32::from_le_bytes([0x5a; 4])]);
+        assert_eq!(*order.lock().unwrap(), ["refused", "later"]);
+        let counts = device.work_counts();
+        let commits = counts.render_log_commits_by_thread + counts.render_log_commits_by_program;
+        assert_eq!(commits, 2, "{counts:?}");
     }
 }

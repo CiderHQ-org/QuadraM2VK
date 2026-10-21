@@ -147,6 +147,20 @@ impl std::fmt::Debug for CommandBuffer {
     }
 }
 
+/// How a commit runs ([`CommandBuffer::commit_now`]).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CommitRun {
+    /// Inside `commit` (or `commit_failed`).
+    AtCall,
+    /// After `commit` returned, its own work having waited for a render encoder's end
+    /// (`render/queued_commits.rs`).
+    Queued,
+    /// Again after that work refused it (`State::refuse_commit`): nothing of the command buffer
+    /// runs, and nothing that may fail is made for it (its predication tables, its root tables'
+    /// pointing, its function-table snapshots, its argument samplers' listing), so it commits.
+    Refused,
+}
+
 /// A command buffer as the device's commits that wait hold it (`render/queued_commits.rs`): a
 /// trait object, whose `Send` and `Sync` its bounds give, made with no allocation. A program's
 /// crate proves the device's `Send` and `Sync` within its own recursion limit (rustc's 128 by
@@ -453,6 +467,10 @@ pub(super) struct State {
     ending: Option<EndInFlight>,
     /// The device's lowering thread lowered the end it holds (`ending`).
     end_lowered: bool,
+    /// The commits' own work fails this many more times (a device test's injection of an out of
+    /// memory, `tests::deferred_calls`).
+    #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
+    failures_injected: u32,
     /// `commit` returned with its own work left to run once a render encoder's end is lowered
     /// (`render/queued_commits.rs`), which has not run: to the program, the command buffer is
     /// committed.
@@ -1498,6 +1516,8 @@ impl CommandBuffer {
                 abandoned: false,
                 ending: None,
                 end_lowered: false,
+                #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
+                failures_injected: 0,
                 queued_commit: false,
                 committing: false,
                 pool: None,
@@ -1604,6 +1624,13 @@ impl CommandBuffer {
     /// This command buffer as the device's commits that wait hold it ([`Waiting`]).
     pub(crate) fn waiting(self) -> Arc<dyn Waiting> {
         self.0
+    }
+
+    /// Fail the work of its next `count` commits (not one run again with nothing of it run), as
+    /// out of memory: a device test's injection (`tests::deferred_calls`).
+    #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
+    pub(crate) fn fail_commit_work(&self, count: u32) {
+        self.state().failures_injected = count;
     }
 
     /// Whether `waiting` holds this command buffer.
@@ -1971,7 +1998,8 @@ impl CommandBuffer {
     /// (docs/API.md section 1). A refusal only that work finds (an executed indirect command's,
     /// out of memory) fails the command buffer with nothing of it run
     /// ([`CommandBufferError::CallRefused`] of `commit`, where no call of it was refused before;
-    /// [`refusal`](Self::refusal) keeps the error).
+    /// [`refusal`](Self::refusal) keeps the error): it completes in its queue's order, its
+    /// completed handlers run.
     pub fn commit(&self) -> Result<(), Error> {
         self.commit_as("commit", None)
     }
@@ -2014,7 +2042,7 @@ impl CommandBuffer {
         }
         // The last render encoder's end, where its call left it to the device's lowering thread.
         self.settle_end();
-        self.commit_settled(call, failure, false)
+        self.commit_settled(call, failure, CommitRun::AtCall)
     }
 
     /// Under `RenderLoweringPolicy::Worker`, where the command buffer holds a render encoder's
@@ -2058,19 +2086,23 @@ impl CommandBuffer {
     /// Run the commit's own work, which waited for a render encoder's end
     /// (`render/queued_commits.rs`), the end lowered: on the device's lowering thread
     /// (`by_thread`) or the program's. A refusal it finds fails the command buffer
-    /// (`State::refuse_commit`), which then commits with nothing of it run. Where even that
-    /// commit fails (the device out of memory), the command buffer never completes; its refusal
-    /// keeps the first error.
+    /// (`State::refuse_commit`), which then commits again with nothing of it run and nothing that
+    /// may fail made for it ([`CommitRun::Refused`]): it completes, in its queue's order, with
+    /// that error, and its completed handlers run, as every committed command buffer of Metal's
+    /// does.
     pub(crate) fn commit_queued(&self, by_thread: bool) {
         let counts = &self.0.device.shared().counts;
         counts.render_log_commit_run(by_thread);
         self.settle_end();
-        let Err(error) = self.commit_settled("commit", None, true) else {
+        let Err(error) = self.commit_settled("commit", None, CommitRun::Queued) else {
             return;
         };
         self.state().refuse_commit(error);
-        // A refusal of this one is already kept, as the first.
-        let _ = self.commit_settled("commit", None, true);
+        let committed = self.commit_settled("commit", None, CommitRun::Refused);
+        debug_assert!(
+            committed.is_ok(),
+            "a refused commit's commit of nothing failed: {committed:?}"
+        );
     }
 
     /// Before a wait for the command buffer: where its commit's own work waits
@@ -2088,21 +2120,21 @@ impl CommandBuffer {
         }
     }
 
-    /// The commit, the last render encoder's end lowered: `queued` where its own work waited
-    /// (`render/queued_commits.rs`).
+    /// The commit, the last render encoder's end lowered, run as `run` says.
     fn commit_settled(
         &self,
         call: &'static str,
         failure: Option<CommitFailure>,
-        queued: bool,
+        run: CommitRun,
     ) -> Result<(), Error> {
         // The waiting fetched render targets take their storage form at this commit where it
         // allows (`storage_form.rs`): one atomic read where none waits. The scheduler's thread
-        // ends the switch once it submitted the command buffer.
-        if !self.take_storage_forms(failure.is_some()) {
-            return self.commit_now(call, failure, queued);
+        // ends the switch once it submitted the command buffer. None where nothing of it runs.
+        let injected = failure.is_some() || run == CommitRun::Refused;
+        if !self.take_storage_forms(injected) {
+            return self.commit_now(call, failure, run);
         }
-        let committed = self.commit_now(call, failure, queued);
+        let committed = self.commit_now(call, failure, run);
         if committed.is_err() {
             self.give_up_storage_forms();
         }
@@ -2114,14 +2146,14 @@ impl CommandBuffer {
         &self,
         call: &'static str,
         failure: Option<CommitFailure>,
-        queued: bool,
+        run: CommitRun,
     ) -> Result<(), Error> {
         let device = &self.0.device;
         let (segments, failure, reached): (Vec<(Deferred, bool)>, _, _) = {
             let mut state = self.state();
-            let refusal = match queued {
-                true => state.commit_refusal(),
-                false => state.refusal(),
+            let refusal = match run {
+                CommitRun::AtCall => state.refusal(),
+                CommitRun::Queued | CommitRun::Refused => state.commit_refusal(),
             };
             if let Some(problem) = refusal {
                 return Err(invalid(call, problem));
@@ -2132,8 +2164,10 @@ impl CommandBuffer {
             }
             // Its last unit of command predication ends: a live block left open where a unit
             // ended refuses, and each step's gates are listed for it.
-            let held = &mut *state;
-            held.predication.commit(&mut held.uploads, device)?;
+            if run != CommitRun::Refused {
+                let held = &mut *state;
+                held.predication.commit(&mut held.uploads, device)?;
+            }
             let failure = Failure::of(failure, state.fails_from, ended);
             let failure = Failure::with_faults(failure, &state.faulted, ended);
             // The encoders that run: all but those `failure` fails.
@@ -2204,9 +2238,21 @@ impl CommandBuffer {
             }
             state.prepare(prepared);
             state.plan_checks();
+            // A refused commit's commands run nothing: none of what follows is made for them.
+            if run == CommitRun::Refused {
+                state.table_snapshots.clear();
+                state.sampler_listings.clear();
+            }
+            #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
+            if run != CommitRun::Refused && state.failures_injected > 0 {
+                state.failures_injected -= 1;
+                return Err(vulkan(vk::Result::ERROR_OUT_OF_DEVICE_MEMORY));
+            }
             // Its root tables search every live buffer of its own on the device, and what its
             // encoders bound and made resident (`live_buffers.rs`).
-            state.point_root_tables(device)?;
+            if run != CommitRun::Refused {
+                state.point_root_tables(device)?;
+            }
             // The function-table snapshots read the tables' words as they stand now.
             for snapshot in &state.table_snapshots {
                 snapshot.refresh()?;
