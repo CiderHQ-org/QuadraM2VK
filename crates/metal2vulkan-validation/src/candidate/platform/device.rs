@@ -604,7 +604,7 @@ thread_local! {
 }
 
 /// Run `call`, a driver call on this thread that the executing driver's facts measure to report
-/// `diagnostics` (`DriverFact::pipeline_creation_diagnostic`), withholding exactly those messages
+/// `diagnostics` (`DriverFact::pipeline_creation_diagnostics`), withholding exactly those messages
 /// from the context's sink while it runs, as the runtime does (`runtime/src/driver_facts.rs`):
 /// the driver reports them from the calling thread inside the call, so a message reported on
 /// another thread, or after the call returns, still fails the row.

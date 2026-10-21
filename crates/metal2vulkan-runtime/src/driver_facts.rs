@@ -130,7 +130,7 @@ thread_local! {
 }
 
 /// Run `call`, a driver call on this thread that the device's driver facts measure to report
-/// `diagnostics` (`DriverFact::pipeline_creation_diagnostic`), withholding exactly those
+/// `diagnostics` (`DriverFact::pipeline_creation_diagnostics`), withholding exactly those
 /// messages from the device's message sink while it runs ([`withholds`]); with how many it
 /// withheld. The driver reports from the calling thread inside the call (MoltenVK's
 /// `MVKBaseObject::reportMessage`), so a message reported on another thread, or after the call

@@ -1275,7 +1275,7 @@ pub enum DriverFact {
     /// graphics pipeline that makes the primitive restart dynamic with its topology dynamic or a
     /// strip or fan, whatever restart the draws set later: a `VALIDATION` message named
     /// `mvk-warn` (number 0), `VK_ERROR_FEATURE_NOT_PRESENT: Metal does not support disabling
-    /// primitive restart.` ([`DriverFact::pipeline_creation_diagnostic`]). MoltenVK reports it so
+    /// primitive restart.` ([`DriverFact::pipeline_creation_diagnostics`]). MoltenVK reports it so
     /// wherever it is built without Metal's private API, Homebrew's build included
     /// (`MVKPipeline.mm` lines 881-893 at 1.4.1), because Metal restarts every strip. The runtime
     /// makes the restart dynamic only with the topology, and each draw sets the restart Metal

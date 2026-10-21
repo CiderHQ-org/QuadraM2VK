@@ -2488,7 +2488,7 @@ pub struct WorkCounts {
     /// them, where the load pass would have rewritten them.
     pub capture_reach_narrower_passes: u64,
     /// Driver diagnostics withheld from the device's message sink: messages a driver diagnostic
-    /// fact (`DriverFact::pipeline_creation_diagnostic`) measures the driver to report inside a
+    /// fact (`DriverFact::pipeline_creation_diagnostics`) measures the driver to report inside a
     /// call the runtime made, reported there (`driver_facts.rs`). MoltenVK 1.4.1's warning of a
     /// pipeline whose restart is dynamic, once per such pipeline it makes.
     pub driver_diagnostics_withheld: u64,
