@@ -7,7 +7,7 @@ use metal2vulkan::bind::SamplerDescriptor;
 use metal2vulkan::metal::PixelFormat;
 
 #[test]
-fn unchanged_buffers_and_textures_preserve_the_stamp() {
+fn unchanged_buffers_textures_and_samplers_preserve_the_stamp() {
     let scratch = Scratch::new("binding-repeats");
     let device = device(&scratch.0);
     let queue = device.new_command_queue().unwrap();
@@ -89,10 +89,15 @@ fn unchanged_buffers_and_textures_preserve_the_stamp() {
         clamped,
         "the sign of a LOD clamp's zero stays distinct"
     );
+    let before_stride = table.stamp();
     table
         .set_buffer_with_stride(&mut core, "test", Some(&buffer), 16, 32, 0)
         .unwrap();
-    assert_ne!(table.stamp(), same, "dynamic stride changes the binding");
+    assert_ne!(
+        table.stamp(),
+        before_stride,
+        "dynamic stride changes the binding"
+    );
     table
         .set_buffer_with_stride(
             &mut core,

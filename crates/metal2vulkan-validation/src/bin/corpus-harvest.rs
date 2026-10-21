@@ -16,6 +16,7 @@
 //! the dependencies function-table linking may resolve it against.
 
 use base64::Engine as _;
+use metal2vulkan_devtools::process::wait_for_child;
 use metal2vulkan_validation::air::{listed_stages, stage_entry_from_ll};
 use metal2vulkan_validation::case::Stage;
 use metal2vulkan_validation::hash::sha256_bytes;
@@ -28,7 +29,6 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
-use wait_timeout::ChildExt as _;
 
 const PROGRAM: &str = "corpus-harvest";
 const DEFAULT_MAX_AIR_BYTES: usize = 1024 * 1024;
@@ -1392,8 +1392,7 @@ fn disassemble_air(
         )?))
         .spawn()
         .map_err(|e| format!("spawn {}: {e}", llvm_dis.display()))?;
-    let status = child
-        .wait_timeout(timeout)
+    let status = wait_for_child(&mut child, timeout)
         .map_err(|error| format!("wait for {}: {error}", llvm_dis.display()))?;
     let Some(status) = status else {
         let _ = child.kill();

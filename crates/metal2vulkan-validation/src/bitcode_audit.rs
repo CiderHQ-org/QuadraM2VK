@@ -39,8 +39,8 @@ use metal2vulkan_air::bitcode::{decode, Decoded};
 use metal2vulkan_air::budget::Meter;
 use metal2vulkan_air::intrinsics::dropped_family;
 use metal2vulkan_air::ir::{Callee, CastOp, Const, ConstExpr, FuncId, InstKind, Value};
+use metal2vulkan_devtools::process::wait_for_child;
 use serde::{Deserialize, Serialize};
-use wait_timeout::ChildExt;
 
 /// The per-attempt ceiling (AGENTS.md), applied to the decode's meter and to `llvm-dis`.
 pub const ROW_TIMEOUT: Duration = Duration::from_secs(20);
@@ -360,7 +360,7 @@ pub fn llvm_dis(tool: &Path, bytes: &[u8]) -> Result<String, String> {
             let _ = stderr.read_to_string(&mut text);
             text
         });
-        let status = match child.wait_timeout(ROW_TIMEOUT) {
+        let status = match wait_for_child(&mut child, ROW_TIMEOUT) {
             Ok(Some(status)) => status,
             Ok(None) => {
                 let _ = child.kill();

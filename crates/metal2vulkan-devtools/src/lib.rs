@@ -22,6 +22,7 @@ use std::process::Stdio;
 pub mod fuzz;
 pub mod litmus;
 pub mod metallib;
+pub mod process;
 pub mod spirv;
 pub mod tools;
 pub mod xr_bicubic;

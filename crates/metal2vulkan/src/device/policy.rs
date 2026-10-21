@@ -6,7 +6,7 @@ use crate::device::profile::{GuestIsolation, HandleDomain, PointerDomain};
 /// Policy inputs of `Device::new`. Every field but `block_decode`, `decoded_texels`, `heap_compression`,
 /// `completion`, `tile_store`, `resolve` and `batch_order` can change emitted code, so the profile
 /// carries it (containment as the encoding it selects) and its fingerprint covers it; those seven
-/// are the runtime's alone (the texels of a carried texture's decoded twin, a heap's compressed
+/// are the runtime's alone (the BC decoder, the texels of a carried texture's decoded twin, a heap's compressed
 /// texture's image, when the host sees a command buffer complete, what a render pass's load leaves
 /// in the texels its draws do not write, how a multisampled color attachment resolves, and how a
 /// batch begins after the earlier ones of its queue), and no profile carries them.
