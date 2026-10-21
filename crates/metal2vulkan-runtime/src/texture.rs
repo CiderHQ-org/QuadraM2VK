@@ -2115,6 +2115,9 @@ impl Device {
         // Metal's contract leaves no moment the CPU may not write them. The shadow's copies
         // address its texels alone, through the buffer.
         let host = texels.buffer.caller_memory() == Some(CallerMemory::HostPages);
+        // Nor over fresh pages the runtime imported for a long buffer of its own
+        // (`fresh_pages.rs`), for the same reason.
+        let fresh = texels.buffer.in_fresh_pages();
         // The plans a linear image aliasing the bytes is tried with, the first the device makes:
         // with the feedback loop usage a draw takes that reads the texture its own pass renders
         // through a snapshot (`feedback_candidate`, `texture/attached_reads.rs`), which costs a
@@ -2143,6 +2146,12 @@ impl Device {
             "the buffer's bytes are the caller's host pages, which an image could alias only from \
              UNDEFINED, whose first move Vulkan lets read and write every byte it is bound to, \
              where Metal keeps every CPU write"
+                .to_owned()
+        } else if fresh {
+            self.shared().counts.shadow_over_fresh_pages();
+            "the buffer's bytes lie in fresh host pages imported for it, which an image could alias \
+             only from UNDEFINED, whose first move Vulkan lets read and write every byte it is \
+             bound to, where Metal keeps every CPU write"
                 .to_owned()
         } else {
             let over = (&*texels, &holds);

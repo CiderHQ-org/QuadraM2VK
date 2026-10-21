@@ -155,25 +155,31 @@ recorded here.
   sign strip (two copies and a dispatch, or a draw per layer when multisampled) follows a pass with
   depth writes where no stand-in runs (`texture/signed_depth.rs`). A texture never switched on pays
   a flag read per pass.
-- **A texture over a no-copy buffer's host pages, or over a buffer whose rows lie with bytes
-  between them,** is a shadow on every device, whatever its usage (`shadowed-texture`): its texels
-  copied in before each use and merged back after each write (only those inside the draws'
-  scissors for a pass that takes it as a loaded attachment alone). An image bound to host pages
-  starts `UNDEFINED` (`VUID-VkImageCreateInfo-pNext-01443`), and its first move may read and write
-  every byte bound to it, which the host could keep only by undoing a CPU write made meanwhile,
-  where Metal keeps it; an image over padded rows holds the bytes between them, which a render
-  pass's load and store operations may rewrite too. On the UHD 770 (ANV) a 1080p `BGRA8Unorm`
-  surface's pass that loads, draws and stores (`guest_frame_costs`) took 1.9 ms from commit to
-  completion, 1.4 ms of it the copies (copy in 0.21 ms, keep 0.60, merge 0.60), against 0.4 ms
-  into a `Private` texture; a linear image over the pages took 2.6-3.1 ms, its draws slow in host
-  memory. Twelve such passes in one command buffer took 21 ms against the linear image's 27.5 ms,
-  and 0.4-0.5 ms more of the process's CPU a frame (1.2 ms against 0.7): about 20 µs a pass on the
-  encoding thread, 10 µs on the queue's waiter and 10 µs on the recorder and reaper together. On
-  ANV making a 1307x512 tile took about 135 µs as a shadow against 41 µs as an image; a frame
-  sampling four `BGRA8Unorm` tiles over no-copy pages
-  (`surface_texture_costs::read_only_padded_costs`) took 3.2-5.3 ms with the textures made once
-  and 3.4-7.1 ms with new ones each frame, where images over the rows took 3.0-6.1 and 4.6-8.6
-  ms. An ordinary buffer's packed rows avoid it.
+- **A texture over a no-copy buffer's host pages, over a host-visible buffer longer than 32 MiB, or
+  over a buffer whose rows lie with bytes between them,** is a shadow on every device, whatever its
+  usage (`shadowed-texture`): its texels copied in before each use and merged back after each write
+  (only those inside the draws' scissors for a pass that takes it as a loaded attachment alone). An
+  image bound to host pages starts `UNDEFINED` (`VUID-VkImageCreateInfo-pNext-01443`), and its first
+  move may read and write every byte bound to it, which the host could keep only by undoing a CPU
+  write made meanwhile, where Metal keeps it; an image over padded rows holds the bytes between
+  them, which a render pass's load and store operations may rewrite too. A host-visible buffer
+  longer than half a pooled block (32 MiB) lies in fresh anonymous pages imported by their pointer
+  where the device imports them (`fresh_pages.rs`), which read zero as mapped, so its creation
+  writes none of its bytes, and the CPU's first touch of its pages is paid where the program makes
+  it, as on Metal (host_ab on the M3 Max, 64 MiB: made in 0.01-2.2 ms against 3.2-4.7 ms of
+  allocation and memset, its first CPU write 2.4-6.5 ms against 0.7-1.4 ms, Metal's 3.7-7.4 ms):
+  such a buffer's textures are shadows for the same reason (`WorkCounts::shadows_over_fresh_pages`).
+  On the UHD 770 (ANV) a 1080p `BGRA8Unorm` surface's pass
+  that loads, draws and stores (`guest_frame_costs`) took 1.9 ms from commit to completion, 1.4 ms
+  of it the copies (copy in 0.21 ms, keep 0.60, merge 0.60), against 0.4 ms into a `Private`
+  texture; a linear image over the pages took 2.6-3.1 ms, its draws slow in host memory. Twelve such
+  passes in one command buffer took 21 ms against the linear image's 27.5 ms, and 0.4-0.5 ms more of
+  the process's CPU a frame (1.2 ms against 0.7): about 20 µs a pass on the encoding thread, 10 µs
+  on the queue's waiter and 10 µs on the recorder and reaper together. On ANV making a 1307x512 tile
+  took about 135 µs as a shadow against 41 µs as an image; a frame sampling four `BGRA8Unorm` tiles
+  over no-copy pages (`surface_texture_costs::read_only_padded_costs`) took 3.2-5.3 ms with the
+  textures made once and 3.4-7.1 ms with new ones each frame, where images over the rows took
+  3.0-6.1 and 4.6-8.6 ms. An ordinary buffer's packed rows avoid it.
 - **On MoltenVK, a texture over a buffer that renders or that blits write keeps a shadow.** MoltenVK
   1.4.1 reports a format's linear-tiling attachment and blit-destination features from
   uninitialized memory, so no MoltenVK description states them

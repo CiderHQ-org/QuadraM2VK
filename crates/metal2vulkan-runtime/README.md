@@ -177,7 +177,10 @@ the runtime made.
   unified memory a `Managed` buffer has two copies, as on a Mac with a discrete GPU
   (`did_modify_range` and a blit's `synchronize_resource` move the bytes), and a `Shared` resource
   lies in host-cached system memory (announced once, `shared-in-system-memory`).
-- **New resources** read what plain Metal's measured answer is: a new buffer reads zero.
+- **New resources** read what plain Metal's measured answer is: a new buffer reads zero. A
+  host-visible buffer longer than 32 MiB lies, where the device imports host pointers, in fresh
+  anonymous pages imported by their pointer, zero as mapped, so that nothing writes its zeros; a
+  recycled one is set to zero on the host.
 - **The Metal address space.** Every buffer and heap has a `gpu_address`, and textures, samplers,
   pipeline states and indirect command buffers a `gpu_resource_id`. Translated shaders read both
   from argument buffers, as on Metal 3. A consumer may pin either (`AddressPlacement`,
@@ -208,8 +211,9 @@ the runtime made.
   between commands whose bytes are apart, as it does between untracked uses Metal leaves to the
   program; no order of either changes a result.
 - **Textures over buffers** share the buffer's bytes. The runtime keeps a copy and announces it
-  (`shadowed-texture`) over a no-copy buffer's host pages (an image bound to them would start
-  `UNDEFINED`, and its first move may rewrite any byte bound to it), where the device's linear
+  (`shadowed-texture`) over a no-copy buffer's host pages or such a long buffer's fresh pages (an
+  image bound to them would start `UNDEFINED`, and its first move may rewrite any byte bound to
+  it), where the device's linear
   images cannot hold Metal's layout, and where the rows lie with bytes between them.
 
 ## Runtime extensions

@@ -102,6 +102,7 @@ mod fill_value;
 mod fragment_imageblock;
 mod framebuffer_fetch;
 mod freed_memory;
+mod fresh_pages;
 mod fresh_unwritten;
 mod function_table;
 #[doc(hidden)]

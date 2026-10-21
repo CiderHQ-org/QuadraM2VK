@@ -15,8 +15,9 @@
 //!   parked buffer its Metal buffer, resident.
 //! - **The same making.** An image is taken only for a making of the same plan (format, extent,
 //!   levels, layers, samples, usage, flags, view formats: `ImagePlan`), texture type, memory class
-//!   and sharing ([`ImageMaking`]); a buffer only for one of the same size and memory class
-//!   ([`BufferMaking`]; every such buffer has the same usage and the device's sharing): its
+//!   and sharing ([`ImageMaking`]); a buffer only for one of the same size, memory class and
+//!   pages, the device's or fresh ones it imported ([`BufferMaking`]; every such buffer has the
+//!   same usage and the device's sharing): its
 //!   `vkCreateImage` or `vkCreateBuffer` parameters and its placement's memory are what a new
 //!   one's would be.
 //! - **What a new owner sees.** Nothing of the last one's. An image is handed over as a new one
@@ -25,7 +26,8 @@
 //!   the current layout"), and its maker's first move writes what a new texture reads: zero, or
 //!   the copies in of a shadow, as for an image just made (`texture/first_move.rs`). A buffer's
 //!   maker sets its bytes to zero as it does a new buffer's, on the host or by the device's next
-//!   submission (`Buffer::clear_first`), at the same cost; a scratch buffer's bytes hold no value
+//!   submission (`Buffer::clear_first`), at the same cost, fresh pages it imported among them
+//!   (`fresh_pages.rs`), which hold the last owner's bytes; a scratch buffer's bytes hold no value
 //!   before the GPU writes them, recycled or new. A buffer takes a range of the Metal address
 //!   space as a new one does (`address.rs`): its Vulkan device address, which the recycled
 //!   `VkBuffer` keeps, is never shown. An image made to start as its memory lies starts as the
@@ -102,12 +104,14 @@ pub(crate) struct ImageMaking {
     pub(crate) families: Vec<u32>,
 }
 
-/// What fixes a buffer's making (`Device::placed_new_buffer`): its size (padded) and the memory
-/// class it lies in.
+/// What fixes a buffer's making (`Device::placed_new_buffer`): its size (padded), the memory
+/// class it lies in, and whether it lies in fresh pages it imported (`fresh_pages.rs`), its
+/// `VkBuffer` made for host allocations.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct BufferMaking {
     pub(crate) size: u64,
     pub(crate) class: MemoryClass,
+    pub(crate) fresh_pages: bool,
 }
 
 /// A parked object.

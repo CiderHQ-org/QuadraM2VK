@@ -16,7 +16,9 @@
 //!   [`MemoryClass`]; [`Memory::free`] with the placement it gave. Buffers use it in step 1;
 //!   textures and heaps add their classes and callers in their own steps. Imported host memory
 //!   has its own entry, [`Memory::import_host`]: one dedicated block per import, never
-//!   pooled, freed through the same [`Memory::free`]. A dma-buf's import
+//!   pooled, freed through the same [`Memory::free`]. So has a buffer's fresh pages
+//!   ([`import_own_pages`], `fresh_pages.rs`): a dedicated block that unmaps them once its
+//!   memory is freed. A dma-buf's import
 //!   (`Memory::import_dma_buf`) is in no block: the placement in it keeps it, and frees it as it
 //!   goes (`dma_buf.rs`'s `DmaBufPages`).
 //!
@@ -47,6 +49,7 @@ use super::device::lock;
 use super::dma_buf::DmaBufPages;
 use super::error::{internal, vulkan, Error, MemoryKind};
 use super::freed_memory::{Parked, Parking};
+use super::fresh_pages::OwnPages;
 use super::memory_log::{self, MemoryLog};
 use super::range::RangeAllocator;
 use super::sharing::Sharing;
@@ -546,6 +549,9 @@ pub(super) struct Block {
     addresses: Option<BlockAddresses>,
     /// It is the caller's host memory, imported ([`Memory::import_host`]).
     imported: bool,
+    /// The pages its memory was imported from, where the runtime mapped them for it
+    /// ([`import_own_pages`]): unmapped once the memory is freed.
+    pages: Option<OwnPages>,
     /// Its memory type.
     type_index: u32,
 }
@@ -567,25 +573,34 @@ impl Block {
     /// Nothing is placed in the block any more, and no command that reads it is pending.
     unsafe fn release(self, device: &ash::Device) {
         // SAFETY: the caller's contract.
-        let memory = unsafe { self.release_addresses(device) };
+        let (memory, pages) = unsafe { self.release_addresses(device) };
         // SAFETY: the caller's contract; freeing unmaps it.
         unsafe { release::object(device, memory) };
+        // The pages it was imported from go after it (`VkImportMemoryHostPointerInfoEXT`).
+        drop(pages);
     }
 
-    /// Destroy the block's buffer of addresses: its memory, to free.
+    /// Destroy the block's buffer of addresses: its memory, to free, and the pages it was
+    /// imported from where the runtime mapped them, to unmap once it is freed.
     ///
     /// # Safety
     ///
     /// Nothing is placed in the block any more, and no command that reads the buffer is pending.
-    unsafe fn release_addresses(self, device: &ash::Device) -> vk::DeviceMemory {
+    unsafe fn release_addresses(
+        self,
+        device: &ash::Device,
+    ) -> (vk::DeviceMemory, Option<OwnPages>) {
         let Block {
-            memory, addresses, ..
+            memory,
+            addresses,
+            pages,
+            ..
         } = self;
         if let Some(addresses) = addresses {
             // SAFETY: the caller's contract.
             unsafe { release::object(device, addresses.raw) };
         }
-        memory
+        (memory, pages)
     }
 }
 
@@ -651,6 +666,8 @@ pub(super) struct Placement {
     /// asked for one ([`allocate_addressed`]) on a device that enables
     /// `bufferDeviceAddress`.
     pub(super) address: Option<u64>,
+    /// It lies in pages the runtime mapped and imported ([`import_own_pages`]).
+    own_pages: bool,
     /// The imports of the caller's dma-bufs the placement lies in, with the source that made them
     /// (`dma_buf.rs`), which no block of the runtime's holds: kept until the placement goes, and
     /// freed, the source dropped, when their last holder goes.
@@ -678,6 +695,7 @@ impl Placement {
             offset,
             mapped: mapped.map(Mapped),
             address: None,
+            own_pages: false,
             #[cfg(unix)]
             dma_buf: None,
         }
@@ -706,6 +724,7 @@ impl Placement {
             offset: 0,
             mapped: Some(Mapped(mapped)),
             address: None,
+            own_pages: false,
             dma_buf: Some(pages),
         }
     }
@@ -731,6 +750,12 @@ impl Placement {
         {
             false
         }
+    }
+
+    /// Whether the placement lies in pages the runtime mapped and imported
+    /// ([`import_own_pages`]), to which no image is bound (`fresh_pages.rs`).
+    pub(super) fn over_own_pages(&self) -> bool {
+        self.own_pages
     }
 
     /// The imports of the caller's dma-bufs the placement lies in, with their source
@@ -765,6 +790,7 @@ impl Placement {
             offset: self.offset,
             mapped: self.mapped,
             address: self.address,
+            own_pages: self.own_pages,
             #[cfg(unix)]
             dma_buf: self.dma_buf.clone(),
         }
@@ -1106,6 +1132,7 @@ impl Memory {
                 .as_ref()
                 .filter(|_| addressed)
                 .map(|addresses| addresses.address + offset),
+            own_pages: payload.pages.is_some(),
             #[cfg(unix)]
             dma_buf: None,
         }
@@ -1219,8 +1246,14 @@ impl Memory {
         // Out of the driver's list first, with no submission inside its `vkQueueSubmit`, whose
         // encoding may list it (`freed_memory.rs`), then the batches that may list it noted.
         // SAFETY: the caller's.
-        let (memory, noted) =
+        let ((memory, pages), noted) =
             parking.note_destroying(|| unsafe { block.release_addresses(device) });
+        // The pages the memory was imported from go after it, with what goes once it is freed.
+        let after = match (pages, after) {
+            (None, after) => after,
+            (Some(pages), None) => Some(Box::new(pages) as Box<dyn Send>),
+            (Some(pages), Some(after)) => Some(Box::new((pages, after)) as Box<dyn Send>),
+        };
         if !parking.reached(&noted) {
             parking.waits();
             // Checked again once counted: a waiter that published a value before the count did
@@ -1274,43 +1307,38 @@ impl Memory {
         allowed: u32,
         class: MemoryClass,
     ) -> Result<Placement, ImportFailure> {
-        let mut failure = ImportFailure::NoMemoryType;
-        for type_index in candidates(&self.types, allowed, class, self.unified) {
-            let mut import = vk::ImportMemoryHostPointerInfoEXT::default()
-                .handle_type(vk::ExternalMemoryHandleTypeFlags::HOST_ALLOCATION_EXT)
-                .host_pointer(pointer.as_ptr().cast());
-            let mut flags = vk::MemoryAllocateFlagsInfo::default()
-                .flags(vk::MemoryAllocateFlags::DEVICE_ADDRESS);
-            let mut info = vk::MemoryAllocateInfo::default()
-                .allocation_size(size)
-                .memory_type_index(type_index)
-                .push_next(&mut import);
-            if self.device_address {
-                info = info.push_next(&mut flags);
-            }
-            // SAFETY: `info` and its chain live for the call; the type index is the device's and
-            // allows the pointer; the caller's contract keeps the memory mapped.
-            match unsafe { device.allocate_memory(&info, None) } {
-                Ok(memory) => {
-                    let block = Block {
-                        memory,
-                        size,
-                        mapped: Some(Mapped(pointer)),
-                        addresses: None,
-                        imported: true,
-                        type_index,
-                    };
-                    let host = pointer.as_ptr() as usize;
-                    self.say_block(&format!("imported host memory 0x{host:x}"), &block);
-                    let index = self
-                        .pool(Holds::Buffers, type_index)
-                        .add(size, true, block, size);
-                    return Ok(self.placement((Holds::Buffers, type_index), index, 0, size, false));
-                }
-                Err(error) => failure = ImportFailure::Vulkan(error),
-            }
-        }
-        Err(failure)
+        let types = candidates(&self.types, allowed, class, self.unified);
+        // SAFETY: the caller's contract.
+        let (memory, type_index) =
+            unsafe { import_pointer(device, pointer, size, &types, self.device_address) }?;
+        let block = Block {
+            memory,
+            size,
+            mapped: Some(Mapped(pointer)),
+            addresses: None,
+            imported: true,
+            pages: None,
+            type_index,
+        };
+        let host = pointer.as_ptr() as usize;
+        self.say_block(&format!("imported host memory 0x{host:x}"), &block);
+        Ok(self.add_import(block, type_index, size))
+    }
+
+    /// The best memory type of `class` among `allowed`, where it has one.
+    pub(super) fn best_type(&self, allowed: u32, class: MemoryClass) -> Option<u32> {
+        candidates(&self.types, allowed, class, self.unified)
+            .first()
+            .copied()
+    }
+
+    /// `block`, `size` bytes of memory type `type_index` just imported, added to its pool as a
+    /// dedicated block: its placement at offset 0.
+    fn add_import(&mut self, block: Block, type_index: u32, size: u64) -> Placement {
+        let index = self
+            .pool(Holds::Buffers, type_index)
+            .add(size, true, block, size);
+        self.placement((Holds::Buffers, type_index), index, 0, size, false)
     }
 
     /// Import the dma-buf `fd`, `size` bytes, as memory of the best type of `class` among
@@ -1526,6 +1554,7 @@ impl BlockMaker {
             mapped,
             addresses,
             imported: false,
+            pages: None,
             type_index,
         })
     }
@@ -1579,6 +1608,77 @@ fn color_image_types(device: &ash::Device, sharing: Sharing<'_>) -> Result<u32, 
         release::object(device, raw);
         types
     })
+}
+
+/// Import `pages`, which the runtime mapped for a buffer of its own (`fresh_pages.rs`), as
+/// memory of type `type_index` in `memory`, as [`Memory::import_host`] imports the caller's: a
+/// dedicated block, which unmaps the pages once its memory is freed, and its placement at
+/// offset 0. The import is made with `memory`'s lock released, as a new block is ([`place`]).
+/// Refused with the driver's failure, the pages unmapped.
+pub(super) fn import_own_pages(
+    memory: &Mutex<Memory>,
+    device: &ash::Device,
+    pages: OwnPages,
+    type_index: u32,
+) -> Result<Placement, ImportFailure> {
+    let device_address = lock(memory).device_address;
+    let (pointer, size) = (pages.pointer(), pages.length());
+    // SAFETY: the pages stay mapped until the block that takes them is freed, and their pointer
+    // and length are multiples of the import alignment (`Device::fresh_page_buffer`).
+    let (raw, type_index) =
+        unsafe { import_pointer(device, pointer, size, &[type_index], device_address) }?;
+    let block = Block {
+        memory: raw,
+        size,
+        mapped: Some(Mapped(pointer)),
+        addresses: None,
+        imported: false,
+        pages: Some(pages),
+        type_index,
+    };
+    let mut memory = lock(memory);
+    memory.say_block("imported fresh pages for a buffer", &block);
+    Ok(memory.add_import(block, type_index, size))
+}
+
+/// The memory of `size` bytes of host memory at `pointer`, imported as the first of `types` the
+/// driver takes, with the device-address flag where `device_address`, and its type. Refused when
+/// `types` is empty, else with the failure of the last type tried.
+///
+/// # Safety
+///
+/// The `size` bytes at `pointer` are host memory of this process that stays mapped until the
+/// memory is freed, both multiples of the device's import alignment, and each of `types` allows
+/// the pointer.
+unsafe fn import_pointer(
+    device: &ash::Device,
+    pointer: NonNull<u8>,
+    size: u64,
+    types: &[u32],
+    device_address: bool,
+) -> Result<(vk::DeviceMemory, u32), ImportFailure> {
+    let mut failure = ImportFailure::NoMemoryType;
+    for &type_index in types {
+        let mut import = vk::ImportMemoryHostPointerInfoEXT::default()
+            .handle_type(vk::ExternalMemoryHandleTypeFlags::HOST_ALLOCATION_EXT)
+            .host_pointer(pointer.as_ptr().cast());
+        let mut flags =
+            vk::MemoryAllocateFlagsInfo::default().flags(vk::MemoryAllocateFlags::DEVICE_ADDRESS);
+        let mut info = vk::MemoryAllocateInfo::default()
+            .allocation_size(size)
+            .memory_type_index(type_index)
+            .push_next(&mut import);
+        if device_address {
+            info = info.push_next(&mut flags);
+        }
+        // SAFETY: `info` and its chain live for the call; the type index is the device's and
+        // allows the pointer; the caller's contract keeps the memory mapped.
+        match unsafe { device.allocate_memory(&info, None) } {
+            Ok(memory) => return Ok((memory, type_index)),
+            Err(error) => failure = ImportFailure::Vulkan(error),
+        }
+    }
+    Err(failure)
 }
 
 /// Place memory meeting a buffer's `requirements` of `class` in `memory`: in a pooled block with

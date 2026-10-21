@@ -276,6 +276,7 @@ fn child(side: &str, options: &Options) {
                 "runtime work counts: queue_submissions {} command_buffers_submitted {} \
                  pipeline_barriers {} draws {} dispatches {} variant_pipelines_made {} \
                  device_memory_allocated {} host_pointer_imports_made {} \
+                 fresh_page_buffers_made {} fresh_page_bytes {} new_buffer_bytes_cleared {} \
                  requirement_images_made {} arena_pools_made {} owned_descriptor_pools {} \
                  draws_settled {} stage_tables_read {} graphics_pipelines_looked_up {} \
                  draws_pushing_set_zero {} set_zero_writes_pushed {} set_zero_sets_reused {} \
@@ -291,6 +292,9 @@ fn child(side: &str, options: &Options) {
                 c.variant_pipelines_made,
                 c.device_memory_allocated,
                 c.host_pointer_imports_made,
+                c.fresh_page_buffers_made,
+                c.fresh_page_bytes,
+                c.new_buffer_bytes_cleared,
                 c.requirement_images_made,
                 c.arena_pools_made,
                 c.owned_descriptor_pools,

@@ -235,6 +235,10 @@ pub(crate) struct Counters {
     modifier_feature_queries: AtomicU64,
     shadowed_textures: AtomicU64,
     shadows_zeroed: AtomicU64,
+    shadows_over_fresh_pages: AtomicU64,
+    fresh_page_buffers_made: AtomicU64,
+    fresh_page_bytes: AtomicU64,
+    new_buffer_bytes_cleared: AtomicU64,
     shadow_copies: AtomicU64,
     shadow_texels_copied_in: AtomicU64,
     shadow_texels_first_copied_in: AtomicU64,
@@ -1673,6 +1677,24 @@ impl Counters {
         if zeroed {
             self.shadows_zeroed.fetch_add(1, Ordering::Relaxed);
         }
+    }
+
+    /// A texture over a buffer's bytes is a shadow of them because they lie in fresh pages the
+    /// buffer imported (`fresh_pages.rs`).
+    pub(crate) fn shadow_over_fresh_pages(&self) {
+        (self.shadows_over_fresh_pages).fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A buffer was made in `bytes` of fresh pages it imported, which read zero unwritten
+    /// (`fresh_pages.rs`).
+    pub(crate) fn fresh_page_buffer_made(&self, bytes: u64) {
+        (self.fresh_page_buffers_made).fetch_add(1, Ordering::Relaxed);
+        (self.fresh_page_bytes).fetch_add(bytes, Ordering::Relaxed);
+    }
+
+    /// The host set `bytes` of a new buffer to zero as it was made (`Buffer::clear_first`).
+    pub(crate) fn new_buffer_cleared(&self, bytes: u64) {
+        (self.new_buffer_bytes_cleared).fetch_add(bytes, Ordering::Relaxed);
     }
 
     /// An encoder planned `n` copies between shadowed textures' truths and their shadows
@@ -3238,6 +3260,21 @@ pub struct WorkCounts {
     /// Every other shadow's copy in writes each texel before any command reads it, so its image
     /// starts as its memory lies.
     pub shadows_zeroed: u64,
+    /// Of `shadowed_textures`, those over a buffer that lies in fresh pages it imported
+    /// (`fresh_page_buffers_made`): an image bound to imported memory starts `UNDEFINED`, and its
+    /// first move may write any byte bound to it.
+    pub shadows_over_fresh_pages: u64,
+    /// Buffers of the runtime's own made in fresh anonymous pages imported by their pointer
+    /// (`VK_EXT_external_memory_host`), which read zero with nothing written: host-visible ones
+    /// longer than half a pooled block, not of a heap, where the device takes such pages. A
+    /// parked one taken again is not counted.
+    pub fresh_page_buffers_made: u64,
+    /// Their pages' bytes: whole units of the host page and the import alignment.
+    pub fresh_page_bytes: u64,
+    /// The bytes of new buffers the host set to zero as they were made: the `Shared` and
+    /// `Managed` ones' (a `Managed` buffer's host copy too, without unified memory), but those
+    /// made in fresh pages.
+    pub new_buffer_bytes_cleared: u64,
     /// Copies between a shadowed texture's truth and its shadow that encoders planned
     /// (`shadow.rs`): copies in before a command, copies back after one or as the encoder ends,
     /// and the keeps and merges of a command that writes the bytes two ways or writes through a
@@ -3919,6 +3956,10 @@ impl Device {
             dma_buf_image_fallbacks: counters.dma_buf_image_fallbacks.load(Ordering::Relaxed),
             modifier_feature_queries: counters.modifier_feature_queries.load(Ordering::Relaxed),
             shadowed_textures: counters.shadowed_textures.load(Ordering::Relaxed),
+            shadows_over_fresh_pages: counters.shadows_over_fresh_pages.load(Ordering::Relaxed),
+            fresh_page_buffers_made: counters.fresh_page_buffers_made.load(Ordering::Relaxed),
+            fresh_page_bytes: counters.fresh_page_bytes.load(Ordering::Relaxed),
+            new_buffer_bytes_cleared: counters.new_buffer_bytes_cleared.load(Ordering::Relaxed),
             views_through_swizzle: counters.views_through_swizzle.load(Ordering::Relaxed),
             view_shadows: counters.view_shadows.load(Ordering::Relaxed),
             attachment_reads_through_copies: counters

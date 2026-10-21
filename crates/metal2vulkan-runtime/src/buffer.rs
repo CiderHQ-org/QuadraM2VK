@@ -28,6 +28,7 @@ use super::degradation::Degradation;
 use super::device::{lock, DeviceShared};
 use super::error::{internal, invalid, nil, vulkan, Error, Problem};
 use super::exit_guard;
+use super::fresh_pages;
 use super::generated_commands::PREPROCESS_BUFFER;
 use super::heap::{Heap, HeapType};
 use super::host_aliases::Alias;
@@ -1869,8 +1870,12 @@ impl Device {
         of_heap: bool,
         placement: impl Into<Place>,
     ) -> Result<Buffer, Error> {
-        let buffer =
+        let (buffer, bytes) =
             self.placed_new_buffer(call, length, modes, class, of_heap, placement.into())?;
+        // Fresh pages read zero as mapped (`fresh_pages.rs`): nothing is written.
+        if bytes == NewBytes::Zero {
+            return Ok(buffer);
+        }
         // Dropping `buffer` on failure releases it.
         buffer.clear_first()?;
         Ok(buffer)
@@ -1902,18 +1907,20 @@ impl Device {
         if length == 0 || length > self.properties().max_buffer_length {
             return Err(nil(CALL, Problem::BufferLength { length }));
         }
-        self.placed_new_buffer(
+        let (buffer, _) = self.placed_new_buffer(
             CALL,
             length,
             modes,
             class,
             false,
             AddressPlacement::Outside.into(),
-        )
+        )?;
+        Ok(buffer)
     }
 
-    /// [`zeroed_buffer`](Device::zeroed_buffer)'s buffer before its bytes are set to zero: its
-    /// bytes are its memory's as placed. A buffer not of a heap is a parked one of the same making
+    /// [`zeroed_buffer`](Device::zeroed_buffer)'s buffer before its bytes are set to zero, and
+    /// what they hold: its memory's bytes as placed, or zero where it lies in fresh pages it
+    /// imported (`fresh_pages.rs`). A buffer not of a heap is a parked one of the same making
     /// where the recycler holds one, and is noted as one it may park as it goes (`recycle.rs`).
     fn placed_new_buffer(
         &self,
@@ -1923,7 +1930,7 @@ impl Device {
         class: MemoryClass,
         of_heap: bool,
         placement: Place,
-    ) -> Result<Buffer, Error> {
+    ) -> Result<(Buffer, NewBytes), Error> {
         if self.is_lost() {
             return Err(Error::DeviceLost);
         }
@@ -1949,23 +1956,55 @@ impl Device {
                 .size(size)
                 .usage(usage(false)),
         );
-        // A heap's own buffer lies where its textures can too, and is never parked.
-        let making = (!of_heap).then_some(BufferMaking { size, class });
-        let taken = making.and_then(|making| self.recycled_buffer(&making));
-        let made = match taken {
-            Some((raw, memory)) => {
-                // Its range of the address space is a new one, as a new buffer's.
-                let address = lock(&shared.addresses).place(placement, length);
-                match address {
-                    Ok(address) => Ok((raw, (memory, address))),
-                    Err(error) => {
-                        lock(&shared.recycled_buffers).forget(raw);
-                        recycle::destroy(raw_device, &mut lock(&shared.memory), [(raw, memory)]);
-                        Err(error)
-                    }
+        // A heap's own buffer lies where its textures can too, and is never parked. A long
+        // host-visible one of the runtime's own lies in fresh pages where the device takes them.
+        let wants_fresh =
+            !of_heap && fresh_pages::takes_fresh_pages(size, class) && shared.host_import.is_ok();
+        let making = (!of_heap).then_some(BufferMaking {
+            size,
+            class,
+            fresh_pages: wants_fresh,
+        });
+        let mut taken = making.and_then(|making| self.recycled_buffer(&making));
+        let fresh = match (&taken, wants_fresh) {
+            (None, true) => self.fresh_page_buffer(size, class)?,
+            _ => None,
+        };
+        // Where the device took no fresh pages, a parked buffer of its own memory, made so as the
+        // buffer is made below.
+        if let (None, None, Some(making)) = (&taken, &fresh, making.filter(|_| wants_fresh)) {
+            let making = BufferMaking {
+                fresh_pages: false,
+                ..making
+            };
+            taken = self.recycled_buffer(&making);
+        }
+        let bytes = match fresh {
+            Some(_) => NewBytes::Zero,
+            None => NewBytes::AsPlaced,
+        };
+        // Its range of the address space is a new one, as a new buffer's; the buffer and its
+        // memory go again where none is left.
+        let place_address = |raw, memory: Placement| {
+            let address = lock(&shared.addresses).place(placement, length);
+            match address {
+                Ok(address) => Ok((raw, (memory, address))),
+                Err(error) => {
+                    lock(&shared.recycled_buffers).forget(raw);
+                    recycle::destroy(raw_device, &mut lock(&shared.memory), [(raw, memory)]);
+                    Err(error)
                 }
             }
-            None => (|| {
+        };
+        let made = match (taken, fresh) {
+            (Some((raw, memory)), _) => place_address(raw, memory),
+            (None, Some((raw, memory))) => {
+                if let Some(making) = making {
+                    lock(&shared.recycled_buffers).made(raw, making);
+                }
+                place_address(raw, memory)
+            }
+            (None, None) => (|| {
                 // SAFETY: the device is live and `info` valid.
                 let raw = unsafe { raw_device.create_buffer(&info, None) }.map_err(vulkan)?;
                 shared.counts.buffer_made(info.usage);
@@ -1976,7 +2015,12 @@ impl Device {
                 };
                 match placed {
                     Ok(placed) => {
+                        // Not in fresh pages, whatever was asked: the device took none.
                         if let Some(making) = making {
+                            let making = BufferMaking {
+                                fresh_pages: false,
+                                ..making
+                            };
                             lock(&shared.recycled_buffers).made(raw, making);
                         }
                         Ok((raw, placed))
@@ -1991,7 +2035,7 @@ impl Device {
         };
         // On failure the host copy, unused, goes with `mirror` (`Mirror`'s drop).
         let (raw, (placement, (address, reserved))) = made?;
-        Ok(self.buffer_of(BufferParts {
+        let buffer = self.buffer_of(BufferParts {
             raw,
             memory: placement,
             offset: 0,
@@ -2007,7 +2051,8 @@ impl Device {
             mirror,
             #[cfg(unix)]
             again: None,
-        }))
+        });
+        Ok((buffer, bytes))
     }
 
     /// A parked buffer of `making` (`recycle.rs`), now live, where the recycler holds one.
@@ -2439,6 +2484,15 @@ impl Device {
     }
 }
 
+/// What a new buffer's bytes hold as [`Device::placed_new_buffer`] makes it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NewBytes {
+    /// Its memory's bytes as placed: undefined, or a parked buffer's last owner's.
+    AsPlaced,
+    /// Zero: fresh pages it imported (`fresh_pages.rs`).
+    Zero,
+}
+
 /// The memory class of a buffer of `modes`' storage and CPU cache modes, for `call`: refused for
 /// `Memoryless`, which is no buffer's. `Shared` storage is `MemoryClass::WriteCombined` in the
 /// write-combined CPU cache mode, which the host does not read.
@@ -2484,6 +2538,18 @@ impl Heap {
 }
 
 impl Buffer {
+    /// Whether the buffer lies in fresh pages it imported (`fresh_pages.rs`), to which no image
+    /// is bound: false for a no-copy buffer, a heap's and one over the caller's `VkBuffer`.
+    pub(super) fn in_fresh_pages(&self) -> bool {
+        match &self.0.bytes {
+            Bytes::Own(OwnBytes {
+                lie: Lie::Fixed(fixed),
+                ..
+            }) => fixed.pages.memory.placement.over_own_pages(),
+            Bytes::Own(_) | Bytes::Heap(_) => false,
+        }
+    }
+
     /// Whether the buffer's own pages, of the runtime's memory, lie in device-local memory; `None`
     /// for a heap's buffer, whose bytes are its heap's. A buffer's pages are its for good.
     pub(super) fn own_pages_device_local(&self) -> Option<bool> {
@@ -2557,6 +2623,7 @@ impl Buffer {
             // SAFETY: as in `clear`: the buffer's host-coherent bytes, which nothing else uses
             // yet.
             unsafe { std::ptr::write_bytes(contents.as_ptr(), 0, size as usize) };
+            self.0.device.shared().counts.new_buffer_cleared(size);
             if self.mirror().is_none() {
                 return Ok(());
             }

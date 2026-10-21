@@ -184,13 +184,16 @@ the device refuses (`HostMemory::with_dma_buf`), `VK_EXT_external_memory_dma_buf
 `VK_EXT_queue_family_foreign` beside them, wherever a device lists them.
 
 A texture over a no-copy buffer's host pages (imported by their pointer or as dma-bufs) is a shadow
-(`shadowed-texture`): an optimal image of the runtime's own memory, whose texels the encoders copy
-in from the pages before a use and back (merged back: only the bytes the commands changed) after a
-write. No image is bound to the pages: an image bound to imported memory starts in
-`VK_IMAGE_LAYOUT_UNDEFINED` (`VUID-VkImageCreateInfo-pNext-01443`), and its first move, like any
-layout transition, may read and write every byte bound to it, where Metal keeps every CPU write to
-bytes a command buffer does not write. `Texture::vk_image` gives `None` for such a texture. A
-texture placed in a heap over dma-buf pages is an image over a dma-buf of its own pages, which its
+(`shadowed-texture`), as is one over a host-visible buffer of the runtime's own longer than 32 MiB
+where the device imports host pointers: that buffer lies in fresh anonymous pages imported by their
+pointer, zero as mapped, so that nothing writes its zeros (`WorkCounts::fresh_page_buffers_made`,
+`shadows_over_fresh_pages`). Such a shadow is an optimal image of the runtime's own memory, whose
+texels the encoders copy in from the pages before a use and back (merged back: only the bytes the
+commands changed) after a write. No image is bound to the pages: an image bound to imported memory
+starts in `VK_IMAGE_LAYOUT_UNDEFINED` (`VUID-VkImageCreateInfo-pNext-01443`), and its first move,
+like any layout transition, may read and write every byte bound to it, where Metal keeps every CPU
+write to bytes a command buffer does not write. `Texture::vk_image` gives `None` for such a texture.
+A texture placed in a heap over dma-buf pages is an image over a dma-buf of its own pages, which its
 first submission acquires from `VK_QUEUE_FAMILY_FOREIGN_EXT`; a linear image over a buffer of the
 runtime's own memory starts `VK_IMAGE_LAYOUT_PREINITIALIZED`, and its move from there keeps its
 bytes. FAST-PATHS.md's costs and known gaps state what this costs and differs from Metal in.
@@ -964,7 +967,8 @@ fast forms record, and each `PrecisionNote`'s rustdoc states its bound.
 
 - `metal2vulkan-degrade-shadowed-texture` (performance). `ShadowedTexture`: A 2D texture over a
   buffer is a shadow image: the buffer is over host pages (a no-copy buffer's, imported by their
-  pointer or as dma-bufs), where an image bound to them would start `UNDEFINED` and Vulkan lets its
+  pointer or as dma-bufs, or the fresh pages a host-visible buffer of the runtime's own longer than
+  32 MiB lies in), where an image bound to them would start `UNDEFINED` and Vulkan lets its
   layout transitions (its first move among them) read and write any byte bound to it, where Metal
   keeps every CPU write; or its rows (or an array's slices) lie with the buffer's bytes between
   them, which an image over them would hold in its subresource, where Vulkan lets the image's
