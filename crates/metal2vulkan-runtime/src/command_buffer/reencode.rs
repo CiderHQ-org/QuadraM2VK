@@ -18,15 +18,28 @@
 //!   turn marks the command buffer again, and its own turn encodes what moved since. A host step
 //!   of the command buffer, which records into its pool on the scheduler's thread, takes the
 //!   same turns: Vulkan synchronizes a pool's recordings externally.
+//! - **Work recorded on the GPU alone, recorded again.** Work its commit recorded on the GPU
+//!   alone, for good (a GPU-written execution's preprocess and its dispatches or draws,
+//!   `gpu_execute.rs`, `render/executions/gpu.rs`), resolved there what its commands named and
+//!   the resident set its preprocess searches: the live buffers and what the encoders made
+//!   resident, as they lay then. Its commit notes the command buffer for any rebind
+//!   (`Rebinds::wait_for_rerecord`), and each rebind before the first submission records that
+//!   work again in its place, as the commit did, over where the buffers lie now: its
+//!   recording, what its commands took and what its host step needs. Its encoder, which logs
+//!   nothing, stays as it was, and so does such work a host step recorded again since (with
+//!   the barriers between its commands, `gpu_execute::Rerecord`, or as a route outgrew it,
+//!   `DeferredPass::outgrown`).
 //! - **What cannot be encoded again stays as before.** An encoder whose log is gone (a command
 //!   predication's command buffer, failed at the commit) or whose second
 //!   encoding is refused or records otherwise (`EncoderCore::finish_replay`) keeps its first
 //!   recording, which the first submission finds rebound: `CommandBufferError::EncodedUseRebound`,
-//!   as before. So does any encoder of a kind that logs nothing (a render encoder's).
+//!   as before. So does any encoder of a kind that logs nothing (a render encoder's), past its
+//!   work recorded on the GPU alone, and such work the rebind no longer records there.
 
 use super::{lock, CommandBuffer, CommandBufferShared, State};
+use crate::deferred::{Deferred, StepInputs};
 use crate::device::functions::Vk;
-use crate::encoder::{Replayed, Segment};
+use crate::encoder::{RecordedSegment, Replayed, Segment};
 use crate::replay::Replay;
 use crate::residency::Residency;
 use crate::resource::ResourceKey;
@@ -48,10 +61,11 @@ impl CommandBufferShared {
     }
 
     /// Encode again each of its encoders that a command of named a buffer over host pages that
-    /// lies elsewhere now than the command took it (the module docs), on the rebind's thread,
-    /// with no lock of the runtime's held; then its first submission may go, and the scheduler
-    /// looks again. Nothing here fails the rebind: an encoder it cannot encode again keeps its
-    /// first recording, which its first submission fails.
+    /// lies elsewhere now than the command took it, and record again the work its commit
+    /// recorded on the GPU alone (the module docs), on the rebind's thread, with no lock of the
+    /// runtime's held; then its first submission may go, and the scheduler looks again. Nothing
+    /// here fails the rebind: an encoder it cannot encode again, or work it cannot record on the
+    /// GPU alone again, keeps its first recording, which its first submission fails.
     pub(crate) fn reencode(self: &Arc<Self>) {
         let turn = lock(&self.reencoding);
         let marked = self.reencode.load(Ordering::Acquire);
@@ -93,6 +107,42 @@ impl CommandBufferShared {
             let spliced = lock(&self.state).splice_replay(vk, at, replayed, residency);
             match spliced {
                 Ok(()) => counts.encoder_reencoded(),
+                Err(unspliced) => {
+                    counts.reencode_refused();
+                    drop(unspliced);
+                }
+            }
+        }
+        // Its work recorded on the GPU alone, each segment by its part and its place there,
+        // which hold through this turn: only the first submission places segments, and it waits
+        // for the turn; a host step, which records one, takes the turn too.
+        let alone: Vec<((usize, usize), Deferred)> = {
+            let state = lock(&self.state);
+            match state.submitted {
+                true => Vec::new(),
+                false => (state.recorded.iter().enumerate())
+                    .flat_map(|(part, recorded)| {
+                        let segments = recorded.segments.iter().enumerate();
+                        segments
+                            .filter(|(_, segment)| segment.gpu_alone && segment.recorded.is_some())
+                            .map(move |(at, segment)| ((part, at), segment.work.clone()))
+                    })
+                    .collect(),
+            }
+        };
+        for (place, work) in alone {
+            // Its notices were announced as it committed (`replay::is_replaying`), and its
+            // commands take what they use without holding it.
+            let again = crate::replay::replaying(|| work.record_on_gpu(&handle));
+            let counts = &device.shared().counts;
+            let Ok(Some((recorded, inputs))) = again else {
+                counts.reencode_refused();
+                continue;
+            };
+            let vk = device.shared().vk();
+            let spliced = lock(&self.state).splice_segment(vk, place, recorded, inputs);
+            match spliced {
+                Ok(()) => counts.segment_recorded_again(),
                 Err(unspliced) => {
                     counts.reencode_refused();
                     drop(unspliced);
@@ -227,6 +277,50 @@ impl State {
         }
         self.retained.extend(retained.into_entry());
         self.retained.push(Box::new(heaps));
+        Ok(())
+    }
+
+    /// Put `recorded`, segment `at` of part `part` recorded again on the GPU alone, in its place
+    /// before the first submission, with `inputs`, what its host step needs now: what its
+    /// commands took held weakly until the first submission, as the commit holds them (by its
+    /// replays too, with `device`, the device's functions: `Replays::hold`). What the first
+    /// recording retained, its executions and its host step's inputs stay retained; its
+    /// `VkCommandBuffer`s go with the pool unsubmitted, and what its commands took, held weakly,
+    /// goes. Refused, changing nothing and giving `recorded` and `inputs` back, where the place
+    /// holds no such segment, or the command buffer was submitted.
+    pub(super) fn splice_segment(
+        &mut self,
+        device: &Vk,
+        (part, at): (usize, usize),
+        mut recorded: RecordedSegment,
+        inputs: StepInputs,
+    ) -> Result<(), Box<(RecordedSegment, StepInputs)>> {
+        let fits = !self.submitted
+            && (self.recorded.get(part))
+                .and_then(|recorded| recorded.segments.get(at))
+                .is_some_and(|segment| segment.gpu_alone && segment.recorded.is_some());
+        if !fits {
+            return Err(Box::new((recorded, inputs)));
+        }
+        match self.replays.clone() {
+            Some(replays) => drop(replays.hold(device, |pages| recorded.taken.wait(pages))),
+            None => recorded.taken.wait(&mut Vec::new()),
+        }
+        let segment = &mut self.recorded[part].segments[at];
+        let first = segment.recorded.replace(recorded);
+        let before = segment.inputs.replace(inputs);
+        if let Some(first) = first {
+            let RecordedSegment {
+                retained,
+                executions,
+                ..
+            } = first;
+            self.retained.extend(retained.into_entry());
+            self.retained.push(Box::new(executions));
+        }
+        if let Some(before) = before {
+            self.retained.push(Box::new(before));
+        }
         Ok(())
     }
 

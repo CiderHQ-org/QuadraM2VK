@@ -38,8 +38,11 @@
 //!   nothing and the command buffer completes with `CommandBufferError::EncodedUseRebound`, every
 //!   other submission running, its signals firing and its handlers running: the gap until the
 //!   encoded uses resolve at submission, announced once
-//!   (`Degradation::EncodedUseRebound`). A GPU-alone replay's resident set, resolved at the
-//!   commit (`gpu_execute.rs`), fails alike where a range of it lies elsewhere by then.
+//!   (`Degradation::EncodedUseRebound`). Work recorded on the GPU alone, whose preprocess's
+//!   resident set and named buffers the commit resolved (`gpu_execute.rs`,
+//!   `render/executions/gpu.rs`), is recorded again at each rebind before then (`reencode.rs`);
+//!   it fails alike where a range of that set lies elsewhere by then all the same (a buffer of it
+//!   released meanwhile), or the rebind could not record it on the GPU alone again.
 //! - **Each submission at its own batch**. The first submission finds which of Metal's submissions
 //!   are rebound, against the pages and the table it fixes for every later batch; each fails only
 //!   as its own batch is submitted, after that batch's submission checks (`checks.rs`). One its

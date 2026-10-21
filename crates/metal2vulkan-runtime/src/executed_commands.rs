@@ -39,7 +39,9 @@ pub enum RecordsRead {
     /// Not on the host: the GPU reads them as it runs (`gpu_execute.rs`), so
     /// [`ExecutedCommands::commands`] is empty and
     /// [`ExecutedCommands::unread_states_can_encode`] tells of every state the records may name.
-    /// Decided in `commit`, on the committing thread.
+    /// Decided in `commit`, on the committing thread, and again on the thread of each rebind of
+    /// a buffer over host pages before the command buffer's first submission, which records the
+    /// execution again.
     Gpu,
 }
 

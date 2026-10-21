@@ -15,6 +15,8 @@
 //! - a concurrent encoder's execution whose buffer's records the CPU sets a barrier in after the
 //!   commit, before its batch is submitted (it waits for an event), recorded again with the
 //!   barriers, still on the GPU alone;
+//! - one whose command buffer waits for an event while a buffer over host pages it never uses is
+//!   rebound, recorded again on the GPU alone at the rebind;
 //! - a range its own commands alone;
 //! - with as many live states as the GPU-alone path takes in its encoder's order on the GPU alone,
 //!   and with one more in the host step, which runs it faster;
@@ -25,7 +27,10 @@
 
 use super::degrade_notices::assert_made_once;
 use super::generated_executions::flat_template;
+use super::host_memory::Seen;
 use super::indirect_host_steps::HOST_STEPS;
+use super::rebind_reach::{buffer_len, buffer_over, pages};
+use super::rebinds::rebind;
 use super::shared_kinds;
 use super::{validated_device_with, Messages, ScratchCache, WAIT};
 use crate::air_library::AirLibrary;
@@ -40,6 +45,7 @@ use metal2vulkan_runtime::{
     Degradation, Device, EventRef, ExecutedPipeline, IndirectCommandBuffer,
     IndirectCommandBufferDescriptor, PipelineOptions, ResourceOptions, Size,
 };
+use std::sync::Arc;
 
 /// `flat_mark(params, out, p)`: each thread adds `params[0] * 1000 + p.x` to `out[p.x]` by a
 /// relaxed atomic, reading only `thread_position_in_grid`: it does not observe its threadgroup
@@ -458,6 +464,58 @@ fn a_barrier_set_after_the_commit_records_the_commands_again() {
             taken[1] >= taken[0] + COMMANDS - 1,
             "the commands recorded again with a barrier between every two: {taken:?}"
         );
+        announced(device, messages, &[]);
+    });
+}
+
+/// A rebind between the commit and the first submission (an event wait holds the command buffer)
+/// of a buffer over host pages the commands never use moves the live buffers the preprocess
+/// searches, which the commit resolved: the rebind records the execution again on the GPU alone
+/// (`command_buffer/reencode.rs`), and it runs what it runs without the rebind, the command
+/// buffer completing with a clean report (not `EncodedUseRebound`) and announcing nothing.
+#[test]
+fn a_rebind_before_the_first_submission_records_the_execution_again() {
+    on_device(|device, messages| {
+        let seen = Arc::new(Seen::default());
+        let Some(unused) = buffer_over(device, pages(buffer_len(), 0, &[1]), &seen) else {
+            return;
+        };
+        let queue = device.new_command_queue().unwrap();
+        let setup = Setup::new(device);
+        let event = device.new_shared_event().unwrap();
+        let command_buffer = queue.command_buffer().unwrap();
+        // The wait first: its first batch waits for the event too, so it is submitted after the
+        // rebind.
+        command_buffer
+            .encode_wait_for_event(EventRef::from(&event), 1)
+            .unwrap();
+        setup.writable(&command_buffer);
+        let mut encoder = command_buffer.compute_command_encoder().unwrap();
+        setup.resident(&mut encoder);
+        encoder
+            .execute_commands_in_buffer(&setup.icb, 0..COMMANDS)
+            .unwrap();
+        encoder.end_encoding().unwrap();
+        command_buffer.commit().unwrap();
+        let before = device.work_counts();
+        let rebound = Arc::new(Seen::default());
+        rebind(&unused, pages(buffer_len(), 0, &[2]), &rebound).unwrap();
+        let after = device.work_counts();
+        assert_eq!(
+            after.segments_recorded_again,
+            before.segments_recorded_again + 1,
+            "the rebind recorded the execution again"
+        );
+        assert_eq!(after.reencodes_refused, before.reencodes_refused);
+        event.set_signaled_value(1);
+        command_buffer.wait_until_completed_for(WAIT).unwrap();
+        assert_eq!(command_buffer.status(), CommandBufferStatus::Completed);
+        assert_eq!(
+            command_buffer.execution_report(),
+            Some(StatusReport::default())
+        );
+        assert_eq!(setup.output(), expected(0..COMMANDS as usize));
+        assert!(ran_flat(&command_buffer), "on the GPU alone");
         announced(device, messages, &[]);
     });
 }

@@ -311,6 +311,7 @@ pub(crate) struct Counters {
     replay_logs_kept: AtomicU64,
     replay_log_bytes: AtomicU64,
     encoders_reencoded: AtomicU64,
+    segments_recorded_again: AtomicU64,
     reencodes_refused: AtomicU64,
     pipeline_libraries_made: AtomicU64,
     fragment_shader_libraries_made: AtomicU64,
@@ -2019,7 +2020,14 @@ impl Counters {
         self.encoders_reencoded.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// A rebind could not encode an ended encoder again, which keeps its first recording.
+    /// A rebind recorded again work its command buffer's commit recorded on the GPU alone
+    /// (`command_buffer/reencode.rs`).
+    pub(crate) fn segment_recorded_again(&self) {
+        self.segments_recorded_again.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A rebind could not encode an ended encoder again, or record again work recorded on the
+    /// GPU alone, which keeps its first recording.
     pub(crate) fn reencode_refused(&self) {
         self.reencodes_refused.fetch_add(1, Ordering::Relaxed);
     }
@@ -3576,9 +3584,12 @@ pub struct WorkCounts {
     /// Ended encoders a rebind encoded again before their command buffer's first submission
     /// (`command_buffer/reencode.rs`).
     pub encoders_reencoded: u64,
+    /// Work a command buffer's commit recorded on the GPU alone (a GPU-written execution's) that
+    /// a rebind before its first submission recorded again (`command_buffer/reencode.rs`).
+    pub segments_recorded_again: u64,
     /// Ended encoders a rebind could not encode again (a call refused the second time, or a
-    /// recording unlike the first), which keep their first recording and fail
-    /// `EncodedUseRebound`.
+    /// recording unlike the first), and work recorded on the GPU alone it could not record there
+    /// again, which keep their first recording and fail `EncodedUseRebound`.
     pub reencodes_refused: u64,
     /// Fences made to end command buffers, where none was idle (`command_buffer/fences.rs`):
     /// none on a driver that reads no command buffer's objects after its value, whose queues'
@@ -4151,6 +4162,7 @@ impl Device {
             replay_logs_kept: counters.replay_logs_kept.load(Ordering::Relaxed),
             replay_log_bytes: counters.replay_log_bytes.load(Ordering::Relaxed),
             encoders_reencoded: counters.encoders_reencoded.load(Ordering::Relaxed),
+            segments_recorded_again: counters.segments_recorded_again.load(Ordering::Relaxed),
             reencodes_refused: counters.reencodes_refused.load(Ordering::Relaxed),
             fences_made: self.shared().fences.made(),
             pipeline_libraries_made: counters.pipeline_libraries_made.load(Ordering::Relaxed),

@@ -114,19 +114,41 @@ pub(super) struct Rebinds {
     pub(super) stale_count: AtomicUsize,
     /// The command buffers committed and not yet first submitted that an encoder of theirs can
     /// encode again (`replay.rs`), with the keys of the buffers over host pages those encoders
-    /// named: a rebind of one of them has them encoded again before their first submission.
+    /// named: a rebind of one of them has them encoded again before their first submission. And
+    /// those with work recorded on the GPU alone, which any rebind has recorded again.
     /// Taken under `buffers`' lock, after it.
     waiting: Mutex<Waiting>,
 }
 
 /// The command buffers waiting for their first submission whose encoders a rebind encodes again
-/// ([`Rebinds::wait_for_replay`]), each with the keys its replayable encoders named, sorted.
+/// ([`Rebinds::wait_for_replay`]), each with the keys its replayable encoders named, sorted; and
+/// those whose work recorded on the GPU alone a rebind records again
+/// ([`Rebinds::wait_for_rerecord`]).
 #[derive(Default)]
 struct Waiting {
     buffers: Vec<(Weak<CommandBufferShared>, Box<[ResourceKey]>)>,
+    /// The command buffers committed with work recorded on the GPU alone (a GPU-written
+    /// execution's preprocess and its draws or dispatches) and not yet first submitted: its
+    /// resident set was resolved at the commit, so a rebind of any buffer before the first
+    /// submission records that work again ([`Rebinds::wait_for_rerecord`]).
+    resolved: Vec<Weak<CommandBufferShared>>,
     /// The length past which the next registration first lets go of the entries whose command
     /// buffer went or was submitted.
     prune_at: usize,
+}
+
+impl Waiting {
+    /// Before a registration: where the entries reached `prune_at`, let go of those whose
+    /// command buffer went before its first submission (its submission failed first), never
+    /// upgraded, so none goes under the lock.
+    fn prune(&mut self) {
+        if self.buffers.len() + self.resolved.len() < self.prune_at {
+            return;
+        }
+        self.buffers.retain(|(buffer, _)| buffer.strong_count() > 0);
+        self.resolved.retain(|buffer| buffer.strong_count() > 0);
+        self.prune_at = (2 * (self.buffers.len() + self.resolved.len())).max(16);
+    }
 }
 
 /// A texture over detached bytes whose unnamed reads a submission's reach may not answer as
@@ -243,15 +265,18 @@ impl Rebinds {
         keys: Box<[ResourceKey]>,
     ) {
         let mut waiting = lock(&self.waiting);
-        // A command buffer that went before its first submission (its submission failed
-        // first) leaves its entry: let go of here, never upgraded, so none goes under the lock.
-        if waiting.buffers.len() >= waiting.prune_at {
-            waiting
-                .buffers
-                .retain(|(buffer, _)| buffer.strong_count() > 0);
-            waiting.prune_at = (2 * waiting.buffers.len()).max(16);
-        }
+        waiting.prune();
         waiting.buffers.push((Arc::downgrade(buffer), keys));
+    }
+
+    /// Note `buffer`, committed now and not yet first submitted, with work recorded on the GPU
+    /// alone: a rebind of any buffer before its first submission records that work again
+    /// ([`Rebinds::replace`], `command_buffer/reencode.rs`). Its first submission lets go of it
+    /// ([`Submitting::submitted_now`]).
+    pub(super) fn wait_for_rerecord(&self, buffer: &Arc<CommandBufferShared>) {
+        let mut waiting = lock(&self.waiting);
+        waiting.prune();
+        waiting.resolved.push(Arc::downgrade(buffer));
     }
 
     /// Whether one of `keys` names a detached buffer (`detach.rs`): at no cost while none is.
@@ -350,9 +375,10 @@ impl Rebinds {
     /// Give the buffer of `key`, whose hold on its pages is `cell`, `pages` from now on, unless
     /// a hold refuses it: where it lay (a detached one is attached again), and the command
     /// buffers waiting for their first submission whose replayable encoders named it
-    /// ([`Rebinds::wait_for_replay`]), each marked under this lock to encode them again before
-    /// that submission (`CommandBufferShared::reencode`), which the caller runs; `Err` gives
-    /// `pages` back.
+    /// ([`Rebinds::wait_for_replay`]) or that hold work recorded on the GPU alone, whose resident
+    /// set held where it lay ([`Rebinds::wait_for_rerecord`]), each marked under this lock to
+    /// encode or record them again before that submission (`CommandBufferShared::reencode`),
+    /// which the caller runs; `Err` gives `pages` back.
     pub(super) fn replace(
         &self,
         key: ResourceKey,
@@ -376,16 +402,20 @@ impl Rebinds {
         // Marked before this lock goes, so a first submission either came before the rebind
         // (and keeps the old pages) or waits for the encoders encoded again.
         // Each upgraded one goes to the caller, which lets go of it without this lock.
-        let mut again = Vec::new();
+        let mut again: Vec<Arc<CommandBufferShared>> = Vec::new();
         let waiting = lock(&self.waiting);
-        for (buffer, keys) in &waiting.buffers {
-            if keys.binary_search(&key).is_err() {
+        let named = (waiting.buffers.iter())
+            .filter(|(_, keys)| keys.binary_search(&key).is_ok())
+            .map(|(buffer, _)| buffer);
+        for buffer in named.chain(&waiting.resolved) {
+            let Some(buffer) = buffer.upgrade() else {
+                continue;
+            };
+            if again.iter().any(|had| Arc::ptr_eq(had, &buffer)) {
                 continue;
             }
-            if let Some(buffer) = buffer.upgrade() {
-                buffer.mark_reencode();
-                again.push(buffer);
-            }
+            buffer.mark_reencode();
+            again.push(buffer);
         }
         Ok((lying, again))
     }
@@ -455,6 +485,9 @@ impl Submitting<'_> {
         waiting
             .buffers
             .retain(|(waiting, _)| !std::ptr::eq(Weak::as_ptr(waiting), buffer));
+        waiting
+            .resolved
+            .retain(|waiting| !std::ptr::eq(Weak::as_ptr(waiting), buffer));
     }
 
     /// Judge `taken`, and hold every pin whose pages still live in `retained` until the command

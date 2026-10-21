@@ -141,14 +141,11 @@ impl Deferred {
                 // On the GPU alone where it is total (`gpu_execute.rs`): not a checked execution,
                 // whose step reads its records for the caller's check, nor one inside a block of
                 // command predication without its preprocess's gate, whose step reads the counter.
-                if let Some((recorded, rerecord)) = gpu_execute::record(command_buffer, execute)? {
+                if let Some((recorded, inputs)) = self.record_on_gpu(command_buffer)? {
                     return Ok(Prepared {
                         recorded: Some(recorded),
                         for_good: true,
-                        inputs: match rerecord {
-                            Some(rerecord) => StepInputs::Rerecord(rerecord),
-                            None => StepInputs::Settled(Vec::new()),
-                        },
+                        inputs,
                         retained: None,
                         pipelines: false,
                     });
@@ -203,11 +200,11 @@ impl Deferred {
             // The step waits for the pipelines its draws record too (`render/pending.rs`).
             // And makes now what the step would make (`render/executions/ahead.rs`).
             Deferred::RenderPass(pass) if step => {
-                if let Some(recorded) = pass.record_on_gpu(command_buffer)? {
+                if let Some((recorded, inputs)) = self.record_on_gpu(command_buffer)? {
                     return Ok(Prepared {
                         recorded: Some(recorded),
                         for_good: true,
-                        inputs: StepInputs::RenderPass,
+                        inputs,
                         retained: None,
                         pipelines: false,
                     });
@@ -261,6 +258,33 @@ impl Deferred {
                     pipelines: later,
                 })
             }
+        }
+    }
+
+    /// Its recording on the GPU alone, for good, with what its host step needs, where it runs
+    /// there over the buffers as they lie now (`gpu_execute.rs`, `DeferredPass::record_on_gpu`);
+    /// `None` where it does not, or is work that never runs there. With no lock of
+    /// `command_buffer` held: at the commit, and at a rebind before the command buffer's first
+    /// submission, which records it again (`command_buffer/reencode.rs`).
+    pub(super) fn record_on_gpu(
+        &self,
+        command_buffer: &CommandBuffer,
+    ) -> Result<Option<(RecordedSegment, StepInputs)>, Error> {
+        match self {
+            Deferred::Execute(execute) => {
+                let recorded = gpu_execute::record(command_buffer, execute)?;
+                Ok(recorded.map(|(recorded, rerecord)| {
+                    let inputs = match rerecord {
+                        Some(rerecord) => StepInputs::Rerecord(rerecord),
+                        None => StepInputs::Settled(Vec::new()),
+                    };
+                    (recorded, inputs)
+                }))
+            }
+            Deferred::RenderPass(pass) => Ok(pass
+                .record_on_gpu(command_buffer)?
+                .map(|recorded| (recorded, StepInputs::RenderPass))),
+            Deferred::Dispatch(_) | Deferred::SparseScrub(_) | Deferred::Pending(_) => Ok(None),
         }
     }
 

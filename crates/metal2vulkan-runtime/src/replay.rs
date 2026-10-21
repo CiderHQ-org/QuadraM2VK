@@ -709,8 +709,9 @@ thread_local! {
     static REPLAYING: Cell<usize> = const { Cell::new(0) };
 }
 
-/// Run `f`, which encodes an encoder again, marked ([`is_replaying`]).
-fn replaying<T>(f: impl FnOnce() -> T) -> T {
+/// Run `f`, which encodes an encoder again, or records again work its commit recorded
+/// (`command_buffer/reencode.rs`), marked ([`is_replaying`]).
+pub(crate) fn replaying<T>(f: impl FnOnce() -> T) -> T {
     /// Ends the mark as `f` returns or unwinds.
     struct Mark;
     impl Drop for Mark {
@@ -723,8 +724,9 @@ fn replaying<T>(f: impl FnOnce() -> T) -> T {
     f()
 }
 
-/// Whether this thread is encoding an encoder again now: its notices were announced as the
-/// program encoded it (`Device::degrade`).
+/// Whether this thread is encoding an encoder again now, or recording again work a commit
+/// recorded: its notices were announced as the program encoded it, or as it committed
+/// (`Device::degrade`).
 pub(crate) fn is_replaying() -> bool {
     REPLAYING.with(Cell::get) > 0
 }

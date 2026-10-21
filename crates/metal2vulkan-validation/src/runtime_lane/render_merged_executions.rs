@@ -16,12 +16,18 @@
 //!   them to;
 //! - into a target over a buffer whose rows the device lays out otherwise (a shadowed texture,
 //!   copied back after the pass): the kernel's triangles in one merged draw, and triangle strips
-//!   the CPU wrote one indirect draw per command, the same pixels as the host step's there.
+//!   the CPU wrote one indirect draw per command, the same pixels as the host step's there;
+//! - after a rebind between the commit and the first submission, of a buffer over host pages
+//!   the commands' vertices lie in or of one they never use: recorded again at the rebind, the
+//!   new pages' points, the command buffer completing.
 
-use super::buffer_with;
 use super::degrade_notices::{assert_made_once, counts, on_device};
+use super::host_memory::Seen;
 use super::indirect_host_steps::{complete, HOST_STEPS};
+use super::rebind_reach::{buffer_len, buffer_over, pages};
+use super::rebinds::rebind;
 use super::render_executions::{forced_with, icb};
+use super::{buffer_with, WAIT};
 use crate::air_library::AirLibrary;
 use metal2vulkan::metal::RenderStages;
 use metal2vulkan::metal::{
@@ -32,11 +38,12 @@ use metal2vulkan::pipeline::{
 };
 use metal2vulkan_devtools::{engine_dir, llvm_assemble};
 use metal2vulkan_runtime::{
-    Buffer, ClearColor, ComputePipelineState, Degradation, Device, IndirectCommandBuffer,
-    IndirectCommandBufferDescriptor, Library, LoadAction, PipelineOptions, Region,
-    RenderPassDescriptor, RenderPipelineState, ResourceOptions, Size, StoreAction, Texture,
-    TextureDescriptor,
+    Buffer, ClearColor, CommandBuffer, CommandBufferStatus, ComputePipelineState, Degradation,
+    Device, EventRef, IndirectCommandBuffer, IndirectCommandBufferDescriptor, Library, LoadAction,
+    PipelineOptions, Region, RenderPassDescriptor, RenderPipelineState, ResourceOptions, Size,
+    StoreAction, Texture, TextureDescriptor,
 };
+use std::sync::Arc;
 
 /// The target's width and height, and the rows an instance moves its vertices down.
 const W: u64 = 64;
@@ -165,18 +172,30 @@ impl Scene {
             .unwrap();
     }
 
-    /// Encode and run, in one command buffer of a new queue: a compute encoder that makes `icb`
-    /// resident for writing, `writer`, where given, writing it over `threads` threads, then a
-    /// pass over the target that executes commands `0..count` of it.
+    /// Encode ([`encode`](Self::encode)) and run, in one command buffer of a new queue.
     fn run(
         &self,
         device: &Device,
+        pipelines: (Option<&ComputePipelineState>, &RenderPipelineState),
+        commands: (&IndirectCommandBuffer, u64, u64),
+    ) {
+        let queue = device.new_command_queue().unwrap();
+        let command_buffer = queue.command_buffer().unwrap();
+        self.encode(device, &command_buffer, pipelines, commands);
+        complete(&command_buffer);
+    }
+
+    /// Encode into `command_buffer`: a compute encoder that makes `icb` resident for writing,
+    /// `writer`, where given, writing it over `threads` threads, then a pass over the target
+    /// that executes commands `0..count` of it.
+    fn encode(
+        &self,
+        device: &Device,
+        command_buffer: &CommandBuffer,
         (writer, state): (Option<&ComputePipelineState>, &RenderPipelineState),
         (icb, threads, count): (&IndirectCommandBuffer, u64, u64),
     ) {
         let arguments = buffer_with(device, &icb.gpu_resource_id().0.to_le_bytes()).unwrap();
-        let queue = device.new_command_queue().unwrap();
-        let command_buffer = queue.command_buffer().unwrap();
         let mut encoder = command_buffer.compute_command_encoder().unwrap();
         encoder
             .use_resource(icb.as_resource(), ResourceUsage::WRITE)
@@ -212,7 +231,6 @@ impl Scene {
         }
         encoder.execute_commands_in_buffer(icb, 0..count).unwrap();
         encoder.end_encoding().unwrap();
-        complete(&command_buffer);
     }
 
     /// The target's pixels, row by row.
@@ -454,5 +472,107 @@ fn gpu_forms_draw_into_a_shadowed_target_what_the_host_step_draws() {
                 "merged {merged}: the GPU form against the host step"
             );
         }
+    });
+}
+
+/// The points `draws` of the kernel's commands draw over `scene`, committed behind an event wait
+/// and first submitted only after `rebind` ran: the commit records them in one merged draw, and
+/// the rebind records them again (`command_buffer/reencode.rs`), once, over where the buffers lie
+/// then; the command buffer completes with a clean report and announces nothing.
+fn rebound_run(
+    device: &Device,
+    messages: &super::Messages,
+    scene: &Scene,
+    draws: &[Draw],
+    rebind: impl FnOnce(),
+) {
+    let library = library(device);
+    let writer = writer(device, &library, "points");
+    let state = state(device, &library);
+    let icb = icb(device, &inheriting(), 8);
+    let queue = device.new_command_queue().unwrap();
+    let event = device.new_shared_event().unwrap();
+    let command_buffer = queue.command_buffer().unwrap();
+    command_buffer
+        .encode_wait_for_event(EventRef::from(&event), 1)
+        .unwrap();
+    let pipelines = (Some(&writer), &state);
+    let (merged, gpu, read) = counted(device, || {
+        scene.encode(
+            device,
+            &command_buffer,
+            pipelines,
+            (&icb, draws.len() as u64, 8),
+        );
+        command_buffer.commit().unwrap();
+    });
+    assert_eq!((merged, gpu, read), (8, 8, 0), "the commit's merged draw");
+    let before = device.work_counts();
+    rebind();
+    let after = device.work_counts();
+    assert_eq!(
+        after.segments_recorded_again,
+        before.segments_recorded_again + 1,
+        "the rebind recorded the merged draw again"
+    );
+    assert_eq!(after.reencodes_refused, before.reencodes_refused);
+    assert_eq!(
+        after.merged_draw_commands - before.merged_draw_commands,
+        8,
+        "in one merged draw again"
+    );
+    assert_eq!(after.indirect_records_read, before.indirect_records_read);
+    event.set_signaled_value(1);
+    command_buffer.wait_until_completed_for(WAIT).unwrap();
+    assert_eq!(command_buffer.status(), CommandBufferStatus::Completed);
+    assert_eq!(command_buffer.error(), None);
+    assert_made_once(messages, &[], &forced_with(device, &[]));
+}
+
+/// A GPU-written execution the commit recorded on the GPU alone is recorded again by a rebind
+/// between the commit and the first submission (an event wait holds the command buffer), as
+/// Metal resolves what its commands reach as it submits the command buffer. A rebind of a buffer
+/// over host pages the commands never use moves the live buffers the preprocess searches, and the
+/// draws draw as without it; a rebind of the buffer the commands' vertices lie in, from pages
+/// holding vertices off the target to pages holding the row of points, draws the new pages'
+/// points, pixel for pixel. Neither fails the command buffer (`EncodedUseRebound`) or announces
+/// anything.
+#[test]
+fn a_rebind_before_the_first_submission_records_the_gpu_form_again_over_the_new_pages() {
+    on_device(|device, messages| {
+        let draws: Vec<Draw> = vec![[0, 5, 1, 0], [8, 3, 2, 1], [30, 6, 3, 2]];
+        let points =
+            |xy: &[[f32; 2]]| pages(buffer_len(), 0, &floats(xy.iter().flatten().copied()));
+        let seen = Arc::new(Seen::default());
+        let Some(unused) = buffer_over(device, points(&[[0.0; 2]]), &seen) else {
+            return;
+        };
+        let scene = Scene::new(device, &draws, &point_row());
+        rebound_run(device, messages, &scene, &draws, || {
+            let seen = Arc::new(Seen::default());
+            rebind(&unused, points(&[[1.0; 2]]), &seen).unwrap();
+        });
+        assert_eq!(
+            scene.pixels(),
+            drawn_points(&draws),
+            "an unused buffer rebound"
+        );
+
+        let off: Vec<[f32; 2]> = point_row().iter().map(|_| [-4.0, -4.0]).collect();
+        let xy = buffer_over(device, points(&off), &seen).unwrap();
+        let scene = Scene {
+            xy,
+            ..Scene::new(device, &draws, &point_row())
+        };
+        rebound_run(device, messages, &scene, &draws, || {
+            let seen = Arc::new(Seen::default());
+            rebind(&scene.xy, points(&point_row()), &seen).unwrap();
+        });
+        assert_eq!(scene.pixels(), drawn_points(&draws), "the vertices rebound");
+        eprintln!(
+            "ICB-REBIND {}: GPU forms recorded again at rebinds before the first submission drew \
+             the new pages",
+            device.name()
+        );
     });
 }

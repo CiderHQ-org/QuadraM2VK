@@ -111,6 +111,11 @@ pub(super) struct Segment {
     /// `commit` left its recording to the host step for the pipelines it records, which were
     /// being made then (`render/pending.rs`).
     pub(super) pipelines: bool,
+    /// `commit` recorded it on the GPU alone, for good (`Prepared::for_good`), and no host step
+    /// recorded it since: its resident set and what its commands named were resolved then, so a
+    /// rebind before the command buffer's first submission records it again
+    /// (`command_buffer/reencode.rs`).
+    pub(super) gpu_alone: bool,
 }
 
 impl Segment {
@@ -259,8 +264,9 @@ pub(super) struct EncoderCore {
     twin_writes: Vec<TwinWrite>,
     /// The core's own number in the process ([`id`](Self::id)).
     id: u64,
-    /// It encodes an ended encoder's calls again, its command buffer committed (`replay.rs`):
-    /// its commands take what they use without holding it (`Rebinds::pin`).
+    /// It encodes an ended encoder's calls again, its command buffer committed (`replay.rs`), or
+    /// records again work a commit recorded (`command_buffer/reencode.rs`): its commands take
+    /// what they use without holding it (`Rebinds::pin`).
     replaying: bool,
     /// The set 0 its last command allocated and wrote, which a later command that writes the same
     /// into a set of the same layout binds again ([`set_zero`](Self::set_zero)).
@@ -442,7 +448,8 @@ impl EncoderCore {
             twin_writes: Vec::new(),
             aliased_uses: Vec::new(),
             id: CORES.fetch_add(1, Ordering::Relaxed),
-            replaying: false,
+            // A segment a rebind records again, its command buffer committed.
+            replaying: crate::replay::is_replaying(),
             last_set_zero: LastSetZero::default(),
             _not_sync: PhantomData,
         })
@@ -1418,6 +1425,7 @@ impl EncoderCore {
             recorded: None,
             stepped: false,
             pipelines: false,
+            gpu_alone: false,
         });
         Ok(())
     }

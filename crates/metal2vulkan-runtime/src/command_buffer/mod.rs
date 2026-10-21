@@ -1162,6 +1162,7 @@ impl State {
                 retained,
                 pipelines,
             } = prepared;
+            segment.gpu_alone = for_good && recorded.is_some();
             segment.recorded = recorded;
             segment.stepped |= for_good;
             segment.pipelines |= pipelines;
@@ -1948,6 +1949,14 @@ impl CommandBuffer {
             if !keys.is_empty() {
                 device.shared().rebinds.wait_for_replay(&self.0, keys);
             }
+            // So does any rebind its work recorded on the GPU alone, whose resident set the
+            // commit resolved.
+            let gpu_alone = (state.recorded.iter())
+                .flat_map(|part| &part.segments)
+                .any(|segment| segment.gpu_alone);
+            if gpu_alone {
+                device.shared().rebinds.wait_for_rerecord(&self.0);
+            }
             if let Some(slot) = &mut state.slot {
                 slot.committed();
             }
@@ -2596,6 +2605,8 @@ impl CommandBufferShared {
                 Ok(done) => {
                     let segment = &mut state.recorded[encoder].segments[at];
                     segment.stepped = true;
+                    // Its recording is the step's now, which a rebind does not record again.
+                    segment.gpu_alone = false;
                     let before = segment.recorded.replace(done);
                     if let Some(mut before) = before {
                         state.retained.extend(before.retained.into_entry());
