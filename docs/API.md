@@ -2747,7 +2747,10 @@ each item named states the rule in full.
 - **Render commands the GPU may write run on the GPU alone** where the commit can tell from what
   the records may hold (`IndirectCommandBuffer::command_writes`) that every command is a draw of one
   primitive type under the encoder's pipeline state, which the buffer inherits with none of its
-  buffers: one indirect draw per command, in order, from what a preprocess wrote. Otherwise, and
+  buffers: one indirect draw per command, in order, from what a preprocess wrote; and where the
+  commands draw points, lines or triangles, the state's vertex function writes no memory and its
+  fragment function reads no buffer and no `[[primitive_id]]`, one merged draw for the whole range,
+  in the commands' order, whatever its count (`WorkCounts::merged_draw_commands`). Otherwise, and
   where what the records may hold grew by the time the pass's batch is ready to submit, a host step
   records the pass.
 - **A checked execution states what its check looks for**

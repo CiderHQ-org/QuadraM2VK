@@ -246,7 +246,8 @@ fn counted(device: &Device, run: impl FnOnce()) -> (u64, u64) {
 
 /// Commands a kernel and the CPU write draw on the GPU, the host reading no record, each with its
 /// own vertex start, instance count and base instance (`vertex_id`, `instance_id`); a reset
-/// command draws nothing. No host step is announced.
+/// command draws nothing. The template's vertex function writes memory, so they draw one draw
+/// each, not merged. No host step is announced.
 #[test]
 fn written_commands_draw_on_the_gpu_with_their_own_arguments() {
     on_device(|device, messages| {
@@ -258,6 +259,7 @@ fn written_commands_draw_on_the_gpu_with_their_own_arguments() {
             out: &setup.out,
         };
         let icb = written(device, &setup);
+        let merged = device.work_counts().merged_draw_commands;
         let (gpu, read) = counted(device, || {
             complete(&encode(
                 device,
@@ -268,6 +270,11 @@ fn written_commands_draw_on_the_gpu_with_their_own_arguments() {
         });
         assert_eq!(setup.output(), expected(&written_draws()));
         assert_eq!((gpu, read), (4, 0), "drawn in the GPU form");
+        assert_eq!(
+            device.work_counts().merged_draw_commands,
+            merged,
+            "one draw each"
+        );
         assert_made_once(messages, &[], &forced_with(device, &[]));
     });
 }

@@ -104,6 +104,7 @@ pub(crate) struct Counters {
     indirect_draws_recorded: AtomicU64,
     indirect_records_read: AtomicU64,
     gpu_form_commands: AtomicU64,
+    merged_draw_commands: AtomicU64,
     gpu_pool_blocks_made: AtomicU64,
     gpu_pool_blocks_released: AtomicU64,
     gpu_pool_leases_peak: AtomicU64,
@@ -789,6 +790,13 @@ impl Counters {
     /// (`render/executions/gpu.rs`): the device reads their records.
     pub(crate) fn gpu_form_commands(&self, count: u64) {
         self.gpu_form_commands.fetch_add(count, Ordering::Relaxed);
+    }
+
+    /// `count` commands of an execution of render commands in its GPU form were drawn by one
+    /// merged draw (`render/executions/gpu.rs`), not one draw each.
+    pub(crate) fn merged_draw_commands(&self, count: u64) {
+        self.merged_draw_commands
+            .fetch_add(count, Ordering::Relaxed);
     }
 
     /// A command buffer's lease made its queue's block of a GPU pool: the queue held none
@@ -2539,6 +2547,9 @@ pub struct WorkCounts {
     /// Commands of executions of render commands recorded in their GPU form, one a command each
     /// time (`render/executions/gpu.rs`): the device read their records, the host none.
     pub gpu_form_commands: u64,
+    /// Of those, the commands drawn by one merged draw per execution rather than one draw each
+    /// (`render/executions/gpu.rs`), one a command each time.
+    pub merged_draw_commands: u64,
     /// Blocks of the GPU pools made: a queue's index pool block (for its index bounds passes and
     /// index rewrites) or its mesh records pool block, made by the first command buffer of the
     /// queue that needs one where the queue holds none. A queue's command buffers share its block
@@ -3765,6 +3776,7 @@ impl Device {
             indirect_draws_recorded: counters.indirect_draws_recorded.load(Ordering::Relaxed),
             indirect_records_read: counters.indirect_records_read.load(Ordering::Relaxed),
             gpu_form_commands: counters.gpu_form_commands.load(Ordering::Relaxed),
+            merged_draw_commands: counters.merged_draw_commands.load(Ordering::Relaxed),
             gpu_pool_blocks_made: counters.gpu_pool_blocks_made.load(Ordering::Relaxed),
             gpu_pool_blocks_released: counters.gpu_pool_blocks_released.load(Ordering::Relaxed),
             gpu_pool_leases_peak: counters.gpu_pool_leases_peak.load(Ordering::Relaxed),

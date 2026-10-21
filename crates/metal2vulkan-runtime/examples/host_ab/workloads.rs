@@ -2294,7 +2294,10 @@ pub fn icb_draws<G: Gpu>(g: &G, library: &G::Library, sizes: &Sizes) {
         }
         let after = g.work_counts();
         for ((counted, before), (_, now)) in counts.iter().zip(&after) {
-            if matches!(*counted, "gpu_form_commands" | "indirect_records_read") {
+            if matches!(
+                *counted,
+                "gpu_form_commands" | "merged_draw_commands" | "indirect_records_read"
+            ) {
                 let per_frame = (now - before) / sizes.timed as f64;
                 emit(name, &format!("rt_{counted}"), "count", &mut [per_frame]);
             }

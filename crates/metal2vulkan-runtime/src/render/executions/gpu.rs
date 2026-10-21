@@ -37,6 +37,16 @@
 //!   and each later command's pushes its own slot tables and draws (`vkCmdDrawIndirect` of one
 //!   draw at its arguments). Its `vertex_id`, `instance_id` and `base_instance` are the command's
 //!   own, as Metal's.
+//! - **Merged** (`bind::DrawReplay::merged`), where the commands draw points, lines or triangles
+//!   (a list type), the vertex function writes no memory, and the state's merged variant
+//!   (`VariantKey::merged_draws`) compiles with a fragment function that reads no buffer and no
+//!   `[[primitive_id]]`: the preprocess, then the two merge passes (`bind::draw_merge_module`,
+//!   owned kernels), each after a barrier from everything before, write each command's first
+//!   vertex in one merged draw and its two `VkDrawIndirectCommand`s; the pass draws them, the
+//!   first through the encoder's draw (`BufferForms::Merged`), and the vertex function finds its
+//!   command, vertex and instance (`bind::replay`'s merged docs), in the commands' order. One
+//!   draw call for the whole range, whatever its count. Otherwise one draw per command, as
+//!   above.
 //! - **What the commands reach.** Their buffers' addresses resolve in the replay's resident set:
 //!   the command buffer's resident resources, then the device's live buffers Metal reaches
 //!   unnamed (`live_buffers.rs`), as the host step resolves them. One in neither is unbound
@@ -70,16 +80,18 @@ use crate::executed_commands::RecordsRead;
 use crate::indirect_execute::ExecutionRange;
 use crate::live_buffers::LiveTable;
 use crate::owned_kernel::OwnedModule;
-use crate::pipeline::{BufferForms, RenderStateKind, Settled};
+use crate::pipeline::{BufferForms, GraphicsState, RenderStateKind, Settled};
 use crate::residency::Residency;
 use crate::sampler::ArgumentSamplers;
 use crate::tracker::{Access, Barrier};
 use crate::visibility::Visibility;
 use crate::Device;
+use crate::RenderPipelineState;
 use ash::vk;
 use metal2vulkan::bind::{
-    draw_replay_preprocess, BindState, DrawCall, DrawReplay, DrawReplayLayout,
-    DrawReplayPreprocess, IndirectRef, NeutralResource, PushHole, ViewSetup, DRAW_ARGUMENT_BYTES,
+    draw_replay_preprocess, BindState, DrawCall, DrawMergeModule, DrawReplay, DrawReplayLayout,
+    DrawReplayPreprocess, IndirectRef, MergePhase, NeutralResource, PushHole, ViewSetup,
+    DRAW_ARGUMENT_BYTES,
 };
 use metal2vulkan::metal::{IndirectCommandType, PrimitiveType};
 use metal2vulkan::pipeline::{CommandWrites, SlotClass, Stage};
@@ -131,10 +143,18 @@ pub(in crate::render) struct ReplayedDraws {
 }
 
 impl ReplayedDraws {
+    /// The address of a merged replay's header, which its vertex function's
+    /// `PushHole::MergedDrawAddress` takes (`binding::Tables::merged_header`); `None` for draws
+    /// per command.
+    pub(in crate::render) fn merged_header(&self) -> Option<u64> {
+        (self.layout.merged).map(|m| self.address + m.header_offset)
+    }
+
     /// The holes of `holes` (the draw's push holes) that take a slot table, each filled in
     /// `pushes` (the draw's push writes) with the first command's: the binder's root tables
     /// are none of the commands'. Refused (internal) for a hole of other stages than one
-    /// function's, or one no push write covers.
+    /// function's, one no push write covers, or any in a merged replay, whose functions read no
+    /// slot table at a hole.
     pub(in crate::render) fn first_tables(
         &self,
         holes: &[PushHole],
@@ -145,6 +165,9 @@ impl ReplayedDraws {
             let PushHole::RootTableAddress { stages, offset } = *hole else {
                 continue;
             };
+            if self.layout.merged.is_some() {
+                return Err(internal("a merged draw's slot table at a hole"));
+            }
             let stages: vk::ShaderStageFlags = stages.into();
             let table = match stages {
                 vk::ShaderStageFlags::VERTEX => Table::Vertex,
@@ -183,7 +206,8 @@ impl ReplayedDraws {
     /// Record the commands' draws: `first`, the first command's recording, then for each later
     /// command the push writes of its slot tables at `holes` and one `vkCmdDrawIndirect` of one
     /// draw at its arguments, in order; the pipeline, sets and dynamic state `first` bound hold
-    /// for them all. The state commands they recorded.
+    /// for them all. A merged replay's: `first`, the merged draw's first, then its second. The
+    /// state commands they recorded.
     ///
     /// # Safety
     ///
@@ -197,6 +221,20 @@ impl ReplayedDraws {
         // SAFETY: the caller's contract.
         let mut recorded = unsafe { first.record(bound) };
         let (raw, command_buffer, layout) = (first.raw, first.command_buffer, first.layout);
+        if let Some(merged) = self.layout.merged {
+            // SAFETY: the caller's contract; the draw lies in the scratch, which holds
+            // `INDIRECT_BUFFER` usage as every upload chunk does.
+            unsafe {
+                raw.cmd_draw_indirect(
+                    command_buffer,
+                    self.buffer,
+                    self.offset + merged.draw_offset(1),
+                    1,
+                    DRAW_ARGUMENT_BYTES as u32,
+                )
+            };
+            return recorded;
+        }
         let mut writes: Vec<PushWrite> = holes
             .iter()
             .map(|hole| (hole.stages, hole.offset, vec![0; 8]))
@@ -254,13 +292,53 @@ impl RenderExecution {
             let rule = "the inherited state is a mesh or a tile state";
             return (core, Err(HostStepCause::Rule(rule)));
         };
+        // Merged where the commands draw a list type or points, else one draw per command.
+        let merges = matches!(
+            primitive_type,
+            PrimitiveType::Point | PrimitiveType::Line | PrimitiveType::Triangle
+        );
+        let commands = (decided, primitive_type, range);
+        let inputs = (storage, residency);
+        let mut core = core;
+        if merges {
+            let (back, form) = self.form_of(
+                core,
+                inputs.clone(),
+                (pipeline, state),
+                commands.clone(),
+                true,
+            );
+            core = back;
+            if let Ok(form) = form {
+                return (core, Ok(form));
+            }
+        }
+        self.form_of(core, inputs, (pipeline, state), commands, false)
+    }
+
+    /// The execution's GPU form for `commands`, `merged` into one draw or one draw per command,
+    /// its `pipeline`'s graphics `state` settled through an encoder of `core` that records nothing
+    /// in that form's buffer forms (the merged variant or the replay variant), over the pass's
+    /// `storage` with `residency`; else the rule that keeps it from that form. Returns the core.
+    fn form_of(
+        &self,
+        core: EncoderCore,
+        (storage, residency): (PassStorage, &Residency),
+        (pipeline, state): (&RenderPipelineState, &GraphicsState),
+        (decided, primitive_type, range): (CommandWrites, PrimitiveType, Range<u32>),
+        merged: bool,
+    ) -> (EncoderCore, Result<GpuForm, HostStepCause>) {
         let snapshot = &self.snapshot;
+        let forms = match merged {
+            true => BufferForms::Merged,
+            false => BufferForms::Replay,
+        };
         let visibility = Visibility::settling(snapshot.layout.visibility.clone(), None);
         let mut encoder = self.replay_encoder(
             core,
             (vk::CommandBuffer::null(), visibility),
             (storage, snapshot.layout.clone(), residency),
-            BufferForms::Replay,
+            forms,
         );
         let slots = encoder.check_pipeline(CALL, pipeline).and_then(|()| {
             encoder.pipeline = Some(pipeline.clone());
@@ -270,7 +348,7 @@ impl RenderExecution {
         let form = match slots {
             Ok(Ok(slots)) => {
                 let commands = (decided, primitive_type, range);
-                self.preprocess(core.device(), residency, commands, slots)
+                self.preprocess(core.device(), residency, commands, slots, merged)
             }
             Ok(Err(rule)) => Err(HostStepCause::Rule(rule)),
             Err(error) => Err(HostStepCause::Refused(error.to_string())),
@@ -359,14 +437,15 @@ impl RenderExecution {
     /// The replay's preprocess of commands `range` drawing `primitive_type`, each stage's slot
     /// table holding `slots` (the vertex function's, then the fragment function's), over
     /// `residency`'s resident resources and the device's live buffers, decided on the records'
-    /// `decided` writes; else why it cannot run (the binder's refusal, a device without device
-    /// addresses among others).
+    /// `decided` writes, `merged` into one draw or not; else why it cannot run (the binder's
+    /// refusal, a device without device addresses among others).
     fn preprocess(
         &self,
         device: &Device,
         residency: &Residency,
         (decided, primitive_type, range): (CommandWrites, PrimitiveType, Range<u32>),
         (vertex_slots, fragment_slots): (u32, u32),
+        merged: bool,
     ) -> Result<GpuForm, HostStepCause> {
         let capacity = u32::try_from(self.icb.size())
             .map_err(|_| HostStepCause::Rule("the buffer holds 2^32 commands or more"))?;
@@ -381,6 +460,7 @@ impl RenderExecution {
         replay.inheritance = self.icb.inheritance();
         replay.vertex_slots = vertex_slots;
         replay.fragment_slots = fragment_slots;
+        replay.merged = merged;
         let pre = draw_replay_preprocess(device.compile_device(), &state, &replay)
             .map_err(|error| HostStepCause::Refused(error.to_string()))?;
         Ok(GpuForm {
@@ -485,8 +565,44 @@ impl RenderExecution {
             }
         });
         // Its writes before the draws' indirect reads and their functions' reads of the slot
-        // tables, the pass begun after it.
+        // tables (and before a merged replay's passes), the pass begun after it.
         core.barrier(Barrier::everything());
+        if let Some(merged) = pre.layout.merged {
+            let push = DrawMergeModule::push_constants(address + merged.header_offset, status);
+            let uses = [writes_by(
+                chunk,
+                at + merged.header_offset..at + pre.layout.bytes,
+                Access::new(
+                    compute,
+                    vk::AccessFlags2::SHADER_STORAGE_READ | vk::AccessFlags2::SHADER_STORAGE_WRITE,
+                ),
+            )];
+            let [x, y, z] = merged.group_count();
+            for phase in [MergePhase::Blocks, MergePhase::Starts] {
+                let kernel = device.owned_kernel(OwnedModule::DrawMerge(phase))?;
+                core.command(compute, &uses, |raw, command_buffer| {
+                    // SAFETY: as the preprocess's: its push bytes name the scratch's header and
+                    // the status words, which live until the command buffer completes.
+                    unsafe {
+                        raw.cmd_bind_pipeline(
+                            command_buffer,
+                            vk::PipelineBindPoint::COMPUTE,
+                            kernel.pipeline,
+                        );
+                        raw.cmd_push_constants(
+                            command_buffer,
+                            kernel.layout,
+                            vk::ShaderStageFlags::COMPUTE,
+                            0,
+                            &push,
+                        );
+                        raw.cmd_dispatch(command_buffer, x, y, z);
+                    }
+                });
+                // Each pass's writes before what reads them next: the second pass, the draws.
+                core.barrier(Barrier::everything());
+            }
+        }
         // Its resident set, resolved now: the command buffer's first submission finds whether
         // the live buffers and what its encoders made resident still lie there.
         core.resolved(form.live.ranges().chain(residency.resident_ranges()));
@@ -495,21 +611,19 @@ impl RenderExecution {
         let visibility =
             Visibility::borrowing(snapshot.layout.visibility.clone(), None, raw, draws);
         let layout = rendered.backing(&snapshot.layout)?;
+        let (forms, first_at) = match pre.layout.merged {
+            Some(merged) => (BufferForms::Merged, merged.draw_offset(0)),
+            None => (BufferForms::Replay, pre.layout.argument_offset(0, 0)),
+        };
         let mut encoder = self.replay_encoder(
             core,
             (draws, visibility),
             (storage, layout, residency),
-            BufferForms::Replay,
+            forms,
         );
-        // The first command's draw reads its arguments where the preprocess wrote them.
-        let first = DrawSource::new(
-            chunk,
-            at + pre.layout.argument_offset(0, 0),
-            DRAW_ARGUMENT_BYTES,
-            4,
-            false,
-            false,
-        )?;
+        // The first draw reads its arguments where the preprocess (or the last merge pass)
+        // wrote them.
+        let first = DrawSource::new(chunk, at + first_at, DRAW_ARGUMENT_BYTES, 4, false, false)?;
         let draw = DrawCall::Indirect {
             indirect: IndirectRef::new(0, first.at),
             indexed: None,
@@ -529,15 +643,19 @@ impl RenderExecution {
         let assembly = Assembly::Primitives(form.primitive_type);
         encoder.draw(CALL, assembly, draw, buffers, false)?;
         encoder.replayed = None;
-        (device.shared().counts).gpu_form_commands(u64::from(pre.layout.commands));
+        let counts = &device.shared().counts;
+        counts.gpu_form_commands(u64::from(pre.layout.commands));
+        if pre.layout.merged.is_some() {
+            counts.merged_draw_commands(u64::from(pre.layout.commands));
+        }
         Ok(encoder)
     }
 }
 
 /// The bytes of a draw replay's scratch the host uploads: the parameters, the resident root
-/// table with its sink entry's `host` field at `sink`, the resident roots' extents and the
-/// encoder's buffers, each at its layout offset; the slot tables and arguments past them are
-/// the preprocess's to write.
+/// table with its sink entry's `host` field at `sink`, the resident roots' extents, the
+/// encoder's buffers and a merged replay's header, each at its layout offset; the slot tables
+/// and arguments past them are the preprocess's to write.
 fn scratch_head(pre: &DrawReplayPreprocess, sink: u64) -> Result<Vec<u8>, Error> {
     let layout = pre.layout;
     let len =
@@ -549,12 +667,16 @@ fn scratch_head(pre: &DrawReplayPreprocess, sink: u64) -> Result<Vec<u8>, Error>
         .get_mut(at..at + 8)
         .ok_or_else(|| internal("a resident root table without a sink entry"))?
         .copy_from_slice(&sink.to_le_bytes());
+    let header = layout.merged.map(|m| (m.header_offset, &pre.header));
     for (offset, part) in [
         (layout.params_offset(), &pre.params),
         (layout.resident_offset, &resident),
         (layout.extents_offset, &pre.extents),
         (layout.parent_offset, &pre.parent),
-    ] {
+    ]
+    .into_iter()
+    .chain(header)
+    {
         let offset = offset as usize;
         bytes
             .get_mut(offset..offset + part.len())
@@ -567,14 +689,18 @@ fn scratch_head(pre: &DrawReplayPreprocess, sink: u64) -> Result<Vec<u8>, Error>
 impl RenderCommandEncoder {
     /// The buffer slots the vertex and fragment functions of a command's draw of `state` as
     /// `primitive_type` read, through this encoder (an execution's at its call, in the replay
-    /// form), where that draw records as the GPU form's draws do (the module docs); else the rule
-    /// it breaks, as the host-step notice words it. Announces nothing: it draws nothing.
+    /// form or the merged one, its `forms`), where that draw records as the GPU form's draws do
+    /// (the module docs); else the rule it breaks, as the host-step notice words it. Announces
+    /// nothing: it draws nothing.
     fn replay_draw_of(
         &self,
         state: &crate::pipeline::GraphicsState,
         primitive_type: PrimitiveType,
     ) -> Result<Result<(u32, u32), &'static str>, Error> {
         let graphics = &state.base().graphics;
+        // A merged draw runs a vertex for each corner of a whole primitive, which only a vertex
+        // function that writes no memory cannot tell from Metal's.
+        let merged = self.forms == BufferForms::Merged;
         let rules = [
             (
                 crate::tessellation::patches(graphics).is_some(),
@@ -589,8 +715,8 @@ impl RenderCommandEncoder {
                 "the inherited state reads tile memory",
             ),
             (
-                graphics.vertex_writes_memory && !graphics.rasterizer_discard,
-                "the inherited state's vertex function writes memory and it rasterizes",
+                graphics.vertex_writes_memory && (merged || !graphics.rasterizer_discard),
+                "the inherited state's vertex function writes memory",
             ),
             (
                 graphics.fragment_writes_memory,
@@ -655,13 +781,24 @@ impl RenderCommandEncoder {
         let commands = plan
             .instantiate_draw(&live.state, &draw)
             .map_err(Error::Bind)?;
+        // Each slot table one function's; a merged draw's at its header alone, the vertex
+        // function's.
         let one_function = commands.push_holes.iter().all(|hole| match *hole {
             PushHole::RootTableAddress { stages, .. } => {
                 let stages: vk::ShaderStageFlags = stages.into();
-                stages == vk::ShaderStageFlags::VERTEX || stages == vk::ShaderStageFlags::FRAGMENT
+                !merged
+                    && (stages == vk::ShaderStageFlags::VERTEX
+                        || stages == vk::ShaderStageFlags::FRAGMENT)
+            }
+            PushHole::MergedDrawAddress { stages, .. } => {
+                merged && vk::ShaderStageFlags::from(stages) == vk::ShaderStageFlags::VERTEX
             }
             _ => true,
         });
+        let header = commands
+            .push_holes
+            .iter()
+            .any(|hole| matches!(hole, PushHole::MergedDrawAddress { .. }));
         let rules = [
             (
                 commands.indirect_needs_arguments,
@@ -690,6 +827,10 @@ impl RenderCommandEncoder {
             (
                 !one_function,
                 "the inherited state's functions share a slot table",
+            ),
+            (
+                merged != header,
+                "the inherited state's variant does not read the merged draw's header",
             ),
         ];
         if let Some((_, rule)) = rules.iter().find(|(breaks, _)| *breaks) {

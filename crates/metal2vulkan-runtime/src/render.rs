@@ -7898,6 +7898,9 @@ impl RenderCommandEncoder {
         if let Some((records, indices)) = capture {
             tables = tables.with_capture(records, indices);
         }
+        if let Some(header) = self.replayed.as_ref().and_then(|r| r.merged_header()) {
+            tables = tables.with_merged_header(header);
+        }
         // A de-indexed draw's vertex function reads its indices in place, at their address.
         if capture.is_none() && variant.key().primitive_id_indices.is_some() {
             let address = buffers

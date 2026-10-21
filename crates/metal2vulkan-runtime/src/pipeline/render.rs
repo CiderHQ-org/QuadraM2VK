@@ -1886,9 +1886,10 @@ impl GraphicsState {
             BufferForms::Large => plan
                 .variant
                 .large_buffer_form(&base.pipeline.dependencies, shape),
-            BufferForms::Replay => {
+            BufferForms::Replay | BufferForms::Merged => {
                 let mut key = plan.variant.clone();
                 key.replay_bindings = true;
+                key.merged_draws = forms == BufferForms::Merged;
                 key
             }
         };
@@ -1900,7 +1901,9 @@ impl GraphicsState {
         let variant = self.variant(&wanted)?;
         let plan = variant.plan(&self.0.device, shape)?;
         let runs = match forms {
-            BufferForms::Bound | BufferForms::Replay => plan.variant == variant.key,
+            BufferForms::Bound | BufferForms::Replay | BufferForms::Merged => {
+                plan.variant == variant.key
+            }
             BufferForms::Large => variant.key.covers(&plan.variant),
         };
         if !runs {

@@ -141,6 +141,9 @@ pub(super) struct Tables<'a> {
     /// A draw's slots read through snapshots (`render/snapshot.rs`): each binds its own texture,
     /// not a copy, in the feedback loop layout, and its snapshot at `WriteSource::SnapshotTexels`.
     snapshots: Option<&'a SnapshotViews>,
+    /// A merged draw replay's header's address (`render/executions/gpu.rs`): its vertex
+    /// function's `PushHole::MergedDrawAddress` takes it.
+    merged_header: Option<u64>,
 }
 
 /// The fragment texture slots a draw reads through snapshots, and the storage view of each one's
@@ -176,6 +179,7 @@ impl<'a> Tables<'a> {
             capture: None,
             indices: None,
             snapshots: None,
+            merged_header: None,
         }
     }
 
@@ -203,6 +207,14 @@ impl<'a> Tables<'a> {
     pub(super) fn with_capture(self, records: u64, indices: Option<u64>) -> Tables<'a> {
         Tables {
             capture: Some((records, indices)),
+            ..self
+        }
+    }
+
+    /// The tables, with a merged draw replay's header's address (`Tables::merged_header`).
+    pub(super) fn with_merged_header(self, address: u64) -> Tables<'a> {
+        Tables {
+            merged_header: Some(address),
             ..self
         }
     }
@@ -702,6 +714,14 @@ pub(super) fn bind(
                     .and_then(|(_, indices)| indices)
                     .or(tables.indices)
                     .ok_or_else(|| internal("a capture index hole without capture indices"))?,
+            },
+            // A merged draw replay's header, which its vertex function finds its command in.
+            PushHole::MergedDrawAddress { stages, offset } => Hole {
+                stages: stages.into(),
+                offset,
+                address: tables
+                    .merged_header
+                    .ok_or_else(|| internal("a merged draw's hole outside a merged draw"))?,
             },
             // Which of a snapshot variant's draws runs: 0 in the plan's bytes, the drawing draw's,
             // and set before each draw as it records (`render/snapshot.rs`).

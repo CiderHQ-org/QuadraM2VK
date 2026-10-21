@@ -825,6 +825,7 @@ impl Gpu for Runtime {
             ("command_pools_made", c.command_pools_made),
             ("dispatches", replayed.cmd_dispatch),
             ("gpu_form_commands", c.gpu_form_commands),
+            ("merged_draw_commands", c.merged_draw_commands),
             ("indirect_records_read", c.indirect_records_read),
             ("dispatches_indirect", replayed.cmd_dispatch_indirect),
         ]

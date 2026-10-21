@@ -61,6 +61,9 @@ pub(super) enum OwnedModule {
     /// `bind::draw_replay_module`: a draw replay's preprocess, which reads every buffer at its
     /// device address (no storage buffer; its push bytes, `render/executions/gpu.rs`).
     DrawReplayPreprocess,
+    /// `bind::draw_merge_module`: a merged draw replay's merge pass of `phase`, after its
+    /// preprocess (no descriptor; its push bytes, `render/executions/gpu.rs`).
+    DrawMerge(metal2vulkan::bind::MergePhase),
     /// `bind::flat_dispatch_module`: an indirect dispatch's region record and group counts on its
     /// flat variant, from Metal's arguments (`indirect_dispatch.rs`). No descriptor: it reaches
     /// memory by device address.
@@ -249,6 +252,15 @@ impl OwnedModule {
                     module.spirv.to_vec(),
                     0,
                     metal2vulkan::bind::DrawReplayModule::PUSH_BYTES,
+                ))
+            }
+            OwnedModule::DrawMerge(phase) => {
+                let module = metal2vulkan::bind::draw_merge_module(device.compile_device(), phase)
+                    .map_err(Error::Compile)?;
+                Ok((
+                    module.spirv.to_vec(),
+                    0,
+                    metal2vulkan::bind::DrawMergeModule::PUSH_BYTES,
                 ))
             }
             OwnedModule::FlatDispatch => {
@@ -465,6 +477,8 @@ pub(super) struct OwnedKernels {
     index_bounds_fill: Option<OwnedKernel>,
     replay_preprocess: Option<OwnedKernel>,
     draw_replay_preprocess: Option<OwnedKernel>,
+    draw_merge_blocks: Option<OwnedKernel>,
+    draw_merge_starts: Option<OwnedKernel>,
     flat_dispatch: Option<OwnedKernel>,
     shadow_merge: Option<OwnedKernel>,
     depth_magnitude: Option<OwnedKernel>,
@@ -506,6 +520,8 @@ impl OwnedKernels {
             self.index_bounds_fill,
             self.replay_preprocess,
             self.draw_replay_preprocess,
+            self.draw_merge_blocks,
+            self.draw_merge_starts,
             self.flat_dispatch,
             self.shadow_merge,
             self.depth_magnitude,
@@ -627,6 +643,12 @@ impl OwnedKernels {
             OwnedModule::IndexBoundsFill => &mut self.index_bounds_fill,
             OwnedModule::ReplayPreprocess => &mut self.replay_preprocess,
             OwnedModule::DrawReplayPreprocess => &mut self.draw_replay_preprocess,
+            OwnedModule::DrawMerge(metal2vulkan::bind::MergePhase::Blocks) => {
+                &mut self.draw_merge_blocks
+            }
+            OwnedModule::DrawMerge(metal2vulkan::bind::MergePhase::Starts) => {
+                &mut self.draw_merge_starts
+            }
             OwnedModule::FlatDispatch => &mut self.flat_dispatch,
             OwnedModule::ShadowMerge => &mut self.shadow_merge,
             OwnedModule::DepthMagnitude => &mut self.depth_magnitude,
