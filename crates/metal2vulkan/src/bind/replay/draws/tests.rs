@@ -399,6 +399,32 @@ fn a_buffer_no_allocation_holds_is_unbound_and_counted() {
     assert_eq!(ran.fragment(0, 0), [0; 4]);
 }
 
+/// A buffer of the command's own that no slot table holds (past the slots its stage's function
+/// reads, or of a stage that reads none) is resolved too: its miss counts, as the host step's
+/// does, though no slot holds it. A nil buffer's offset counts none, nor does a command that draws
+/// nothing.
+#[test]
+fn a_buffer_past_the_slots_read_counts_its_miss() {
+    let mut replay = DrawReplay::new(2, 0, 2, vec![3]);
+    replay.vertex_slots = 1;
+    replay.fragment_slots = 0;
+    let buffers = |action| {
+        record(
+            action,
+            &[(0, A.0), (1, AWAY), (2, B.0), (3, 0x40)],
+            &[(0, AWAY), (1, AWAY)],
+        )
+    };
+    let records = [buffers(draw(3, 0, 3, [1, 0])), buffers(Action::Empty)];
+    let ran = preprocess(&replay, &records, clean(2));
+    assert!(!ran.status.replay_fault);
+    assert!(ran.status.resident_miss);
+    assert_eq!(ran.status.resident_misses, 3);
+    assert_eq!(ran.args(0, 0), [3, 1, 0, 0]);
+    assert_eq!(ran.vertex(0, 0), [A.1, A.0, padded(A.2), 0]);
+    assert_eq!(ran.args(1, 0), [0; 4]);
+}
+
 /// Where the commands inherit buffers, every command's tables hold the encoder's, and a command
 /// that sets one of its own draws nothing (`BUFFERS`).
 #[test]

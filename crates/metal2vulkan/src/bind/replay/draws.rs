@@ -28,7 +28,9 @@
 //!   draw's own). A buffer whose address no resident allocation holds is unbound (its slot reads
 //!   as a buffer never set), and counted as a resident miss ([`StatusBits::RESIDENT_MISS`], the
 //!   [`StatusWord::ResidentMisses`] count), as the host's step leaves it unbound and counts it;
-//!   the command still draws.
+//!   the command still draws. A command's own buffer that no slot table holds (past the slots its
+//!   stage's function reads, or of the object or mesh stage) is resolved for the count alone, as
+//!   the host's step resolves every buffer below its stage's count.
 //! - **What it does not run** draws nothing and sets [`StatusBits::REPLAY_FAULT`] with its
 //!   reasons ([`ReplayFaults`]) in the command buffer's `ExecutionStatus`: a record the host's
 //!   decode refuses (`RECORD`, `ENCODING`), a draw of a primitive type the execution does not
@@ -463,6 +465,26 @@ fn no_binding(_: &Symbol) -> Option<u32> {
     None
 }
 
+/// The root `guest` resolves to in the resident set at `resident`, its offset there, and whether
+/// it lies inside the root's unpadded extent (`extents`, a `u64` per root): a hit.
+fn resolved(
+    fb: &mut FunctionBuilder<'_>,
+    t: Types,
+    (resident, extents): (Value, Value),
+    guest: Value,
+) -> BResult<(Value, Value, Value)> {
+    let (root, offset) = roots::resolve(fb, resident, guest)?;
+    let null = k64(fb, roots::NULL_ROOT)?;
+    let found = fb.binary(BinOp::INotEqual, root, null)?;
+    let eight = k64(fb, 8)?;
+    let extent_rel = fb.binary(BinOp::IMul, root, eight)?;
+    let extent_at = fb.binary(BinOp::IAdd, extents, extent_rel)?;
+    let extent = load64(fb, t, extent_at)?;
+    let inside = fb.binary(BinOp::ULessThan, offset, extent)?;
+    let hit = fb.binary(BinOp::LogicalAnd, found, inside)?;
+    Ok((root, offset, hit))
+}
+
 /// Write zero into every argument of the command whose arguments start at `base`.
 fn zero_draws(fb: &mut FunctionBuilder<'_>, t: Types, base: Value, types: Value) -> BResult<()> {
     count_loop(fb, t, types, move |fb, k| {
@@ -641,6 +663,9 @@ pub fn typed_module() -> BResult<TypedModule> {
     let dynamic_allowed = fb.binary(BinOp::INotEqual, dynamic_bits, zero32)?;
     let static_stride = k64(fb, u64::MAX)?;
     let bad_bindings = counter(fb, t, 0)?;
+    let unresolved = counter(fb, t, 0)?;
+    let extents_off = wide(fb, t, extents_at)?;
+    let extents = fb.binary(BinOp::IAdd, resident, extents_off)?;
     let all = k32(fb, layout::ALL_BINDINGS as u32)?;
     count_loop(fb, t, all, |fb, n| {
         let n64 = wide(fb, t, n)?;
@@ -684,7 +709,42 @@ pub fn typed_module() -> BResult<TypedModule> {
         let refused_stride = fb.binary(BinOp::LogicalOr, refused_stride, strideless)?;
         let bad_stride = fb.binary(BinOp::LogicalAnd, dynamic, refused_stride)?;
         let bad = fb.binary(BinOp::LogicalOr, past, bad_stride)?;
-        flag(fb, bad_bindings, bad, 1)
+        flag(fb, bad_bindings, bad, 1)?;
+        // A buffer of the command's own below its stage's count that no slot table holds (past
+        // the slots its stage's function reads, or of another stage) is resolved too, so that its
+        // miss counts as the host step's does.
+        let first_address = k64(fb, BufferBinding::MIN_BUFFER_ADDRESS)?;
+        let names = fb.binary(BinOp::UGreaterThanEqual, address, first_address)?;
+        let below = fb.binary(BinOp::ULessThan, slot, stage_count)?;
+        let mut held = [zero64; 2];
+        for (h, (stage_index, slots)) in held
+            .iter_mut()
+            .zip([(1u32, vertex_slots), (2, fragment_slots)])
+        {
+            let k = k32(fb, stage_index)?;
+            let is = fb.binary(BinOp::IEqual, stage, k)?;
+            let inside = fb.binary(BinOp::ULessThan, slot, slots)?;
+            *h = fb.binary(BinOp::LogicalAnd, is, inside)?;
+        }
+        let covered = fb.binary(BinOp::LogicalOr, held[0], held[1])?;
+        let uncovered = fb.unary(UnOp::LogicalNot, covered)?;
+        let own = fb.unary(UnOp::LogicalNot, inherit_buffers)?;
+        let counted = fb.binary(BinOp::LogicalAnd, names, below)?;
+        let counted = fb.binary(BinOp::LogicalAnd, counted, uncovered)?;
+        let counted = fb.binary(BinOp::LogicalAnd, counted, own)?;
+        let count: ArmFn<'_, ()> = Box::new(move |fb, _| {
+            let (_, _, hit) = resolved(fb, t, (resident, extents), address)?;
+            let missed = fb.unary(UnOp::LogicalNot, hit)?;
+            let one = k32(fb, 1)?;
+            let zero = k32(fb, 0)?;
+            let add = fb.select(missed, one, zero)?;
+            let u = fb.load(unresolved, MemAccess::default())?;
+            let u = fb.binary(BinOp::IAdd, u, add)?;
+            fb.store(unresolved, u, MemAccess::default())?;
+            Ok(ArmEnd::FallThrough(Vec::new()))
+        });
+        fb.if_(&mut (), counted, count, None)?;
+        Ok(())
     })?;
     let bad = fb.load(bad_bindings, MemAccess::default())?;
     let bad = fb.binary(BinOp::INotEqual, bad, zero32)?;
@@ -735,12 +795,15 @@ pub fn typed_module() -> BResult<TypedModule> {
     let parent_off = wide(fb, t, parent_at)?;
     let parent = fb.binary(BinOp::IAdd, resident, parent_off)?;
     let source = fb.select(inherit_buffers, parent, rec)?;
-    let extents_off = wide(fb, t, extents_at)?;
-    let extents = fb.binary(BinOp::IAdd, resident, extents_off)?;
     let runs = fb.load(fault, MemAccess::default())?;
     let runs = fb.binary(BinOp::IEqual, runs, zero32)?;
     let runs = fb.binary(BinOp::LogicalAnd, runs, draw)?;
+    // The misses of a command that draws: those of the buffers no slot table holds, and below
+    // those of its tables'.
     let misses = counter(fb, t, 0)?;
+    let unresolved = fb.load(unresolved, MemAccess::default())?;
+    let unresolved = fb.select(runs, unresolved, zero32)?;
+    fb.store(misses, unresolved, MemAccess::default())?;
     let sink_entry = roots::SINK_ROOT * roots::ENTRY_BYTES;
     let sink_at = at(fb, resident, sink_entry + roots::HOST)?;
     let sink = load64(fb, t, sink_at)?;
@@ -780,16 +843,8 @@ pub fn typed_module() -> BResult<TypedModule> {
             let first_address = k64(fb, BufferBinding::MIN_BUFFER_ADDRESS)?;
             let bound = fb.binary(BinOp::UGreaterThanEqual, guest, first_address)?;
             let live = fb.binary(BinOp::LogicalAnd, runs, bound)?;
-            let (root, offset) = roots::resolve(fb, resident, guest)?;
-            let null = k64(fb, roots::NULL_ROOT)?;
-            let found = fb.binary(BinOp::INotEqual, root, null)?;
+            let (root, offset, hit) = resolved(fb, t, (resident, extents), guest)?;
             let size = roots::entry_field(fb, resident, root, roots::SIZE)?;
-            let eight = k64(fb, 8)?;
-            let extent_rel = fb.binary(BinOp::IMul, root, eight)?;
-            let extent_at = fb.binary(BinOp::IAdd, extents, extent_rel)?;
-            let extent = load64(fb, t, extent_at)?;
-            let inside = fb.binary(BinOp::ULessThan, offset, extent)?;
-            let hit = fb.binary(BinOp::LogicalAnd, found, inside)?;
             let missed = fb.unary(UnOp::LogicalNot, hit)?;
             let miss = fb.binary(BinOp::LogicalAnd, live, missed)?;
             let one = k32(fb, 1)?;
