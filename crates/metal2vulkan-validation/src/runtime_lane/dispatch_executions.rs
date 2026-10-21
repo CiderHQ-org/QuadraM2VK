@@ -16,6 +16,8 @@
 //!   commit, before its batch is submitted (it waits for an event), recorded again with the
 //!   barriers, still on the GPU alone;
 //! - a range its own commands alone;
+//! - with as many live states as the GPU-alone path takes in its encoder's order on the GPU alone,
+//!   and with one more in the host step, which runs it faster;
 //! - inside a block of command predication, nothing where the block skips and every command where
 //!   it holds, from the preprocess's gate;
 //! - a checked execution, and one whose range is read from a buffer, keep the host step, announced
@@ -178,6 +180,12 @@ struct Setup {
 
 impl Setup {
     fn new(device: &Device) -> Setup {
+        Setup::sized(device, COMMANDS)
+    }
+
+    /// [`Setup::new`] of a buffer of `size` commands (at least [`COMMANDS`]), those past
+    /// [`PLAN`]'s never written, with windows of `params` and `out` for each.
+    fn sized(device: &Device, size: u64) -> Setup {
         let sum = flat_template(device);
         let mark = mark_state(device);
         let mut descriptor = IndirectCommandBufferDescriptor::new();
@@ -185,9 +193,9 @@ impl Setup {
             .union(IndirectCommandType::CONCURRENT_DISPATCH_THREADS);
         descriptor.max_kernel_buffer_bind_count = 2;
         let icb = device
-            .new_indirect_command_buffer(&descriptor, COMMANDS, ResourceOptions::shared())
+            .new_indirect_command_buffer(&descriptor, size, ResourceOptions::shared())
             .unwrap();
-        let params: Vec<u8> = (0..COMMANDS as usize * WINDOW)
+        let params: Vec<u8> = (0..size as usize * WINDOW)
             .map(|word| match word % WINDOW {
                 0 => base(word / WINDOW),
                 _ => 0,
@@ -195,7 +203,7 @@ impl Setup {
             .flat_map(u32::to_le_bytes)
             .collect();
         let params = buffer_with(device, &params).unwrap();
-        let out = buffer_with(device, &vec![0; COMMANDS as usize * WINDOW * 4]).unwrap();
+        let out = buffer_with(device, &vec![0; size as usize * WINDOW * 4]).unwrap();
         for (index, command) in PLAN.iter().enumerate() {
             let (state, grid) = match *command {
                 Command::Unwritten => continue,
@@ -273,6 +281,12 @@ impl Setup {
 
 /// [`FLAT_MARK`]'s state on `device`, made with `supportIndirectCommandBuffers`.
 fn mark_state(device: &Device) -> ComputePipelineState {
+    mark_states(device, 1).pop().unwrap()
+}
+
+/// `count` states of [`FLAT_MARK`]'s on `device`, each its own, made with
+/// `supportIndirectCommandBuffers` from one library.
+fn mark_states(device: &Device, count: u64) -> Vec<ComputePipelineState> {
     let library = device
         .new_library_with_air(&llvm_assemble_text(FLAT_MARK).unwrap())
         .unwrap();
@@ -280,9 +294,13 @@ fn mark_state(device: &Device) -> ComputePipelineState {
     let mut descriptor =
         ComputePipelineDescriptor::new(StageSource::Function(function.function_descriptor()));
     descriptor.support_indirect_command_buffers = true;
-    device
-        .new_compute_pipeline_state(&descriptor, &PipelineOptions::default())
-        .unwrap()
+    (0..count)
+        .map(|_| {
+            device
+                .new_compute_pipeline_state(&descriptor, &PipelineOptions::default())
+                .unwrap()
+        })
+        .collect()
 }
 
 /// Run `test` on a validated device with `VK_EXT_device_generated_commands` withheld; then require
@@ -442,6 +460,61 @@ fn a_barrier_set_after_the_commit_records_the_commands_again() {
         );
         announced(device, messages, &[]);
     });
+}
+
+/// The commands of the executions [`MOST_STATES`] bounds: [`PLAN`]'s and as many never written,
+/// so both bounds fall below the replay's 64 variants (`bind::MAX_REPLAY_VARIANTS`).
+const BOUNDED: u64 = 2 * COMMANDS;
+
+/// The most live states an execution of [`BOUNDED`] commands runs with on the GPU alone, as
+/// `runtime/gpu_execute.rs`'s `dispatches_run` bounds them: where its commands go with no barrier
+/// between them (a concurrent encoder's, whose records no route could set a barrier in), four
+/// free and 256 dispatches past them (`FREE_STATES_UNORDERED`, `DISPATCHES_PAST_UNORDERED`); where
+/// they go with one (a serial encoder's), twelve and 512.
+const MOST_STATES: [(DispatchType, u64); 2] = [
+    (DispatchType::Concurrent, 4 + 256 / BOUNDED),
+    (DispatchType::Serial, 12 + 512 / BOUNDED),
+];
+
+/// An execution whose records may name as many live states as the GPU-alone path takes for its
+/// commands in its encoder's order runs on the GPU alone, one indirect dispatch per command and
+/// state, announcing nothing; with one more state alive, which no record names, the host step
+/// runs it, faster, with no indirect dispatch, announced once. Both write what Metal computes, in
+/// a concurrent and in a serial encoder.
+#[test]
+fn an_execution_of_more_states_than_the_gpu_path_takes_runs_in_the_host_step() {
+    for (dispatch_type, most) in MOST_STATES {
+        on_device(|device, messages| {
+            let queue = device.new_command_queue().unwrap();
+            for states in [most, most + 1] {
+                let setup = Setup::sized(device, BOUNDED);
+                // Alive with `supportIndirectCommandBuffers` past the two the records name.
+                let unnamed = mark_states(device, states - setup.states.len() as u64);
+                let command_buffer = queue.command_buffer().unwrap();
+                setup.writable(&command_buffer);
+                let before = dispatches_indirect(device);
+                let mut encoder = command_buffer
+                    .compute_command_encoder_with_dispatch_type(dispatch_type)
+                    .unwrap();
+                setup.resident(&mut encoder);
+                encoder
+                    .execute_commands_in_buffer(&setup.icb, 0..BOUNDED)
+                    .unwrap();
+                encoder.end_encoding().unwrap();
+                complete(&command_buffer);
+                let at = format!("{dispatch_type:?} of {states} states");
+                let mut want = expected(0..COMMANDS as usize);
+                want.resize(BOUNDED as usize * WINDOW, 0);
+                assert_eq!(setup.output(), want, "{at}");
+                let alone = states <= most;
+                assert_eq!(ran_flat(&command_buffer), alone, "{at}");
+                let dispatched = dispatches_indirect(device) - before;
+                assert_eq!(dispatched, if alone { BOUNDED * states } else { 0 }, "{at}");
+                drop(unnamed);
+            }
+            announced(device, messages, &STEPPED);
+        });
+    }
 }
 
 /// A range runs its own commands alone, on the GPU alone, one indirect dispatch per command of the

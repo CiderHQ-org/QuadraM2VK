@@ -26,20 +26,24 @@
 //!   then the recording:
 //!   - **generated commands** (`generated_execute.rs`), where the device enabled
 //!     `VK_EXT_device_generated_commands` (`DeviceOptions::withhold_generated_commands` keeps it
-//!     off) and the product sets the path up for the variants (`bind::replay_preprocess_generated`):
-//!     per command one `vkCmdExecuteGeneratedCommandsEXT` of the sequences the preprocess wrote;
+//!     off) and the product sets the path up for the variants
+//!     (`bind::replay_preprocess_generated`): per command one `vkCmdExecuteGeneratedCommandsEXT`
+//!     of the sequences the preprocess wrote;
 //!   - **indirect dispatches** (`dispatch_execute.rs`) on every other device, Vulkan 1.2's core
 //!     (`bind::replay_preprocess`): per command of the range, in order, per variant its pipeline,
 //!     its push bytes naming the command's slot table and region record, and one
-//!     `vkCmdDispatchIndirect` of the group count the preprocess wrote for that command and variant:
-//!     the command's own for the state its record names, zero for every other variant, and for a
-//!     command that runs nothing. At most [`MAX_DISPATCHES`] (commands times variants) per
-//!     execution; past it the host step remains.
+//!     `vkCmdDispatchIndirect` of the group count the preprocess wrote for that command and
+//!     variant: the command's own for the state its record names, zero for every other variant,
+//!     and for a command that runs nothing. At most [`MAX_DISPATCHES`] (commands times variants)
+//!     per execution, and at most [`DISPATCHES_PAST_UNORDERED`] commands times the variants past
+//!     [`FREE_STATES_UNORDERED`] where no barrier goes between the commands
+//!     ([`DISPATCHES_PAST_ORDERED`] past [`FREE_STATES_ORDERED`] where one does): past those the
+//!     host step runs the execution, as it does it faster ([`dispatches_run`]).
 //! - **Order.** In a serial encoder, a barrier between every two commands
 //!   (`Barrier::between_dispatches`): the commands run in Metal's order, one after another, which
 //!   orders them wherever their uses meet, as the records' uses are GPU data. In a concurrent
-//!   encoder, Metal orders a command only after a barrier its record sets: where no route that wrote
-//!   the buffer's records may set one (`IndirectCommandBuffer::command_writes`, no
+//!   encoder, Metal orders a command only after a barrier its record sets: where no route that
+//!   wrote the buffer's records may set one (`IndirectCommandBuffer::command_writes`, no
 //!   `CommandWrites::BARRIER`), the indirect dispatches go with no barrier between them, and else
 //!   with one between every two. A route encoded after the commit can still run before the
 //!   execution only where the execution's batch waits for an event its command buffer signals, so
@@ -112,6 +116,61 @@ const FLAT_THREADS: u32 = 64;
 /// more. Each costs the CPU one recorded dispatch and, on MoltenVK, a Metal dispatch the GPU runs
 /// even at a zero group count (`dispatch_execute.rs`), so a range past it keeps the host step.
 pub(super) const MAX_DISPATCHES: u64 = 1 << 15;
+
+/// The variants (pipeline states the records may name) an execution the indirect dispatches run
+/// may have, whatever its commands, where no barrier goes between them (a concurrent encoder's
+/// whose records no route may set a barrier in, the module's order): with them every count of
+/// commands ran faster on the GPU alone than in the host step. Each variant costs every command
+/// one more indirect dispatch, which MoltenVK encodes as a Metal dispatch the GPU runs even at a
+/// zero group count; past these, [`DISPATCHES_PAST_UNORDERED`] bounds those dispatches. Measured
+/// with host_ab's icb workload on an M3 Max (macOS 27, MoltenVK 1.4.1), frame time on the GPU
+/// alone over a host-step build's, interleaved runs: at 4,096 commands 0.53x with one variant,
+/// 0.89x with four, 1.03x with five and 1.32x with eight; at 1,024 commands 0.88x with four,
+/// 1.00x with five and 1.30x with eight; at 256 commands 0.90x and 0.96x with four, 1.06x and
+/// 1.00x with five, 1.26x with eight.
+pub(super) const FREE_STATES_UNORDERED: usize = 4;
+
+/// The indirect dispatches past [`FREE_STATES_UNORDERED`] (the commands times the variants past
+/// it) an execution whose commands go with no barrier between them may record on the GPU alone:
+/// what the host step's round trip costs beside them, about 0.8 us of the GPU's time each against
+/// 0.2 to 0.5 ms a frame. Measured as [`FREE_STATES_UNORDERED`] was: 256 commands of five variants
+/// ran as fast on both paths, 4,096 of five and 1,024 of five 0.95x and 1.00x in the host step,
+/// 256 of twelve 0.63x; 16 of twelve 1.28x and 16 and 64 of five 1.5x to 1.8x (slower) in the
+/// host step.
+pub(super) const DISPATCHES_PAST_UNORDERED: u64 = 256;
+
+/// [`FREE_STATES_UNORDERED`] where a barrier goes between every two commands (a serial encoder's,
+/// or a concurrent one's whose records may set one): MoltenVK ends its Metal compute encoder at
+/// each barrier, which the host step's commands pay too, so a variant's dispatches weigh less
+/// against it. Measured as [`FREE_STATES_UNORDERED`] was: at 256 commands 0.79x with one variant,
+/// 0.90x with eight, 0.94x with twelve, 0.96x with fourteen and 1.06x with sixteen; at 64
+/// commands 0.72x, 0.87x, 0.91x, 0.93x and 0.93x, and 1.02x with twenty-four; at 16 commands
+/// 0.63x to 0.68x at every count up to sixteen, 0.85x with twenty-four. At 1,024 and 4,096
+/// commands, where a Metal encoder a command bounds both paths, runs vary from 0.88x to 1.30x with
+/// no trend in the count.
+pub(super) const FREE_STATES_ORDERED: usize = 12;
+
+/// [`DISPATCHES_PAST_UNORDERED`] where a barrier goes between every two commands, past
+/// [`FREE_STATES_ORDERED`]: about 0.6 us of the GPU's time each against the host step's 0.3 ms a
+/// frame. Measured as [`FREE_STATES_UNORDERED`] was: 256 commands of fourteen variants (512 past)
+/// ran 0.96x and of sixteen 1.06x on the GPU alone, 64 of twenty-four (768 past) 1.02x, 16 of
+/// twenty-four (192 past) 0.85x; 16, 64 and 256 commands of thirteen 1.51x, 1.15x and 1.04x
+/// (slower) in the host step.
+pub(super) const DISPATCHES_PAST_ORDERED: u64 = 512;
+
+/// Whether the indirect dispatches run an execution of `commands` commands over `variants`
+/// variants, with a barrier between every two commands where `ordered`: within
+/// [`MAX_DISPATCHES`], and within its order's dispatches past its order's free variants. Both
+/// paths run the commands exactly; the bounds choose the faster.
+fn dispatches_run(commands: u32, variants: usize, ordered: bool) -> bool {
+    let (free, past) = match ordered {
+        true => (FREE_STATES_ORDERED, DISPATCHES_PAST_ORDERED),
+        false => (FREE_STATES_UNORDERED, DISPATCHES_PAST_UNORDERED),
+    };
+    let commands = u64::from(commands);
+    commands * variants.saturating_sub(free) as u64 <= past
+        && commands * variants as u64 <= MAX_DISPATCHES
+}
 
 /// One variant of the execution: its compiled variant and plan, its replay commands, and its
 /// registration.
@@ -201,7 +260,10 @@ pub(super) fn record(
     }
     let device = command_buffer.device();
     let residency = command_buffer.residency()?.kernel();
-    let Some(total) = total(device, execute, &residency)? else {
+    // A serial encoder orders its commands wherever their uses meet; a concurrent one only after
+    // a barrier a record sets.
+    let ordered = execute.ordered || execute.icb.command_writes().may(CommandWrites::BARRIER);
+    let Some(total) = total(device, execute, &residency, ordered)? else {
         return Ok(None);
     };
     // The GPU reads the records: the handlers learn the states they may name.
@@ -212,12 +274,8 @@ pub(super) fn record(
             .any(ComputePipelineState::can_encode_indirect_commands);
         (Vec::new(), encode)
     });
-    // A serial encoder orders its commands wherever their uses meet; a concurrent one only after
-    // a barrier a record sets.
     let barriers = match &total.form {
-        Form::Dispatches(_) => {
-            execute.ordered || execute.icb.command_writes().may(CommandWrites::BARRIER)
-        }
+        Form::Dispatches(_) => ordered,
         Form::Generated => true,
     };
     let recorded = record_total(command_buffer, execute, &residency, &total, barriers)?;
@@ -247,11 +305,12 @@ fn refusal<T>(result: Result<T, BindError>) -> Result<Option<T>, Error> {
 
 /// The variants, the replay's preprocess and the recording of `execute` on `device`, with
 /// `residency`, its command buffer's, where every record it may hold is covered (the module's
-/// rules); `None` where it is not.
+/// rules), its commands with a barrier between every two where `ordered`; `None` where it is not.
 fn total(
     device: &Device,
     execute: &Execute,
     residency: &Residency,
+    ordered: bool,
 ) -> Result<Option<Total>, Error> {
     let ExecutionRange::Fixed(range) = &execute.range else {
         return Ok(None);
@@ -285,6 +344,13 @@ fn total(
     state.resident_ranges = live.clone();
     let shape = state.shape();
     let states = execute.states(device);
+    // Where only the indirect dispatches could run it, none past their bounds, before a variant is
+    // compiled for it.
+    if device.shared().generated_commands.is_none()
+        && !dispatches_run(range.len() as u32, states.len(), ordered)
+    {
+        return Ok(None);
+    }
     let mut prepared = Vec::with_capacity(states.len());
     for pipeline in &states {
         match prepare(pipeline, &state, &shape)? {
@@ -300,7 +366,7 @@ fn total(
         .and_then(|pipeline| NonZeroU64::new(pipeline.gpu_resource_id().0));
     // A flat variant runs each command as one region.
     execution.regions = 1;
-    let Some((pre, form)) = preprocess(device, &state, &execution, &prepared)? else {
+    let Some((pre, form)) = preprocess(device, &state, &execution, &prepared, ordered)? else {
         return Ok(None);
     };
     Ok(Some(Total {
@@ -314,14 +380,16 @@ fn total(
 
 /// The replay's preprocess of `execution` over `prepared` for `state` on `device`, and the
 /// recording that takes it: the generated commands where the device enabled them and the product
-/// sets their path up, else the indirect dispatches, within [`MAX_DISPATCHES`] and where each
-/// variant's push bytes take the command's slot table and region record
-/// ([`Template::of`]). `None` where neither takes it.
+/// sets their path up, else the indirect dispatches, within their bounds for commands with a
+/// barrier between every two where `ordered` ([`dispatches_run`]) and where each variant's push
+/// bytes take the command's slot table and region record ([`Template::of`]). `None` where neither
+/// takes it.
 fn preprocess(
     device: &Device,
     state: &BindState,
     execution: &ReplayExecution,
     prepared: &[Prepared],
+    ordered: bool,
 ) -> Result<Option<(ReplayPreprocess, Form)>, Error> {
     let registered: Vec<ReplayVariant> = prepared.iter().map(|p| p.registered).collect();
     if device.shared().generated_commands.is_some() {
@@ -353,8 +421,7 @@ fn preprocess(
             Err(error) => return refusal(Err(error)),
         }
     }
-    let dispatches = u64::from(execution.count) * prepared.len() as u64;
-    if dispatches > MAX_DISPATCHES {
+    if !dispatches_run(execution.count, prepared.len(), ordered) {
         return Ok(None);
     }
     let Some(templates) = prepared

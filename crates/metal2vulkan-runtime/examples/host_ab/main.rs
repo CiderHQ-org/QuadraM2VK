@@ -108,14 +108,15 @@
 //!   over 16.7 and 25 ms), the encoding thread's time to encode and commit, the process's CPU
 //!   time, and on the runtime's side its work counts per frame (`rt_*`).
 //! - `icb`: indirect command buffers a kernel writes. Per frame, a kernel encodes 16, 64, 256 or
-//!   4096 compute commands into an indirect command buffer (one a thread: one of 1 or 4 states
-//!   made with `supportIndirectCommandBuffers`, its own 64-word window of a buffer, one
-//!   threadgroup of 64 threads, no barrier), and a second compute encoder, serial or concurrent,
-//!   executes them (`executeCommandsInBuffer:withRange:`), as a GPU culling pass hands its kept
-//!   work on. Per frame: the wall time from the command buffer's creation to the wait's return,
-//!   the encoding thread's through the commit, the process's CPU time, and on the runtime's side
-//!   its queue submissions, barriers, dispatches and indirect dispatches (`rt_*`). The first
-//!   frame's output is checked (`workloads::icb`).
+//!   4096 compute commands into an indirect command buffer (one a thread: one of 1 to 21 live
+//!   states made with `supportIndirectCommandBuffers`, of which the commands name four at most,
+//!   its own 64-word window of a buffer, one threadgroup of 64 threads, no barrier), and a
+//!   second compute encoder, serial or concurrent, executes them
+//!   (`executeCommandsInBuffer:withRange:`), as a GPU culling pass hands its kept work on. Per
+//!   frame: the wall time from the command buffer's creation to the wait's return, the encoding
+//!   thread's through the commit, the process's CPU time, and on the runtime's side its queue
+//!   submissions, barriers, dispatches and indirect dispatches (`rt_*`). The first frame's output
+//!   is checked (`workloads::icb`).
 //! - `icb_draws`: a frame of Apple's "Encoding Indirect Command Buffers on the GPU": a blit
 //!   resets an indirect command buffer of 65,536 draws whose commands inherit the pipeline state,
 //!   a kernel culls 65,536 objects on a grid a little wider than the view and encodes a command for

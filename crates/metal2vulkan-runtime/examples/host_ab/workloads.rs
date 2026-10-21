@@ -1832,21 +1832,31 @@ const ICB_COMMANDS: [usize; 4] = [16, 64, 256, 4096];
 const ICB_WINDOW: usize = 64;
 /// Untimed frames before the icb workload's timed ones.
 const ICB_WARM: usize = 3;
+/// The icb workload's live states made with `supportIndirectCommandBuffers`: the commands name
+/// the first four at most, the rest stay alive unnamed, as an app's other such states do. Each
+/// side of the runtime's bounds on the states an execution runs with on the GPU alone, at each
+/// count of [`ICB_COMMANDS`] (a concurrent encoder's: 20, 8, 5 and 4; a serial encoder's: 44, 20,
+/// 14 and 8).
+const ICB_STATES: [usize; 10] = [1, 4, 5, 6, 8, 9, 14, 15, 20, 21];
+/// The most states the icb workload's commands name (`icb_step0` to `icb_step3`).
+const ICB_NAMED: usize = 4;
 
 /// The icb workload (main.rs): per frame, one command buffer of a compute encoder whose kernel
 /// (`icb_encode`) encodes `commands` compute commands into an indirect command buffer, one a
 /// thread, and a second compute encoder that executes them, each command one threadgroup of 64
-/// threads of one of `states` states made with `supportIndirectCommandBuffers` (the only such
-/// states alive), in turn; committed and waited for. For a serial and a concurrent executing
-/// encoder, 1 and 4 states and each count of [`ICB_COMMANDS`]: the frame's wall time (the command buffer's creation to the wait's return),
+/// threads of one of the first [`ICB_NAMED`] at most of `states` states made with
+/// `supportIndirectCommandBuffers` (the only such states alive), in turn; committed and waited
+/// for. For a serial and a concurrent executing encoder, each count of [`ICB_STATES`] and of
+/// [`ICB_COMMANDS`]: the frame's wall time (the command buffer's creation to the wait's return),
 /// the encoding thread's (through the commit's return) and the process's CPU time, and on the
 /// runtime's side its work counts per frame (`rt_*`). The first frame's output is checked: each
 /// command's window holds its state's step of zero.
 pub fn icb<G: Gpu>(g: &G, library: &G::Library, sizes: &Sizes) {
     let encode = g.compute_pipeline(library, "icb_encode");
-    for states in [1usize, 4] {
+    for states in ICB_STATES {
+        let named = states.min(ICB_NAMED);
         let steps: Vec<G::ComputePipeline> = (0..states)
-            .map(|k| g.indirect_compute_pipeline(library, &format!("icb_step{k}")))
+            .map(|k| g.indirect_compute_pipeline(library, &format!("icb_step{}", k % ICB_NAMED)))
             .collect();
         for (concurrent, commands) in [false, true]
             .into_iter()
@@ -1854,11 +1864,11 @@ pub fn icb<G: Gpu>(g: &G, library: &G::Library, sizes: &Sizes) {
         {
             let icb = g.indirect_commands(commands);
             let mut arguments = g.commands_id(&icb).to_le_bytes().to_vec();
-            for k in 0..4 {
-                arguments.extend(g.pipeline_id(&steps[k.min(states - 1)]).to_le_bytes());
+            for k in 0..ICB_NAMED {
+                arguments.extend(g.pipeline_id(&steps[k.min(named - 1)]).to_le_bytes());
             }
             let arguments = g.buffer_with(&arguments);
-            let count = g.buffer_with(&(states as u32).to_le_bytes());
+            let count = g.buffer_with(&(named as u32).to_le_bytes());
             let data = g.buffer_with(&vec![0u8; commands * ICB_WINDOW * 4]);
             let threads = commands.min(64);
             let (mut wall, mut encoding, mut cpu) = (vec![], vec![], vec![]);
@@ -1900,7 +1910,7 @@ pub fn icb<G: Gpu>(g: &G, library: &G::Library, sizes: &Sizes) {
                     let mut bytes = vec![0u8; commands * ICB_WINDOW * 4];
                     g.read_buffer(&data, &mut bytes);
                     for (word, value) in bytes.as_chunks::<4>().0.iter().enumerate() {
-                        let expected = (word / ICB_WINDOW % states) as u32 + 1;
+                        let expected = (word / ICB_WINDOW % named) as u32 + 1;
                         assert_eq!(
                             u32::from_le_bytes(*value),
                             expected,

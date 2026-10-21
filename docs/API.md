@@ -1317,23 +1317,31 @@ fast forms record, and each `PrecisionNote`'s rustdoc states its bound.
   whole-image barriers per batch that uses it: into GENERAL before its first encoder, and back to
   its home layout at its end.
 - `metal2vulkan-degrade-host-replayed-indirect-commands` (performance).
-  `HostReplayedIndirectCommands`: An execution of an indirect command buffer that an encoder made
-  resident for writing, or that lies inside a block of command predication or reads its range from
-  a buffer, which the GPU cannot run alone: a compute execution with the caller's check
-  (`execute_commands_in_buffer_checked`), of a range read from a buffer, of a buffer that inherits
-  the encoder's buffers, or whose records may name a pipeline state whose kernel observes its
-  threadgroup partition or fetches `[[stage_in]]` attributes; a render execution whose records may
-  hold, at the commit or as its batch is ready, more than draws of one primitive type under the
-  encoder's state, or what its check looks for. The GPU may write the records it
-  runs, so they are known only once the work before it completed. Cost: one GPU-to-CPU round trip per execution: its command buffer's work
-  before it, and every batch submitted before that on any queue, completes before the CPU records
-  its commands from their records and submits the rest; the device's scheduler submits nothing else
-  while it records them, and the first command of a threadgroup size or threadgroup lengths its
-  pipeline state has not dispatched makes that VkPipeline then. The commands run in the large-buffer
-  form (their range-limited buffer slots at device addresses, with in-shader bounds checks), whose
-  variants the commit compiles for every pipeline state a record may name (or, for an execution
-  committed before the buffer was made resident for writing, the use_resource call that made it so);
-  without device addresses, a command's first buffer shape compiles its variant then.
+  `HostReplayedIndirectCommands`: An execution of an indirect command buffer
+  (`executeCommandsInBuffer:withRange:`) whose commands are known only once the work before it
+  completed: an encoder made the buffer resident for writing, so the GPU may write its records; it
+  reads its range from a buffer; or it lies inside a block of command predication. The runtime
+  records such an execution on the CPU then where the GPU cannot run it alone. A render execution:
+  where its records may hold, at the commit or as its batch is ready, more than draws of one
+  primitive type under the encoder's state, or what its check looks for. A compute execution: with
+  the caller's check (`execute_commands_in_buffer_checked`); with its range read from a buffer; of a
+  buffer that inherits the encoder's buffers; where its records may name a pipeline state whose
+  kernel observes its threadgroup partition or fetches `[[stage_in]]` attributes, or a state the CPU
+  set that the program released since; and, on a device without `VK_EXT_device_generated_commands`,
+  where the host step is faster: where its commands run with no barrier between them and its
+  commands times the pipeline states its records may name past four pass 256 (the states: every live
+  one made with `supportIndirectCommandBuffers`, or the encoder's where the buffer inherits it),
+  where they run with one and its commands times the states past twelve pass 512, and where its
+  commands times its states pass 32,768. Every other execution runs on the GPU alone and announces
+  nothing. Cost: one GPU-to-CPU round trip per execution: its command buffer's work before it, and
+  every batch submitted before that on any queue, completes before the CPU records its commands from
+  their records and submits the rest; the device's scheduler submits nothing else while it records
+  them, and the first command of a threadgroup size or threadgroup lengths its pipeline state has
+  not dispatched makes that VkPipeline then. The commands run in the large-buffer form (their
+  range-limited buffer slots at device addresses, with in-shader bounds checks), whose variants the
+  commit compiles for every pipeline state a record may name (or, for an execution committed before
+  the buffer was made resident for writing, the use_resource call that made it so); without device
+  addresses, a command's first buffer shape compiles its variant then.
 - `metal2vulkan-degrade-uncalibrated-gpu-times` (precision). `UncalibratedGpuTimes`: A command
   buffer's GPU times on a device that calibrates its timestamps against no host clock the runtime
   reads (no `VK_KHR_calibrated_timestamps` or `VK_EXT_calibrated_timestamps` with the device's time
