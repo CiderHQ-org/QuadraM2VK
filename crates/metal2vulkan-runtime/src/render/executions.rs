@@ -2663,14 +2663,19 @@ impl DeferredPass {
             *lock(&self.cause) = Some(cause);
             Ok(None)
         };
-        if !self.shadows.is_empty() {
-            return declined(HostStepCause::Rule("the pass has a shadowed texture"));
-        }
         if self.executions.iter().any(|e| e.range.indirect()) {
             let rule = "an execution of the pass reads its range from a buffer";
             return declined(HostStepCause::Rule(rule));
         }
+        // A pass with a shadowed texture runs as any other, its copies around its instances
+        // (`render/shadows.rs`), unless its commands may reach a shadow's truth past what their
+        // calls gathered, which the host step refuses too (`record_forms`).
         let residency = command_buffer.residency()?;
+        if self.reaches_past_its_copies(command_buffer.device(), &residency) {
+            let rule = "the command buffer made resident, past an execution's call, what meets \
+                        the truth of a shadowed texture the pass copies";
+            return declined(HostStepCause::Rule(rule));
+        }
         let mut core = EncoderCore::segment(command_buffer, false)?;
         let mut forms = Vec::with_capacity(self.executions.len());
         for execution in &self.executions {

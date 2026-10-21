@@ -11,17 +11,19 @@
 //!   caller's check, if it has one (`execute_commands_in_buffer_checked`), has nothing to see
 //!   there (`IndirectCommandCheckNeeds`: no draw of points, a primitive type the writes do not
 //!   state counting as one, where it looks for them; the encoder's state encodes no indirect
-//!   commands, where it looks for such states), so it is never called; of a buffer of draws of primitives alone (`IndirectCommandType::DRAW`) that
-//!   inherits the encoder's pipeline state and not its buffers, and whose records the CPU and
-//!   every encoder that made it resident for writing may fill with draws of one primitive type,
-//!   buffers, resets and cleared barriers alone; in a pass with no shadowed texture, whose
-//!   fragment stages wrote no bytes before the call (no copy of them is read,
-//!   `render/pass_start_reads.rs`), with no tile threadgroup memory argument set. The state is
-//!   one the pass takes (`check_pipeline`), neither a tessellation nor a mesh one, whose fragment
-//!   function writes no memory, nor its vertex function where it rasterizes (no command's draw
-//!   waits on another's, `render_target::after_geometry_writes`), and whose vertex function
-//!   fetches no attribute; its replay variant (`VariantKey::replay_bindings`)
-//!   compiles and draws in the execution's instance as one indirect draw whose arguments the
+//!   commands, where it looks for such states), so it is never called; of a buffer of draws of
+//!   primitives alone (`IndirectCommandType::DRAW`) that inherits the encoder's pipeline state
+//!   and not its buffers, and whose records the CPU and every encoder that made it resident for
+//!   writing may fill with draws of one primitive type, buffers, resets and cleared barriers
+//!   alone; in a pass whose fragment stages wrote no bytes before the call (no copy of them is
+//!   read, `render/pass_start_reads.rs`), with no tile threadgroup memory argument set, and where
+//!   the pass has a shadowed texture, whose command buffer made resident past the call nothing
+//!   that meets a shadowed texture's truth (`shadows::meets_truths`), as the host step's rule.
+//!   The state is one the pass takes (`check_pipeline`), neither a tessellation nor a mesh one,
+//!   whose fragment function writes no memory, nor its vertex function where it rasterizes (no
+//!   command's draw waits on another's, `render_target::after_geometry_writes`), and whose vertex
+//!   function fetches no attribute; its replay variant (`VariantKey::replay_bindings`) compiles
+//!   and draws in the execution's instance as one indirect draw whose arguments the
 //!   device reads (`DrawCommands::indirect_needs_arguments` clear): no amplification drawn apart,
 //!   view, rate map, fragment imageblock, fetched or storage attachment, shader-side stencil or
 //!   depth test, or color in another format. And the device has device addresses
@@ -37,6 +39,11 @@
 //!   and each later command's pushes its own slot tables and draws (`vkCmdDrawIndirect` of one
 //!   draw at its arguments). Its `vertex_id`, `instance_id` and `base_instance` are the command's
 //!   own, as Metal's.
+//! - **Shadowed textures.** In a pass with one, the pass's copies go around its instances as for
+//!   the host step and any draw (`render/shadows.rs`): a shadow is copied in before the instance
+//!   that reads it and copied back, or merged, after the pass where it writes it; the commands'
+//!   draws use the shadows their call gathered, the first command's draw binding them as the
+//!   encoder's draw does, and the later ones drawing with its tables.
 //! - **Merged** (`bind::DrawReplay::merged`), where the commands draw points, lines or triangles
 //!   (a list type), the vertex function writes no memory, and the state's merged variant
 //!   (`VariantKey::merged_draws`) compiles with a fragment function that reads no buffer and no
@@ -401,10 +408,6 @@ impl RenderExecution {
             primitive_type.ok_or(HostStepCause::PrimitiveTypes(written.primitive_types))?;
         self.check_has_nothing_to_see(written)?;
         rule(!self.reaches_tile_memory(), "the pass reaches tile memory")?;
-        rule(
-            self.shadows.is_empty(),
-            "the execution reaches a shadowed texture",
-        )?;
         rule(
             !self.snapshot.pass_start.fragment_wrote(),
             "the pass's fragment functions wrote memory before the execution",

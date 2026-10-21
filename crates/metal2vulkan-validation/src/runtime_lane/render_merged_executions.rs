@@ -13,7 +13,10 @@
 //!   record;
 //! - points, lines (a trailing vertex drawing nothing) and triangles (trailing vertices drawing
 //!   nothing): the same pixels as the host step, which a barrier the CPU set and cleared sends
-//!   them to.
+//!   them to;
+//! - into a target over a buffer whose rows the device lays out otherwise (a shadowed texture,
+//!   copied back after the pass): the kernel's triangles in one merged draw, and triangle strips
+//!   the CPU wrote one indirect draw per command, the same pixels as the host step's there.
 
 use super::buffer_with;
 use super::degrade_notices::{assert_made_once, counts, on_device};
@@ -21,13 +24,15 @@ use super::indirect_host_steps::{complete, HOST_STEPS};
 use super::render_executions::{forced_with, icb};
 use crate::air_library::AirLibrary;
 use metal2vulkan::metal::RenderStages;
-use metal2vulkan::metal::{IndirectCommandType, PixelFormat, ResourceUsage, TextureUsage};
+use metal2vulkan::metal::{
+    IndirectCommandType, PixelFormat, PrimitiveType, ResourceUsage, TextureUsage,
+};
 use metal2vulkan::pipeline::{
     ColorAttachmentDescriptor, ComputePipelineDescriptor, RenderPipelineDescriptor, StageSource,
 };
 use metal2vulkan_devtools::{engine_dir, llvm_assemble};
 use metal2vulkan_runtime::{
-    Buffer, ClearColor, ComputePipelineState, Device, IndirectCommandBuffer,
+    Buffer, ClearColor, ComputePipelineState, Degradation, Device, IndirectCommandBuffer,
     IndirectCommandBufferDescriptor, Library, LoadAction, PipelineOptions, Region,
     RenderPassDescriptor, RenderPipelineState, ResourceOptions, Size, StoreAction, Texture,
     TextureDescriptor,
@@ -96,55 +101,97 @@ fn floats(values: impl IntoIterator<Item = f32>) -> Vec<u8> {
     values.into_iter().flat_map(f32::to_le_bytes).collect()
 }
 
-/// What one run draws: the writer's inputs and the target.
+/// What one run draws: the writer's inputs and the target, and the buffer it lies over where it
+/// is a texture over one.
 struct Scene {
     draws: Buffer,
     marks: Buffer,
     frame: Buffer,
     xy: Buffer,
     target: Texture,
+    _over: Option<Buffer>,
 }
 
 impl Scene {
     /// `draws` for the kernel, each command's mark 100 plus its index, and the vertices at `xy`
     /// (pixel positions).
     fn new(device: &Device, draws: &[Draw], xy: &[[f32; 2]]) -> Scene {
+        Scene::with_rows(device, draws, xy, None)
+    }
+
+    /// [`Scene::new`], the target a texture over a `Shared` buffer whose rows lie `rows` bytes
+    /// apart where given.
+    fn with_rows(device: &Device, draws: &[Draw], xy: &[[f32; 2]], rows: Option<u64>) -> Scene {
         let mut target = TextureDescriptor::texture_2d(PixelFormat::RGBA32Uint, W, H, false);
         target.usage = TextureUsage::RENDER_TARGET;
         target.resource_options = ResourceOptions::shared();
+        let (target, over) = match rows {
+            Some(rows) => {
+                let over = device
+                    .new_buffer(rows * H, ResourceOptions::shared())
+                    .unwrap();
+                (over.new_texture(&target, 0, rows).unwrap(), Some(over))
+            }
+            None => (device.new_texture(&target).unwrap(), None),
+        };
         Scene {
             draws: buffer_with(device, &words(draws.iter().flatten().copied())).unwrap(),
             marks: buffer_with(device, &words((0..draws.len() as u32).map(|c| 100 + c))).unwrap(),
             frame: buffer_with(device, &floats([W as f32, H as f32, ROW, 0.0])).unwrap(),
             xy: buffer_with(device, &floats(xy.iter().flatten().copied())).unwrap(),
-            target: device.new_texture(&target).unwrap(),
+            target,
+            _over: over,
         }
     }
 
-    /// Encode and run, in one command buffer of a new queue: `writer` over `threads` threads
-    /// writing `icb`, then a pass over the target that executes commands `0..count` of it.
+    /// Write command `c` of `icb` on the CPU, as the kernels write one: its mark, the frame and
+    /// the vertices as vertex buffers 0 to 2, and a draw of `primitive_type` of `draw`.
+    fn write(
+        &self,
+        icb: &IndirectCommandBuffer,
+        c: u64,
+        primitive_type: PrimitiveType,
+        draw: Draw,
+    ) {
+        let command = icb.indirect_render_command_at(c).unwrap();
+        command
+            .set_vertex_buffer(Some(&self.marks), 4 * c, 0)
+            .unwrap();
+        command.set_vertex_buffer(Some(&self.frame), 0, 1).unwrap();
+        command.set_vertex_buffer(Some(&self.xy), 0, 2).unwrap();
+        let [start, count, instances, base] = draw.map(u64::from);
+        command
+            .draw_primitives(primitive_type, start, count, instances, base)
+            .unwrap();
+    }
+
+    /// Encode and run, in one command buffer of a new queue: a compute encoder that makes `icb`
+    /// resident for writing, `writer`, where given, writing it over `threads` threads, then a
+    /// pass over the target that executes commands `0..count` of it.
     fn run(
         &self,
         device: &Device,
-        (writer, state): (&ComputePipelineState, &RenderPipelineState),
+        (writer, state): (Option<&ComputePipelineState>, &RenderPipelineState),
         (icb, threads, count): (&IndirectCommandBuffer, u64, u64),
     ) {
         let arguments = buffer_with(device, &icb.gpu_resource_id().0.to_le_bytes()).unwrap();
         let queue = device.new_command_queue().unwrap();
         let command_buffer = queue.command_buffer().unwrap();
         let mut encoder = command_buffer.compute_command_encoder().unwrap();
-        encoder.set_compute_pipeline_state(writer).unwrap();
-        for (index, buffer) in [&arguments, &self.draws, &self.marks, &self.frame, &self.xy]
-            .into_iter()
-            .enumerate()
-        {
-            encoder.set_buffer(Some(buffer), 0, index as u32).unwrap();
-        }
         encoder
             .use_resource(icb.as_resource(), ResourceUsage::WRITE)
             .unwrap();
-        let grid = Size::new(threads, 1, 1);
-        encoder.dispatch_threads(grid, grid).unwrap();
+        if let Some(writer) = writer {
+            encoder.set_compute_pipeline_state(writer).unwrap();
+            for (index, buffer) in [&arguments, &self.draws, &self.marks, &self.frame, &self.xy]
+                .into_iter()
+                .enumerate()
+            {
+                encoder.set_buffer(Some(buffer), 0, index as u32).unwrap();
+            }
+            let grid = Size::new(threads, 1, 1);
+            encoder.dispatch_threads(grid, grid).unwrap();
+        }
         encoder.end_encoding().unwrap();
         let mut pass = RenderPassDescriptor::new();
         let color = &mut pass.color_attachments[0];
@@ -238,7 +285,11 @@ fn merged_points_draw_each_command_s_own_vertices_and_instances() {
         let scene = Scene::new(device, &draws, &point_row());
         let icb = icb(device, &inheriting(), 8);
         let (merged, gpu, read) = counted(device, || {
-            scene.run(device, (&writer, &state), (&icb, draws.len() as u64, 8));
+            scene.run(
+                device,
+                (Some(&writer), &state),
+                (&icb, draws.len() as u64, 8),
+            );
         });
         assert_eq!(scene.pixels(), drawn_points(&draws));
         assert_eq!((merged, gpu, read), (8, 8, 0), "drawn in one merged draw");
@@ -296,7 +347,11 @@ fn merged_draws_draw_what_the_host_step_draws() {
                     command.clear_barrier().unwrap();
                 }
                 let (merged, gpu, read) = counted(device, || {
-                    scene.run(device, (&writer, &state), (&icb, draws.len() as u64, 6));
+                    scene.run(
+                        device,
+                        (Some(&writer), &state),
+                        (&icb, draws.len() as u64, 6),
+                    );
                 });
                 match host_step {
                     false => assert_eq!((merged, gpu, read), (6, 6, 0), "{kind}: merged"),
@@ -322,6 +377,81 @@ fn merged_draws_draw_what_the_host_step_draws() {
             assert_eq!(
                 merged, host,
                 "{kind}: the merged draw against the host step"
+            );
+        }
+    });
+}
+
+/// GPU-written commands run on the GPU in a pass whose target is a texture over a buffer whose
+/// rows the device lays out otherwise (a shadowed texture: its shadow image renders, and is
+/// copied back to the buffer after the pass): the kernel's triangles in one merged draw, and
+/// triangle strips the CPU wrote (a compute encoder made the buffer resident for writing) one
+/// indirect draw per command, neither read by the host. Each draws, pixel for pixel, what the host
+/// step draws into such a target (a barrier the CPU set and cleared sends the same commands
+/// there).
+#[test]
+fn gpu_forms_draw_into_a_shadowed_target_what_the_host_step_draws() {
+    on_device(|device, messages| {
+        let library = library(device);
+        let state = state(device, &library);
+        let triangles = writer(device, &library, "triangles");
+        let draws: Vec<Draw> = vec![
+            [0, 7, 1, 0],
+            [9, 6, 2, 1],
+            [3, 4, 1, 0],
+            [15, 2, 0, 0],
+            [21, 5, 3, 0],
+        ];
+        // Rows of 1280 bytes for 64 texels of 16: past the 1024 a linear image of them lays.
+        let rows = Some(W * 16 + 256);
+        let mut outputs = Vec::new();
+        for host_step in [false, true] {
+            for merged in [true, false] {
+                let scene = Scene::with_rows(device, &draws, &shape_vertices(), rows);
+                let icb = icb(device, &inheriting(), 6);
+                if !merged {
+                    for (c, draw) in draws.iter().enumerate() {
+                        scene.write(&icb, c as u64, PrimitiveType::TriangleStrip, *draw);
+                    }
+                }
+                if host_step {
+                    let command = icb.indirect_render_command_at(5).unwrap();
+                    command.set_barrier().unwrap();
+                    command.clear_barrier().unwrap();
+                }
+                let writer = merged.then_some(&triangles);
+                let copies = device.work_counts().shadow_copies;
+                let (merges, gpu, read) = counted(device, || {
+                    scene.run(device, (writer, &state), (&icb, draws.len() as u64, 6));
+                });
+                let what = format!("merged {merged}, host step {host_step}");
+                assert!(
+                    device.work_counts().shadow_copies > copies,
+                    "{what}: the target is shadowed"
+                );
+                match (host_step, merged) {
+                    (false, true) => assert_eq!((merges, gpu, read), (6, 6, 0), "{what}"),
+                    (false, false) => assert_eq!((merges, gpu, read), (0, 6, 0), "{what}"),
+                    (true, _) => assert!(merges == 0 && gpu == 0 && read >= 6, "{what}: {read}"),
+                }
+                outputs.push(scene.pixels());
+            }
+            if !host_step {
+                let shadowed = [Degradation::ShadowedTexture];
+                assert_made_once(messages, &shadowed, &forced_with(device, &[]));
+            }
+        }
+        let host_notices = counts(&messages.take_notices());
+        assert!(
+            host_notices.contains_key(&HOST_STEPS[0]),
+            "{host_notices:?}"
+        );
+        let (gpu, host) = outputs.split_at(2);
+        for (merged, (gpu, host)) in [true, false].iter().zip(gpu.iter().zip(host)) {
+            assert!(gpu.iter().any(|p| p[0] != 0), "merged {merged}: drawn");
+            assert_eq!(
+                gpu, host,
+                "merged {merged}: the GPU form against the host step"
             );
         }
     });

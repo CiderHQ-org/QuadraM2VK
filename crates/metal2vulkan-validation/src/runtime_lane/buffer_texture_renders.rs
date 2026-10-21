@@ -1058,22 +1058,31 @@ fn two_ways(lane: &Lane, kind: Kind) {
 /// pass races, is not checked.
 #[test]
 fn a_pass_executing_render_commands_copies_shadowed_textures_between_its_instances() {
-    on_device(|device| each_kind(device, |lane, kind| executed(lane, kind, Before::Nothing)));
+    on_device(|device| {
+        each_kind(device, |lane, kind| {
+            executed(lane, kind, Before::Nothing, 16)
+        })
+    });
 }
 
-/// [`a_pass_executing_render_commands_copies_shadowed_textures_between_its_instances`] where a
-/// compute encoder before the pass made the indirect command buffer resident for writing, so the
-/// GPU may write its records and a host step records the pass from them, over the command buffer's
-/// resident resources: the buffer's records, which no shadowed texture's bytes share, change no
-/// copy, and the pass draws as before. Where that encoder also made the shadowed texture resident,
-/// past what the call gathered, the pass is refused (`NotImplemented(IndirectRenderCommands)`):
+/// [`a_pass_executing_render_commands_copies_shadowed_textures_between_its_instances`] over a
+/// texture of rows 32 bytes apart (16 bytes of texels: shadowed, as the shadow copies it counts
+/// show), where a compute encoder before the pass made the indirect command buffer resident for
+/// writing, so the GPU may write its records and a host step records the pass from them, over the
+/// command buffer's resident resources: the buffer's records, which no shadowed texture's bytes
+/// share, change no copy, and the pass draws as before. Where a compute encoder after the pass
+/// made the shadowed texture resident, past what the call gathered (an earlier encoder's shadowed
+/// textures join the call's own), the pass is refused (`NotImplemented(IndirectRenderCommands)`):
 /// its copies follow what the call gathered.
 #[test]
 fn a_shadowed_pass_executes_commands_the_gpu_may_write() {
     on_device(|device| {
         each_kind(device, |lane, kind| {
-            executed(lane, kind, Before::Writer);
-            executed(lane, kind, Before::WriterAndTexture);
+            let copies = lane.device.work_counts().shadow_copies;
+            executed(lane, kind, Before::Writer, BPR);
+            let copied = lane.device.work_counts().shadow_copies - copies;
+            assert!(copied > 0, "{kind:?}: the texture is shadowed");
+            executed(lane, kind, Before::WriterAndTexture, BPR);
         })
     });
 }
@@ -1084,11 +1093,12 @@ enum Before {
     Nothing,
     /// A compute encoder that makes the indirect command buffer resident for writing.
     Writer,
-    /// One that also makes the shadowed texture resident.
+    /// That, and a compute encoder after the pass that makes the shadowed texture resident.
     WriterAndTexture,
 }
 
-fn executed(lane: &Lane, kind: Kind, before: Before) {
+/// The test over texture rows `bpr` bytes apart.
+fn executed(lane: &Lane, kind: Kind, before: Before, bpr: u64) {
     let device = &lane.device;
     let rgba = PixelFormat::RGBA8Unorm;
     let read = lane.pipeline(("tob_rect", "tob_read"), rgba, 1);
@@ -1109,7 +1119,7 @@ fn executed(lane: &Lane, kind: Kind, before: Before) {
         .new_render_pipeline_state(&descriptor, &PipelineOptions::default())
         .unwrap();
     let mut b = Held::new(device, kind).unwrap();
-    let t = b.texture_of(rgba, RT, (OFF, 16), ALL);
+    let t = b.texture_of(rgba, RT, (OFF, bpr), ALL);
     let params: Vec<u8> = [0x0101_0101u32, 0x4030_2010]
         .iter()
         .flat_map(|w| w.to_le_bytes())
@@ -1135,11 +1145,6 @@ fn executed(lane: &Lane, kind: Kind, before: Before) {
         writer
             .use_resource(icb.as_resource(), ResourceUsage::WRITE)
             .unwrap();
-        if before == Before::WriterAndTexture {
-            writer
-                .use_resource(t.as_resource(), ResourceUsage::READ)
-                .unwrap();
-        }
         writer.end_encoding().unwrap();
     }
     let descriptor = pass(&o, LoadAction::Clear, StoreAction::Store, [0.0; 4]);
@@ -1167,6 +1172,13 @@ fn executed(lane: &Lane, kind: Kind, before: Before) {
     );
     lane.rect(&mut e, h, &read, FULL, None);
     e.end_encoding().unwrap();
+    if before == Before::WriterAndTexture {
+        let mut after = command_buffer.compute_command_encoder().unwrap();
+        after
+            .use_resource(t.as_resource(), ResourceUsage::READ)
+            .unwrap();
+        after.end_encoding().unwrap();
+    }
     command_buffer.commit().unwrap();
     command_buffer.wait_until_completed_for(WAIT).unwrap();
     assert_eq!(icb.gpu_written(), before != Before::Nothing, "{before:?}");
@@ -1196,6 +1208,11 @@ fn executed(lane: &Lane, kind: Kind, before: Before) {
         "a read, an execution's write, a barrier and a read over a {kind:?} buffer, {before:?}"
     );
     Expect::of(&b.model).check(&b.bytes(), &what);
-    let texels = &b.model[OFF as usize..OFF as usize + 64];
-    Expect::of(texels).check(&texture_bytes(&o, ALL), &what);
+    let texels: Vec<u8> = (0..4)
+        .flat_map(|row| {
+            let at = (OFF + row * bpr) as usize;
+            b.model[at..at + 16].to_vec()
+        })
+        .collect();
+    Expect::of(&texels).check(&texture_bytes(&o, ALL), &what);
 }
