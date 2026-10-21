@@ -38,11 +38,13 @@
 //!   nothing and the command buffer completes with `CommandBufferError::EncodedUseRebound`, every
 //!   other submission running, its signals firing and its handlers running: the gap until the
 //!   encoded uses resolve at submission, announced once
-//!   (`Degradation::EncodedUseRebound`). Work recorded on the GPU alone, whose preprocess's
-//!   resident set and named buffers the commit resolved (`gpu_execute.rs`,
-//!   `render/executions/gpu.rs`), is recorded again at each rebind before then (`reencode.rs`);
-//!   it fails alike where a range of that set lies elsewhere by then all the same (a buffer of it
-//!   released meanwhile), or the rebind could not record it on the GPU alone again.
+//!   (`Degradation::EncodedUseRebound`). Work recorded on the GPU alone (`gpu_execute.rs`,
+//!   `render/executions/gpu.rs`) resolves its commands' records through the resident set its
+//!   preprocess's table names: where the list changed or a buffer of it moved since the commit,
+//!   the submission points every such table at the set as it lies now, with its entries'
+//!   extents (`State::point_replay_tables`, `ResidentSet::replay_bytes`), so a rebind or a
+//!   release meanwhile takes effect in its commands, which are recorded once. What its commands
+//!   named is encoded or recorded again as an encoder's commands are (`reencode.rs`).
 //! - **Each submission at its own batch**. The first submission finds which of Metal's submissions
 //!   are rebound, against the pages and the table it fixes for every later batch; each fails only
 //!   as its own batch is submitted, after that batch's submission checks (`checks.rs`). One its
@@ -57,15 +59,15 @@ use super::checks::metal_submissions;
 use super::rebound_use::{ReboundAt, ReboundUse, Recording};
 use super::{write_fields, CommandBufferShared, Resident, State};
 use crate::buffer::HostPages;
-use crate::error::{CommandBufferError, Error};
+use crate::error::{internal, CommandBufferError, Error};
 use crate::live_buffers::LiveTable;
 use crate::rebind::SubmittedHolds;
 use crate::residency::Residency;
 use crate::upload::Upload;
 use crate::used_resources::UsedResources;
 use crate::Device;
-use metal2vulkan::bind::{ResidentRange, ResidentSet};
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use metal2vulkan::bind::{ResidentRange, ResidentSet, RootTable};
+use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
 use std::sync::{Arc, Weak};
 
@@ -74,6 +76,16 @@ use std::sync::{Arc, Weak};
 #[derive(Clone)]
 pub(crate) struct NotedTable {
     pub(crate) upload: Upload,
+    pub(crate) address: u64,
+}
+
+/// A replay preprocess's resident root table (`render/executions/gpu.rs`, `gpu_execute.rs`): its
+/// upload, where it lies there, and its device address. The command buffer's first submission
+/// points it at the resident set as it lies then, where that changed since the commit
+/// (`State::point_replay_tables`).
+pub(crate) struct ReplayTable {
+    pub(crate) upload: Upload,
+    pub(crate) at: u64,
     pub(crate) address: u64,
 }
 
@@ -211,6 +223,38 @@ impl State {
         self.remake_resident(device, &fresh)
     }
 
+    /// Its work on the GPU alone, at its first submission: each preprocess's resident root table
+    /// (`replay_tables`), recorded with the resident set as it lay then, pointed at the set as
+    /// the live buffers and what its encoders made resident lie now, where that changed
+    /// (`moved`), with its extents (`ResidentSet::replay_bytes`), uploaded once for all: a
+    /// rebind or a release since takes effect in its commands, as Metal resolves them at the
+    /// submission, and nothing is recorded again. The live buffers' table is held until it
+    /// completes either way, as their ranges lie in its pages.
+    fn point_replay_tables(&mut self, device: &Device, moved: bool) -> Result<(), Error> {
+        let live = device.shared().live_buffers.table(device)?;
+        if moved {
+            let ranges = live.ranges().chain(self.fresh_ranges());
+            let (bytes, count) = ResidentSet::replay_bytes(ranges);
+            let len = bytes.len() as u64;
+            let upload =
+                (self.uploads).upload_aligned(device, &bytes, len, RootTable::ENTRY_ALIGNMENT)?;
+            let set = (upload.device_address())
+                .ok_or_else(|| internal("a replay's resident set without a device address"))?;
+            for table in &self.replay_tables {
+                let fields = RootTable::resident_fields(table.address, set, count)
+                    .ok_or_else(|| internal("a replay's resident table off its set's alignment"))?;
+                let at = table.at + u64::from(RootTable::RESIDENT_FIELDS_OFFSET);
+                table.upload.write_at(at, &fields);
+            }
+            let pointed = self.replay_tables.len() as u64;
+            device.shared().counts.replay_tables_pointed(pointed);
+            self.retained.push(Box::new(upload));
+        }
+        self.replay_tables.clear();
+        self.retained.push(Box::new(live));
+        Ok(())
+    }
+
     /// The ranges of what its encoders made resident, as it lies now.
     fn fresh_ranges(&self) -> Vec<ResidentRange> {
         self.residency
@@ -293,7 +337,6 @@ impl State {
         let shared = device.shared();
         let mut verdicts = BTreeMap::new();
         let mut moved = false;
-        let mut replays = false;
         let mut holds = SubmittedHolds::new(device);
         {
             let mut submitting = shared.rebinds.submitting();
@@ -340,7 +383,6 @@ impl State {
                     let found = submitting.submit(&mut done.taken, retained, &mut holds);
                     moved |= found.moved;
                     judge(&mut verdicts, part.encoder, found.failure());
-                    replays |= !done.taken.resolved().is_empty();
                     if let (Some(CommandBufferError::EncodedUseRebound), Some(kind)) =
                         (found.failure(), kind)
                     {
@@ -374,48 +416,15 @@ impl State {
         for earlier in self.stepped_tables.drain(..) {
             device.let_go_elsewhere(Box::new(earlier));
         }
-        // A replay's resident set holds where every range of it lies as it did at the commit.
-        if replays {
-            let live = shared.live_buffers.table(device)?;
-            if changed || moved {
-                let now: HashSet<ResidentRange> =
-                    live.ranges().chain(self.fresh_ranges()).collect();
-                for part in &self.recorded {
-                    let stale = part
-                        .segments
-                        .iter()
-                        .filter_map(|segment| segment.recorded.as_ref())
-                        .find_map(|done| done.taken.resolved().iter().find(|r| !now.contains(r)));
-                    let Some(stale) = stale else {
-                        continue;
-                    };
-                    judge(
-                        &mut verdicts,
-                        part.encoder,
-                        Some(CommandBufferError::EncodedUseRebound),
-                    );
-                    // Released where no range holds its Metal address now; else rebound.
-                    let holds = |range: &ResidentRange| {
-                        (range.guest..range.guest.saturating_add(range.length.max(1)))
-                            .contains(&stale.guest)
-                    };
-                    let released = !now.iter().any(holds);
-                    if let Some(record) = self.ended.get(part.encoder) {
-                        self.rebound_use.get_or_insert(ReboundUse {
-                            encoder: part.encoder,
-                            kind: record.kind,
-                            at: ReboundAt::ResidentSet { released },
-                        });
-                    }
-                }
-            }
-            // Its pages held from now on, as the replay's ranges lie in them.
-            self.retained.push(Box::new(live));
+        // The resident tables of its work on the GPU alone, pointed at the set as it lies now
+        // where the list changed or a buffer of it moved since the commit.
+        if !self.replay_tables.is_empty() {
+            self.point_replay_tables(device, changed || moved)?;
         }
         // Found here, against the pages and the table fixed for every later batch; each fails
         // at its own batch, after its check.
         self.failing = self.failing_submissions(&verdicts);
-        // Their names and resolved ranges let go; the listing released without the lock.
+        // Their names let go; the listing released without the lock.
         let State {
             ended,
             recorded,

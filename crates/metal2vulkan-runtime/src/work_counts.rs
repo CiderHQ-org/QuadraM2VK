@@ -313,6 +313,7 @@ pub(crate) struct Counters {
     replay_log_bytes: AtomicU64,
     encoders_reencoded: AtomicU64,
     segments_recorded_again: AtomicU64,
+    replay_tables_pointed: AtomicU64,
     reencodes_refused: AtomicU64,
     pipeline_libraries_made: AtomicU64,
     fragment_shader_libraries_made: AtomicU64,
@@ -2033,6 +2034,13 @@ impl Counters {
         self.segments_recorded_again.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// A command buffer's first submission pointed `tables` resident root tables of its work on
+    /// the GPU alone at the resident set as it lay then (`command_buffer/first_submission.rs`).
+    pub(crate) fn replay_tables_pointed(&self, tables: u64) {
+        self.replay_tables_pointed
+            .fetch_add(tables, Ordering::Relaxed);
+    }
+
     /// A rebind could not encode an ended encoder again, or record again work recorded on the
     /// GPU alone, which keeps its first recording.
     pub(crate) fn reencode_refused(&self) {
@@ -3601,8 +3609,14 @@ pub struct WorkCounts {
     /// (`command_buffer/reencode.rs`).
     pub encoders_reencoded: u64,
     /// Work a command buffer's commit recorded on the GPU alone (a GPU-written execution's) that
-    /// a rebind before its first submission recorded again (`command_buffer/reencode.rs`).
+    /// a rebind before its first submission of a buffer it named recorded again
+    /// (`command_buffer/reencode.rs`).
     pub segments_recorded_again: u64,
+    /// Resident root tables of work recorded on the GPU alone that their command buffer's first
+    /// submission pointed at the resident set as it lay then, the live buffers having changed or
+    /// moved since the commit (`command_buffer/first_submission.rs`): a rebind or a release
+    /// meanwhile that records nothing again.
+    pub replay_tables_pointed: u64,
     /// Ended encoders a rebind could not encode again (a call refused the second time, or a
     /// recording unlike the first), and work recorded on the GPU alone it could not record there
     /// again, which keep their first recording and fail `EncodedUseRebound`.
@@ -4180,6 +4194,7 @@ impl Device {
             replay_log_bytes: counters.replay_log_bytes.load(Ordering::Relaxed),
             encoders_reencoded: counters.encoders_reencoded.load(Ordering::Relaxed),
             segments_recorded_again: counters.segments_recorded_again.load(Ordering::Relaxed),
+            replay_tables_pointed: counters.replay_tables_pointed.load(Ordering::Relaxed),
             reencodes_refused: counters.reencodes_refused.load(Ordering::Relaxed),
             fences_made: self.shared().fences.made(),
             pipeline_libraries_made: counters.pipeline_libraries_made.load(Ordering::Relaxed),

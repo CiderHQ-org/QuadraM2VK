@@ -78,14 +78,13 @@ use super::super::{Assembly, DrawBuffers, Recording, RenderLowering};
 use super::{HostStepCause, PassStorage, RenderExecution, Rendered, CALL};
 use crate::binding::PushWrite;
 use crate::blit::{reads_by, writes_by};
-use crate::command_buffer::CommandBuffer;
+use crate::command_buffer::{CommandBuffer, ReplayTable};
 use crate::device::lock;
 use crate::draw_source::DrawSource;
 use crate::encoder::EncoderCore;
 use crate::error::{internal, Error};
 use crate::executed_commands::RecordsRead;
 use crate::indirect_execute::ExecutionRange;
-use crate::live_buffers::LiveTable;
 use crate::owned_kernel::OwnedModule;
 use crate::pipeline::{BufferForms, GraphicsState, RenderStateKind, Settled};
 use crate::residency::Residency;
@@ -117,10 +116,10 @@ pub(super) struct GpuForm {
     pub(super) decided: CommandWrites,
     /// The primitive type every command that draws draws.
     primitive_type: PrimitiveType,
-    /// The replay's preprocess over the command buffer's resident set and `live`'s buffers.
+    /// The replay's preprocess over the command buffer's resident set and the device's live
+    /// buffers as they lay then, which the command buffer's first submission points at the set as
+    /// it lies then.
     pre: DrawReplayPreprocess,
-    /// The device's live buffers the resident set holds.
-    live: Arc<LiveTable>,
 }
 
 /// The slot table one push hole of a replayed draw names: the vertex function's or the fragment
@@ -470,7 +469,6 @@ impl RenderExecution {
             decided,
             primitive_type,
             pre,
-            live,
         })
     }
 
@@ -606,9 +604,13 @@ impl RenderExecution {
                 core.barrier(Barrier::everything());
             }
         }
-        // Its resident set, resolved now: the command buffer's first submission finds whether
-        // the live buffers and what its encoders made resident still lie there.
-        core.resolved(form.live.ranges().chain(residency.resident_ranges()));
+        // Its resident set as the live buffers and what its encoders made resident lie now: the
+        // command buffer's first submission points its table at the set as it lies then.
+        command_buffer.state().replay_table(ReplayTable {
+            upload: scratch.clone(),
+            at: pre.layout.resident_offset,
+            address: address + pre.layout.resident_offset,
+        });
         let draws = command_buffer.begin_draws(&snapshot.compatible)?;
         let raw = device.shared().vk();
         let visibility =

@@ -77,7 +77,7 @@
 use super::argument_table::ArgumentTable;
 use super::binding;
 use super::blit::reads;
-use super::command_buffer::CommandBuffer;
+use super::command_buffer::{CommandBuffer, ReplayTable};
 use super::degradation::CompiledPipeline;
 use super::device::lock;
 use super::dispatch_execute::{self, Template};
@@ -193,14 +193,13 @@ pub(super) enum Form {
 }
 
 /// What [`total`] found: the variants, the replay's preprocess, the bind state they were
-/// planned for, the ranges of the live buffers its resident set holds, and the recording. The
-/// command buffer keeps the live buffers' ranges, not their pages, until its first submission,
-/// which finds whether they still lie there and holds the table then current until it completes.
+/// planned for, and the recording. Its resident set holds the live buffers as they lay then; the
+/// command buffer's first submission points it at the set as it lies then, and holds the table
+/// then current until it completes (`command_buffer/first_submission.rs`).
 struct Total {
     prepared: Vec<Prepared>,
     pre: ReplayPreprocess,
     state: BindState,
-    live: Vec<ResidentRange>,
     form: Form,
 }
 
@@ -341,7 +340,7 @@ fn total(
     let mut state = BindState::default();
     state.stages.insert(Stage::Kernel, StageTable::default());
     state.used_resources = residency.used_resources();
-    state.resident_ranges = live.clone();
+    state.resident_ranges = live;
     let shape = state.shape();
     let states = execute.states(device);
     // Where only the indirect dispatches could run it, none past their bounds, before a variant is
@@ -373,7 +372,6 @@ fn total(
         prepared,
         pre,
         state,
-        live,
         form,
     }))
 }
@@ -539,7 +537,6 @@ fn record_total(
         prepared,
         pre,
         state,
-        live,
         form,
     } = total;
     let kernel = device.owned_kernel(OwnedModule::ReplayPreprocess)?;
@@ -655,10 +652,13 @@ fn record_total(
         });
         announce(&device, p, objects);
     }
-    // Its resident set, resolved now: the command buffer's first submission finds whether the
-    // live buffers and what its encoders made resident still lie there, holding the table from
-    // then on; until then a release or a rebind lets their pages go.
-    core.resolved(live.iter().copied().chain(residency.resident_ranges()));
+    // Its resident set as the live buffers and what its encoders made resident lie now: the
+    // command buffer's first submission points its table at the set as it lies then.
+    command_buffer.state().replay_table(ReplayTable {
+        upload: scratch.upload.clone(),
+        at: pre.layout.resident_offset,
+        address: scratch.address + pre.layout.resident_offset,
+    });
     core.retain(scratch.upload);
     let variants: Vec<Arc<Variant>> = prepared.iter().map(|p| Arc::clone(&p.variant)).collect();
     core.retain(variants);

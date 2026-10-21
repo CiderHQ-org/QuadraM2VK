@@ -108,7 +108,7 @@ use std::num::NonZeroU64;
 use std::sync::Arc;
 
 use crate::bind::instantiate::{PushHole, RootTable};
-use crate::bind::resident::{resident_entries, resident_extents, stage_root_table};
+use crate::bind::resident::{replay_extents, resident_entries, stage_root_table};
 use crate::bind::state::BindState;
 use crate::bind::status::{ReplayFaults, StatusBits, StatusWord};
 use crate::budget::{Budget, Meter};
@@ -202,23 +202,21 @@ const P_TABLES_BELOW: u64 = 16;
 const P_VARIANTS_AT: u64 = 20;
 const P_PARENT_AT: u64 = 24;
 const P_ARGUMENTS_AT: u64 = 28;
-/// `extents - resident`: each resident root's unpadded extent.
-const P_EXTENTS_AT: u64 = 32;
 /// The regions recorded per command, and `regions - resident`.
-const P_REGIONS: u64 = 36;
-const P_REGIONS_AT: u64 = 40;
+const P_REGIONS: u64 = 32;
+const P_REGIONS_AT: u64 = 36;
 /// The generated-commands path: the sequence stride (0: K14c's arguments instead), the push token's
 /// bytes, the most commands of one execution, and `templates - resident`, `counts - resident`,
 /// `sequences - resident`.
-const P_STRIDE: u64 = 44;
-const P_PUSH_BYTES: u64 = 48;
-const P_SEGMENT: u64 = 52;
-const P_TEMPLATES_AT: u64 = 56;
-const P_COUNTS_AT: u64 = 60;
-const P_SEQUENCES_AT: u64 = 64;
+const P_STRIDE: u64 = 40;
+const P_PUSH_BYTES: u64 = 44;
+const P_SEGMENT: u64 = 48;
+const P_TEMPLATES_AT: u64 = 52;
+const P_COUNTS_AT: u64 = 56;
+const P_SEQUENCES_AT: u64 = 60;
 /// The device's `max_threadgroup_memory_length`, which a command's lengths are clamped to before
 /// they are rounded up to 16 bytes.
-const P_MAX_LENGTH: u64 = 68;
+const P_MAX_LENGTH: u64 = 64;
 
 /// The parameters' flag bits: the descriptor's inheritance.
 const INHERIT_PIPELINE: u32 = 1 << 0;
@@ -405,7 +403,8 @@ pub struct ReplayLayout {
     /// The resident root table ([`ReplayPreprocess::resident`]); the parameters
     /// ([`ReplayPreprocess::params`]) end here.
     pub resident_offset: u64,
-    /// Each resident root's unpadded extent ([`ReplayPreprocess::extents`]).
+    /// Each resident root's unpadded extent ([`ReplayPreprocess::extents`]): right after the
+    /// resident root table, whose set ends with it.
     pub extents_offset: u64,
     /// The registered variants ([`ReplayPreprocess::variants`]).
     pub variants_offset: u64,
@@ -467,10 +466,13 @@ pub struct ReplayPreprocess {
     /// The resident root table, at `layout.resident_offset`: its sink entry's `host` field
     /// ([`RootTable::SINK_HOST_OFFSET`]) takes the sink's device address, as any root table's.
     pub resident: RootTable,
-    /// One `u64` per root of `resident`, at `layout.extents_offset`: how many bytes from the
-    /// root's guest address its allocations hold at their own lengths, without the padding (zero
-    /// for the null and sink roots). A kernel buffer resolves only below it, as the host resolves a
-    /// record's address (`BufferBinding::resolve_buffer`).
+    /// One `u64` per entry of `resident`'s set, at `layout.extents_offset`, right after the set,
+    /// then one zero: how many bytes from the entry's guest address its allocations hold at their
+    /// own lengths, without the padding. A kernel buffer resolves only below it, as the host
+    /// resolves a record's address (`BufferBinding::resolve_buffer`). The preprocess reads them
+    /// after the set the table names, wherever a consumer points it: one that points the table at
+    /// a set uploaded later puts that set's extents after it
+    /// ([`ResidentSet::replay_bytes`](crate::bind::ResidentSet::replay_bytes)).
     pub extents: Vec<u8>,
     /// The registered variants, at `layout.variants_offset`.
     pub variants: Vec<u8>,
@@ -614,15 +616,14 @@ fn preprocess(
 
     let entries = resident_entries(state);
     let resident = stage_root_table(&[], 2, &entries);
-    let mut extents = vec![0u8; 2 * 8];
-    for x in resident_extents(state, &entries) {
-        extents.extend_from_slice(&x.to_le_bytes());
-    }
+    let extents = replay_extents(state, &entries);
     let slots = u64::from(execution.count);
     let count = variants.len() as u64;
     let regions = u64::from(execution.regions);
     let resident_offset = slots * SLOT_TABLE_BYTES + PARAMS_BYTES;
-    let extents_offset = section(resident_offset + resident.bytes.len() as u64);
+    // The extents right after the set, which the table holds from its root 2 to its end
+    // (`memory::roots::ResidentView`).
+    let extents_offset = resident_offset + resident.bytes.len() as u64;
     let variants_offset = section(extents_offset + extents.len() as u64);
     let parent_offset = section(variants_offset + count * VARIANT_BYTES);
     let regions_offset = section(parent_offset + COMMAND_BYTES as u64);
@@ -687,7 +688,6 @@ fn preprocess(
         (variants_offset - resident_offset) as u32,
         (parent_offset - resident_offset) as u32,
         (arguments_offset - resident_offset) as u32,
-        (extents_offset - resident_offset) as u32,
         execution.regions,
         (regions_offset - resident_offset) as u32,
         generated_layout.map_or(0, |g| g.stride),
@@ -1251,7 +1251,6 @@ pub fn typed_module(limits: [u32; 3]) -> BResult<TypedModule> {
     let variants_at = param(fb, P_VARIANTS_AT)?;
     let parent_at = param(fb, P_PARENT_AT)?;
     let arguments_at = param(fb, P_ARGUMENTS_AT)?;
-    let extents_at = param(fb, P_EXTENTS_AT)?;
     let regions_n = param(fb, P_REGIONS)?;
     let regions_at = param(fb, P_REGIONS_AT)?;
     let stride = param(fb, P_STRIDE)?;
@@ -1473,12 +1472,11 @@ pub fn typed_module(limits: [u32; 3]) -> BResult<TypedModule> {
     let sink_entry = roots::SINK_ROOT * roots::ENTRY_BYTES;
     let sink_at = at(fb, resident, sink_entry + roots::HOST)?;
     let sink = load64(fb, t, sink_at)?;
-    let count_at = at(fb, resident, sink_entry + roots::RESIDENT_COUNT)?;
-    let resident_count = load64(fb, t, count_at)?;
-    // `R0` of the slot table is the distance in entries from it to the resident set, which the
-    // resident root table holds from its root 2.
-    let resident_first = at(fb, resident, 2 * roots::ENTRY_BYTES)?;
-    let distance = fb.binary(BinOp::ISub, resident_first, table)?;
+    // `R0` of the slot table is the distance in entries from it to the resident set the resident
+    // root table names, wherever it lies (`roots::ResidentView`), of its count.
+    let view = roots::resident_view(fb, resident)?;
+    let resident_count = view.count;
+    let distance = fb.binary(BinOp::ISub, view.set, table)?;
     let entry_shift = k64(fb, roots::ENTRY_BYTES.trailing_zeros().into())?;
     let r0 = fb.binary(BinOp::ShiftRightLogical, distance, entry_shift)?;
     for (field, v) in [
@@ -1498,8 +1496,6 @@ pub fn typed_module(limits: [u32; 3]) -> BResult<TypedModule> {
     // bind offset, which holds a nil buffer's address word, so the kernel sees the offset as
     // the buffer's address, as Metal's does. A dynamic stride of a bound buffer is no replayed
     // template's.
-    let extents_off = wide(fb, t, extents_at)?;
-    let extents = fb.binary(BinOp::IAdd, resident, extents_off)?;
     let source = fb.select(inherit_buffers, parent, rec)?;
     let bindings = k32(fb, BINDING_COUNT as u32)?;
     count_loop(fb, t, bindings, |fb, n| {
@@ -1525,10 +1521,7 @@ pub fn typed_module(limits: [u32; 3]) -> BResult<TypedModule> {
         let found = fb.binary(BinOp::INotEqual, root, null)?;
         let size = roots::entry_field(fb, resident, root, roots::SIZE)?;
         // The allocation's own extent, not its padded size: as the host's resolve.
-        let eight = k64(fb, 8)?;
-        let extent_rel = fb.binary(BinOp::IMul, root, eight)?;
-        let extent_at = fb.binary(BinOp::IAdd, extents, extent_rel)?;
-        let extent = load64(fb, t, extent_at)?;
+        let extent = roots::extent_of(fb, &view, root, found)?;
         let inside = fb.binary(BinOp::ULessThan, offset, extent)?;
         let hit = fb.binary(BinOp::LogicalAnd, found, inside)?;
         let missed = fb.unary(UnOp::LogicalNot, hit)?;

@@ -58,7 +58,7 @@ use super::Device;
 use crate::device::functions::Vk;
 use crate::work_counts::Begun;
 use ash::vk;
-use metal2vulkan::bind::{ReplayFaults, ResidentRange};
+use metal2vulkan::bind::ReplayFaults;
 use std::any::Any;
 use std::collections::BTreeSet;
 use std::marker::PhantomData;
@@ -573,12 +573,6 @@ impl EncoderCore {
     /// retained into it holds until it changes (`ArgumentTable::retain`).
     pub(super) fn id(&self) -> u64 {
         self.id
-    }
-
-    /// Note `ranges`, the resident set a GPU-alone replay resolved as it was recorded
-    /// (`Taken::resolve`).
-    pub(super) fn resolved(&mut self, ranges: impl IntoIterator<Item = ResidentRange>) {
-        self.taken.resolve(ranges);
     }
 
     /// The command buffer the encoder records into.

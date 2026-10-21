@@ -1287,9 +1287,8 @@ degradations! {
         /// calls; a command predication's command buffer; a render pass a host step records, or
         /// whose end captured its draws' tile reach; work recorded on the GPU alone that no longer
         /// runs there; a call refused again; `replay.rs`). Its reason names where the first such
-        /// submission found the use (the encoder, and its own commands, work it left for later,
-        /// or the resident set work on the GPU alone resolved at the commit) and why no rebind
-        /// encoded or recorded it again. Announced once, as
+        /// submission found the use (the encoder, and its own commands or work it left for later)
+        /// and why no rebind encoded or recorded it again. Announced once, as
         /// the first such submission is made, on the scheduler's thread, which makes it:
         /// `DeviceOptions::announce_each` does not repeat it, as no program
         /// call or host step meets it.

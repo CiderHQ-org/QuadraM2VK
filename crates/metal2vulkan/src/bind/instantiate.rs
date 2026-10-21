@@ -387,6 +387,25 @@ impl ResidentSet {
         end <= u128::from(e.size) && e.host.wrapping_add(into) == range.host
     }
 
+    /// What a consumer points a replay preprocess's resident root table at
+    /// ([`ReplayPreprocess::resident`](crate::bind::ReplayPreprocess::resident),
+    /// [`DrawReplayPreprocess::resident`](crate::bind::DrawReplayPreprocess::resident)) for its
+    /// commands' addresses to resolve through `ranges` as they lie then (the first submission of
+    /// the command buffer that records it, say): the set of `ranges` ([`ResidentSet::new`]) in its
+    /// entries' layout, then each entry's unpadded extent (a `u64`: how many bytes from its Metal
+    /// address the ranges hold without a gap, at their own lengths), then one zero; and the set's
+    /// count `N`. The consumer uploads the bytes at a 32-byte-aligned device address `set` and
+    /// writes [`RootTable::resident_fields`] of the table, `set` and `N` over the table's own.
+    pub fn replay_bytes(ranges: impl IntoIterator<Item = ResidentRange>) -> (Vec<u8>, u64) {
+        let ranges: Vec<ResidentRange> = ranges.into_iter().collect();
+        let set = ResidentSet::new(ranges.iter().copied());
+        let allocations = ranges.iter().map(|range| (range.guest, range.length));
+        let extents = crate::bind::resident::extents_of(allocations, &set.entries);
+        let mut bytes = set.bytes();
+        bytes.extend(crate::bind::resident::extents_bytes(extents));
+        (bytes, set.len())
+    }
+
     /// The set of its entries and `ranges`, coalesced.
     pub fn with(&self, ranges: impl IntoIterator<Item = ResidentRange>) -> ResidentSet {
         let own = self

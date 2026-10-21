@@ -17,10 +17,12 @@
 //! - into a target over a buffer whose rows the device lays out otherwise (a shadowed texture,
 //!   copied back after the pass): the kernel's triangles in one merged draw, and triangle strips
 //!   the CPU wrote one indirect draw per command, the same pixels as the host step's there;
-//! - after a rebind between the commit and the first submission, of a buffer over host pages
-//!   the commands' vertices lie in or of one they never use: recorded again at the rebind, the
-//!   new pages' points, the command buffer completing; and of the buffer a shadowed target lies
-//!   over: the render encoder encoded again, its copies and its merged draw into the new pages.
+//! - after a rebind between the commit and the first submission of a buffer over host pages the
+//!   commands' vertices lie in, or of one they never use, or the release of one they never use:
+//!   the records' buffers as they lie at the first submission, which points the merged draw's
+//!   resident table at them, nothing recorded again, the new pages' points; and after a rebind of
+//!   the buffer a shadowed target lies over: the render encoder encoded again, its copies and its
+//!   merged draw into the new pages.
 
 use super::degrade_notices::{assert_made_once, assert_once, counts, expected_once, on_device};
 use super::host_memory::Mapping;
@@ -493,10 +495,12 @@ fn gpu_forms_draw_into_a_shadowed_target_what_the_host_step_draws() {
 }
 
 /// The points `draws` of the kernel's commands draw over `scene`, committed behind an event wait
-/// and first submitted only after `rebind` ran: the commit records them in one merged draw, and
-/// the rebind records them again (`command_buffer/reencode.rs`), once, over where the buffers lie
-/// then: as a segment of its own, or in its render encoder encoded again (`pass_encoded`), with
-/// `encoded` of the command buffer's encoders encoded again; the command buffer completes with a
+/// and first submitted only after `rebind` ran (a rebind, or a release): the commit records them
+/// in one merged draw. `encoded` of the command buffer's encoders are encoded again at the rebind
+/// (`command_buffer/reencode.rs`), where a command of theirs named what moved, the merged draw
+/// recorded again with the render encoder (`pass_encoded`); nothing records it again as a
+/// segment of its own. The first submission points the merged draw's resident table at the set
+/// as it lies then (`WorkCounts::replay_tables_pointed`), and the command buffer completes with a
 /// clean report and announces `kinds` alone.
 fn rebound_run(
     device: &Device,
@@ -545,6 +549,7 @@ fn rebound_run(
     );
     event.set_signaled_value(1);
     command_buffer.wait_until_completed_for(WAIT).unwrap();
+    let pointed = device.work_counts().replay_tables_pointed - before.replay_tables_pointed;
     let ended = (command_buffer.status(), command_buffer.error());
     let expected = expected_once(messages, kinds, &forced_with(device, &[]));
     let notices = messages.take_notices();
@@ -552,27 +557,31 @@ fn rebound_run(
         .filter_map(|message| message.degradation.as_ref())
         .map(|notice| format!("{:?}: {}", notice.degradation, notice.reason))
         .collect();
-    // Recorded again once, in one merged draw: as a segment of its own, or with its encoder.
-    let recorded = (u64::from(!pass_encoded), encoded, 0, 8, 0);
+    // Recorded again only with an encoder encoded again, in one merged draw.
+    let again = 8 * u64::from(pass_encoded);
+    let recorded = (0, encoded, 0, again, 0);
     assert_eq!(
-        (counted, ended),
-        (recorded, (CommandBufferStatus::Completed, None)),
+        (counted, pointed > 0, ended),
+        (recorded, true, (CommandBufferStatus::Completed, None)),
         "(segments recorded again, encoders encoded again, refused, merged commands, records \
-         read), and the command buffer's end; notices: {reasons:#?}"
+         read), tables pointed at the first submission, and the command buffer's end; notices: \
+         {reasons:#?}"
     );
     assert_once(&notices, &expected);
 }
 
-/// A GPU-written execution the commit recorded on the GPU alone is recorded again by a rebind
-/// between the commit and the first submission (an event wait holds the command buffer), as
-/// Metal resolves what its commands reach as it submits the command buffer. A rebind of a buffer
-/// over host pages the commands never use moves the live buffers the preprocess searches, and the
-/// draws draw as without it; a rebind of the buffer the commands' vertices lie in, from pages
-/// holding vertices off the target to pages holding the row of points, draws the new pages'
-/// points, pixel for pixel. Neither fails the command buffer (`EncodedUseRebound`) or announces
-/// anything.
+/// A GPU-written execution the commit recorded on the GPU alone reaches what its commands' records
+/// name as it lies at the command buffer's first submission (an event wait holds it after a rebind
+/// or a release), as Metal resolves them as it submits the command buffer: the submission points
+/// the merged draw's resident table at the set as it lies then, and nothing is recorded again. A
+/// rebind of a buffer over host pages the commands never use, and the release of a buffer they
+/// never use, change the live buffers the preprocess searches, and the draws draw as without them;
+/// a rebind of the buffer the commands' vertices lie in (the kernel writes its address into the
+/// records, and the render encoder makes it resident), from pages holding vertices off the
+/// target to pages holding the row of points, draws the new pages' points, pixel for pixel. None
+/// fails the command buffer (`EncodedUseRebound`) or announces anything.
 #[test]
-fn a_rebind_before_the_first_submission_records_the_gpu_form_again_over_the_new_pages() {
+fn a_rebind_or_a_release_before_the_first_submission_reaches_the_gpu_form_s_records_as_they_lie() {
     on_device(|device, messages| {
         let draws: Vec<Draw> = vec![[0, 5, 1, 0], [8, 3, 2, 1], [30, 6, 3, 2]];
         let points =
@@ -594,6 +603,19 @@ fn a_rebind_before_the_first_submission_records_the_gpu_form_again_over_the_new_
             "an unused buffer rebound"
         );
 
+        let released = std::cell::RefCell::new(Some(
+            device.new_buffer(4096, ResourceOptions::shared()).unwrap(),
+        ));
+        let release = || drop(released.borrow_mut().take());
+        let gone = (&release as &dyn Fn(), 0, false);
+        rebound_run(device, (messages, &[]), (&scene, &draws), gone);
+        assert!(released.borrow().is_none());
+        assert_eq!(
+            scene.pixels(),
+            drawn_points(&draws),
+            "an unused buffer released"
+        );
+
         let off: Vec<[f32; 2]> = point_row().iter().map(|_| [-4.0, -4.0]).collect();
         let xy = buffer_over(device, points(&off), &seen).unwrap();
         let scene = Scene {
@@ -610,8 +632,8 @@ fn a_rebind_before_the_first_submission_records_the_gpu_form_again_over_the_new_
         rebound_run(device, (messages, &[]), (&scene, &draws), rebound);
         assert_eq!(scene.pixels(), drawn_points(&draws), "the vertices rebound");
         eprintln!(
-            "ICB-REBIND {}: GPU forms recorded again at rebinds before the first submission drew \
-             the new pages",
+            "ICB-REBIND {}: GPU forms reached their records' buffers as they lay at the first \
+             submission, after a rebind or a release, recorded once",
             device.name()
         );
     });

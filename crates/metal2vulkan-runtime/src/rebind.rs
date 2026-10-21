@@ -69,7 +69,6 @@ use super::key_hash::KeyMap;
 use super::program_objects;
 use super::resource::{ObjectId, ResourceKey};
 use super::Device;
-use metal2vulkan::bind::ResidentRange;
 use std::any::Any;
 use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -113,26 +112,19 @@ pub(super) struct Rebinds {
     /// How many there are: the check at each submission costs one load while none is.
     pub(super) stale_count: AtomicUsize,
     /// The command buffers committed and not yet first submitted that an encoder of theirs can
-    /// encode again (`replay.rs`), with the keys of the buffers over host pages those encoders
-    /// named: a rebind of one of them has them encoded again before their first submission. And
-    /// those with work recorded on the GPU alone, which any rebind has recorded again.
-    /// Taken under `buffers`' lock, after it.
+    /// encode again (`replay.rs`), or work of theirs on the GPU alone can be recorded again, with
+    /// the keys of the buffers over host pages those encoders and that work named: a rebind of
+    /// one of them has them encoded or recorded again before their first submission. Taken under
+    /// `buffers`' lock, after it.
     waiting: Mutex<Waiting>,
 }
 
-/// The command buffers waiting for their first submission whose encoders a rebind encodes again
-/// ([`Rebinds::wait_for_replay`]), each with the keys its replayable encoders named, sorted; and
-/// those whose work recorded on the GPU alone a rebind records again
-/// ([`Rebinds::wait_for_rerecord`]).
+/// The command buffers waiting for their first submission whose encoders a rebind encodes again,
+/// or whose work on the GPU alone it records again ([`Rebinds::wait_for_replay`]), each with the
+/// keys they named, sorted.
 #[derive(Default)]
 struct Waiting {
     buffers: Vec<(Weak<CommandBufferShared>, Box<[ResourceKey]>)>,
-    /// The command buffers committing or committed with work they may record on the GPU alone (a
-    /// GPU-written execution's preprocess and its draws or dispatches) and not yet first
-    /// submitted: its resident set is resolved as the commit records it, so a rebind of any
-    /// buffer from then to the first submission records that work again
-    /// ([`Rebinds::wait_for_rerecord`]).
-    resolved: Vec<Weak<CommandBufferShared>>,
     /// The length past which the next registration first lets go of the entries whose command
     /// buffer went or was submitted.
     prune_at: usize,
@@ -143,12 +135,11 @@ impl Waiting {
     /// command buffer went before its first submission (its submission failed first), never
     /// upgraded, so none goes under the lock.
     fn prune(&mut self) {
-        if self.buffers.len() + self.resolved.len() < self.prune_at {
+        if self.buffers.len() < self.prune_at {
             return;
         }
         self.buffers.retain(|(buffer, _)| buffer.strong_count() > 0);
-        self.resolved.retain(|buffer| buffer.strong_count() > 0);
-        self.prune_at = (2 * (self.buffers.len() + self.resolved.len())).max(16);
+        self.prune_at = (2 * self.buffers.len()).max(16);
     }
 }
 
@@ -270,16 +261,6 @@ impl Rebinds {
         waiting.buffers.push((Arc::downgrade(buffer), keys));
     }
 
-    /// Note `buffer`, committing now, with work it may record on the GPU alone, before it
-    /// records it: a rebind of any buffer from now to its first submission records that work
-    /// again ([`Rebinds::replace`], `command_buffer/reencode.rs`). Its first submission lets go of
-    /// it ([`Submitting::submitted_now`]).
-    pub(super) fn wait_for_rerecord(&self, buffer: &Arc<CommandBufferShared>) {
-        let mut waiting = lock(&self.waiting);
-        waiting.prune();
-        waiting.resolved.push(Arc::downgrade(buffer));
-    }
-
     /// Whether one of `keys` names a detached buffer (`detach.rs`): at no cost while none is.
     pub(super) fn any_detached(&self, keys: impl IntoIterator<Item = ResourceKey>) -> bool {
         if self.detached.load(Ordering::Acquire) == 0 {
@@ -375,11 +356,10 @@ impl Rebinds {
 
     /// Give the buffer of `key`, whose hold on its pages is `cell`, `pages` from now on, unless
     /// a hold refuses it: where it lay (a detached one is attached again), and the command
-    /// buffers waiting for their first submission whose replayable encoders named it
-    /// ([`Rebinds::wait_for_replay`]) or that hold work recorded on the GPU alone, whose resident
-    /// set held where it lay ([`Rebinds::wait_for_rerecord`]), each marked under this lock to
-    /// encode or record them again before that submission (`CommandBufferShared::reencode`),
-    /// which the caller runs; `Err` gives `pages` back.
+    /// buffers waiting for their first submission whose replayable encoders or work on the GPU
+    /// alone named it ([`Rebinds::wait_for_replay`]), each marked under this lock to encode or
+    /// record them again before that submission (`CommandBufferShared::reencode`), which the
+    /// caller runs; `Err` gives `pages` back.
     pub(super) fn replace(
         &self,
         key: ResourceKey,
@@ -408,7 +388,7 @@ impl Rebinds {
         let named = (waiting.buffers.iter())
             .filter(|(_, keys)| keys.binary_search(&key).is_ok())
             .map(|(buffer, _)| buffer);
-        for buffer in named.chain(&waiting.resolved) {
+        for buffer in named {
             let Some(buffer) = buffer.upgrade() else {
                 continue;
             };
@@ -486,14 +466,11 @@ impl Submitting<'_> {
         waiting
             .buffers
             .retain(|(waiting, _)| !std::ptr::eq(Weak::as_ptr(waiting), buffer));
-        waiting
-            .resolved
-            .retain(|waiting| !std::ptr::eq(Weak::as_ptr(waiting), buffer));
     }
 
     /// Judge `taken`, and hold every pin whose pages still live in `retained` until the command
-    /// buffer completes, counted in `holds` for a detach to wait for. Its named keys and
-    /// resolved ranges stay for the caller. (Every key was named where the command buffer's root
+    /// buffer completes, counted in `holds` for a detach to wait for. Its named keys stay for the
+    /// caller. (Every key was named where the command buffer's root
     /// tables searched their own sets, past the search's capacity, which a set of any count no
     /// longer meets.)
     pub(super) fn submit(
@@ -637,18 +614,12 @@ pub(super) enum Pinned {
 /// indirect command's resolved buffer. A key no command named is reached through the resident set
 /// alone (an encoder's `use_resource`, `use_heap`, a bound buffer no command reads), whose ranges
 /// the command buffer resolves again as it is first submitted.
-///
-/// A GPU-alone replay of an indirect command buffer (`gpu_execute.rs`) resolves its
-/// resident set as the commit records it, into its scratch: its ranges (`resolved`) hold as the
-/// command buffer is first submitted only where the live buffers and what its encoders made
-/// resident still lie there.
 #[derive(Default)]
 pub(super) struct Taken {
     pins: Vec<(ResourceKey, Pinned)>,
     /// The objects of releasable imports its blits took ([`ImportHold`]).
     imports: Vec<ImportHold>,
     named: BTreeSet<ResourceKey>,
-    resolved: Vec<ResidentRange>,
     /// A command named a detached buffer, and the encoder recorded nothing from it on
     /// (`EncoderCore::skips`): its submission never runs.
     dead: bool,
@@ -727,21 +698,10 @@ impl Taken {
         keys
     }
 
-    /// Note `ranges`, a resident set its commands resolved as they were recorded.
-    pub(super) fn resolve(&mut self, ranges: impl IntoIterator<Item = ResidentRange>) {
-        self.resolved.extend(ranges);
-    }
-
-    /// The resident ranges its commands resolved as they were recorded.
-    pub(super) fn resolved(&self) -> &[ResidentRange] {
-        &self.resolved
-    }
-
-    /// Join `other`'s pins, names and resolved ranges.
+    /// Join `other`'s pins and names.
     pub(super) fn join(&mut self, other: Taken) {
         self.pins.extend(other.pins);
         self.named.extend(other.named);
-        self.resolved.extend(other.resolved);
         self.dead |= other.dead;
     }
 
@@ -772,10 +732,9 @@ impl Taken {
         }
     }
 
-    /// Its named keys and resolved ranges let go, once judged (`Submitting::submit`).
+    /// Its named keys let go, once judged (`Submitting::submit`).
     pub(super) fn judged(&mut self) {
         self.named.clear();
-        self.resolved.clear();
     }
 
     /// Hand every pin's pages that still live to `retained`, upgraded, which the command buffer
@@ -791,7 +750,6 @@ impl Taken {
         retained.extend(live.map(|pages| Box::new(pages) as Box<dyn Any + Send + Sync>));
         retained.extend(self.imports.drain(..).filter_map(ImportHold::retained));
         self.named.clear();
-        self.resolved.clear();
     }
 }
 

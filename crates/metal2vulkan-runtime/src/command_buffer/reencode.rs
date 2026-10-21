@@ -20,20 +20,20 @@
 //!   same turns: Vulkan synchronizes a pool's recordings externally.
 //! - **Work recorded on the GPU alone, recorded again.** Work its commit recorded on the GPU
 //!   alone, for good (a GPU-written execution's preprocess and its dispatches or draws,
-//!   `gpu_execute.rs`, `render/executions/gpu.rs`), resolved there what its commands named and
-//!   the resident set its preprocess searches: the live buffers and what the encoders made
-//!   resident, as they lay then. An encoder that left such work keeps its log as one that left
-//!   none does, and its encoding again records that work at once, on the GPU alone, in segments
-//!   of the same parts (`EncoderCore::finish_replay`), its own commands (a render pass's
-//!   shadowed textures' copies and its other steps among them) recorded again around them. Its
-//!   commit notes the command buffer for any rebind too (`Rebinds::wait_for_rerecord`): each
-//!   rebind before the first submission records the work of the encoders it does not encode
-//!   again in its place, as the commit did, over where the buffers lie now: its recording, what
-//!   its commands took and what its host step needs. The commit notes it before it records that
-//!   work, with its lock free: a rebind meanwhile marks it, and leaves the mark to the commit,
-//!   which records the work again once it ended. Work a host step recorded again since
-//!   (with the barriers between its commands, `gpu_execute::Rerecord`, or as a route outgrew
-//!   it, `DeferredPass::outgrown`) keeps that step's recording.
+//!   `gpu_execute.rs`, `render/executions/gpu.rs`), reaches what its commands' records name
+//!   through the resident set its preprocess's table names, which the first submission points
+//!   at the set as it lies then (`first_submission.rs`): no rebind or release records it again
+//!   for that. What its commands named (the pass's attachments, say) was resolved as it was
+//!   recorded: an encoder that left such work keeps its log as one that left none does, and its
+//!   encoding again records that work at once, on the GPU alone, in segments of the same parts
+//!   (`EncoderCore::finish_replay`), its own commands (a render pass's shadowed textures'
+//!   copies and its other steps among them) recorded again around them. Its commit notes the
+//!   keys that work named too (`State::keep_replays`): a rebind of one of them before the first
+//!   submission records the work of the encoders it does not encode again in its place, as the
+//!   commit did, over where the buffers lie now: its recording, what its commands took and what
+//!   its host step needs. Work a host step recorded again since (with the barriers between its
+//!   commands, `gpu_execute::Rerecord`, or as a route outgrew it, `DeferredPass::outgrown`)
+//!   keeps that step's recording.
 //! - **What cannot be encoded again stays as before.** An encoder whose log is gone (a command
 //!   predication's command buffer, failed at the commit) or whose second
 //!   encoding is refused or records otherwise (`EncoderCore::finish_replay`), its work among
@@ -46,7 +46,7 @@ use super::{lock, CommandBuffer, CommandBufferShared, State};
 use crate::buffer::HostPages;
 use crate::deferred::{Deferred, StepInputs};
 use crate::device::functions::Vk;
-use crate::encoder::{RecordedSegment, Replayed, ReplayedPart};
+use crate::encoder::{RecordedSegment, Replayed, ReplayedPart, Segment};
 use crate::replay::Replay;
 use crate::residency::Residency;
 use crate::resource::ResourceKey;
@@ -77,11 +77,6 @@ impl CommandBufferShared {
         let turn = lock(&self.reencoding);
         let marked = self.reencode.load(Ordering::Acquire);
         if marked == 0 {
-            return;
-        }
-        // Its commit records its work on the GPU alone with the lock free: the mark stays, and
-        // the commit records that work again once it ended.
-        if lock(&self.state).committing {
             return;
         }
         let device = &self.device;
@@ -136,23 +131,32 @@ impl CommandBufferShared {
                 }
             }
         }
-        // Its work recorded on the GPU alone in encoders not encoded again, each segment by its
-        // part and its place there, which hold through this turn: only the first submission
-        // places segments, and it waits for the turn; a host step, which records one, takes the
-        // turn too.
+        // Its work recorded on the GPU alone in encoders not encoded again that named a buffer
+        // over host pages that lies elsewhere now, each segment by its part and its place
+        // there, which hold through this turn: only the first submission places segments, and
+        // it waits for the turn; a host step, which records one, takes the turn too. What it
+        // reaches through its resident set its first submission points it at as it lies then.
         let alone: Vec<((usize, usize), Deferred)> = {
             let state = lock(&self.state);
             match state.submitted {
                 true => Vec::new(),
-                false => (state.recorded.iter().enumerate())
-                    .filter(|(_, recorded)| !spliced.contains(&recorded.encoder))
-                    .flat_map(|(part, recorded)| {
-                        let segments = recorded.segments.iter().enumerate();
-                        segments
-                            .filter(|(_, segment)| segment.gpu_alone && segment.recorded.is_some())
-                            .map(move |(at, segment)| ((part, at), segment.work.clone()))
-                    })
-                    .collect(),
+                false => {
+                    let submitting = device.shared().rebinds.submitting();
+                    let moved = |segment: &Segment| {
+                        segment.gpu_alone
+                            && (segment.recorded.as_ref())
+                                .is_some_and(|done| submitting.rebound(&done.taken))
+                    };
+                    (state.recorded.iter().enumerate())
+                        .filter(|(_, recorded)| !spliced.contains(&recorded.encoder))
+                        .flat_map(|(part, recorded)| {
+                            let segments = recorded.segments.iter().enumerate();
+                            segments
+                                .filter(|(_, segment)| moved(segment))
+                                .map(move |(at, segment)| ((part, at), segment.work.clone()))
+                        })
+                        .collect()
+                }
             }
         };
         for (place, work) in alone {
@@ -375,8 +379,9 @@ impl State {
 
     /// As it commits: the logs of encoders no rebind encodes again go, for the caller to let go
     /// of without this lock: every log where an encoder used command predication, and those of
-    /// encoders the commit's failure fails (they run nothing). The keys the encoders whose logs
-    /// stay named of buffers over host pages, sorted, each once (`Rebinds::wait_for_replay`).
+    /// encoders the commit's failure fails (they run nothing). The keys of buffers over host pages
+    /// the encoders whose logs stay named, and the work its commit recorded on the GPU alone,
+    /// sorted, each once (`Rebinds::wait_for_replay`).
     pub(super) fn keep_replays(&mut self) -> (Vec<Arc<Replay>>, Box<[ResourceKey]>) {
         let mut gone = Vec::new();
         let mut keys = Vec::new();
@@ -399,6 +404,13 @@ impl State {
             if record.replay.is_some() {
                 keys.extend(record.taken.named_pins());
             }
+        }
+        let alone = (self.recorded.iter())
+            .flat_map(|part| &part.segments)
+            .filter(|segment| segment.gpu_alone)
+            .filter_map(|segment| segment.recorded.as_ref());
+        for done in alone {
+            keys.extend(done.taken.named_pins());
         }
         keys.sort_unstable();
         keys.dedup();

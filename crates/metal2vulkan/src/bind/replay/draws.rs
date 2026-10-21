@@ -66,7 +66,7 @@ use super::{
     store64, wide, ReplayRefusal, Types, PARAMS_BYTES,
 };
 use crate::bind::instantiate::{PushHole, RootTable};
-use crate::bind::resident::{resident_entries, resident_extents, stage_root_table};
+use crate::bind::resident::{replay_extents, resident_entries, stage_root_table};
 use crate::bind::state::BindState;
 use crate::bind::status::{ReplayFaults, StatusBits, StatusWord};
 use crate::budget::{Budget, Meter};
@@ -105,16 +105,15 @@ const P_COUNT: u64 = 4;
 const P_FLAGS: u64 = 8;
 /// `tables - resident`: how far past the resident root table the slot tables start.
 const P_TABLES_AT: u64 = 12;
-/// `parent - resident`, `arguments - resident`, `extents - resident`.
+/// `parent - resident`, `arguments - resident`.
 const P_PARENT_AT: u64 = 16;
 const P_ARGUMENTS_AT: u64 = 20;
-const P_EXTENTS_AT: u64 = 24;
 /// The buffer slots each stage's slot table holds.
-const P_VERTEX_SLOTS: u64 = 28;
-const P_FRAGMENT_SLOTS: u64 = 32;
+const P_VERTEX_SLOTS: u64 = 24;
+const P_FRAGMENT_SLOTS: u64 = 28;
 /// The primitive types named, then each (`MAX_DRAW_REPLAY_TYPES` words).
-const P_TYPES: u64 = 36;
-const P_TYPE: u64 = 40;
+const P_TYPES: u64 = 32;
+const P_TYPE: u64 = 36;
 
 /// The parameters' flag bit: the commands inherit the encoder's buffers.
 const INHERIT_BUFFERS: u32 = 1;
@@ -183,7 +182,8 @@ pub struct DrawReplayLayout {
     /// The resident root table ([`DrawReplayPreprocess::resident`]); the parameters
     /// ([`DrawReplayPreprocess::params`]) end here.
     pub resident_offset: u64,
-    /// Each resident root's unpadded extent ([`DrawReplayPreprocess::extents`]).
+    /// Each resident root's unpadded extent ([`DrawReplayPreprocess::extents`]): right after the
+    /// resident root table, whose set ends with it.
     pub extents_offset: u64,
     /// The encoder's buffers ([`DrawReplayPreprocess::parent`]).
     pub parent_offset: u64,
@@ -243,8 +243,9 @@ pub struct DrawReplayPreprocess {
     /// The resident root table, at `layout.resident_offset`: its sink entry's `host` field
     /// ([`RootTable::SINK_HOST_OFFSET`]) takes the sink's device address, as any root table's.
     pub resident: RootTable,
-    /// One `u64` per root of `resident`, at `layout.extents_offset`: the unpadded extent a buffer
-    /// resolves below, as a compute replay's (`ReplayPreprocess::extents`).
+    /// One `u64` per entry of `resident`'s set, at `layout.extents_offset`, right after the set,
+    /// then one zero: the unpadded extent a buffer resolves below, as a compute replay's, read
+    /// after whatever set a consumer points the table at (`ReplayPreprocess::extents`).
     pub extents: Vec<u8>,
     /// The encoder's vertex and fragment buffers in a record's layout, at `layout.parent_offset`.
     pub parent: Vec<u8>,
@@ -315,15 +316,14 @@ pub fn draw_replay_preprocess(
 
     let entries = resident_entries(state);
     let resident = stage_root_table(&[], 2, &entries);
-    let mut extents = vec![0u8; 2 * 8];
-    for x in resident_extents(state, &entries) {
-        extents.extend_from_slice(&x.to_le_bytes());
-    }
+    let extents = replay_extents(state, &entries);
     let commands = u64::from(replay.count);
     let types = replay.primitive_types.len() as u64;
     let tables = table_bytes(replay.vertex_slots) + table_bytes(replay.fragment_slots);
     let resident_offset = PARAMS_BYTES;
-    let extents_offset = section(resident_offset + resident.bytes.len() as u64);
+    // The extents right after the set, which the table holds from its root 2 to its end
+    // (`memory::roots::ResidentView`).
+    let extents_offset = resident_offset + resident.bytes.len() as u64;
     let parent_offset = section(extents_offset + extents.len() as u64);
     let header_offset = section(parent_offset + COMMAND_BYTES as u64);
     let uploaded = match corners {
@@ -391,7 +391,6 @@ pub fn draw_replay_preprocess(
         as_param(tables_offset - resident_offset)?,
         as_param(parent_offset - resident_offset)?,
         as_param(arguments_offset - resident_offset)?,
-        as_param(extents_offset - resident_offset)?,
         replay.vertex_slots,
         replay.fragment_slots,
         types as u32,
@@ -517,21 +516,17 @@ fn no_binding(_: &Symbol) -> Option<u32> {
     None
 }
 
-/// The root `guest` resolves to in the resident set at `resident`, its offset there, and whether
-/// it lies inside the root's unpadded extent (`extents`, a `u64` per root): a hit.
+/// The root `guest` resolves to in the resident set the resident root table at `resident` names
+/// (`view`), its offset there, and whether it lies inside the root's unpadded extent: a hit.
 fn resolved(
     fb: &mut FunctionBuilder<'_>,
-    t: Types,
-    (resident, extents): (Value, Value),
+    (resident, view): (Value, &roots::ResidentView),
     guest: Value,
 ) -> BResult<(Value, Value, Value)> {
     let (root, offset) = roots::resolve(fb, resident, guest)?;
     let null = k64(fb, roots::NULL_ROOT)?;
     let found = fb.binary(BinOp::INotEqual, root, null)?;
-    let eight = k64(fb, 8)?;
-    let extent_rel = fb.binary(BinOp::IMul, root, eight)?;
-    let extent_at = fb.binary(BinOp::IAdd, extents, extent_rel)?;
-    let extent = load64(fb, t, extent_at)?;
+    let extent = roots::extent_of(fb, view, root, found)?;
     let inside = fb.binary(BinOp::ULessThan, offset, extent)?;
     let hit = fb.binary(BinOp::LogicalAnd, found, inside)?;
     Ok((root, offset, hit))
@@ -612,7 +607,6 @@ pub fn typed_module() -> BResult<TypedModule> {
     let tables_at = param(fb, P_TABLES_AT)?;
     let parent_at = param(fb, P_PARENT_AT)?;
     let arguments_at = param(fb, P_ARGUMENTS_AT)?;
-    let extents_at = param(fb, P_EXTENTS_AT)?;
     let vertex_slots = param(fb, P_VERTEX_SLOTS)?;
     let fragment_slots = param(fb, P_FRAGMENT_SLOTS)?;
     let types = param(fb, P_TYPES)?;
@@ -716,8 +710,7 @@ pub fn typed_module() -> BResult<TypedModule> {
     let static_stride = k64(fb, u64::MAX)?;
     let bad_bindings = counter(fb, t, 0)?;
     let unresolved = counter(fb, t, 0)?;
-    let extents_off = wide(fb, t, extents_at)?;
-    let extents = fb.binary(BinOp::IAdd, resident, extents_off)?;
+    let view = roots::resident_view(fb, resident)?;
     let all = k32(fb, layout::ALL_BINDINGS as u32)?;
     count_loop(fb, t, all, |fb, n| {
         let n64 = wide(fb, t, n)?;
@@ -785,7 +778,7 @@ pub fn typed_module() -> BResult<TypedModule> {
         let counted = fb.binary(BinOp::LogicalAnd, counted, uncovered)?;
         let counted = fb.binary(BinOp::LogicalAnd, counted, own)?;
         let count: ArmFn<'_, ()> = Box::new(move |fb, _| {
-            let (_, _, hit) = resolved(fb, t, (resident, extents), address)?;
+            let (_, _, hit) = resolved(fb, (resident, &view), address)?;
             let missed = fb.unary(UnOp::LogicalNot, hit)?;
             let one = k32(fb, 1)?;
             let zero = k32(fb, 0)?;
@@ -859,9 +852,7 @@ pub fn typed_module() -> BResult<TypedModule> {
     let sink_entry = roots::SINK_ROOT * roots::ENTRY_BYTES;
     let sink_at = at(fb, resident, sink_entry + roots::HOST)?;
     let sink = load64(fb, t, sink_at)?;
-    let count_at = at(fb, resident, sink_entry + roots::RESIDENT_COUNT)?;
-    let resident_count = load64(fb, t, count_at)?;
-    let resident_first = at(fb, resident, 2 * roots::ENTRY_BYTES)?;
+    let resident_count = view.count;
     for (stage, table, slots) in [
         (BufferStage::Vertex, vertex_table, vertex_slots),
         (BufferStage::Fragment, fragment_table, fragment_slots),
@@ -870,8 +861,9 @@ pub fn typed_module() -> BResult<TypedModule> {
             let a = at(fb, table, roots::NULL_ROOT * roots::ENTRY_BYTES + field)?;
             store64(fb, t, a, zero64)?;
         }
-        // `R0` of the slot table is the distance in entries from it to the resident set.
-        let distance = fb.binary(BinOp::ISub, resident_first, table)?;
+        // `R0` of the slot table is the distance in entries from it to the resident set the
+        // resident root table names, wherever it lies.
+        let distance = fb.binary(BinOp::ISub, view.set, table)?;
         let entry_shift = k64(fb, roots::ENTRY_BYTES.trailing_zeros().into())?;
         let r0 = fb.binary(BinOp::ShiftRightLogical, distance, entry_shift)?;
         for (field, v) in [
@@ -895,7 +887,7 @@ pub fn typed_module() -> BResult<TypedModule> {
             let first_address = k64(fb, BufferBinding::MIN_BUFFER_ADDRESS)?;
             let bound = fb.binary(BinOp::UGreaterThanEqual, guest, first_address)?;
             let live = fb.binary(BinOp::LogicalAnd, runs, bound)?;
-            let (root, offset, hit) = resolved(fb, t, (resident, extents), guest)?;
+            let (root, offset, hit) = resolved(fb, (resident, &view), guest)?;
             let size = roots::entry_field(fb, resident, root, roots::SIZE)?;
             let missed = fb.unary(UnOp::LogicalNot, hit)?;
             let miss = fb.binary(BinOp::LogicalAnd, live, missed)?;

@@ -435,7 +435,11 @@ fn the_layout_keeps_every_section_apart() {
     assert_eq!((l.slots, l.variants, l.regions), (5, 3, 2));
     assert_eq!(l.table_offset(4) + SLOT_TABLE_BYTES, l.params_offset());
     assert_eq!(pre.params.len() as u64, PARAMS_BYTES);
-    assert!(l.resident_offset + pre.resident.bytes.len() as u64 <= l.extents_offset);
+    // The extents right after the resident set, which ends the resident root table.
+    assert_eq!(
+        l.resident_offset + pre.resident.bytes.len() as u64,
+        l.extents_offset
+    );
     assert!(l.extents_offset + pre.extents.len() as u64 <= l.variants_offset);
     assert!(l.variants_offset + pre.variants.len() as u64 <= l.parent_offset);
     assert!(l.parent_offset + pre.parent.len() as u64 <= l.regions_offset);
@@ -453,7 +457,6 @@ fn the_layout_keeps_every_section_apart() {
     );
     assert!(l.argument_offset(4, 1, 2) + ARGUMENT_BYTES <= l.bytes);
     for at in [
-        l.extents_offset,
         l.variants_offset,
         l.parent_offset,
         l.regions_offset,
@@ -470,8 +473,8 @@ fn the_layout_keeps_every_section_apart() {
         &pre.params[..12],
         [2u32, 5, 3].map(u32::to_le_bytes).concat().as_slice()
     );
-    // One extent per root: none for the null and sink roots, then each allocation's own length
-    // (B's 60 bytes, not its padded 64).
+    // One extent per entry of the set, each allocation's own length (B's 60 bytes, not its padded
+    // 64), then the zero a search that found no entry reads.
     let extents: Vec<u64> = pre
         .extents
         .as_chunks::<8>()
@@ -479,11 +482,7 @@ fn the_layout_keeps_every_section_apart() {
         .iter()
         .map(|c| u64::from_le_bytes(*c))
         .collect();
-    assert_eq!(extents, [0, 0, A.2, B.2]);
-    assert_eq!(
-        u64::from(word(&pre.params, P_EXTENTS_AT as usize)),
-        l.extents_offset - l.resident_offset
-    );
+    assert_eq!(extents, [A.2, B.2, 0]);
     assert_eq!(word(&pre.params, P_REGIONS as usize), 2);
     assert_eq!(
         u64::from(word(&pre.params, P_REGIONS_AT as usize)),

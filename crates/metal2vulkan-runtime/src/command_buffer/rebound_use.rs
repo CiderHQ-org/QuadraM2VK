@@ -48,9 +48,6 @@ pub(crate) enum ReboundAt {
     NotEncodedAgain,
     /// Work it left for later named it.
     Segment(Recording),
-    /// The resident set its work on the GPU alone resolved at the commit holds a buffer's range
-    /// that lies elsewhere now (rebound) or that no buffer holds now (`released`).
-    ResidentSet { released: bool },
 }
 
 /// Where the first submission found a use rebound: the command buffer's ended encoder `encoder`,
@@ -87,7 +84,10 @@ impl fmt::Display for ReboundUse {
         write!(f, "found in its {kind} encoder {}: ", self.encoder)?;
         match &self.at {
             ReboundAt::Unlogged(Some(why)) => {
-                write!(f, "a command of its own named it, not encoded again as {why}")
+                write!(
+                    f,
+                    "a command of its own named it, not encoded again as {why}"
+                )
             }
             ReboundAt::Unlogged(None) => {
                 f.write_str("a command of its own named it, and it kept no log")
@@ -109,14 +109,6 @@ impl fmt::Display for ReboundUse {
             ReboundAt::Segment(Recording::HostStep) => {
                 f.write_str("work a host step recorded named it, which a rebind does not record")
             }
-            ReboundAt::ResidentSet { released: false } => f.write_str(
-                "the resident set its work on the GPU alone resolved at the commit holds a range \
-                 rebound since, and no rebind recorded that work again",
-            ),
-            ReboundAt::ResidentSet { released: true } => f.write_str(
-                "the resident set its work on the GPU alone resolved at the commit holds the range \
-                 of a buffer released since, which records nothing again",
-            ),
         }
     }
 }

@@ -44,7 +44,7 @@ mod storage_form;
 mod submit;
 
 pub(super) use completion::Completion;
-pub(super) use first_submission::NotedTable;
+pub(super) use first_submission::{NotedTable, ReplayTable};
 pub(super) use group::{Group, GroupEnd, GROUP_BATCHES};
 use rebound_use::{ReboundUse, Unlogged};
 pub(super) use submit::{BatchLists, Submitting};
@@ -576,6 +576,10 @@ pub(super) struct State {
     /// Where its first submission, or a later batch's, found the first use rebound, for the
     /// notice (`rebound_use.rs`).
     rebound_use: Option<ReboundUse>,
+    /// The resident root tables of its work on the GPU alone recorded before its first
+    /// submission, which that submission points at the set as it lies then
+    /// (`first_submission.rs`).
+    replay_tables: Vec<ReplayTable>,
     /// The ended encoders whose submissions failed so: no part of one goes to a queue with work
     /// (`submit.rs` holds it to that).
     unrunnable: BTreeSet<usize>,
@@ -664,6 +668,16 @@ impl State {
             refused: None,
         });
         self.ended.len() - 1
+    }
+
+    /// Note `table`, the resident root table of work recorded on the GPU alone: its first
+    /// submission points it at the resident set as it lies then (`first_submission.rs`). One
+    /// recorded after the first submission searches the set as it lay as it was recorded, which
+    /// the submitted command buffer holds.
+    pub(super) fn replay_table(&mut self, table: ReplayTable) {
+        if !self.submitted {
+            self.replay_tables.push(table);
+        }
     }
 
     /// Ended encoder `encoder` kept no log a rebind encodes it again from (`replay.rs`), as
@@ -1449,6 +1463,7 @@ impl CommandBuffer {
                 submitted: false,
                 failing: Vec::new(),
                 rebound_use: None,
+                replay_tables: Vec::new(),
                 unrunnable: BTreeSet::new(),
                 submitted_holds: Vec::new(),
                 failed_at_commit: None,
@@ -1864,14 +1879,7 @@ impl CommandBuffer {
                 .filter(|recorded| runs(recorded.encoder))
                 .flat_map(|encoder| &encoder.segments)
                 .map(|segment| (segment.work.clone(), segment.needs_step()))
-                .collect::<Vec<_>>();
-            // Work it may record on the GPU alone below resolves the live buffers as they lie
-            // then, with this lock free: any rebind from here to its first submission records
-            // it again (`reencode.rs`), one before its recording ends once the commit ended.
-            let alone = (segments.iter()).any(|(work, step)| *step && work.may_run_on_gpu_alone());
-            if alone {
-                device.shared().rebinds.wait_for_rerecord(&self.0);
-            }
+                .collect();
             // What of it the live buffers list once used, held weakly: the device's registries'
             // locks, which take no other, inside this one.
             let reached = state.reached(device.shared(), runs);
@@ -1966,8 +1974,9 @@ impl CommandBuffer {
             for heap in state.used_heaps.drain(..) {
                 heap.mark_used();
             }
-            // A rebind before its first submission of a buffer its replayable encoders named
-            // encodes them again (`reencode.rs`): noted while their holds still refuse one.
+            // A rebind before its first submission of a buffer its replayable encoders, or its
+            // work on the GPU alone, named encodes or records them again (`reencode.rs`): noted
+            // while their holds still refuse one.
             let (unreplayable, keys) = state.keep_replays();
             if !keys.is_empty() {
                 device.shared().rebinds.wait_for_replay(&self.0, keys);
@@ -2058,11 +2067,6 @@ impl CommandBuffer {
             }
         }
         drop(unreplayable);
-        // A rebind while it recorded its work on the GPU alone left that work to record again
-        // here, now that the commit ended (`reencode.rs`).
-        if self.0.reencode_pending() {
-            self.0.reencode();
-        }
         // The storage-sink degrade's trigger decides, in the program's call, before the
         // scheduler sees the command buffer (`detach.rs`).
         device.reach_storage_sinks(reaches);

@@ -106,9 +106,33 @@ fn resident_allocations(state: &BindState) -> impl Iterator<Item = (u64, u64, u6
 /// then one forward pass per entry over the allocations that start inside its window (the windows
 /// are disjoint), bounds the work by the allocations' count times its logarithm.
 pub(crate) fn resident_extents(state: &BindState, resident: &[RootEntry]) -> Vec<u64> {
-    let mut ranges: Vec<(u128, u128)> = resident_allocations(state)
-        .filter(|&(_, _, length)| length > 0)
-        .map(|(_, guest, length)| (u128::from(guest), u128::from(guest) + u128::from(length)))
+    let allocations = resident_allocations(state).map(|(_, guest, length)| (guest, length));
+    extents_of(allocations, resident)
+}
+
+/// The unpadded extents a replay preprocess reads right after its resident set
+/// (`memory::roots::ResidentView`): a `u64` per entry of `resident`, `state`'s resident set
+/// ([`resident_extents`]), then one zero, which a search that found no entry reads.
+pub(crate) fn replay_extents(state: &BindState, resident: &[RootEntry]) -> Vec<u8> {
+    extents_bytes(resident_extents(state, resident))
+}
+
+/// `extents`, little-endian, then one zero.
+pub(crate) fn extents_bytes(extents: impl IntoIterator<Item = u64>) -> Vec<u8> {
+    let mut bytes: Vec<u8> = extents.into_iter().flat_map(u64::to_le_bytes).collect();
+    bytes.extend_from_slice(&0u64.to_le_bytes());
+    bytes
+}
+
+/// [`resident_extents`] of the entries `resident` over the allocations `allocations`, each its
+/// `(guest, length)` at its own length.
+pub(crate) fn extents_of(
+    allocations: impl Iterator<Item = (u64, u64)>,
+    resident: &[RootEntry],
+) -> Vec<u64> {
+    let mut ranges: Vec<(u128, u128)> = allocations
+        .filter(|&(_, length)| length > 0)
+        .map(|(guest, length)| (u128::from(guest), u128::from(guest) + u128::from(length)))
         .collect();
     ranges.sort_unstable();
     // The furthest end of the allocations up to each one.

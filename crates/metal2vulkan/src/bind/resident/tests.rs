@@ -373,3 +373,47 @@ fn a_resident_set_holds_what_its_entries_resolve_alike() {
     assert_eq!(with.len(), 3);
     assert!(with.holds(&other) && with.holds(&own) && with.holds(&placed));
 }
+
+/// What a consumer points a replay preprocess's resident root table at holds the set of its
+/// ranges in their entries' layout, then each entry's unpadded extent, then a zero: the same
+/// set, and the same extents, as the binder lays out after the table it builds of those
+/// allocations, so a table pointed there resolves as the binder's own does.
+#[test]
+fn replay_bytes_are_the_binders_set_then_its_extents() {
+    use crate::bind::{ResidentRange, ResidentSet};
+    // Three allocations, one inside another and one of a length the padding rounds up.
+    let ranges = [
+        ResidentRange::new(0x9000, 0x1_0000_0000, 64),
+        ResidentRange::new(0x9010, 0x1_0000_0010, 16),
+        ResidentRange::new(0x5000, 0x2_0000_0000, 60),
+    ];
+    let (bytes, count) = ResidentSet::replay_bytes(ranges);
+    let set = ResidentSet::new(ranges);
+    assert_eq!(count, set.len());
+    assert_eq!(count, 2);
+    let entries = set.bytes();
+    assert_eq!(&bytes[..entries.len()], &entries[..]);
+    let extents: Vec<u64> = bytes[entries.len()..]
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .map(|c| u64::from_le_bytes(*c))
+        .collect();
+    assert_eq!(extents, [64, 60, 0]);
+    let allocations = ranges.iter().map(|r| (r.guest, r.length));
+    let entries: Vec<RootEntry> = (set.bytes().as_chunks::<32>().0.iter())
+        .map(|e| {
+            let field = |at: usize| u64::from_le_bytes(e[at..at + 8].try_into().unwrap());
+            RootEntry {
+                host: field(0),
+                guest: field(8),
+                size: field(16),
+                bind_offset: field(24),
+            }
+        })
+        .collect();
+    assert_eq!(
+        extents_bytes(extents_of(allocations, &entries)),
+        bytes[set.bytes().len()..]
+    );
+}

@@ -16,7 +16,8 @@
 //!   commit, before its batch is submitted (it waits for an event), recorded again with the
 //!   barriers, still on the GPU alone;
 //! - one whose command buffer waits for an event while a buffer over host pages it never uses is
-//!   rebound, recorded again on the GPU alone at the rebind;
+//!   rebound, recorded once, its resident table pointed at the set as it lies at the first
+//!   submission;
 //! - a range its own commands alone;
 //! - with as many live states as the GPU-alone path takes in its encoder's order on the GPU alone,
 //!   and with one more in the host step, which runs it faster;
@@ -470,11 +471,12 @@ fn a_barrier_set_after_the_commit_records_the_commands_again() {
 
 /// A rebind between the commit and the first submission (an event wait holds the command buffer)
 /// of a buffer over host pages the commands never use moves the live buffers the preprocess
-/// searches, which the commit resolved: the rebind records the execution again on the GPU alone
-/// (`command_buffer/reencode.rs`), and it runs what it runs without the rebind, the command
-/// buffer completing with a clean report (not `EncodedUseRebound`) and announcing nothing.
+/// searches: the first submission points the execution's resident table at the set as it lies
+/// then (`command_buffer/first_submission.rs`), nothing is recorded again, and it runs what it
+/// runs without the rebind, the command buffer completing with a clean report (not
+/// `EncodedUseRebound`) and announcing nothing.
 #[test]
-fn a_rebind_before_the_first_submission_records_the_execution_again() {
+fn a_rebind_before_the_first_submission_reaches_the_execution_s_records_as_they_lie() {
     on_device(|device, messages| {
         let seen = Arc::new(Seen::default());
         let Some(unused) = buffer_over(device, pages(buffer_len(), 0, &[1]), &seen) else {
@@ -500,15 +502,18 @@ fn a_rebind_before_the_first_submission_records_the_execution_again() {
         let before = device.work_counts();
         let rebound = Arc::new(Seen::default());
         rebind(&unused, pages(buffer_len(), 0, &[2]), &rebound).unwrap();
-        let after = device.work_counts();
-        assert_eq!(
-            after.segments_recorded_again,
-            before.segments_recorded_again + 1,
-            "the rebind recorded the execution again"
-        );
-        assert_eq!(after.reencodes_refused, before.reencodes_refused);
         event.set_signaled_value(1);
         command_buffer.wait_until_completed_for(WAIT).unwrap();
+        let after = device.work_counts();
+        assert_eq!(
+            after.segments_recorded_again, before.segments_recorded_again,
+            "recorded once"
+        );
+        assert_eq!(after.reencodes_refused, before.reencodes_refused);
+        assert!(
+            after.replay_tables_pointed > before.replay_tables_pointed,
+            "its resident table pointed at the first submission"
+        );
         assert_eq!(command_buffer.status(), CommandBufferStatus::Completed);
         assert_eq!(
             command_buffer.execution_report(),

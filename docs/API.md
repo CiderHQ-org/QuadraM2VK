@@ -1794,8 +1794,7 @@ fast forms record, and each `PrecisionNote`'s rustdoc states its bound.
   (EncodedUseRebound), where Metal resolves the use as it submits the command buffer and reaches the
   pages the buffer lies in then; the rebind encodes compute, blit and render encoders again, but not
   this one. The reason names where the first such submission found the use (the encoder; its own
-  commands, work it left for later, or the resident set work on the GPU alone resolved at the
-  commit) and why no rebind encoded or recorded it again.
+  commands or work it left for later) and why no rebind encoded or recorded it again.
 - `metal2vulkan-degrade-stale-detached-reach` (precision). `StaleDetachedReach`: A command buffer
   that bound a heap set, whose commands may reach any texture through its resource ID without naming
   it, was submitted while a texture's bytes (a no-copy buffer's or heap's, the texture over them or
