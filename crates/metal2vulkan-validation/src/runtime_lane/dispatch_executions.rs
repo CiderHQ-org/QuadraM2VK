@@ -534,6 +534,7 @@ fn checked_and_indirect_range_executions_keep_the_host_step() {
                             Box::new(move |_, _| {
                                 seen.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             }),
+                            metal2vulkan_runtime::IndirectCommandCheckNeeds::ALL,
                         )
                         .unwrap();
                 }
