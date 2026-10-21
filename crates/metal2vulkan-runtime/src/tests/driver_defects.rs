@@ -26,13 +26,15 @@ const PUSHES: RuntimeDriverDefect = RuntimeDriverDefect::PushedBufferSizesUnset;
 const STALE_PUSHES: RuntimeDriverDefect =
     RuntimeDriverDefect::PushedDescriptorsStaleAfterPipelineBinds;
 const BAKED_SAMPLERS: RuntimeDriverDefect = RuntimeDriverDefect::ImmutableSamplersLostAfterCopies;
+const SET_SUPPORT: RuntimeDriverDefect = RuntimeDriverDefect::SetLayoutSupportUnderstated;
 
 /// Every committed profile's driver has its defects at every release and GPU but those a probe
 /// found clean: MoltenVK the multisampled depth/stencil colour copies, the inexact depths past
 /// `[0, 1]`, the crashing 2D views of a 3D image in lazily allocated memory, the pipeline cache
 /// compiled at load, the copies of compressed images that rewrite texels, the reads of command
 /// buffers after their signal, the frees that fail pending work, the destroys that fail a
-/// submission encoding meanwhile and the pushed sets' unset buffer sizes; lavapipe the colour copies, the depth/stencil resolve of the
+/// submission encoding meanwhile, the pushed sets' unset buffer sizes and the set layouts its
+/// support query refuses though it runs them; lavapipe the colour copies, the depth/stencil resolve of the
 /// first layer and level, the explicit plane's rows past its height and the baked samplers lost
 /// after a copy;
 /// RADV the multisampled copies that convert float NaNs, and the implicit
@@ -66,6 +68,7 @@ fn the_committed_profiles_drivers_have_their_defects() {
                     FREES,
                     DESTROYS,
                     PUSHES,
+                    SET_SUPPORT,
                 ]
             }
             Some(DriverId::MESA_LLVMPIPE) => vec![COPIES, RESOLVES, PAST_HEIGHT, BAKED_SAMPLERS],
@@ -341,4 +344,34 @@ fn the_unmeasured_identity_option_runs_another_gpu_s_paths() {
     let text = unmeasured_driver(&assumed).expect("the option's message");
     assert!(text.ends_with(&format!("[{UNMEASURED_DRIVER}]")), "{text}");
     assert!(!text.contains("metal2vulkan-degrade-"), "{text}");
+}
+
+/// A descriptor set layout of at most 1024 descriptors (the least `maxPerSetDescriptors` Vulkan
+/// allows) is made without asking the driver; a larger one is made where the driver's
+/// `vkGetDescriptorSetLayoutSupport` answers `VK_TRUE`, made and announced where it answers
+/// `VK_FALSE` on a driver that runs what it refuses (`SetLayoutSupportUnderstated`), and refused
+/// on any other: never made past the driver's answer unannounced.
+#[test]
+fn a_set_layout_past_the_least_per_set_limit_is_made_as_the_driver_answers() {
+    use crate::pipeline::objects::{set_support, SetSupport, LEAST_PER_SET_DESCRIPTORS};
+    let unasked = || -> bool { panic!("asked about a layout Vulkan promises") };
+    for understated in [false, true] {
+        for total in [0, 1, 1023, LEAST_PER_SET_DESCRIPTORS] {
+            assert_eq!(
+                set_support(total, understated, unasked),
+                SetSupport::Supported
+            );
+        }
+        let refused = match understated {
+            true => SetSupport::Understated,
+            false => SetSupport::Refused,
+        };
+        for total in [1025, 1212, 65536, 393_216] {
+            assert_eq!(
+                set_support(total, understated, || true),
+                SetSupport::Supported
+            );
+            assert_eq!(set_support(total, understated, || false), refused);
+        }
+    }
 }

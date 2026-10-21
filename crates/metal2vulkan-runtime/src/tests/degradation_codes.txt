@@ -167,6 +167,7 @@ metal2vulkan-degrade-rotated-load-tiles
 metal2vulkan-degrade-sample-depth-clamp
 metal2vulkan-degrade-sample-planes
 metal2vulkan-degrade-separate-depth-stencil
+metal2vulkan-degrade-set-past-layout-support
 metal2vulkan-degrade-shader-color-conversion
 metal2vulkan-degrade-shader-half-color-bits
 metal2vulkan-degrade-shader-resolve

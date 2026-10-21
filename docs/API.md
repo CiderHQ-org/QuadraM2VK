@@ -1807,6 +1807,14 @@ fast forms record, and each `PrecisionNote`'s rustdoc states its bound.
   device runs them as Metal does, but its driver leaves the vertex stage out of
   subgroupSupportedStages, so Vulkan's validation layer reports each shader module of the function
   (VUID-RuntimeSpirv-None-06343).
+- `metal2vulkan-degrade-set-past-layout-support` (validity). `SetPastLayoutSupport`: A descriptor
+  set layout the device's driver refuses through `vkGetDescriptorSetLayoutSupport` though it makes
+  and runs it, a heap's set 1 past `maxPerSetDescriptors`
+  (`metal2vulkan::error::RuntimeDriverDefect::SetLayoutSupportUnderstated`, MoltenVK): the runtime
+  makes it there as the driver runs it. Cost: the device runs the set as Metal runs the argument
+  buffer it is encoded in, but its driver's vkGetDescriptorSetLayoutSupport refuses the layout, so
+  Vulkan's validation layer reports each such layout
+  (VUID-vkCreateDescriptorSetLayout-support-09582).
 - `metal2vulkan-degrade-released-command-state` (precision). `ReleasedCommandState`: An indirect
   command naming the ID of a pipeline state the program released is executed where the runtime
   cannot run what Metal runs. Cost: a command naming another ID than the state set on it runs

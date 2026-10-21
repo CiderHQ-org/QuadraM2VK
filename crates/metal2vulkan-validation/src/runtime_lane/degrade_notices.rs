@@ -83,7 +83,8 @@
 //! held for copies alone that a kernel's texture handles reach in `pvrtc_textures`
 //! ([`UNREADABLE`]), the device's texture table and heap sets in `resource_ids` (an unviewable
 //! texture, [`UNVIEWABLE`]; a shadowed one, [`UNNAMED_SHADOWS`]; an ID past a pipeline's arrays,
-//! [`PAST_CAPACITY`]; each command buffer's own copy on a device withholding
+//! [`PAST_CAPACITY`]; a heap set made past its driver's support answer, [`PAST_LAYOUT_SUPPORT`];
+//! each command buffer's own copy on a device withholding
 //! `descriptorBindingUpdateUnusedWhilePending`, [`OWN_COPIES`]; a no-copy buffer's deallocator
 //! that waits for its pages' import, which a texture's image a submitted command buffer may read
 //! holds, [`DELAYED_DEALLOCATORS`]),
@@ -188,8 +189,8 @@ use super::rate_mapped_passes::ZERO_LAYER_AFTER_RELEASE;
 use super::rebind_reach::REBOUND_USES;
 use super::resolves::{color_pass, lane, quiet, MIXED_RESOLVES, ONE};
 use super::resource_ids::{
-    DELAYED_DEALLOCATORS, OWN_COPIES, PAST_CAPACITY, RESOURCE_IDS, UNLISTED, UNNAMED_SHADOWS,
-    UNVIEWABLE,
+    DELAYED_DEALLOCATORS, OWN_COPIES, PAST_CAPACITY, PAST_LAYOUT_SUPPORT, RESOURCE_IDS, UNLISTED,
+    UNNAMED_SHADOWS, UNVIEWABLE,
 };
 use super::rotated_textures::ROTATED_LOADS;
 use super::sample_copies::DRAWN_DEPTH;
@@ -228,6 +229,7 @@ use metal2vulkan::metal::{
     PixelFormat, SamplerMinMagFilter, SamplerMipFilter, TextureType, TextureUsage,
 };
 use metal2vulkan::pipeline::MeshPipelineDescriptor;
+use metal2vulkan::pipeline::PipelineLayout;
 use metal2vulkan::pipeline::StageModule;
 use metal2vulkan::pipeline::{
     ColorAttachmentDescriptor, RenderPipelineDescriptor, Stage, StageSource,
@@ -509,6 +511,7 @@ fn every_kind_has_a_site_a_lane_test_takes() {
         &UNVIEWABLE,
         &UNNAMED_SHADOWS,
         &PAST_CAPACITY,
+        &PAST_LAYOUT_SUPPORT,
         &OWN_COPIES,
         &KEPT_COLORS,
         &PER_COLOR_COUNTS,
@@ -1815,7 +1818,8 @@ fn making_kinds<'a>(stages: impl IntoIterator<Item = &'a StageModule>) -> BTreeS
 
 /// [`making_kinds`] of a render pipeline state of `descriptor` on `device`, as the device's
 /// compile layer compiles it, apart from the runtime (`compile_render_pipeline`, as
-/// `color_writes::pipeline_states_announce_the_shader_conversion_once` holds the runtime to).
+/// `color_writes::pipeline_states_announce_the_shader_conversion_once` holds the runtime to), and
+/// its layout's ([`layout_kinds`]).
 pub(super) fn made_render_kinds(
     device: &Device,
     descriptor: &RenderPipelineDescriptor,
@@ -1824,11 +1828,13 @@ pub(super) fn made_render_kinds(
         .compile_device()
         .compile_render_pipeline(descriptor, &Budget::standard())
         .unwrap();
-    making_kinds(&compiled.stages)
+    let mut kinds = making_kinds(&compiled.stages);
+    kinds.extend(layout_kinds(device, &compiled.layout));
+    kinds
 }
 
 /// [`making_kinds`] of a mesh render pipeline state of `descriptor` on `device`, as its compile
-/// layer compiles it (`compile_mesh_pipeline`).
+/// layer compiles it (`compile_mesh_pipeline`), and its layout's ([`layout_kinds`]).
 pub(super) fn made_mesh_kinds(
     device: &Device,
     descriptor: &MeshPipelineDescriptor,
@@ -1837,11 +1843,13 @@ pub(super) fn made_mesh_kinds(
         .compile_device()
         .compile_mesh_pipeline(descriptor, &Budget::standard())
         .unwrap();
-    making_kinds(&compiled.stages)
+    let mut kinds = making_kinds(&compiled.stages);
+    kinds.extend(layout_kinds(device, &compiled.layout));
+    kinds
 }
 
 /// [`making_kinds`] of a compute pipeline state of kernel `function` on `device`, as its compile
-/// layer compiles it (`compile_compute_pipeline`).
+/// layer compiles it (`compile_compute_pipeline`), and its layout's ([`layout_kinds`]).
 pub(super) fn made_compute_kinds(
     device: &Device,
     function: FunctionDescriptor,
@@ -1851,7 +1859,64 @@ pub(super) fn made_compute_kinds(
         .compile_device()
         .compile_compute_pipeline(&descriptor, &Budget::standard())
         .unwrap();
-    making_kinds([&compiled.stage])
+    let mut kinds = making_kinds([&compiled.stage]);
+    kinds.extend(layout_kinds(device, &compiled.layout));
+    kinds
+}
+
+/// The kinds the making of a pipeline state of `layout` announces on `device` by its layout:
+/// `set-past-layout-support` where a set of it is one the device's driver refuses
+/// ([`refused_sets`]), which the runtime makes only where the driver runs what it refuses
+/// (`RuntimeDriverDefect::SetLayoutSupportUnderstated`; elsewhere it refuses the state, typed).
+pub(super) fn layout_kinds(device: &Device, layout: &PipelineLayout) -> BTreeSet<Degradation> {
+    forced(&[(
+        Degradation::SetPastLayoutSupport,
+        !refused_sets(device, layout).is_empty(),
+    )])
+}
+
+/// The sets of `layout`, each by its number and descriptor count, whose layout `device`'s driver
+/// refuses through `vkGetDescriptorSetLayoutSupport`, asked here apart from the runtime of each
+/// set's binding types, counts, stages and flags as the layout states them.
+pub(super) fn refused_sets(device: &Device, layout: &PipelineLayout) -> Vec<(u32, u64)> {
+    // SAFETY: a device-level query on the device's own handle, made while it lives.
+    let raw = unsafe { device.raw() };
+    layout
+        .sets
+        .iter()
+        .filter_map(|set| {
+            let bindings: Vec<ash::vk::DescriptorSetLayoutBinding<'_>> = set
+                .bindings
+                .iter()
+                .map(|binding| {
+                    ash::vk::DescriptorSetLayoutBinding::default()
+                        .binding(binding.binding)
+                        .descriptor_type(binding.ty.into())
+                        .descriptor_count(binding.count)
+                        .stage_flags(binding.stages.into())
+                })
+                .collect();
+            let flags: Vec<ash::vk::DescriptorBindingFlags> =
+                set.bindings.iter().map(|b| b.flags.into()).collect();
+            let mut flags_info =
+                ash::vk::DescriptorSetLayoutBindingFlagsCreateInfo::default().binding_flags(&flags);
+            let mut info = ash::vk::DescriptorSetLayoutCreateInfo::default()
+                .flags(set.flags.into())
+                .bindings(&bindings);
+            if flags.iter().any(|f| !f.is_empty()) {
+                info = info.push_next(&mut flags_info);
+            }
+            let mut support = ash::vk::DescriptorSetLayoutSupport::default();
+            // SAFETY: `info` and every array it points at are live for the call, and `support`
+            // heads an empty chain.
+            unsafe {
+                raw.device
+                    .get_descriptor_set_layout_support(&info, &mut support)
+            };
+            let total = set.bindings.iter().map(|b| u64::from(b.count)).sum();
+            (support.supported != ash::vk::TRUE).then_some((set.set, total))
+        })
+        .collect()
 }
 
 /// The kinds a dispatch of kernel `function`'s compute pipeline state on `device` may announce

@@ -464,7 +464,10 @@ pub fn echo_validation_messages() {
 /// report of a vertex module's subgroup operations outside `subgroupSupportedStages`
 /// (`candidate/unadvertised_stage.rs`) fails nothing: the translation relies on the driver's
 /// measured answer there, as the module's requirements state. Nor does a driver diagnostic every
-/// pipeline making of the opened device is measured to report ([`MessageSink::making`]).
+/// pipeline making of the opened device is measured to report ([`MessageSink::making`]), nor, on a
+/// device whose driver runs the set layouts its support query refuses
+/// ([`MessageSink::unsupported_sets`]), the layer's report of such a layout
+/// (`candidate/unsupported_set.rs`).
 pub(super) struct MessageSink {
     messages: Mutex<Vec<String>>,
     /// Whether the context's opened profile takes `DriverDeviation::MetalVertexSimdgroups`, set
@@ -477,6 +480,11 @@ pub(super) struct MessageSink {
     /// reports one only as it makes a render pipeline, naming the format, so a message of exactly
     /// one of them fails no row; set once the opened description is known.
     making: OnceLock<Vec<metal2vulkan::device::DriverDiagnostic>>,
+    /// Whether the opened device's driver runs the descriptor set layouts its
+    /// `vkGetDescriptorSetLayoutSupport` refuses, as the runtime makes them there
+    /// (`metal2vulkan_runtime::makes_layouts_past_support`: a heap's set 1 on MoltenVK), set once
+    /// the opened description is known.
+    unsupported_sets: AtomicBool,
 }
 
 impl MessageSink {
@@ -539,6 +547,14 @@ unsafe extern "system" fn record_validation_message(
     };
     if sink.unadvertised_vertex.load(Ordering::Relaxed)
         && crate::candidate::unadvertised_stage::shape(
+            &text(data.p_message_id_name),
+            &text(data.p_message),
+        )
+    {
+        return vk::FALSE;
+    }
+    if sink.unsupported_sets.load(Ordering::Relaxed)
+        && crate::candidate::unsupported_set::shape(
             &text(data.p_message_id_name),
             &text(data.p_message),
         )
@@ -683,6 +699,7 @@ fn only_errors_and_validation_warnings_fail_a_row() {
         messages: Mutex::new(Vec::new()),
         unadvertised_vertex: AtomicBool::new(false),
         making: OnceLock::new(),
+        unsupported_sets: AtomicBool::new(false),
     };
     for n in 0..100 {
         sink.record(format!("m{n}"));
@@ -712,6 +729,7 @@ fn a_measured_diagnostic_fails_no_row_inside_its_call_alone() {
         messages: Mutex::new(Vec::new()),
         unadvertised_vertex: AtomicBool::new(false),
         making: OnceLock::new(),
+        unsupported_sets: AtomicBool::new(false),
     };
     let user = std::ptr::from_ref(&sink) as usize;
     let report = |severity: S, text: &str| {
@@ -1588,6 +1606,7 @@ impl VulkanContext {
             messages: Mutex::new(Vec::new()),
             unadvertised_vertex: AtomicBool::new(false),
             making: OnceLock::new(),
+            unsupported_sets: AtomicBool::new(false),
         }));
         let messenger_info = vk::DebugUtilsMessengerCreateInfoEXT::default()
             .message_severity(
@@ -1806,6 +1825,10 @@ impl VulkanContext {
                 })
                 .collect();
             let _ = messages.making.set(making);
+            messages.unsupported_sets.store(
+                metal2vulkan_runtime::makes_layouts_past_support(description),
+                Ordering::Relaxed,
+            );
         }
         let opened = opened_description
             .clone()

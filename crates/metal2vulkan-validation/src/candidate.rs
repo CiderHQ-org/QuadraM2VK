@@ -162,6 +162,7 @@ pub mod engine;
 pub mod runtime_case;
 pub mod runtime_samples;
 pub(crate) mod unadvertised_stage;
+pub(crate) mod unsupported_set;
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod platform;

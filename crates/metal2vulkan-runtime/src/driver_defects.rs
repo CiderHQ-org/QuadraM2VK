@@ -305,6 +305,25 @@ pub(super) struct Affected {
 ///   does (`pending_dispatch.rs`); a host step's dispatch (an indirect dispatch's, an indirect
 ///   command buffer's execution) records in place. Graphics draws are unmeasured. Every lavapipe
 ///   release takes it: 26.2.4, measured clean, has no committed profile to be a measured identity.
+///
+/// `SetLayoutSupportUnderstated`:
+/// - MoltenVK (`MOLTENVK`): `MVKDevice::getDescriptorSetLayoutSupport` sums the bindings'
+///   `descriptorCount` and answers `sum < maxPerSetDescriptors` (1212 on Apple's GPUs: four times
+///   a stage's Metal argument-table slots), so a layout of exactly `maxPerSetDescriptors` is
+///   refused, where Vulkan guarantees `VK_TRUE`, and so is every layout past it, though the driver
+///   encodes an update-after-bind set in a Metal argument buffer and reports
+///   `maxDescriptorSetUpdateAfterBind*` limits of 500000 and 1000000. The driver makes such a
+///   layout, and a set of it is written and read as Metal reads the argument buffer: a bare
+///   Vulkan probe (one binding of 65536 sampled images, `UPDATE_AFTER_BIND_POOL`, element 65535
+///   read in a dispatch) read it right where the query answered `VK_FALSE` at 1212, 1213 and
+///   65536 descriptors, and the runtime lanes that read textures through their IDs past element
+///   1211 (`runtime_lane::resource_ids`) are Metal's. Read in 1.4.1's and 1.4.2's source (the
+///   function is the same) and measured on 1.4.2 (driverVersion 10402) on an M3 Max: known broken
+///   through 1.4.2. Vulkan-ValidationLayers 1.4.363 asks the query for every layout past
+///   `maxPerSetDescriptors` and reports one it refuses
+///   (`VUID-vkCreateDescriptorSetLayout-support-09582`). Nothing is refused: a set layout the
+///   driver refuses is made there, announced (`set-past-layout-support`, `pipeline/objects.rs`);
+///   on every other driver a set layout its driver refuses is refused.
 pub(super) const AFFECTED: &[Affected] = &[
     Affected {
         defect: RuntimeDriverDefect::MultisampledDepthStencilColourCopies,
@@ -401,6 +420,11 @@ pub(super) const AFFECTED: &[Affected] = &[
     Affected {
         defect: RuntimeDriverDefect::ImmutableSamplersLostAfterCopies,
         driver: DriverId::MESA_LLVMPIPE,
+        clean: &[],
+    },
+    Affected {
+        defect: RuntimeDriverDefect::SetLayoutSupportUnderstated,
+        driver: DriverId::MOLTENVK,
         clean: &[],
     },
 ];

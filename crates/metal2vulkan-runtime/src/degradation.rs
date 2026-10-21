@@ -68,6 +68,7 @@ use super::color_resolve;
 use super::device::{DebugMessage, Device, MessageKind, MessageSeverity};
 use super::error::Error;
 use super::fragment_imageblock::PassImageblock;
+use super::pipeline::objects::{set_layout_support, SetSupport};
 use super::render_pass::{ColorTarget, PassLayout, Target};
 use super::render_target::{self, depth_stencil_steps, HandedDontCare, PassShape};
 use super::render_values::{LoadAction, StoreAction};
@@ -139,9 +140,10 @@ pub enum DegradationCategory {
     /// A recorded near-equivalent: Metal's answer is not given exactly.
     Precision,
     /// Metal's answer, exactly, through use of the device that its driver does not advertise
-    /// but runs as Metal does, measured (a `metal2vulkan::error::DriverDeviation`): Vulkan does
-    /// not allow the use on the device as the driver describes it, so the validation layer
-    /// reports it.
+    /// but runs as Metal does, measured (a `metal2vulkan::error::DriverDeviation`, or a
+    /// `metal2vulkan::error::RuntimeDriverDefect` of a query that refuses what the driver runs):
+    /// Vulkan does not allow the use on the device as the driver describes it, so the validation
+    /// layer reports it.
     Validity,
 }
 
@@ -1233,6 +1235,14 @@ degradations! {
             "the device runs them as Metal does, but its driver leaves the vertex stage out of \
              subgroupSupportedStages, so Vulkan's validation layer reports each shader module of \
              the function (VUID-RuntimeSpirv-None-06343)";
+        /// A descriptor set layout the device's driver refuses through
+        /// `vkGetDescriptorSetLayoutSupport` though it makes and runs it, a heap's set 1 past
+        /// `maxPerSetDescriptors` ([`metal2vulkan::error::RuntimeDriverDefect::SetLayoutSupportUnderstated`]):
+        /// the runtime makes it there as the driver runs it (`pipeline/objects.rs`).
+        SetPastLayoutSupport = "set-past-layout-support", Validity,
+            "the device runs the set as Metal runs the argument buffer it is encoded in, but its \
+             driver's vkGetDescriptorSetLayoutSupport refuses the layout, so Vulkan's validation \
+             layer reports each such layout (VUID-vkCreateDescriptorSetLayout-support-09582)";
         /// An indirect command naming the ID of a pipeline state the program released is
         /// executed where the runtime cannot run what Metal runs (`indirect_command_buffer.rs`). A
         /// command holds the program of the state the CPU set on it, and runs it while its record
@@ -2478,6 +2488,14 @@ pub(crate) enum CompiledPipeline<'a> {
 }
 
 impl<'a> CompiledPipeline<'a> {
+    /// The pipeline's layout.
+    fn layout(self) -> &'a metal2vulkan::pipeline::PipelineLayout {
+        match self {
+            CompiledPipeline::Render(p) => &p.layout,
+            CompiledPipeline::Kernel(p) => &p.layout,
+        }
+    }
+
     /// The pipeline's runtime dependencies.
     fn dependencies(self) -> &'a [metal2vulkan::pipeline::RuntimeDependency] {
         match self {
@@ -3020,8 +3038,10 @@ impl Device {
     /// word bound ([`Degradation::ExactFormsOverCompilerLimit`]), naming the pipeline state's kind
     /// (render, mesh render, tile render or compute), and, for a render variant, requirements that
     /// hold a vertex function's subgroup operations on a driver that runs them as Metal does
-    /// without advertising the vertex stage ([`Degradation::UnadvertisedVertexSimdgroups`]); for
-    /// the base variant and every other alike, each pipeline by its own records.
+    /// without advertising the vertex stage ([`Degradation::UnadvertisedVertexSimdgroups`]), and,
+    /// for any, a set layout its driver refuses though it runs it
+    /// ([`Degradation::SetPastLayoutSupport`], before any layout of the variant is made); for the
+    /// base variant and every other alike, each pipeline by its own records.
     pub(super) fn degrade_pipeline(&self, pipeline: CompiledPipeline<'_>, at: Occurrence<'_>) {
         if let Some(dropped) = dropped_exact_forms(pipeline.dependencies()) {
             self.degrade_at(at, Degradation::ExactFormsOverCompilerLimit, || {
@@ -3034,6 +3054,31 @@ impl Device {
                     ),
                 )
             });
+        }
+        if self
+            .shared()
+            .announced
+            .pending(Degradation::SetPastLayoutSupport)
+        {
+            for set in &pipeline.layout().sets {
+                if set_layout_support(self, set) != SetSupport::Understated {
+                    continue;
+                }
+                let total: u64 = set.bindings.iter().map(|b| u64::from(b.count)).sum();
+                self.degrade_at(at, Degradation::SetPastLayoutSupport, || {
+                    (
+                        pipeline.object().to_owned(),
+                        format!(
+                            "its set {} holds {total} descriptors, which {} makes and runs as \
+                             Metal runs the argument buffer it encodes the set in (measured, \
+                             `RuntimeDriverDefect::SetLayoutSupportUnderstated`) though its \
+                             driver's vkGetDescriptorSetLayoutSupport refuses the layout",
+                            set.set,
+                            self.name()
+                        ),
+                    )
+                });
+            }
         }
         let CompiledPipeline::Render(pipeline) = pipeline else {
             return;

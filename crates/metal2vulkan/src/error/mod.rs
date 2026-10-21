@@ -920,6 +920,13 @@ pub enum RuntimeDriverDefect {
     /// that bakes samplers records in a `VkCommandBuffer` of its own there, as one whose pipeline
     /// is still being made does.
     ImmutableSamplersLostAfterCopies,
+    /// `vkGetDescriptorSetLayoutSupport` answers `VK_FALSE` for a descriptor set layout the driver
+    /// makes and runs: one of exactly `maxPerSetDescriptors` descriptors, which Vulkan guarantees
+    /// `VK_TRUE`, and every one past it, however far within the update-after-bind limits the
+    /// driver reports. Nothing is refused: the runtime makes such a layout there (a heap's set 1)
+    /// as the driver runs it, announced (`set-past-layout-support`), and Vulkan's validation layer
+    /// reports it (`VUID-vkCreateDescriptorSetLayout-support-09582`).
+    SetLayoutSupportUnderstated,
 }
 
 /// One device capability a refusal can name.

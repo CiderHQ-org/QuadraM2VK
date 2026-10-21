@@ -51,7 +51,7 @@ use crate::candidate::engine::resources::{
 use crate::candidate::engine::tables::{FunctionTable, TableBuffers};
 use crate::candidate::engine::{ComputeCase, ComputeOutput, LinkedModule};
 use crate::candidate::runtime_samples::{multisampled_texture_with, SampleFill};
-use crate::candidate::unadvertised_stage;
+use crate::candidate::{unadvertised_stage, unsupported_set};
 use crate::case::out_of_bounds::OutOfBoundsResource;
 use crate::case::{ArgumentBufferSamplerResource, AuthoredCase, RateMapLiteral, TextureType};
 use crate::check::interface::{
@@ -204,6 +204,10 @@ pub(crate) fn report_each_message() {
 /// `Degradation::UnadvertisedVertexSimdgroups` notice, which it gives only where its profile
 /// takes `DriverDeviation::MetalVertexSimdgroups`. Each such message prints an `UNADVERTISED-STAGE`
 /// line, and a test's count of them prints once its messages go; before the notice it fails.
+/// So does the layer's report of a descriptor set layout the driver's support query refuses
+/// (`candidate/unsupported_set.rs`), after the device's `Degradation::SetPastLayoutSupport` notice,
+/// which it gives only where its driver runs what the query refuses
+/// (`RuntimeDriverDefect::SetLayoutSupportUnderstated`), each printing an `UNSUPPORTED-SET` line.
 #[derive(Clone, Default)]
 pub struct Messages(Arc<Mutex<Reported>>);
 
@@ -217,6 +221,10 @@ struct Reported {
     unadvertised_vertex: bool,
     /// How many of the layer's messages about such a vertex module passed.
     unadvertised_messages: usize,
+    /// Whether a device announced `Degradation::SetPastLayoutSupport`.
+    unsupported_sets: bool,
+    /// How many of the layer's messages about such a set layout passed.
+    unsupported_set_messages: usize,
     /// The thread that made the list: the test's.
     test: String,
     /// How many notices of each kind were taken so far (`Messages::take_notices`), less those
@@ -233,6 +241,8 @@ impl Default for Reported {
             layer_gaps: 0,
             unadvertised_vertex: false,
             unadvertised_messages: 0,
+            unsupported_sets: false,
+            unsupported_set_messages: 0,
             taken: BTreeMap::new(),
             test: std::thread::current()
                 .name()
@@ -255,6 +265,13 @@ impl Drop for Reported {
                 "UNADVERTISED-STAGE count {}: {} message(s) about the vertex stage's subgroups \
                  passed",
                 self.test, self.unadvertised_messages
+            );
+        }
+        if self.unsupported_set_messages != 0 {
+            eprintln!(
+                "UNSUPPORTED-SET count {}: {} message(s) about set layouts the driver's support \
+                 query refuses passed",
+                self.test, self.unsupported_set_messages
             );
         }
     }
@@ -361,6 +378,9 @@ impl Messages {
                 if notice.degradation == Degradation::UnadvertisedVertexSimdgroups {
                     reported.unadvertised_vertex = true;
                 }
+                if notice.degradation == Degradation::SetPastLayoutSupport {
+                    reported.unsupported_sets = true;
+                }
                 if reported.notices.len() < Self::MAX {
                     reported.notices.push(message.clone());
                 }
@@ -383,6 +403,19 @@ impl Messages {
                     "UNADVERTISED-STAGE {}: passed, announced as {}: {} ({}): {}",
                     reported.test,
                     Degradation::UnadvertisedVertexSimdgroups.code(),
+                    message.id_name,
+                    message.id,
+                    message.text.replace('\n', " ")
+                );
+                return;
+            }
+            if reported.unsupported_sets && unsupported_set::shape(&message.id_name, &message.text)
+            {
+                reported.unsupported_set_messages += 1;
+                eprintln!(
+                    "UNSUPPORTED-SET {}: passed, announced as {}: {} ({}): {}",
+                    reported.test,
+                    Degradation::SetPastLayoutSupport.code(),
                     message.id_name,
                     message.id,
                     message.text.replace('\n', " ")

@@ -7,11 +7,13 @@
 //! texture once that holder went. The kernel samples a 2-by-2 `RGBA32Uint` texture through a
 //! sampler held beside it, so its output is the texels it reached (a float twin of the case reads
 //! `RGBA16Float` linearly). Each degradation site of the kinds ([`RESOURCE_IDS`] and the device
-//! heap's: [`UNVIEWABLE`], [`UNNAMED_SHADOWS`], [`PAST_CAPACITY`], [`OWN_COPIES`]) is taken on a
-//! device of its own and announced once.
+//! heap's: [`UNVIEWABLE`], [`UNNAMED_SHADOWS`], [`PAST_CAPACITY`], [`PAST_LAYOUT_SUPPORT`],
+//! [`OWN_COPIES`]) is taken on a device of its own and announced once.
 
 use super::buffer_texture_blits::linear_rows_differ;
-use super::degrade_notices::{assert_made_once, assert_once, forced, shared_in_system_memory};
+use super::degrade_notices::{
+    assert_made_once, assert_once, forced, refused_sets, shared_in_system_memory,
+};
 use super::host_memory::{no_copy, not_importable, Mapping, GUEST_PAGE};
 use super::sparse_textures::{lacks_sparse, SparseFacts};
 use super::{
@@ -21,6 +23,7 @@ use super::{
 };
 use crate::candidate::engine::resources::argument_sampler_descriptor;
 use crate::candidate::engine::ComputeOutput;
+use crate::candidate::unsupported_set;
 use crate::gpu::TEST_DEVICE;
 use crate::literal::LiteralTexture;
 use ash::vk;
@@ -28,7 +31,7 @@ use metal2vulkan::bind::indirect_commands::RECORDS_ID_LIMIT;
 use metal2vulkan::bind::{SamplerDescriptor, TileMapping};
 use metal2vulkan::device::DriverFact;
 use metal2vulkan::device::VkFeature;
-use metal2vulkan::error::Feature;
+use metal2vulkan::error::{Feature, RuntimeDriverDefect};
 use metal2vulkan::metal::format::direct_format;
 use metal2vulkan::metal::{
     CompareFunction, IndirectCommandType, PixelFormat, RenderStages, ResourceUsage,
@@ -66,6 +69,11 @@ pub(super) const UNNAMED_SHADOWS: [Degradation; 1] = [Degradation::UnnamedShadow
 /// pipeline's heap arrays end below the highest ID Metal hands out (and expects absent
 /// elsewhere).
 pub(super) const PAST_CAPACITY: [Degradation; 1] = [Degradation::UnnamedTexturesPastCapacity];
+
+/// The kind [`a_heap_set_its_driver_refuses_is_announced_once_where_it_runs`] takes where the
+/// device's driver refuses the pipeline's heap set through its support query (and expects absent
+/// elsewhere).
+pub(super) const PAST_LAYOUT_SUPPORT: [Degradation; 1] = [Degradation::SetPastLayoutSupport];
 
 /// The kind [`a_device_without_pending_writes_binds_a_copy_per_command_buffer`] takes.
 pub(super) const OWN_COPIES: [Degradation; 1] = [Degradation::HeapSetCopied];
@@ -1620,6 +1628,52 @@ fn a_texture_at_the_highest_id_is_reached_where_the_arrays_hold_it() {
     });
 }
 
+/// The case's pipeline state reads its texture through its ID, so its set 1 holds the heap's
+/// arrays, past the 1024 descriptors every Vulkan device's set layouts hold. Where the device's
+/// driver refuses that layout through `vkGetDescriptorSetLayoutSupport` (asked here apart from
+/// the runtime, `degrade_notices::refused_sets`) and runs it as Metal runs the argument buffer
+/// (`RuntimeDriverDefect::SetLayoutSupportUnderstated`: MoltenVK), the making announces it once
+/// (`PAST_LAYOUT_SUPPORT`), and the validation layer's report of each such layout passes after
+/// the notice (`candidate/unsupported_set.rs`); a second state of the case announces nothing
+/// again. Where the driver supports the layout, nothing is announced. The dispatch reads the
+/// case's texels through the set either way. The line `SET-SUPPORT` reports the sets the driver
+/// refuses.
+#[test]
+fn a_heap_set_its_driver_refuses_is_announced_once_where_it_runs() {
+    on_device(|device, messages| {
+        let sampling = Sampling::new(device);
+        let texture = sampling.texture();
+        let (command_buffer, buffers) = sampling.encode(device, texture, Some(texture), None);
+        command_buffer.commit().unwrap();
+        let output = sampling.output(&command_buffer, &buffers);
+        assert_eq!(output, sampling.case.metal_output, "through the heap set");
+        let [execution] = &command_buffer.executions()[..] else {
+            panic!("one dispatch");
+        };
+        let ExecutedPipeline::Compute(pipeline) = execution.pipeline() else {
+            panic!("a compute pipeline");
+        };
+        let refused = refused_sets(device, &pipeline.layout);
+        eprintln!(
+            "SET-SUPPORT {}: the driver refuses the sets (number, descriptors) {refused:?}",
+            device.name()
+        );
+        let understated = (device.properties().driver_defects)
+            .contains(&RuntimeDriverDefect::SetLayoutSupportUnderstated);
+        assert!(
+            refused.is_empty() || understated,
+            "made a set its driver refuses: {refused:?}"
+        );
+        let kinds: &[Degradation] = match refused.is_empty() {
+            true => &[],
+            false => &PAST_LAYOUT_SUPPORT,
+        };
+        sampling.announced(device, messages, kinds);
+        drop(pipeline_state(device, &sampling.case).unwrap());
+        sampling.announced(device, messages, &[]);
+    });
+}
+
 /// On a device without `descriptorBindingUpdateUnusedWhilePending` (withheld here; every venue
 /// has it), which writes no descriptor set a pending command buffer binds, each command buffer
 /// binds a copy of the heap set of its own, announced once (`OWN_COPIES`). The IDs read as on any
@@ -2793,7 +2847,9 @@ type Seen = (Vec<DebugMessage>, Vec<DebugMessage>, Vec<DebugMessage>);
 fn reservations_keep_ids_from_plain_allocation() {
     let messages = Messages::default();
     // The device's sink keeps the reservation's diagnostic lines, what the validation layer
-    // reported that fails a run (the rule `Messages` applies), and the notices.
+    // reported that fails a run (the rule `Messages` applies: a set layout's report after the
+    // device announced `set-past-layout-support` passes, `candidate/unsupported_set.rs`), and the
+    // notices.
     let seen: Arc<Mutex<Seen>> = Arc::default();
     let cache = ScratchCache::new().unwrap();
     {
@@ -2810,7 +2866,14 @@ fn reservations_keep_ids_from_plain_allocation() {
                     } else if message.severity == MessageSeverity::Error
                         || (message.severity == MessageSeverity::Warning && message.kind.validation)
                     {
-                        seen.1.push(message.clone());
+                        let announced = seen.2.iter().any(|notice| {
+                            notice.degradation.as_ref().is_some_and(|notice| {
+                                notice.degradation == Degradation::SetPastLayoutSupport
+                            })
+                        });
+                        if !(announced && unsupported_set::shape(&message.id_name, &message.text)) {
+                            seen.1.push(message.clone());
+                        }
                     }
                 }));
             })

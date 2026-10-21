@@ -34,6 +34,7 @@ use crate::Device;
 use ash::vk;
 use metal2vulkan::bind::DispatchRegion;
 use metal2vulkan::cache::{Hash256, SpecializationKey};
+use metal2vulkan::error::{Feature, RuntimeDriverDefect, Unsupported};
 use metal2vulkan::pipeline::{
     DescriptorSetLayout, PipelineLayout, RenderPipeline, SlotRef, StageModule,
 };
@@ -1021,13 +1022,123 @@ impl VariantObjects {
 
 /// The `VkDescriptorSetLayout` of `set`, each binding with its `immutable` samplers (none where
 /// its list is empty or missing) and of its type in `types` (the set's own where the list is
-/// shorter).
+/// shorter). A layout the driver refuses ([`set_support`]) is refused, but where the driver runs
+/// what it refuses (`RuntimeDriverDefect::SetLayoutSupportUnderstated`), whose variant's making
+/// announced it (`Device::degrade_pipeline`).
 pub(crate) fn create_set_layout(
     device: &Device,
     set: &DescriptorSetLayout,
-    (immutable, types): (&[&[vk::Sampler]], &[vk::DescriptorType]),
+    samplers_and_types: (&[&[vk::Sampler]], &[vk::DescriptorType]),
     push: bool,
 ) -> Result<vk::DescriptorSetLayout, Error> {
+    with_create_info(set, samplers_and_types, push, |info| {
+        if layout_support(device, set, info) == SetSupport::Refused {
+            return Err(Error::Unsupported(Unsupported::not_implemented(
+                Feature::ArgumentBufferTextures,
+            )));
+        }
+        // SAFETY: `info` and every array it points at are live for the call.
+        unsafe {
+            device
+                .shared()
+                .vk()
+                .create_descriptor_set_layout(info, None)
+        }
+        .map_err(vulkan)
+    })
+}
+
+/// Whether the device makes `set`'s layout (as a pooled set of its own binding types), asking its
+/// driver where Vulkan does not promise it ([`set_support`]).
+pub(crate) fn set_layout_support(device: &Device, set: &DescriptorSetLayout) -> SetSupport {
+    with_create_info(set, (&[], &[]), false, |info| {
+        layout_support(device, set, info)
+    })
+}
+
+/// [`set_support`] of `set`, whose create info is `info`, on `device`.
+fn layout_support(
+    device: &Device,
+    set: &DescriptorSetLayout,
+    info: &vk::DescriptorSetLayoutCreateInfo<'_>,
+) -> SetSupport {
+    let understated = (device.properties().driver_defects)
+        .contains(&RuntimeDriverDefect::SetLayoutSupportUnderstated);
+    let total = set.bindings.iter().map(|b| u64::from(b.count)).sum();
+    set_support(total, understated, || {
+        let mut support = vk::DescriptorSetLayoutSupport::default();
+        // SAFETY: `info` and every array it points at are live for the call, and `support` heads
+        // an empty chain.
+        unsafe {
+            device
+                .shared()
+                .vk()
+                .get_descriptor_set_layout_support(info, &mut support)
+        };
+        support.supported == vk::TRUE
+    })
+}
+
+/// Whether the runtime makes, on the device `description` names, a descriptor set layout its
+/// driver's `vkGetDescriptorSetLayoutSupport` refuses ([`SetSupport::Understated`]): where the
+/// driver runs what the query refuses (`RuntimeDriverDefect::SetLayoutSupportUnderstated`,
+/// `driver_defects.rs`). Validation's executor makes its own heap sets by it, so its sink passes
+/// the validation layer's report of such a layout there as the runtime's does.
+#[doc(hidden)]
+pub fn makes_layouts_past_support(description: &metal2vulkan::device::DeviceDescription) -> bool {
+    crate::driver_defects::of(description)
+        .contains(&RuntimeDriverDefect::SetLayoutSupportUnderstated)
+}
+
+/// The least `maxPerSetDescriptors` Vulkan allows (its Required Limits): a set layout of at most
+/// that many descriptors is one `vkGetDescriptorSetLayoutSupport` answers `VK_TRUE` for on every
+/// device, so only a larger one is asked about.
+pub(crate) const LEAST_PER_SET_DESCRIPTORS: u64 = 1024;
+
+/// Whether a device makes a descriptor set layout.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SetSupport {
+    /// It makes it: Vulkan promises it, or the driver's `vkGetDescriptorSetLayoutSupport`
+    /// answers `VK_TRUE`.
+    Supported,
+    /// The driver's query answers `VK_FALSE`, and the driver runs the layout as Metal runs the
+    /// argument buffer it encodes it in (`RuntimeDriverDefect::SetLayoutSupportUnderstated`): it
+    /// is made, announced (`Degradation::SetPastLayoutSupport`), and Vulkan's validation layer
+    /// reports it (`VUID-vkCreateDescriptorSetLayout-support-09582`).
+    Understated,
+    /// The driver's query answers `VK_FALSE`: not made (`Unsupported`), as Vulkan requires
+    /// (`VUID-vkCreateDescriptorSetLayout-support-09582`: "If the descriptor layout exceeds the
+    /// limits reported through the physical device limits, then vkGetDescriptorSetLayoutSupport
+    /// must have returned VkDescriptorSetLayoutSupport with support equal to VK_TRUE").
+    Refused,
+}
+
+/// [`SetSupport`] of a layout of `total` descriptors on a device whose driver understates its
+/// support (`understated`), `supported` asking the driver: a layout of at most
+/// [`LEAST_PER_SET_DESCRIPTORS`] is supported unasked ("If the descriptor set layout satisfies
+/// the VkPhysicalDeviceMaintenance3Properties::maxPerSetDescriptors limit, this command is
+/// guaranteed to return VK_TRUE"); any other is what the driver answers.
+pub(crate) fn set_support(
+    total: u64,
+    understated: bool,
+    supported: impl FnOnce() -> bool,
+) -> SetSupport {
+    if total <= LEAST_PER_SET_DESCRIPTORS || supported() {
+        SetSupport::Supported
+    } else if understated {
+        SetSupport::Understated
+    } else {
+        SetSupport::Refused
+    }
+}
+
+/// `f` of the `VkDescriptorSetLayoutCreateInfo` of `set` as [`create_set_layout`] makes it.
+fn with_create_info<R>(
+    set: &DescriptorSetLayout,
+    (immutable, types): (&[&[vk::Sampler]], &[vk::DescriptorType]),
+    push: bool,
+    f: impl FnOnce(&vk::DescriptorSetLayoutCreateInfo<'_>) -> R,
+) -> R {
     let bindings: Vec<vk::DescriptorSetLayoutBinding<'_>> = set
         .bindings
         .iter()
@@ -1059,14 +1170,7 @@ pub(crate) fn create_set_layout(
     if flags.iter().any(|f| !f.is_empty()) {
         info = info.push_next(&mut flags_info);
     }
-    // SAFETY: `info` and every array it points at are live for the call.
-    unsafe {
-        device
-            .shared()
-            .vk()
-            .create_descriptor_set_layout(&info, None)
-    }
-    .map_err(vulkan)
+    f(&info)
 }
 
 /// The shape of `layout`'s set 0 and push-constant ranges, where its draws push set 0
