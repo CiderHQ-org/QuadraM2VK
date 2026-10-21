@@ -1210,12 +1210,18 @@ struct ManyDraws<G: Gpu> {
     indices: G::Buffer,
     /// Four uniform buffers: draw `i` reads buffer `i % 4` at `(i / 4) * MANY_STRIDE`.
     uniforms: [G::Buffer; 4],
+    /// Where the uniforms lie in host pages: the heap over those pages, which the buffers lie in
+    /// too, as a guest's buffers lie in its memory beside its heaps.
+    _pages: Option<G::Heap>,
     target: G::Texture,
     depth: G::Texture,
 }
 
 impl<G: Gpu> ManyDraws<G> {
-    fn new(g: &G, library: &G::Library, count: usize) -> ManyDraws<G> {
+    /// The scene of `count` draws, its uniforms in buffers of their own, or with `pages` in
+    /// no-copy buffers over host pages a no-copy heap lies over too: `None` where the side makes
+    /// no such heap.
+    fn new(g: &G, library: &G::Library, count: usize, pages: bool) -> Option<ManyDraws<G>> {
         let pipeline = |i: usize| {
             g.depth_pipeline(
                 library,
@@ -1266,17 +1272,39 @@ impl<G: Gpu> ManyDraws<G> {
             .iter()
             .flat_map(|i| i.to_le_bytes())
             .collect();
-        ManyDraws {
+        let (uniforms, pages) = match pages {
+            false => (bytes.map(|bytes| g.buffer_with(&bytes)), None),
+            true => {
+                let page = 16 << 10;
+                let each = per.next_multiple_of(page);
+                // SAFETY: a new mapping of four buffers' pages, never unmapped: the process's to
+                // its end, past the heap and the buffers over it.
+                let pointer = unsafe { host_pages(4 * each) };
+                for (at, bytes) in bytes.iter().enumerate() {
+                    // SAFETY: `at * each + per` bytes lie in the mapping, which nothing uses yet.
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(bytes.as_ptr(), pointer.add(at * each), per)
+                    };
+                }
+                // SAFETY: page-aligned read-write memory that outlives the heap.
+                let heap = unsafe { g.heap_no_copy(pointer, 4 * each) }?;
+                // SAFETY: as above, each buffer over its own pages of the mapping.
+                let buffer = |at: usize| unsafe { g.buffer_no_copy(pointer.add(at * each), each) };
+                ([0, 1, 2, 3].map(buffer), Some(heap))
+            }
+        };
+        Some(ManyDraws {
             pipelines: [pipeline(0), pipeline(1), pipeline(2), pipeline(3)],
             depth_states: [g.depth_stencil(true), g.depth_stencil(false)],
             samplers: [g.sampler(true), g.sampler(false)],
             textures,
             quad: g.buffer_with(&floats(&[0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0])),
             indices: g.buffer_with(&indices),
-            uniforms: bytes.map(|bytes| g.buffer_with(&bytes)),
+            uniforms,
+            _pages: pages,
             target: g.texture(Format::Bgra8, MANY_TARGET.0, MANY_TARGET.1, true),
             depth: g.texture(Format::Depth32Float, MANY_TARGET.0, MANY_TARGET.1, true),
-        }
+        })
     }
 
     /// Encode one frame's render pass of `count` draws into `command_buffer`, as m2vbench's draws
@@ -1323,7 +1351,17 @@ impl<G: Gpu> ManyDraws<G> {
 /// time through the commit's return, and the GPU time where the side measures it.
 pub fn many_draws<G: Gpu>(g: &G, library: &G::Library, sizes: &Sizes) {
     let count = sizes.many_draws;
-    let scene = ManyDraws::new(g, library, count);
+    for (name, pages) in [("", false), ("pages_", true)] {
+        let Some(scene) = ManyDraws::new(g, library, count, pages) else {
+            continue;
+        };
+        many_draws_of(g, &scene, (name, count), sizes);
+    }
+}
+
+/// The many-draws workload's frames of `scene`, `count` draws each, its rows' names prefixed with
+/// `name`.
+fn many_draws_of<G: Gpu>(g: &G, scene: &ManyDraws<G>, (name, count): (&str, usize), sizes: &Sizes) {
     let mut times: [Vec<f64>; 7] = Default::default();
     for frame in 0..sizes.timed + 3 {
         g.pool(|| {
@@ -1354,14 +1392,14 @@ pub fn many_draws<G: Gpu>(g: &G, library: &G::Library, sizes: &Sizes) {
         });
     }
     let [encode, commit, wait, frame, cpu, gpu, thread] = &mut times;
-    emit("many_draws", "encode", "ms", encode);
-    emit("many_draws", "commit", "ms", commit);
-    emit("many_draws", "commit_to_done", "ms", wait);
-    emit("many_draws", "frame", "ms", frame);
-    emit("many_draws", "cpu", "ms", cpu);
-    emit("many_draws", "thread_cpu", "ms", thread);
+    emit("many_draws", &format!("{name}encode"), "ms", encode);
+    emit("many_draws", &format!("{name}commit"), "ms", commit);
+    emit("many_draws", &format!("{name}commit_to_done"), "ms", wait);
+    emit("many_draws", &format!("{name}frame"), "ms", frame);
+    emit("many_draws", &format!("{name}cpu"), "ms", cpu);
+    emit("many_draws", &format!("{name}thread_cpu"), "ms", thread);
     if !gpu.is_empty() {
-        emit("many_draws", "gpu", "ms", gpu);
+        emit("many_draws", &format!("{name}gpu"), "ms", gpu);
     }
 }
 

@@ -62,7 +62,9 @@
 //!   every 64. Per frame: the encoding thread's wall time from the command buffer's creation
 //!   through `endEncoding`, the commit call's, from its return to the wait's, the whole frame's,
 //!   the process's CPU time, the encoding thread's CPU time through the commit's return, and
-//!   native's GPU time.
+//!   native's GPU time. Where the side makes a heap over host pages (the runtime's), the frames
+//!   again with the four uniform buffers no-copy buffers over host pages that such a heap lies
+//!   over too, as a guest's buffers lie in its memory beside its heaps (the `pages_` rows).
 //! - `drag`: a frame shaped as the guest's window drag (a macOS guest's WindowServer, measured in
 //!   a VM's work counts): 40 command buffers, each committed, of which the first 31 hold a render
 //!   pass of three textured draws into one of eight 256x256 `BGRA8Unorm` window surfaces in a
