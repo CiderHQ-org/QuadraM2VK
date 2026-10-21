@@ -13,7 +13,7 @@ use crate::metal::format::candidate_formats;
 use crate::metal::PixelFormat;
 use crate::spirv::interp::{run, run_with_images, Buffer, Config, Image, Order, Resources};
 use crate::spirv::ir::TypedModule;
-use crate::spirv::testing::{check_valid, committed_profiles};
+use crate::spirv::testing::{check_valid, committed_profiles, sharded_tests};
 use crate::vk::Format;
 
 /// Every chain the M4 measured that the tests replay (the file's header states them).
@@ -706,25 +706,114 @@ fn check_m3_chains(chains: &[Digested]) -> Checked {
     checked
 }
 
+/// Shard `shard` of `shards` of a table's `chains`: those whose index is `shard` modulo
+/// `shards`, each in exactly one shard.
+fn shard_of(chains: Vec<Digested>, (shard, shards): (usize, usize)) -> Vec<Digested> {
+    chains.into_iter().skip(shard).step_by(shards).collect()
+}
+
+/// The `shards` shards of the table `chains` makes take its chains together, each once.
+fn shards_cover(chains: impl Fn() -> Vec<Digested>, shards: usize) {
+    let named = |chains: Vec<Digested>| -> Vec<String> {
+        (chains.into_iter())
+            .map(|c| format!("{} {} {:?}", c.key, c.store, c.digests))
+            .collect()
+    };
+    let mut taken: Vec<String> = (0..shards)
+        .flat_map(|shard| named(shard_of(chains(), (shard, shards))))
+        .collect();
+    let mut all = named(chains());
+    taken.sort();
+    all.sort();
+    assert_eq!(taken, all);
+}
+
+/// What [`check_m3_chains`] finds of chains of which `known` are claimed and `near_ties` of those
+/// miss a level from a near tie.
+fn checked((known, near_ties): (usize, usize)) -> Checked {
+    Checked { known, near_ties }
+}
+
+/// What the shards of a table find ([`check_m3_chains`] over each, [`checked`]), together: the
+/// table's.
+fn together(shards: &[(usize, usize)]) -> Checked {
+    checked(
+        shards
+            .iter()
+            .fold((0, 0), |(known, near), &(k, n)| (known + k, near + n)),
+    )
+}
+
 /// Every chain the M3 Max measured past its tail's extent (2D textures, arrays and cubes whose
 /// first level is wider or taller than 64 texels, Private), from the probe's first level: the
 /// chain claims every one (`check_m3_chains`; the formats whose fields are not all 8-bit unorm or
 /// 32-bit float), and gives every level's digest but from a near tie in four (one sRGB colour code
 /// of a first level, and 16-bit float texels of levels read from kept values); the kernel's chain
 /// of one of them, two passes and the tail, and of a strip, is the CPU's.
+///
+/// The chains run as shards ([`sharded_tests!`], [`shard_of`]), each checking its chains
+/// ([`check_m3_chains`]) to what it finds of the table's ([`M3_PASSES_SHARDS`], which hold the
+/// table's together: [`the_m3_s_measured_passes_are_claimed_with_four_near_ties`]); the kernel's
+/// chains are tests of their own ([`the_kernel_gives_the_m3_s_measured_passes`]).
+fn the_chain_gives_the_m3_s_measured_passes(shard: usize, shards: usize) {
+    assert_eq!(M3_PASSES_SHARDS.len(), shards);
+    let chains = shard_of(digested(MEASURED_M3_PASSES, false), (shard, shards));
+    assert_eq!(check_m3_chains(&chains), checked(M3_PASSES_SHARDS[shard]));
+}
+
+sharded_tests!(
+    the_chain_gives_the_m3_s_measured_passes = the_chain_gives_the_m3_s_measured_passes(
+        shard_0 => 0,
+        shard_1 => 1,
+        shard_2 => 2,
+        shard_3 => 3,
+        shard_4 => 4,
+        shard_5 => 5,
+        shard_6 => 6,
+        shard_7 => 7,
+    )
+);
+
+/// What each shard of [`the_chain_gives_the_m3_s_measured_passes`] finds of its chains
+/// ([`Checked`]): the chains the chain claims, and those of them that miss a level from a near
+/// tie.
+const M3_PASSES_SHARDS: [(usize, usize); 8] = [
+    (30, 1),
+    (30, 2),
+    (30, 0),
+    (30, 0),
+    (30, 1),
+    (30, 0),
+    (29, 0),
+    (29, 0),
+];
+
+/// The table [`the_chain_gives_the_m3_s_measured_passes`] checks in shards: 238 chains, which its
+/// shards take together, each once, and find together that the chain claims every one and gives
+/// every level's digest but from a near tie in four.
 #[test]
-fn the_chain_gives_the_m3_s_measured_passes() {
-    let chains = digested(MEASURED_M3_PASSES, false);
-    assert_eq!(chains.len(), 238);
+fn the_m3_s_measured_passes_are_claimed_with_four_near_ties() {
+    assert_eq!(digested(MEASURED_M3_PASSES, false).len(), 238);
+    shards_cover(
+        || digested(MEASURED_M3_PASSES, false),
+        M3_PASSES_SHARDS.len(),
+    );
     assert_eq!(
-        check_m3_chains(&chains),
+        together(&M3_PASSES_SHARDS),
         Checked {
             known: 238,
             near_ties: 4
         }
     );
+}
+
+/// The kernel's chain of one of [`the_chain_gives_the_m3_s_measured_passes`]'s chains, two passes
+/// and the tail, and of a strip, is the CPU's, each a shard of its own.
+fn the_kernel_gives_the_m3_s_measured_passes(shard: usize, shards: usize) {
+    let chains = digested(MEASURED_M3_PASSES, false);
     let mut modules = Modules::default();
-    for key in ["f80-2d-130x130-l8-u8", "f80-2d-1000x3-l10-u8"] {
+    let keys = ["f80-2d-130x130-l8-u8", "f80-2d-1000x3-l10-u8"];
+    for key in keys.into_iter().skip(shard).step_by(shards) {
         kernel_gives(
             &mut modules,
             &chains,
@@ -733,6 +822,13 @@ fn the_chain_gives_the_m3_s_measured_passes() {
         );
     }
 }
+
+sharded_tests!(
+    the_kernel_gives_the_m3_s_measured_passes = the_kernel_gives_the_m3_s_measured_passes(
+        shard_0 => 0,
+        shard_1 => 1,
+    )
+);
 
 /// share-mips-m3b's chains of the 8-bit unorm and 32-bit float formats (strips from 66x1 to
 /// 16384x1, chains to 8192x64, Private, Shared and with `allowGPUOptimizedContents` off): the
@@ -825,16 +921,76 @@ fn the_chain_gives_the_m3_s_runs_where_metal_does_not_compress() {
 /// reads kept values at every level of a run, and the tail reads an axis of one texel alone
 /// (`RG11B10Float`'s 4096x4 strip, whose one-texel levels hold infinities); the kernel's chains of
 /// such strips are the CPU's.
-#[test]
-fn the_chain_gives_every_format_s_m3_passes() {
+///
+/// The chains run as shards ([`sharded_tests!`], [`shard_of`] of each table), each checking its
+/// chains ([`check_m3_chains`]) to what it finds of the tables' ([`M3_FORMATS_SHARDS`], which hold
+/// the tables' together: [`every_format_s_m3_passes_are_claimed_with_fourteen_near_ties`]); the
+/// kernel's chains are tests of their own ([`the_kernel_gives_every_format_s_m3_passes`]).
+fn the_chain_gives_every_format_s_m3_passes(shard: usize, shards: usize) {
+    assert_eq!(M3_FORMATS_SHARDS.len(), shards);
+    let (formats, stores) = every_format_s_m3_passes();
+    let (formats, stores) = (
+        shard_of(formats, (shard, shards)),
+        shard_of(stores, (shard, shards)),
+    );
+    let (in_formats, in_stores) = M3_FORMATS_SHARDS[shard];
+    assert_eq!(
+        (check_m3_chains(&formats), check_m3_chains(&stores)),
+        (checked(in_formats), checked(in_stores))
+    );
+}
+
+sharded_tests!(
+    the_chain_gives_every_format_s_m3_passes = the_chain_gives_every_format_s_m3_passes(
+        shard_0 => 0,
+        shard_1 => 1,
+        shard_2 => 2,
+        shard_3 => 3,
+        shard_4 => 4,
+        shard_5 => 5,
+        shard_6 => 6,
+        shard_7 => 7,
+    )
+);
+
+/// share-mips-m3b's chains of every format (`formats`) and share-mips-m3c's of every format but
+/// `BGRA8Unorm` (`stores`), which [`the_chain_gives_every_format_s_m3_passes`] checks.
+fn every_format_s_m3_passes() -> (Vec<Digested>, Vec<Digested>) {
     let formats = digested(MEASURED_M3_FORMATS, true);
     let stores: Vec<Digested> = digested(MEASURED_M3_STORES, true)
         .into_iter()
         .filter(|c| c.pf != PixelFormat::BGRA8Unorm)
         .collect();
+    (formats, stores)
+}
+
+/// What each shard of [`the_chain_gives_every_format_s_m3_passes`] finds of its chains of each
+/// table ([`Checked`]: the chains the chain claims, and those of them that miss a level from a
+/// near tie), share-mips-m3b's then share-mips-m3c's.
+const M3_FORMATS_SHARDS: [((usize, usize), (usize, usize)); 8] = [
+    ((19, 2), (14, 0)),
+    ((19, 2), (14, 0)),
+    ((19, 1), (14, 0)),
+    ((19, 1), (14, 0)),
+    ((18, 3), (14, 1)),
+    ((18, 1), (13, 0)),
+    ((17, 0), (12, 0)),
+    ((17, 3), (12, 0)),
+];
+
+/// The tables [`the_chain_gives_every_format_s_m3_passes`] checks in shards: 158 and 117 chains,
+/// which its shards take together, each once, and find together that the chain claims 146 and 107
+/// of them and gives every level's digest but from a near tie in 13 and 1.
+#[test]
+fn every_format_s_m3_passes_are_claimed_with_fourteen_near_ties() {
+    let (formats, stores) = every_format_s_m3_passes();
     assert_eq!((formats.len(), stores.len()), (158, 117));
+    let shards = M3_FORMATS_SHARDS.len();
+    shards_cover(|| every_format_s_m3_passes().0, shards);
+    shards_cover(|| every_format_s_m3_passes().1, shards);
+    let (in_formats, in_stores): (Vec<_>, Vec<_>) = M3_FORMATS_SHARDS.into_iter().unzip();
     assert_eq!(
-        (check_m3_chains(&formats), check_m3_chains(&stores)),
+        (together(&in_formats), together(&in_stores)),
         (
             Checked {
                 known: 146,
@@ -846,8 +1002,15 @@ fn the_chain_gives_every_format_s_m3_passes() {
             }
         )
     );
+}
+
+/// The kernel's chains of two strips of [`the_chain_gives_every_format_s_m3_passes`]'s formats
+/// carried through a half are the CPU's, each a shard of its own.
+fn the_kernel_gives_every_format_s_m3_passes(shard: usize, shards: usize) {
+    let (_, stores) = every_format_s_m3_passes();
     let mut modules = Modules::default();
-    for key in ["f554-2d-1024x12-l11-u8", "f92-2d-4096x4-l13-u8"] {
+    let keys = ["f554-2d-1024x12-l11-u8", "f92-2d-4096x4-l13-u8"];
+    for key in keys.into_iter().skip(shard).step_by(shards) {
         kernel_gives(
             &mut modules,
             &stores,
@@ -856,6 +1019,13 @@ fn the_chain_gives_every_format_s_m3_passes() {
         );
     }
 }
+
+sharded_tests!(
+    the_kernel_gives_every_format_s_m3_passes = the_kernel_gives_every_format_s_m3_passes(
+        shard_0 => 0,
+        shard_1 => 1,
+    )
+);
 
 /// The digests of every level of the M3 Max's chains under macOS 27.0.1 (the file's header states
 /// them).
