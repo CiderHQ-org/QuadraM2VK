@@ -18,6 +18,7 @@ use super::first_use::{read_mark, release, Busy, ENDED};
 use super::host_memory::{
     no_copy, not_importable, on_device, recording, Mapping, Seen, GUEST_PAGE,
 };
+use super::keep_alives::eventually;
 use super::rebind_reach::{node, output, A, POINTER_WALKER};
 use super::{
     bound_buffers, encode_case, pipeline_state, public_case, read_buffer, CaseResources, WAIT,
@@ -287,15 +288,18 @@ fn frees_while_the_gpu_is_busy_fail_no_command_buffer() {
 /// Neither Metal nor Vulkan keeps such an import for the walk: the program released memory its
 /// queued work reads. So the leg asserts nothing: it prints the busy work's and the walk's errors
 /// and the walk's output (`FREE-IN-FLIGHT ... AddressedImportReleased`). The pages stay mapped
-/// throughout, as guest memory does: the import's free alone is measured.
+/// throughout, as guest memory does: the import's free alone is measured. They go once the walk
+/// completed and the import's deallocator ran, which `HostMemory::new`'s contract asks: the
+/// deallocator, which reads them, may run on a handler thread after the waits return, where the
+/// device delays it (`host-deallocator-delayed`).
 fn addressed_import_released(device: &Device, queue: &CommandQueue, busy: &Busy) {
     let name = device.name();
     let seen: Arc<Seen> = Arc::default();
-    // The pages stay mapped until the walk completed (the mapping goes last), as the consumer's
-    // guest memory does: only the import is freed.
+    // The pages stay mapped until the walk completed and the deallocator ran (the mapping goes
+    // last), as the consumer's guest memory does: only the import is freed.
     let mapping = Mapping::anonymous(IMPORTED);
     // SAFETY: the mapping stays mapped until the end of this function, after every command
-    // buffer over it completed.
+    // buffer over it completed and the deallocator ran.
     let made = unsafe {
         no_copy(
             device,
@@ -357,6 +361,11 @@ fn addressed_import_released(device: &Device, queue: &CommandQueue, busy: &Busy)
         busy_work.error(),
         walk.status(),
         walk.error()
+    );
+    let ran = eventually(|| seen.runs.load(Ordering::SeqCst) == 1);
+    assert!(
+        ran,
+        "{name}: AddressedImportReleased: the import's deallocator never ran"
     );
     drop(mapping);
 }

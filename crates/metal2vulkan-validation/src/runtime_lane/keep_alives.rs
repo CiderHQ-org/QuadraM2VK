@@ -117,8 +117,9 @@ fn texture_over(buffer: &Buffer) -> (Texture, bool) {
     (texture, bound)
 }
 
-/// Wait until `done`, at most [`WAIT`]: an image and its import may go on a runtime thread.
-fn eventually(done: impl Fn() -> bool) -> bool {
+/// Wait until `done`, at most [`WAIT`]: an image and its import, and an import's deallocator,
+/// may go on a runtime thread.
+pub(super) fn eventually(done: impl Fn() -> bool) -> bool {
     let deadline = Instant::now() + WAIT;
     while !done() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(5));
