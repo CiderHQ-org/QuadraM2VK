@@ -7,9 +7,9 @@
 //! classed, and so reaches the ledger.
 
 use crate::device::{
-    BatchOrderPolicy, BlockDecodePolicy, CompletionPolicy, DecodedTexelsPolicy, DevicePolicy, FloatMathsPolicy,
-    HalfBlendPolicy, HalfRoundingPolicy, HeapCompressionPolicy, NanMinMaxPolicy, ResolvePolicy,
-    RoundingOrderPolicy, SamplingPolicy, TexelConversionPolicy, TileStorePolicy,
+    BatchOrderPolicy, BlockDecodePolicy, CompletionPolicy, DecodedTexelsPolicy, DevicePolicy,
+    FloatMathsPolicy, HalfBlendPolicy, HalfRoundingPolicy, HeapCompressionPolicy, NanMinMaxPolicy,
+    ResolvePolicy, RoundingOrderPolicy, SamplingPolicy, TexelConversionPolicy, TileStorePolicy,
     Unorm8LinearFilterPolicy, YCbCrFilterPolicy,
 };
 use crate::pipeline::PrecisionNote;
@@ -510,11 +510,15 @@ fn the_runtime_s_block_decode_choice_keys_no_profile() {
     let exact = committed_profiles_with(DevicePolicy {
         block_decode: BlockDecodePolicy::Exact,
         ..DevicePolicy::UNTRUSTED
-    }).expect("profiles");
+    })
+    .expect("profiles");
     assert_eq!(native.len(), exact.len());
     for ((name, native), (other, exact)) in native.iter().zip(&exact) {
         assert_eq!(name, other);
         assert_eq!(native.fingerprint(), exact.fingerprint(), "{name}");
     }
-    assert_eq!(DevicePolicy::UNTRUSTED.exact_answers().block_decode, BlockDecodePolicy::Exact);
+    assert_eq!(
+        DevicePolicy::UNTRUSTED.exact_answers().block_decode,
+        BlockDecodePolicy::Exact
+    );
 }

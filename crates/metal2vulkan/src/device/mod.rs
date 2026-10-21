@@ -66,10 +66,10 @@ pub use enables::{EnableSet, Exposure};
 pub(crate) use mechanism::mechanism;
 pub use metal::{MetalDeviceProperties, SimdSupport, StageSimd};
 pub use policy::{
-    BatchOrderPolicy, BlockDecodePolicy, CompletionPolicy, ContainmentPolicy, DecodedTexelsPolicy, DevicePolicy,
-    FloatMathsPolicy, HalfBlendPolicy, HalfRoundingPolicy, HeapCompressionPolicy, NanMinMaxPolicy,
-    ResolvePolicy, RoundingOrderPolicy, SamplingPolicy, TexelConversionPolicy, TileStorePolicy,
-    Unorm8LinearFilterPolicy, YCbCrFilterPolicy,
+    BatchOrderPolicy, BlockDecodePolicy, CompletionPolicy, ContainmentPolicy, DecodedTexelsPolicy,
+    DevicePolicy, FloatMathsPolicy, HalfBlendPolicy, HalfRoundingPolicy, HeapCompressionPolicy,
+    NanMinMaxPolicy, ResolvePolicy, RoundingOrderPolicy, SamplingPolicy, TexelConversionPolicy,
+    TileStorePolicy, Unorm8LinearFilterPolicy, YCbCrFilterPolicy,
 };
 pub(crate) use profile::whole_point_size;
 pub use profile::{DeviceProfile, SpirvValidation};

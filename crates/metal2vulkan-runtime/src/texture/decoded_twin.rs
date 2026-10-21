@@ -137,8 +137,8 @@ use metal2vulkan::bind::{
     AstcDecode, AstcTexels, BlockDecode, BlockDecodeModule, ChromaDecode, EtcDecode, EtcTexels,
     ImageViewDesc, PvrtcDecode,
 };
-use metal2vulkan::device::{BlockDecodePolicy, DecodedTexelsPolicy};
 use metal2vulkan::device::FormatUsage;
+use metal2vulkan::device::{BlockDecodePolicy, DecodedTexelsPolicy};
 use metal2vulkan::error::{Capability, Feature, Unsupported};
 use metal2vulkan::metal::format::FormatMapping;
 use metal2vulkan::metal::PixelFormat;

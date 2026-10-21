@@ -413,7 +413,13 @@ impl ArgumentTable {
     /// Whether a plain buffer binding leaves this slot's identity, offset, stride and kind
     /// unchanged. Inline bytes and function tables must still be replaced even when their
     /// backing buffer happens to be the same object.
-    fn same_buffer(&self, index: u32, buffer: Option<&Buffer>, offset: u64, stride: Option<u32>) -> bool {
+    fn same_buffer(
+        &self,
+        index: u32,
+        buffer: Option<&Buffer>,
+        offset: u64,
+        stride: Option<u32>,
+    ) -> bool {
         let same = match (self.buffers.get(&index), buffer) {
             (Some((bound, at)), Some(buffer)) => bound == buffer && *at == offset,
             (None, None) => true,
@@ -536,10 +542,15 @@ impl ArgumentTable {
                 self.check_buffer(core, call, buffer, offset)?;
             }
         }
-        if buffers.iter().zip(offsets).enumerate().all(|(i, (buffer, &offset))| {
-            let stride = strides.and_then(|s| attribute_stride(s[i]));
-            self.same_buffer(first + i as u32, *buffer, offset, stride)
-        }) {
+        if buffers
+            .iter()
+            .zip(offsets)
+            .enumerate()
+            .all(|(i, (buffer, &offset))| {
+                let stride = strides.and_then(|s| attribute_stride(s[i]));
+                self.same_buffer(first + i as u32, *buffer, offset, stride)
+            })
+        {
             return Ok(());
         }
         self.stamp = Stamp::fresh();
@@ -715,7 +726,11 @@ impl ArgumentTable {
             core.check_device(call, texture.device())?;
             texture.check_not_memoryless(call)?;
         }
-        if textures.iter().zip(first..).all(|(texture, index)| self.textures.get(&index) == *texture) {
+        if textures
+            .iter()
+            .zip(first..)
+            .all(|(texture, index)| self.textures.get(&index) == *texture)
+        {
             return Ok(());
         }
         self.stamp = Stamp::fresh();

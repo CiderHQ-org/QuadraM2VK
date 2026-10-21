@@ -11,12 +11,6 @@ mod address_map;
 mod amplification;
 mod apple_only;
 mod argument_buffers;
-#[cfg(any(m2v_gpu, m2v_cpu_icd))]
-mod binding_repeats;
-#[cfg(any(m2v_gpu, m2v_cpu_icd))]
-mod cpu_copy_size;
-#[cfg(any(m2v_gpu, m2v_cpu_icd))]
-mod native_block_decode;
 mod argument_encoder;
 #[cfg(debug_assertions)]
 mod argument_table;
@@ -25,6 +19,8 @@ mod attributes;
 mod batches;
 mod binary;
 mod binary_archive;
+#[cfg(any(m2v_gpu, m2v_cpu_icd))]
+mod binding_repeats;
 mod binding_view;
 mod blit;
 #[cfg(any(m2v_gpu, m2v_cpu_icd))]
@@ -42,6 +38,8 @@ mod completion_seen;
 mod compute;
 mod contexts;
 mod copy_plan;
+#[cfg(any(m2v_gpu, m2v_cpu_icd))]
+mod cpu_copy_size;
 mod degradation;
 mod depth_copy;
 mod depth_ranges;
@@ -118,6 +116,8 @@ mod mipmap_scratch;
 mod multisample_buffer_copy;
 #[cfg(any(m2v_gpu, m2v_cpu_icd))]
 mod nan_signs;
+#[cfg(any(m2v_gpu, m2v_cpu_icd))]
+mod native_block_decode;
 mod noted_apart;
 mod numbered_samplers;
 mod options;

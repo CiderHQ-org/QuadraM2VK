@@ -41,11 +41,11 @@
 //! (ignored, release) times the CPU decode that takes.
 
 use super::degrade_notices::{counts, on_device_with};
-use super::Messages;
 use super::first_use::{read_mark, release, scheduled, Busy, ENDED};
 use super::host_memory::{recording, Mapping, Seen};
 use super::no_copy_heaps::{no_copy_heap, shared, HEAP};
 use super::rebinds::rebind_heap;
+use super::Messages;
 use super::{buffer_with, read_buffer, WAIT};
 use crate::air_library::AirLibrary;
 use metal2vulkan::device::{BlockDecodePolicy, DriverFact};
@@ -62,7 +62,10 @@ use std::time::Instant;
 
 /// This lane qualifies Metal's exact decoder; the native default has separate coverage.
 fn on_device(test: impl FnOnce(&Device, &Messages)) {
-    on_device_with(|options| options.policy.block_decode = BlockDecodePolicy::Exact, test);
+    on_device_with(
+        |options| options.policy.block_decode = BlockDecodePolicy::Exact,
+        test,
+    );
 }
 
 /// The kinds a BC1 to BC5 texture announces on a driver not measured to decode it as Metal does:

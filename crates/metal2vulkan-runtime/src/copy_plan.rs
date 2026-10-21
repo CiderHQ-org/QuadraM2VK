@@ -477,7 +477,8 @@ impl HostLayout {
         if self.row_bytes == 0 || self.rows == 0 || self.images == 0 {
             return Some(0);
         }
-        (self.images - 1).checked_mul(self.bytes_per_image)?
+        (self.images - 1)
+            .checked_mul(self.bytes_per_image)?
             .checked_add((self.rows - 1).checked_mul(self.bytes_per_row)?)?
             .checked_add(self.row_bytes)
     }
@@ -596,13 +597,16 @@ pub(super) fn plan_host_copy(
         return Ok(None);
     }
     let host = HostLayout {
-            row_bytes: s.row_bytes,
-            rows: s.rows,
-            images: s.images,
-            bytes_per_row,
-            bytes_per_image,
-        };
-    if host.checked_host_len().is_none_or(|len| len > isize::MAX as u64) {
+        row_bytes: s.row_bytes,
+        rows: s.rows,
+        images: s.images,
+        bytes_per_row,
+        bytes_per_image,
+    };
+    if host
+        .checked_host_len()
+        .is_none_or(|len| len > isize::MAX as u64)
+    {
         return Err(CopyProblem::BufferRange);
     }
     Ok(Some((image, host)))
