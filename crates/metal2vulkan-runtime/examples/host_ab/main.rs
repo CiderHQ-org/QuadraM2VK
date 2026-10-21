@@ -65,6 +65,11 @@
 //!   native's GPU time. Where the side makes a heap over host pages (the runtime's), the frames
 //!   again with the four uniform buffers no-copy buffers over host pages that such a heap lies
 //!   over too, as a guest's buffers lie in its memory beside its heaps (the `pages_` rows).
+//! - `layers`: a frame shaped as m2vbench's composite mode (CoreAnimation-like layers): one render
+//!   pass into a 1920x1080 `BGRA8Unorm` target, a wallpaper, then 800 textured rounded-corner
+//!   layers back to front, each one draw of a strip whose uniforms are its `setVertexBytes` and
+//!   whose texture (of 48) is bound before it, with a soft shadow's draw under every eighth (its
+//!   own pipeline state, set before it and back after): 901 draws. Per frame as `many_draws`.
 //! - `drag`: a frame shaped as the guest's window drag (a macOS guest's WindowServer, measured in
 //!   a VM's work counts): 40 command buffers, each committed, of which the first 31 hold a render
 //!   pass of three textured draws into one of eight 256x256 `BGRA8Unorm` window surfaces in a
@@ -155,7 +160,7 @@ use std::process::{Command, Stdio};
 use std::time::Instant;
 use workloads::Sizes;
 
-const WORKLOADS: [&str; 14] = [
+const WORKLOADS: [&str; 15] = [
     "encode",
     "fixed",
     "latency",
@@ -164,6 +169,7 @@ const WORKLOADS: [&str; 14] = [
     "memory",
     "frame",
     "many_draws",
+    "layers",
     "churn",
     "compositing",
     "drag",
@@ -375,6 +381,7 @@ fn run<G: Gpu>(g: &G, opened: Instant, metallib: &Path, options: &Options) {
             "memory" => workloads::memory(g, sizes, &options.variants),
             "frame" => workloads::frame(g, &scene, sizes),
             "many_draws" => workloads::many_draws(g, &library, sizes),
+            "layers" => workloads::layers(g, &library, sizes),
             "churn" => workloads::churn(g, sizes),
             "compositing" => workloads::compositing(g, &scene, sizes),
             "drag" => workloads::drag(g, &scene, sizes),

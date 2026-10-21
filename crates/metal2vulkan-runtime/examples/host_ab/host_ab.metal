@@ -384,3 +384,47 @@ vertex QuadOut icb_draw_vertex(uint vid [[vertex_id]], uint object [[instance_id
 fragment float4 icb_draw_fragment(QuadOut in [[stage_in]]) {
     return float4(in.uv, float(NONCE) * 1.0e-12, 1.0);
 }
+
+// The layers workload's (m2vbench's composite mode): a layer's rectangle in pixels (x, y, w, h)
+// and the viewport's size, its opacity and its corner radius.
+struct LayerUniforms {
+    float4 rect;
+    float4 v;
+};
+
+struct LayerOut {
+    float4 position [[position]];
+    float2 uv;
+    float4 shape;
+};
+
+// A layer's rectangle as a strip of four vertices.
+vertex LayerOut layer_vertex(uint vid [[vertex_id]], constant LayerUniforms &u [[buffer(0)]]) {
+    float2 p = float2(float(vid & 1u), float(vid >> 1));
+    float2 ndc = (u.rect.xy + p * u.rect.zw) / u.v.xy * 2.0 - 1.0;
+    LayerOut out;
+    out.position = float4(ndc.x, -ndc.y, float(NONCE) * 1.0e-12, 1.0);
+    out.uv = p;
+    out.shape = float4(u.rect.zw, u.v.z, u.v.w);
+    return out;
+}
+
+static float rounded_rect(float2 uv, float2 size, float r) {
+    float2 q = abs(uv - 0.5) * size - (size * 0.5 - r);
+    return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
+}
+
+// A layer's texels inside its rounded corners, premultiplied by its opacity.
+fragment float4 layer_fragment(LayerOut in [[stage_in]],
+                               texture2d<float> t [[texture(0)]],
+                               sampler s [[sampler(0)]]) {
+    float a = saturate(0.5 - rounded_rect(in.uv, in.shape.xy, in.shape.w));
+    return t.sample(s, in.uv) * (a * in.shape.z) + float4(float(NONCE) * 1.0e-12);
+}
+
+// A soft shadow under a layer grown by 32 pixels on each side.
+fragment float4 shadow_fragment(LayerOut in [[stage_in]]) {
+    float d = rounded_rect(in.uv, in.shape.xy, in.shape.w + 32.0) + 32.0;
+    float a = 1.0 - smoothstep(-24.0, 24.0, d);
+    return float4(0.0, 0.0, 0.0, 0.35 * a * in.shape.z + float(NONCE) * 1.0e-12);
+}

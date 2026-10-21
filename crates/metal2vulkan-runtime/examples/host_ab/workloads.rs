@@ -1403,6 +1403,166 @@ fn many_draws_of<G: Gpu>(g: &G, scene: &ManyDraws<G>, (name, count): (&str, usiz
     }
 }
 
+/// The layers workload's layers, its textures, their sides, and the target's size (m2vbench's
+/// composite mode at its default count).
+const LAYERS: usize = 800;
+const LAYER_TEXTURES: usize = 48;
+const LAYER_SIDES: [usize; 5] = [64, 96, 128, 192, 256];
+const LAYERS_TARGET: (usize, usize) = (1920, 1080);
+
+/// What the layers workload draws with (module docs of `main.rs`).
+struct Layers<G: Gpu> {
+    /// The layers' and the shadows' pipeline states; the wallpaper is drawn as a layer.
+    layer: G::RenderPipeline,
+    shadow: G::RenderPipeline,
+    sampler: G::Sampler,
+    wallpaper: G::Texture,
+    textures: Vec<G::Texture>,
+    /// Each layer's rectangle at rest: x, y, w, h in pixels.
+    rests: Vec<[f32; 4]>,
+    target: G::Texture,
+}
+
+impl<G: Gpu> Layers<G> {
+    fn new(g: &G, library: &G::Library) -> Layers<G> {
+        let (width, height) = LAYERS_TARGET;
+        let pipeline =
+            |fragment| g.render_pipeline(library, "layer_vertex", fragment, Format::Bgra8, true);
+        let texture = |w: usize, h: usize, seed: usize| {
+            let texture = g.texture(Format::Rgba8, w, h, false);
+            let texels: Vec<u8> = (0..w * h)
+                .flat_map(|i| {
+                    let (x, y) = (i % w, i / w);
+                    let v = ((x * 7 + y * 13) ^ seed.wrapping_mul(2_654_435_761)) as u8;
+                    [
+                        v,
+                        (x * 255 / w) as u8,
+                        ((y * 255 / h + seed * 31) % 256) as u8,
+                        255,
+                    ]
+                })
+                .collect();
+            g.replace_region(&texture, (w, h), &texels, w * 4);
+            texture
+        };
+        let textures = (0..LAYER_TEXTURES)
+            .map(|i| texture(LAYER_SIDES[i % 5], LAYER_SIDES[(i / 5) % 5], i + 300))
+            .collect();
+        let mut seed = 42u32;
+        let mut next = || {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (seed >> 8) as f32 / (1u32 << 24) as f32
+        };
+        let rests = (0..LAYERS)
+            .map(|_| {
+                let (w, h) = (120.0 + next() * 560.0, 90.0 + next() * 420.0);
+                let (x, y) = (next() * (width as f32 - w), next() * (height as f32 - h));
+                [x, y, w, h]
+            })
+            .collect();
+        Layers {
+            layer: pipeline("layer_fragment"),
+            shadow: pipeline("shadow_fragment"),
+            sampler: g.sampler(true),
+            wallpaper: texture(256, 256, 999),
+            textures,
+            rests,
+            target: g.texture(Format::Bgra8, width, height, true),
+        }
+    }
+
+    /// Encode one frame at time `t` into `command_buffer`, as m2vbench's composite mode does: the
+    /// wallpaper, then each layer back to front, a shadow under every eighth, one draw each, its
+    /// uniforms as vertex bytes and its texture bound before it.
+    fn encode(&self, g: &G, command_buffer: &G::CommandBuffer, t: f32) {
+        let (width, height) = (LAYERS_TARGET.0 as f32, LAYERS_TARGET.1 as f32);
+        let uniforms = |rect: [f32; 4], opacity: f32| {
+            floats(&[
+                rect[0], rect[1], rect[2], rect[3], width, height, opacity, 12.0,
+            ])
+        };
+        let mut encoder = g.render_encoder(command_buffer, &self.target, true);
+        g.set_fragment_sampler(&mut encoder, &self.sampler, 0);
+        g.set_render_pipeline(&mut encoder, &self.layer);
+        g.set_vertex_bytes(&mut encoder, &uniforms([0.0, 0.0, width, height], 1.0), 0);
+        g.set_fragment_texture(&mut encoder, &self.wallpaper, 0);
+        g.draw_strip(&mut encoder, 4);
+        for (i, rest) in self.rests.iter().enumerate() {
+            let f = i as f32;
+            let rect = [
+                rest[0] + 40.0 * (t * 0.7 + f).sin(),
+                rest[1] + 30.0 * (t * 0.5 + f * 0.3).cos(),
+                rest[2],
+                rest[3],
+            ];
+            let opacity = 0.75 + 0.25 * (f * 1.7).sin();
+            if i % 8 == 0 {
+                let grown = [
+                    rect[0] - 32.0,
+                    rect[1] - 24.0,
+                    rect[2] + 64.0,
+                    rect[3] + 64.0,
+                ];
+                g.set_render_pipeline(&mut encoder, &self.shadow);
+                g.set_vertex_bytes(&mut encoder, &uniforms(grown, opacity), 0);
+                g.draw_strip(&mut encoder, 4);
+                g.set_render_pipeline(&mut encoder, &self.layer);
+            }
+            g.set_vertex_bytes(&mut encoder, &uniforms(rect, opacity), 0);
+            g.set_fragment_texture(&mut encoder, &self.textures[i % LAYER_TEXTURES], 0);
+            g.draw_strip(&mut encoder, 4);
+        }
+        g.end_render(encoder);
+    }
+}
+
+/// The layers workload (module docs of `main.rs`): per frame, the encoding thread's wall time
+/// through `endEncoding`, the commit call's, the commit's return to the wait's, the whole frame's,
+/// the process's CPU time, the encoding thread's CPU time through the commit's return, and the
+/// GPU time where the side measures it.
+pub fn layers<G: Gpu>(g: &G, library: &G::Library, sizes: &Sizes) {
+    let scene = Layers::new(g, library);
+    let mut times: [Vec<f64>; 7] = Default::default();
+    for frame in 0..sizes.timed + 3 {
+        g.pool(|| {
+            let cpu = process_cpu();
+            let thread = thread_cpu();
+            let start = Instant::now();
+            let command_buffer = g.command_buffer();
+            scene.encode(g, &command_buffer, frame as f32 / 60.0);
+            let encoded = Instant::now();
+            g.commit(&command_buffer);
+            let committed = Instant::now();
+            let thread = thread_cpu() - thread;
+            g.wait(&command_buffer);
+            let done = Instant::now();
+            let cpu = process_cpu() - cpu;
+            if frame < 3 {
+                return;
+            }
+            times[6].push(ms(thread));
+            times[0].push(ms(encoded - start));
+            times[1].push(ms(committed - encoded));
+            times[2].push(ms(done - committed));
+            times[3].push(ms(done - start));
+            times[4].push(ms(cpu));
+            if let Some(gpu) = g.gpu_seconds(&command_buffer) {
+                times[5].push(gpu * 1e3);
+            }
+        });
+    }
+    let [encode, commit, wait, frame, cpu, gpu, thread] = &mut times;
+    emit("layers", "encode", "ms", encode);
+    emit("layers", "commit", "ms", commit);
+    emit("layers", "commit_to_done", "ms", wait);
+    emit("layers", "frame", "ms", frame);
+    emit("layers", "cpu", "ms", cpu);
+    emit("layers", "thread_cpu", "ms", thread);
+    if !gpu.is_empty() {
+        emit("layers", "gpu", "ms", gpu);
+    }
+}
+
 /// The textures each frame of the `churn` workload makes.
 const CHURNED: usize = 8;
 /// The buffers each frame of the `churn` workload's `buffers` makes, and their length.
