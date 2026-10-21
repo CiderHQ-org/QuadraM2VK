@@ -1,5 +1,11 @@
 # Metal on Vulkan (experimental)
 
+This checkout uses QuadraM2VK's `development` branch, based on upstream `a2c440b`,
+and requires guest/host ABI **2**. Build and deploy the framework and host library together.
+The original Quadra dependency was `720ef1c`; its recorded gameplay evidence below does
+not qualify this modified build. The new host regressions run on software Vulkan; the
+guest completion worker and the modified X11/Wayland presenter still need live qualification.
+
 A third renderer next to OpenGL and Vulkan (Zink): Roblox's own **Metal** renderer, with every
 Metal call run on the host's Vulkan driver. Native 0.32 packages and source builds expose it in
 **Settings → Environment → Game → Renderer → Metal on Vulkan (experimental)**.
@@ -35,8 +41,8 @@ RobloxPlayer (guest, Mach-O)            host (ELF)
   time by a subclass, without linking QuartzCore, which links Metal. Roblox's
   `Resources/builtins.shaders` (Metal source, which cannot be compiled on Linux) are emulated:
   its three upload kernels run as buffer-to-texture blits.
-- `host/`: [steelbrain/metal2vulkan](https://github.com/steelbrain/metal2vulkan) 0.2's runtime
-  (GPL-2.0-or-later OR LGPL-3.0-or-later; pinned to `720ef1c`) behind the C table, plus
+- `host/`: the local QuadraM2VK fork of [steelbrain/metal2vulkan](https://github.com/steelbrain/metal2vulkan) 0.2's runtime
+  (GPL-2.0-or-later OR LGPL-3.0-or-later) behind the C table, plus
   presentation (`src/present.rs`) and the AIR upgrade (`src/air.rs`).
 - Shaders: Roblox's metallibs are format 2.2 with LLVM bitcode of module version 1 and Metal
   2.2-era AIR call forms, all of which metal2vulkan 0.2 refuses. `src/air.rs` upgrades each
@@ -56,7 +62,10 @@ RobloxPlayer (guest, Mach-O)            host (ELF)
   cached by SHA-256 in `$MACOBLOX_METAL_SHADER_CACHE/air-upgrade-v2`. The new namespace
   automatically regenerates corrected upgrades after updating from 0.32.
 
-## Status
+## Baseline evidence and qualification
+
+The gameplay and hardware results in this section were recorded by the original Quadra
+bridge. Recheck them with the modified framework and host before distributing this build.
 
 - Roblox accepts the device: `[FLog::Graphics] Metal renderer: NVIDIA GeForce RTX 3060 Ti`.
 - All 2,266 shader libraries of the pack decode through metal2vulkan's AIR front end, and all
@@ -111,6 +120,15 @@ RobloxPlayer (guest, Mach-O)            host (ELF)
 
 ## Running it again
 
+Place the reviewed fork at `vendor/metal2vulkan` before building. A source checkout or a
+symlink works; all three product crates must come from the same revision. For the offline
+source archive, from the Quadra repository root:
+
+```sh
+mkdir -p vendor/metal2vulkan
+tar -xzf /path/to/metal2vulkan-source.tar.gz --strip-components=1 -C vendor/metal2vulkan
+```
+
 ```sh
 prototype/metal-vulkan/build.sh            # needs clang, lld, Rust 1.98+
 # The repository is its own data folder when run from source: give it a client.
@@ -126,6 +144,39 @@ The test script sets `renderer=metal`, turns VR, MangoHud and Discord off, and n
 `settings.json`. Logs go to `logs/` in the repository. The host library reads
 `MACOBLOX_METAL_PRESENT_MODE` (`fifo`, `mailbox` or `immediate`) and `MACOBLOX_METAL_LIBLLVM`
 (an explicit libLLVM).
+
+## ABI 2 behavior
+
+- Host texture reads and writes validate their exact format/block/pitch footprint before
+  constructing a Rust slice. A zero-byte operation accepts a null pointer; a nonempty
+  source must be readable for the queried span. Readback also checks the supplied capacity.
+- The first runtime encoder failure and a refused commit remain on the command buffer.
+  Status and both waits return `QM_STATUS_ERROR` for a rejected commit.
+- `dispatchThreads` preserves the requested invocation count, including a partial final
+  group. Dynamic threadgroup memory, fences, buffer/texture residency and explicit barriers
+  are forwarded. Heap residency remains unsupported by this bridge.
+- Render bulk buffer, texture and sampler bindings use bounded arrays and one host call per
+  range. Compute inline byte storage is reused while preserving the immediate copy contract.
+- Encoder storage is boxed separately, so the largest encoder no longer determines the
+  allocation size of every buffer, texture and other host handle.
+- Guest completion workers retire after an idle interval and restart when needed. Scheduled
+  waits observe the host's scheduled transition; completion waits include guest handlers.
+- Swapchain images retain an owner through texture views and submitted GPU use. Acquisition
+  and presentation do not share a state mutex across their blocking driver calls. Unused
+  drawables retire their swapchain on the next acquisition when individual image release is
+  unavailable; this conservative fallback can stall during cancellation/resize.
+- Supported native BC1–BC5 textures use the device's compressed decoder by default, avoiding
+  extra decoded images and their update work. Native results can differ from Metal. Rust
+  consumers can select `DevicePolicy::exact_answers()` or `BlockDecodePolicy::Exact` to keep
+  the fitted decode; ABI 2's reserved device options do not expose this policy yet. Unsupported
+  formats retain their existing emulation.
+
+The authored regressions are `tests/metal_fork_test.c`, `metal_dispatch.ll`, `metal_draw.ll`
+and `assemble_metal_test.py`. They contain no client shaders. Compile the test with
+`-ldl -lpthread -lX11`, assemble `metal_dispatch.ll`, then run it with the host library and
+generated metallib paths. `--offscreen` explicitly skips WSI; without it a working X11
+display is required. Use Vulkan validation and an outer timeout. `tests/metal_perf.c`
+compares the original ABI 1 bridge and this ABI 2 build on the same authored workload.
 
 ## Licenses
 

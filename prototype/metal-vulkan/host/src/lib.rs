@@ -8,10 +8,11 @@ mod present;
 mod util;
 
 use metal2vulkan::metal::{
-    BlendFactor, BlendOperation, ColorWriteMask, CompareFunction, CullMode, DepthClipMode,
-    IndexType, PixelFormat, PrimitiveTopologyClass, PrimitiveType, SamplerAddressMode,
-    SamplerBorderColor, SamplerMinMagFilter, SamplerMipFilter, StencilOperation, TextureType,
-    TextureUsage, TriangleFillMode, VertexFormat, VertexStepFunction, Winding,
+    BarrierScope, BlendFactor, BlendOperation, ColorWriteMask, CompareFunction, CullMode,
+    DepthClipMode, IndexType, PixelFormat, PrimitiveTopologyClass, PrimitiveType, RenderStages,
+    ResourceUsage, SamplerAddressMode, SamplerBorderColor, SamplerMinMagFilter, SamplerMipFilter,
+    StencilOperation, TextureType, TextureUsage, TriangleFillMode, VertexFormat,
+    VertexStepFunction, Winding,
 };
 use metal2vulkan::pipeline::{
     ColorAttachmentDescriptor, RenderPipelineDescriptor, StageSource, VertexAttributeDescriptor,
@@ -20,10 +21,10 @@ use metal2vulkan::pipeline::{
 use metal2vulkan_runtime::{
     BlitCommandEncoder, BlitOption, Buffer, ClearColor, CommandBuffer, CommandBufferStatus,
     CommandQueue, ComputeCommandEncoder, ComputePipelineState, DepthStencilState, Device,
-    DeviceKind, DeviceOptions, Function, Library, LoadAction, Origin, PipelineOptions,
-    RenderCommandEncoder, RenderPassDescriptor, RenderPipelineState, ResourceOptions,
-    ResourceRef, SamplerState, ScissorRect, Size, StoreAction, Texture, TextureDescriptor,
-    Viewport, VisibilityResultMode,
+    DeviceKind, DeviceOptions, Fence, Function, Library, LoadAction, Origin, PipelineOptions,
+    RenderCommandEncoder, RenderPassDescriptor, RenderPipelineState, ResourceOptions, ResourceRef,
+    SamplerState, ScissorRect, Size, StoreAction, Texture, TextureDescriptor, Viewport,
+    VisibilityResultMode,
 };
 use std::ffi::{c_char, c_int, c_void, CStr};
 use std::sync::{Arc, Mutex};
@@ -211,6 +212,7 @@ pub enum Obj {
     Buffer(Buffer),
     Texture(Texture),
     Sampler(SamplerState),
+    Fence(Fence),
     DepthStencil(DepthStencilState),
     Library(Library),
     Function(Function),
@@ -218,16 +220,22 @@ pub enum Obj {
     ComputePipeline(ComputePipelineState),
     Queue(CommandQueue),
     CommandBuffer(CommandBufferObject),
-    RenderEncoder(Option<RenderCommandEncoder>),
-    BlitEncoder(Option<BlitCommandEncoder>),
-    ComputeEncoder(Option<ComputeCommandEncoder>),
+    RenderEncoder(Box<EncoderObject<RenderCommandEncoder>>),
+    BlitEncoder(Box<EncoderObject<BlitCommandEncoder>>),
+    ComputeEncoder(Box<EncoderObject<ComputeCommandEncoder>>),
     Surface(Arc<Surface>),
     Drawable(Arc<Drawable>),
+}
+
+pub struct EncoderObject<T> {
+    value: Option<T>,
+    errors: Arc<Mutex<Option<String>>>,
 }
 
 pub struct CommandBufferObject {
     buffer: CommandBuffer,
     presents: Mutex<Vec<Arc<Drawable>>>,
+    errors: Arc<Mutex<Option<String>>>,
 }
 
 fn handle(object: Obj) -> *mut c_void {
@@ -255,12 +263,12 @@ macro_rules! get {
 }
 
 macro_rules! get_or {
-    ($handle:expr, $variant:ident, $default:expr) => {
+    ($handle:expr, $variant:ident $(, $default:expr)?) => {
         match get!($handle, $variant) {
             Some(value) => value,
             None => {
                 set_error(concat!("not a ", stringify!($variant), " handle"));
-                return $default;
+                return $($default)?;
             }
         }
     };
@@ -270,7 +278,7 @@ fn optional_texture<'a>(handle: *mut c_void) -> Option<&'a Texture> {
     if handle.is_null() {
         None
     } else {
-        get!(handle, Texture).map(|texture| &*texture)
+        get!(handle, Texture)
     }
 }
 
@@ -278,7 +286,7 @@ fn optional_buffer<'a>(handle: *mut c_void) -> Option<&'a Buffer> {
     if handle.is_null() {
         None
     } else {
-        get!(handle, Buffer).map(|buffer| &*buffer)
+        get!(handle, Buffer)
     }
 }
 
@@ -336,8 +344,10 @@ extern "C" fn device_create(_options: *const c_void) -> *mut c_void {
 }
 
 extern "C" fn device_info(device: *mut c_void, out: *mut QmDeviceInfo) {
-    let device = get_or!(device, Device, ());
-    let Some(out) = (unsafe { out.as_mut() }) else { return };
+    let device = get_or!(device, Device);
+    let Some(out) = (unsafe { out.as_mut() }) else {
+        return;
+    };
     let properties = device.properties();
     let name = properties.name.as_bytes();
     let count = name.len().min(out.name.len() - 1);
@@ -377,7 +387,8 @@ extern "C" fn device_supports_family(device: *mut c_void, family: i64) -> c_int 
 extern "C" fn device_supports_texture_sample_count(device: *mut c_void, count: u64) -> c_int {
     let device = get_or!(device, Device, 0);
     let limits = &device.properties().description.limits;
-    let supported = limits.framebuffer_color_sample_counts.as_raw() & limits.framebuffer_depth_sample_counts.as_raw();
+    let supported = limits.framebuffer_color_sample_counts.as_raw()
+        & limits.framebuffer_depth_sample_counts.as_raw();
     (count.is_power_of_two() && count <= 64 && supported & count as u32 != 0) as c_int
 }
 
@@ -386,7 +397,12 @@ extern "C" fn device_current_allocated_size(device: *mut c_void) -> u64 {
     util::allocated_bytes()
 }
 
-extern "C" fn buffer_new(device: *mut c_void, length: u64, options: u64, bytes: *const c_void) -> *mut c_void {
+extern "C" fn buffer_new(
+    device: *mut c_void,
+    length: u64,
+    options: u64,
+    bytes: *const c_void,
+) -> *mut c_void {
     let device = get_or!(device, Device, std::ptr::null_mut());
     guard(std::ptr::null_mut(), || {
         let options = match ResourceOptions::from_raw(options) {
@@ -396,7 +412,10 @@ extern "C" fn buffer_new(device: *mut c_void, length: u64, options: u64, bytes: 
         let result = if bytes.is_null() {
             device.new_buffer(length.max(1), options)
         } else {
-            let bytes = unsafe { std::slice::from_raw_parts(bytes as *const u8, length as usize) };
+            let bytes = match unsafe { util::input_bytes(bytes, length) } {
+                Ok(bytes) => bytes,
+                Err(error) => return fail(error),
+            };
             device.new_buffer_with_bytes(bytes, options)
         };
         match result {
@@ -411,7 +430,9 @@ extern "C" fn buffer_new(device: *mut c_void, length: u64, options: u64, bytes: 
 
 extern "C" fn buffer_contents(buffer: *mut c_void) -> *mut c_void {
     let buffer = get_or!(buffer, Buffer, std::ptr::null_mut());
-    buffer.contents().map_or(std::ptr::null_mut(), |pointer| pointer.as_ptr() as *mut c_void)
+    buffer.contents().map_or(std::ptr::null_mut(), |pointer| {
+        pointer.as_ptr() as *mut c_void
+    })
 }
 
 extern "C" fn buffer_length(buffer: *mut c_void) -> u64 {
@@ -456,14 +477,25 @@ fn texture_bytes(descriptor: &TextureDescriptor) -> i64 {
         100..=139 => 8,
         _ => 4,
     } as u64;
-    (descriptor.width * descriptor.height * descriptor.depth * descriptor.array_length
-        * descriptor.sample_count * texel * if descriptor.mipmap_level_count > 1 { 4 } else { 3 }
+    (descriptor.width
+        * descriptor.height
+        * descriptor.depth
+        * descriptor.array_length
+        * descriptor.sample_count
+        * texel
+        * if descriptor.mipmap_level_count > 1 {
+            4
+        } else {
+            3
+        }
         / 3) as i64
 }
 
 extern "C" fn texture_new(device: *mut c_void, desc: *const QmTextureDesc) -> *mut c_void {
     let device = get_or!(device, Device, std::ptr::null_mut());
-    let Some(desc) = (unsafe { desc.as_ref() }) else { return fail("no texture descriptor") };
+    let Some(desc) = (unsafe { desc.as_ref() }) else {
+        return fail("no texture descriptor");
+    };
     guard(std::ptr::null_mut(), || {
         let descriptor = match texture_descriptor(desc) {
             Ok(descriptor) => descriptor,
@@ -476,8 +508,12 @@ extern "C" fn texture_new(device: *mut c_void, desc: *const QmTextureDesc) -> *m
             }
             Err(error) => fail(format!(
                 "newTextureWithDescriptor {:?} {}x{}x{} levels {} samples {}: {error}",
-                descriptor.pixel_format, descriptor.width, descriptor.height, descriptor.depth,
-                descriptor.mipmap_level_count, descriptor.sample_count
+                descriptor.pixel_format,
+                descriptor.width,
+                descriptor.height,
+                descriptor.depth,
+                descriptor.mipmap_level_count,
+                descriptor.sample_count
             )),
         }
     })
@@ -519,8 +555,10 @@ extern "C" fn texture_view(
 }
 
 extern "C" fn texture_describe(texture: *mut c_void, out: *mut QmTextureDesc) {
-    let texture = get_or!(texture, Texture, ());
-    let Some(out) = (unsafe { out.as_mut() }) else { return };
+    let texture = get_or!(texture, Texture);
+    let Some(out) = (unsafe { out.as_mut() }) else {
+        return;
+    };
     out.texture_type = texture.texture_type() as u64;
     out.pixel_format = texture.pixel_format() as u64;
     out.width = texture.width();
@@ -546,16 +584,37 @@ extern "C" fn texture_replace_region(
 ) -> c_int {
     let texture = get_or!(texture, Texture, 0);
     guard(0, || {
-        let rows = region_size.height.max(1);
-        let images = region_size.depth.max(1);
-        let length = if images > 1 || bytes_per_image != 0 {
-            bytes_per_image.max(bytes_per_row * rows) * images
-        } else {
-            bytes_per_row * rows
+        let region = metal2vulkan_runtime::Region::new_3d(
+            region_origin.x,
+            region_origin.y,
+            region_origin.z,
+            region_size.width,
+            region_size.height,
+            region_size.depth,
+        );
+        let length = match texture.cpu_copy_byte_length(
+            region,
+            level,
+            slice,
+            bytes_per_row,
+            bytes_per_image,
+        ) {
+            Ok(length) => length,
+            Err(error) => {
+                set_error(format!("replaceRegion: {error}"));
+                return 0;
+            }
         };
-        let length = if length == 0 { util::packed_length(texture, region_size) } else { length };
-        let data = unsafe { std::slice::from_raw_parts(bytes as *const u8, length as usize) };
-        let region = metal2vulkan_runtime::Region::new_3d(region_origin.x, region_origin.y, region_origin.z, region_size.width, region_size.height, region_size.depth);
+        let data = if length == 0 {
+            &[]
+        } else {
+            if bytes.is_null() {
+                set_error("replaceRegion: null source for a nonempty copy");
+                return 0;
+            }
+            // The C caller supplies at least the validated span; no trailing padding is read.
+            unsafe { std::slice::from_raw_parts(bytes.cast::<u8>(), length as usize) }
+        };
         match texture.replace_region(region, level, slice, data, bytes_per_row, bytes_per_image) {
             Ok(()) => 1,
             Err(error) => {
@@ -579,8 +638,40 @@ extern "C" fn texture_get_bytes(
 ) -> c_int {
     let texture = get_or!(texture, Texture, 0);
     guard(0, || {
-        let data = unsafe { std::slice::from_raw_parts_mut(bytes as *mut u8, length as usize) };
-        let region = metal2vulkan_runtime::Region::new_3d(region_origin.x, region_origin.y, region_origin.z, region_size.width, region_size.height, region_size.depth);
+        let region = metal2vulkan_runtime::Region::new_3d(
+            region_origin.x,
+            region_origin.y,
+            region_origin.z,
+            region_size.width,
+            region_size.height,
+            region_size.depth,
+        );
+        let required = match texture.cpu_copy_byte_length(
+            region,
+            level,
+            slice,
+            bytes_per_row,
+            bytes_per_image,
+        ) {
+            Ok(length) => length,
+            Err(error) => {
+                set_error(format!("getBytes: {error}"));
+                return 0;
+            }
+        };
+        if length < required {
+            set_error("getBytes: destination shorter than the checked copy span");
+            return 0;
+        }
+        let data = if required == 0 {
+            &mut []
+        } else {
+            if bytes.is_null() {
+                set_error("getBytes: null destination for a nonempty copy");
+                return 0;
+            }
+            unsafe { std::slice::from_raw_parts_mut(bytes.cast::<u8>(), required as usize) }
+        };
         match texture.get_bytes(data, bytes_per_row, bytes_per_image, region, level, slice) {
             Ok(()) => 1,
             Err(error) => {
@@ -591,25 +682,71 @@ extern "C" fn texture_get_bytes(
     })
 }
 
+extern "C" fn texture_copy_byte_length(
+    texture: *mut c_void,
+    region_origin: QmOrigin,
+    region_size: QmSize,
+    level: u64,
+    slice: u64,
+    row: u64,
+    image: u64,
+    out: *mut u64,
+) -> c_int {
+    let texture = get_or!(texture, Texture, 0);
+    let Some(out) = (unsafe { out.as_mut() }) else {
+        set_error("copy span: null output");
+        return 0;
+    };
+    guard(0, || {
+        let region = metal2vulkan_runtime::Region::new_3d(
+            region_origin.x,
+            region_origin.y,
+            region_origin.z,
+            region_size.width,
+            region_size.height,
+            region_size.depth,
+        );
+        match texture.cpu_copy_byte_length(region, level, slice, row, image) {
+            Ok(length) => {
+                *out = length;
+                1
+            }
+            Err(error) => {
+                set_error(format!("texture copy span: {error}"));
+                0
+            }
+        }
+    })
+}
+
 extern "C" fn sampler_new(device: *mut c_void, desc: *const QmSamplerDesc) -> *mut c_void {
     let device = get_or!(device, Device, std::ptr::null_mut());
-    let Some(desc) = (unsafe { desc.as_ref() }) else { return fail("no sampler descriptor") };
+    let Some(desc) = (unsafe { desc.as_ref() }) else {
+        return fail("no sampler descriptor");
+    };
     guard(std::ptr::null_mut(), || {
         let build = || -> Result<metal2vulkan::bind::SamplerDescriptor, String> {
             let mut descriptor = metal2vulkan::bind::SamplerDescriptor::default();
-            descriptor.min_filter = enum_value::<SamplerMinMagFilter>(desc.min_filter, "min filter")?;
-            descriptor.mag_filter = enum_value::<SamplerMinMagFilter>(desc.mag_filter, "mag filter")?;
+            descriptor.min_filter =
+                enum_value::<SamplerMinMagFilter>(desc.min_filter, "min filter")?;
+            descriptor.mag_filter =
+                enum_value::<SamplerMinMagFilter>(desc.mag_filter, "mag filter")?;
             descriptor.mip_filter = enum_value::<SamplerMipFilter>(desc.mip_filter, "mip filter")?;
-            descriptor.s_address_mode = enum_value::<SamplerAddressMode>(desc.s_address_mode, "address mode")?;
-            descriptor.t_address_mode = enum_value::<SamplerAddressMode>(desc.t_address_mode, "address mode")?;
-            descriptor.r_address_mode = enum_value::<SamplerAddressMode>(desc.r_address_mode, "address mode")?;
-            descriptor.border_color = enum_value::<SamplerBorderColor>(desc.border_color, "border color")?;
+            descriptor.s_address_mode =
+                enum_value::<SamplerAddressMode>(desc.s_address_mode, "address mode")?;
+            descriptor.t_address_mode =
+                enum_value::<SamplerAddressMode>(desc.t_address_mode, "address mode")?;
+            descriptor.r_address_mode =
+                enum_value::<SamplerAddressMode>(desc.r_address_mode, "address mode")?;
+            descriptor.border_color =
+                enum_value::<SamplerBorderColor>(desc.border_color, "border color")?;
             descriptor.normalized_coordinates = desc.normalized_coordinates != 0;
             descriptor.lod_min_clamp = desc.lod_min_clamp;
             descriptor.lod_max_clamp = desc.lod_max_clamp;
             descriptor.lod_average = desc.lod_average != 0;
             descriptor.max_anisotropy = desc.max_anisotropy.max(1);
-            descriptor.compare_function = enum_value::<CompareFunction>(desc.compare_function, "compare function")?;
+            descriptor.compare_function =
+                enum_value::<CompareFunction>(desc.compare_function, "compare function")?;
             Ok(descriptor)
         };
         let descriptor = match build() {
@@ -625,18 +762,27 @@ extern "C" fn sampler_new(device: *mut c_void, desc: *const QmSamplerDesc) -> *m
 
 fn stencil(desc: &QmStencilDesc) -> Result<metal2vulkan::metal::state::StencilDescriptor, String> {
     let mut stencil = metal2vulkan::metal::state::StencilDescriptor::default();
-    stencil.stencil_compare_function = enum_value::<CompareFunction>(desc.compare_function, "stencil compare")?;
-    stencil.stencil_failure_operation = enum_value::<StencilOperation>(desc.failure_operation, "stencil operation")?;
-    stencil.depth_failure_operation = enum_value::<StencilOperation>(desc.depth_failure_operation, "stencil operation")?;
-    stencil.depth_stencil_pass_operation = enum_value::<StencilOperation>(desc.pass_operation, "stencil operation")?;
+    stencil.stencil_compare_function =
+        enum_value::<CompareFunction>(desc.compare_function, "stencil compare")?;
+    stencil.stencil_failure_operation =
+        enum_value::<StencilOperation>(desc.failure_operation, "stencil operation")?;
+    stencil.depth_failure_operation =
+        enum_value::<StencilOperation>(desc.depth_failure_operation, "stencil operation")?;
+    stencil.depth_stencil_pass_operation =
+        enum_value::<StencilOperation>(desc.pass_operation, "stencil operation")?;
     stencil.read_mask = desc.read_mask;
     stencil.write_mask = desc.write_mask;
     Ok(stencil)
 }
 
-extern "C" fn depth_stencil_new(device: *mut c_void, desc: *const QmDepthStencilDesc) -> *mut c_void {
+extern "C" fn depth_stencil_new(
+    device: *mut c_void,
+    desc: *const QmDepthStencilDesc,
+) -> *mut c_void {
     let device = get_or!(device, Device, std::ptr::null_mut());
-    let Some(desc) = (unsafe { desc.as_ref() }) else { return fail("no depth-stencil descriptor") };
+    let Some(desc) = (unsafe { desc.as_ref() }) else {
+        return fail("no depth-stencil descriptor");
+    };
     guard(std::ptr::null_mut(), || {
         let build = || -> Result<metal2vulkan::metal::state::DepthStencilDescriptor, String> {
             let mut descriptor = metal2vulkan::metal::state::DepthStencilDescriptor::default();
@@ -663,11 +809,16 @@ extern "C" fn depth_stencil_new(device: *mut c_void, desc: *const QmDepthStencil
 /// there. An empty one (`ENDT`) is inserted and the three later sections move by its 4 bytes;
 /// their contents, the bitcode and its hash, stay as they are.
 pub fn normalize_metallib(bytes: &[u8]) -> std::borrow::Cow<'_, [u8]> {
-    let u64_at = |at: usize| bytes.get(at..at + 8).map(|b| u64::from_le_bytes(b.try_into().unwrap()));
+    let u64_at = |at: usize| {
+        bytes
+            .get(at..at + 8)
+            .map(|b| u64::from_le_bytes(b.try_into().unwrap()))
+    };
     if bytes.len() < 0x58 || &bytes[..4] != b"MTLB" {
         return bytes.into();
     }
-    let (Some(list_offset), Some(list_size), Some(public)) = (u64_at(24), u64_at(32), u64_at(40)) else {
+    let (Some(list_offset), Some(list_size), Some(public)) = (u64_at(24), u64_at(32), u64_at(40))
+    else {
         return bytes.into();
     };
     let list_end = list_offset + 4 + list_size;
@@ -693,7 +844,10 @@ pub fn normalize_metallib(bytes: &[u8]) -> std::borrow::Cow<'_, [u8]> {
 extern "C" fn library_new(device: *mut c_void, data: *const c_void, length: u64) -> *mut c_void {
     let device = get_or!(device, Device, std::ptr::null_mut());
     guard(std::ptr::null_mut(), || {
-        let bytes = unsafe { std::slice::from_raw_parts(data as *const u8, length as usize) };
+        let bytes = match unsafe { util::input_bytes(data, length) } {
+            Ok(bytes) => bytes,
+            Err(error) => return fail(error),
+        };
         let prepared = match air::prepare(bytes) {
             Ok(prepared) => prepared,
             Err(error) => {
@@ -709,7 +863,11 @@ extern "C" fn library_new(device: *mut c_void, data: *const c_void, length: u64)
     })
 }
 
-extern "C" fn library_function_names(library: *mut c_void, buffer: *mut c_char, capacity: u64) -> u64 {
+extern "C" fn library_function_names(
+    library: *mut c_void,
+    buffer: *mut c_char,
+    capacity: u64,
+) -> u64 {
     let library = get_or!(library, Library, 0);
     guard(0, || {
         let mut joined = Vec::new();
@@ -718,7 +876,9 @@ extern "C" fn library_function_names(library: *mut c_void, buffer: *mut c_char, 
             joined.push(0);
         }
         if !buffer.is_null() && capacity >= joined.len() as u64 {
-            unsafe { std::ptr::copy_nonoverlapping(joined.as_ptr(), buffer as *mut u8, joined.len()) };
+            unsafe {
+                std::ptr::copy_nonoverlapping(joined.as_ptr(), buffer as *mut u8, joined.len())
+            };
         }
         joined.len() as u64
     })
@@ -737,12 +897,17 @@ extern "C" fn function_new(library: *mut c_void, name: *const c_char) -> *mut c_
 
 extern "C" fn function_type(function: *mut c_void) -> c_int {
     let function = get_or!(function, Function, 0);
-    guard(0, || function.function_type().map_or(0, |kind| kind as c_int))
+    guard(0, || {
+        function.function_type().map_or(0, |kind| kind as c_int)
+    })
 }
 
-fn render_pipeline_descriptor(desc: &QmRenderPipelineDesc) -> Result<RenderPipelineDescriptor, String> {
+fn render_pipeline_descriptor(
+    desc: &QmRenderPipelineDesc,
+) -> Result<RenderPipelineDescriptor, String> {
     let vertex = get!(desc.vertex_function, Function).ok_or("no vertex function")?;
-    let mut descriptor = RenderPipelineDescriptor::new(StageSource::Function(vertex.function_descriptor()));
+    let mut descriptor =
+        RenderPipelineDescriptor::new(StageSource::Function(vertex.function_descriptor()));
     if !desc.fragment_function.is_null() {
         let fragment = get!(desc.fragment_function, Function).ok_or("bad fragment function")?;
         descriptor.fragment = Some(StageSource::Function(fragment.function_descriptor()));
@@ -765,12 +930,16 @@ fn render_pipeline_descriptor(desc: &QmRenderPipelineDesc) -> Result<RenderPipel
             if layout.present == 0 {
                 continue;
             }
-            let used = vertex_descriptor.attributes.values().any(|attribute| attribute.buffer_index == index as u32);
+            let used = vertex_descriptor
+                .attributes
+                .values()
+                .any(|attribute| attribute.buffer_index == index as u32);
             if !used && layout.stride == 0 {
                 continue;
             }
             let mut value = VertexBufferLayoutDescriptor::new(Some(layout.stride));
-            value.step_function = enum_value::<VertexStepFunction>(layout.step_function, "step function")?;
+            value.step_function =
+                enum_value::<VertexStepFunction>(layout.step_function, "step function")?;
             value.step_rate = layout.step_rate;
             vertex_descriptor.layouts.insert(index as u32, value);
         }
@@ -782,13 +951,20 @@ fn render_pipeline_descriptor(desc: &QmRenderPipelineDesc) -> Result<RenderPipel
         }
         let mut attachment = ColorAttachmentDescriptor::new(pixel_format(color.pixel_format)?);
         attachment.blending_enabled = color.blending_enabled != 0;
-        attachment.source_rgb_blend_factor = enum_value::<BlendFactor>(color.source_rgb, "blend factor")?;
-        attachment.destination_rgb_blend_factor = enum_value::<BlendFactor>(color.destination_rgb, "blend factor")?;
-        attachment.rgb_blend_operation = enum_value::<BlendOperation>(color.rgb_operation, "blend operation")?;
-        attachment.source_alpha_blend_factor = enum_value::<BlendFactor>(color.source_alpha, "blend factor")?;
-        attachment.destination_alpha_blend_factor = enum_value::<BlendFactor>(color.destination_alpha, "blend factor")?;
-        attachment.alpha_blend_operation = enum_value::<BlendOperation>(color.alpha_operation, "blend operation")?;
-        attachment.write_mask = ColorWriteMask::try_from(color.write_mask).map_err(|_| "write mask")?;
+        attachment.source_rgb_blend_factor =
+            enum_value::<BlendFactor>(color.source_rgb, "blend factor")?;
+        attachment.destination_rgb_blend_factor =
+            enum_value::<BlendFactor>(color.destination_rgb, "blend factor")?;
+        attachment.rgb_blend_operation =
+            enum_value::<BlendOperation>(color.rgb_operation, "blend operation")?;
+        attachment.source_alpha_blend_factor =
+            enum_value::<BlendFactor>(color.source_alpha, "blend factor")?;
+        attachment.destination_alpha_blend_factor =
+            enum_value::<BlendFactor>(color.destination_alpha, "blend factor")?;
+        attachment.alpha_blend_operation =
+            enum_value::<BlendOperation>(color.alpha_operation, "blend operation")?;
+        attachment.write_mask =
+            ColorWriteMask::try_from(color.write_mask).map_err(|_| "write mask")?;
         descriptor.color_attachments[index] = Some(attachment);
     }
     if desc.depth_format != 0 {
@@ -806,9 +982,14 @@ fn render_pipeline_descriptor(desc: &QmRenderPipelineDesc) -> Result<RenderPipel
     Ok(descriptor)
 }
 
-extern "C" fn render_pipeline_new(device: *mut c_void, desc: *const QmRenderPipelineDesc) -> *mut c_void {
+extern "C" fn render_pipeline_new(
+    device: *mut c_void,
+    desc: *const QmRenderPipelineDesc,
+) -> *mut c_void {
     let device = get_or!(device, Device, std::ptr::null_mut());
-    let Some(desc) = (unsafe { desc.as_ref() }) else { return fail("no pipeline descriptor") };
+    let Some(desc) = (unsafe { desc.as_ref() }) else {
+        return fail("no pipeline descriptor");
+    };
     guard(std::ptr::null_mut(), || {
         let descriptor = match render_pipeline_descriptor(desc) {
             Ok(descriptor) => descriptor,
@@ -816,7 +997,11 @@ extern "C" fn render_pipeline_new(device: *mut c_void, desc: *const QmRenderPipe
         };
         let mut options = PipelineOptions::default();
         if !desc.label.is_null() {
-            options.label = Some(unsafe { CStr::from_ptr(desc.label) }.to_string_lossy().into_owned());
+            options.label = Some(
+                unsafe { CStr::from_ptr(desc.label) }
+                    .to_string_lossy()
+                    .into_owned(),
+            );
         }
         let started = std::time::Instant::now();
         let result = device.new_render_pipeline_state(&descriptor, &options);
@@ -831,23 +1016,38 @@ extern "C" fn render_pipeline_new(device: *mut c_void, desc: *const QmRenderPipe
     })
 }
 
-extern "C" fn compute_pipeline_new(device: *mut c_void, function: *mut c_void, label: *const c_char) -> *mut c_void {
+extern "C" fn compute_pipeline_new(
+    device: *mut c_void,
+    function: *mut c_void,
+    label: *const c_char,
+) -> *mut c_void {
     let device = get_or!(device, Device, std::ptr::null_mut());
     let function = get_or!(function, Function, std::ptr::null_mut());
     guard(std::ptr::null_mut(), || {
         let mut options = PipelineOptions::default();
         if !label.is_null() {
-            options.label = Some(unsafe { CStr::from_ptr(label) }.to_string_lossy().into_owned());
+            options.label = Some(
+                unsafe { CStr::from_ptr(label) }
+                    .to_string_lossy()
+                    .into_owned(),
+            );
         }
         match device.new_compute_pipeline_state_with_function(function, &options) {
             Ok(state) => handle(Obj::ComputePipeline(state)),
-            Err(error) => fail(format!("newComputePipelineState {}: {error}", function.name())),
+            Err(error) => fail(format!(
+                "newComputePipelineState {}: {error}",
+                function.name()
+            )),
         }
     })
 }
 
-extern "C" fn compute_pipeline_info(pipeline: *mut c_void, max_threads: *mut u32, execution_width: *mut u32) {
-    let pipeline = get_or!(pipeline, ComputePipeline, ());
+extern "C" fn compute_pipeline_info(
+    pipeline: *mut c_void,
+    max_threads: *mut u32,
+    execution_width: *mut u32,
+) {
+    let pipeline = get_or!(pipeline, ComputePipeline);
     unsafe {
         if let Some(out) = max_threads.as_mut() {
             *out = pipeline.max_total_threads_per_threadgroup();
@@ -869,7 +1069,11 @@ extern "C" fn queue_new(device: *mut c_void) -> *mut c_void {
 extern "C" fn command_buffer_new(queue: *mut c_void) -> *mut c_void {
     let queue = get_or!(queue, Queue, std::ptr::null_mut());
     guard(std::ptr::null_mut(), || match queue.command_buffer() {
-        Ok(buffer) => handle(Obj::CommandBuffer(CommandBufferObject { buffer, presents: Mutex::new(Vec::new()) })),
+        Ok(buffer) => handle(Obj::CommandBuffer(CommandBufferObject {
+            buffer,
+            presents: Mutex::new(Vec::new()),
+            errors: Arc::new(Mutex::new(None)),
+        })),
         Err(error) => fail(format!("commandBuffer: {error}")),
     })
 }
@@ -877,24 +1081,32 @@ extern "C" fn command_buffer_new(queue: *mut c_void) -> *mut c_void {
 extern "C" fn command_buffer_present(command_buffer: *mut c_void, drawable: *mut c_void) -> c_int {
     let command_buffer = get_or!(command_buffer, CommandBuffer, 0);
     let drawable = get_or!(drawable, Drawable, 0);
-    command_buffer.presents.lock().unwrap().push(drawable.clone());
+    command_buffer
+        .presents
+        .lock()
+        .unwrap()
+        .push(drawable.clone());
     1
 }
 
 extern "C" fn command_buffer_commit(command_buffer: *mut c_void) -> c_int {
     let command_buffer = get_or!(command_buffer, CommandBuffer, 0);
     guard(0, || {
+        if let Some(error) = command_buffer.errors.lock().unwrap().as_ref() {
+            set_error(error.clone());
+            return 0;
+        }
         let presents = std::mem::take(&mut *command_buffer.presents.lock().unwrap());
         for drawable in presents {
             if let Err(error) = drawable.encode_present(&command_buffer.buffer) {
-                log_once(&format!("[Quadra Metal] presentDrawable: {error}"));
+                record_error(&command_buffer.errors, error);
+                return 0;
             }
         }
         match command_buffer.buffer.commit() {
             Ok(()) => 1,
             Err(error) => {
-                log_once(&format!("[Quadra Metal] commit: {error}"));
-                set_error(format!("commit: {error}"));
+                record_error(&command_buffer.errors, format!("commit: {error}"));
                 0
             }
         }
@@ -915,14 +1127,23 @@ fn status(status: CommandBufferStatus) -> c_int {
 
 extern "C" fn command_buffer_wait(command_buffer: *mut c_void) -> c_int {
     let command_buffer = get_or!(command_buffer, CommandBuffer, 5);
+    if let Some(error) = command_buffer.errors.lock().unwrap().as_ref() {
+        set_error(error.clone());
+        return 5;
+    }
     guard(5, || {
         if let Err(error) = command_buffer.buffer.wait_until_completed() {
             log_once(&format!("[Quadra Metal] waitUntilCompleted: {error}"));
         }
         let result = command_buffer.buffer.status();
         if matches!(result, CommandBufferStatus::Error) {
-            let description = command_buffer.buffer.error_description().unwrap_or_default();
-            log_once(&format!("[Quadra Metal] command buffer failed: {description}"));
+            let description = command_buffer
+                .buffer
+                .error_description()
+                .unwrap_or_default();
+            log_once(&format!(
+                "[Quadra Metal] command buffer failed: {description}"
+            ));
         }
         status(result)
     })
@@ -930,11 +1151,15 @@ extern "C" fn command_buffer_wait(command_buffer: *mut c_void) -> c_int {
 
 extern "C" fn command_buffer_status(command_buffer: *mut c_void) -> c_int {
     let command_buffer = get_or!(command_buffer, CommandBuffer, 5);
-    status(command_buffer.buffer.status())
+    if command_buffer.errors.lock().unwrap().is_some() {
+        5
+    } else {
+        status(command_buffer.buffer.status())
+    }
 }
 
 extern "C" fn command_buffer_times(command_buffer: *mut c_void, start: *mut f64, end: *mut f64) {
-    let command_buffer = get_or!(command_buffer, CommandBuffer, ());
+    let command_buffer = get_or!(command_buffer, CommandBuffer);
     unsafe {
         if let Some(out) = start.as_mut() {
             *out = command_buffer.buffer.gpu_start_time().unwrap_or(0.0);
@@ -964,13 +1189,20 @@ fn store_action(raw: u32) -> StoreAction {
     }
 }
 
-extern "C" fn render_encoder_new(command_buffer: *mut c_void, desc: *const QmRenderPassDesc) -> *mut c_void {
+extern "C" fn render_encoder_new(
+    command_buffer: *mut c_void,
+    desc: *const QmRenderPassDesc,
+) -> *mut c_void {
     let command_buffer = get_or!(command_buffer, CommandBuffer, std::ptr::null_mut());
-    let Some(desc) = (unsafe { desc.as_ref() }) else { return fail("no render pass descriptor") };
+    let Some(desc) = (unsafe { desc.as_ref() }) else {
+        return fail("no render pass descriptor");
+    };
     guard(std::ptr::null_mut(), || {
         let mut pass = RenderPassDescriptor::new();
         for (index, color) in desc.color.iter().enumerate() {
-            let Some(texture) = optional_texture(color.texture) else { continue };
+            let Some(texture) = optional_texture(color.texture) else {
+                continue;
+            };
             let attachment = &mut pass.color_attachments[index];
             attachment.texture = Some(texture.clone());
             attachment.level = color.level;
@@ -982,7 +1214,12 @@ extern "C" fn render_encoder_new(command_buffer: *mut c_void, desc: *const QmRen
             attachment.resolve_depth_plane = color.resolve_depth_plane;
             attachment.load_action = load_action(color.load_action);
             attachment.store_action = store_action(color.store_action);
-            attachment.clear_color = ClearColor::new(color.clear[0], color.clear[1], color.clear[2], color.clear[3]);
+            attachment.clear_color = ClearColor::new(
+                color.clear[0],
+                color.clear[1],
+                color.clear[2],
+                color.clear[3],
+            );
         }
         if let Some(texture) = optional_texture(desc.depth.texture) {
             let depth = &mut pass.depth_attachment;
@@ -1016,7 +1253,10 @@ extern "C" fn render_encoder_new(command_buffer: *mut c_void, desc: *const QmRen
         pass.render_target_array_length = desc.render_target_array_length;
         pass.default_raster_sample_count = desc.default_raster_sample_count;
         match command_buffer.buffer.render_command_encoder(&pass) {
-            Ok(encoder) => handle(Obj::RenderEncoder(Some(encoder))),
+            Ok(encoder) => handle(Obj::RenderEncoder(Box::new(EncoderObject {
+                value: Some(encoder),
+                errors: command_buffer.errors.clone(),
+            }))),
             Err(error) => fail(format!("renderCommandEncoderWithDescriptor: {error}")),
         }
     })
@@ -1025,28 +1265,56 @@ extern "C" fn render_encoder_new(command_buffer: *mut c_void, desc: *const QmRen
 macro_rules! encoder {
     ($handle:expr, $variant:ident) => {
         match unsafe { object_mut($handle) } {
-            Some(Obj::$variant(Some(encoder))) => encoder,
+            Some(Obj::$variant(slot)) if slot.value.is_some() => {
+                (slot.value.as_mut().unwrap(), &slot.errors)
+            }
             _ => {
-                log_once(concat!("[Quadra Metal] call on an ended or missing ", stringify!($variant)));
+                log_once(concat!(
+                    "[Quadra Metal] call on an ended or missing ",
+                    stringify!($variant)
+                ));
                 return;
             }
         }
     };
 }
 
+/// Keep the first failure so a later call cannot turn a rejected buffer into success.
+fn record_error(errors: &Mutex<Option<String>>, description: impl Into<String>) {
+    let description = description.into();
+    errors
+        .lock()
+        .unwrap()
+        .get_or_insert_with(|| description.clone());
+    set_error(description.clone());
+    log_once(&format!("[Quadra Metal] {description}"));
+}
+
 /// Encoder calls answer nothing in Metal; a refusal is logged once per distinct text.
-fn report<T>(call: &str, result: Result<T, metal2vulkan_runtime::Error>) {
+fn report<T>(
+    errors: &Mutex<Option<String>>,
+    call: &str,
+    result: Result<T, metal2vulkan_runtime::Error>,
+) {
     if let Err(error) = result {
-        log_once(&format!("[Quadra Metal] {call}: {error}"));
+        record_error(errors, format!("{call}: {error}"));
     }
 }
 
 extern "C" fn render_end(encoder: *mut c_void) -> c_int {
-    let Some(Obj::RenderEncoder(slot)) = (unsafe { object_mut(encoder) }) else { return 0 };
-    let Some(value) = slot.take() else { return 0 };
+    let Some(Obj::RenderEncoder(slot)) = (unsafe { object_mut(encoder) }) else {
+        return 0;
+    };
+    let Some(value) = slot.value.take() else {
+        return 0;
+    };
     guard(0, || match value.end_encoding() {
         Ok(()) => 1,
         Err(error) => {
+            slot.errors
+                .lock()
+                .unwrap()
+                .get_or_insert_with(|| format!("render endEncoding: {error}"));
             log_once(&format!("[Quadra Metal] render endEncoding: {error}"));
             0
         }
@@ -1054,152 +1322,299 @@ extern "C" fn render_end(encoder: *mut c_void) -> c_int {
 }
 
 extern "C" fn render_set_pipeline(encoder: *mut c_void, pipeline: *mut c_void) {
-    let encoder = encoder!(encoder, RenderEncoder);
-    let Some(pipeline) = get!(pipeline, RenderPipeline) else { return };
-    report("setRenderPipelineState", encoder.set_render_pipeline_state(pipeline));
+    let (encoder, errors) = encoder!(encoder, RenderEncoder);
+    let _ = errors;
+    let Some(pipeline) = get!(pipeline, RenderPipeline) else {
+        return;
+    };
+    report(
+        errors,
+        "setRenderPipelineState",
+        encoder.set_render_pipeline_state(pipeline),
+    );
 }
 
-extern "C" fn render_set_buffer(encoder: *mut c_void, stage: c_int, buffer: *mut c_void, offset: u64, index: u32) {
-    let encoder = encoder!(encoder, RenderEncoder);
+extern "C" fn render_set_buffer(
+    encoder: *mut c_void,
+    stage: c_int,
+    buffer: *mut c_void,
+    offset: u64,
+    index: u32,
+) {
+    let (encoder, errors) = encoder!(encoder, RenderEncoder);
+    let _ = errors;
     let buffer = optional_buffer(buffer);
     if stage == 0 {
-        report("setVertexBuffer", encoder.set_vertex_buffer(buffer, offset, index));
+        report(
+            errors,
+            "setVertexBuffer",
+            encoder.set_vertex_buffer(buffer, offset, index),
+        );
     } else {
-        report("setFragmentBuffer", encoder.set_fragment_buffer(buffer, offset, index));
+        report(
+            errors,
+            "setFragmentBuffer",
+            encoder.set_fragment_buffer(buffer, offset, index),
+        );
     }
 }
 
-extern "C" fn render_set_buffer_offset(encoder: *mut c_void, stage: c_int, offset: u64, index: u32) {
-    let encoder = encoder!(encoder, RenderEncoder);
+extern "C" fn render_set_buffer_offset(
+    encoder: *mut c_void,
+    stage: c_int,
+    offset: u64,
+    index: u32,
+) {
+    let (encoder, errors) = encoder!(encoder, RenderEncoder);
+    let _ = errors;
     if stage == 0 {
-        report("setVertexBufferOffset", encoder.set_vertex_buffer_offset(offset, index));
+        report(
+            errors,
+            "setVertexBufferOffset",
+            encoder.set_vertex_buffer_offset(offset, index),
+        );
     } else {
-        report("setFragmentBufferOffset", encoder.set_fragment_buffer_offset(offset, index));
+        report(
+            errors,
+            "setFragmentBufferOffset",
+            encoder.set_fragment_buffer_offset(offset, index),
+        );
     }
 }
 
-extern "C" fn render_set_bytes(encoder: *mut c_void, stage: c_int, bytes: *const c_void, length: u64, index: u32) {
-    let encoder = encoder!(encoder, RenderEncoder);
-    let bytes = unsafe { std::slice::from_raw_parts(bytes as *const u8, length as usize) };
+extern "C" fn render_set_bytes(
+    encoder: *mut c_void,
+    stage: c_int,
+    bytes: *const c_void,
+    length: u64,
+    index: u32,
+) {
+    let (encoder, errors) = encoder!(encoder, RenderEncoder);
+    let _ = errors;
+    let bytes = match unsafe { util::input_bytes(bytes, length) } {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            record_error(errors, error);
+            return;
+        }
+    };
     if stage == 0 {
-        report("setVertexBytes", encoder.set_vertex_bytes(bytes, index));
+        report(
+            errors,
+            "setVertexBytes",
+            encoder.set_vertex_bytes(bytes, index),
+        );
     } else {
-        report("setFragmentBytes", encoder.set_fragment_bytes(bytes, index));
+        report(
+            errors,
+            "setFragmentBytes",
+            encoder.set_fragment_bytes(bytes, index),
+        );
     }
 }
 
-extern "C" fn render_set_texture(encoder: *mut c_void, stage: c_int, texture: *mut c_void, index: u32) {
-    let encoder = encoder!(encoder, RenderEncoder);
+extern "C" fn render_set_texture(
+    encoder: *mut c_void,
+    stage: c_int,
+    texture: *mut c_void,
+    index: u32,
+) {
+    let (encoder, errors) = encoder!(encoder, RenderEncoder);
+    let _ = errors;
     let texture = optional_texture(texture);
     if stage == 0 {
-        report("setVertexTexture", encoder.set_vertex_texture(texture, index));
+        report(
+            errors,
+            "setVertexTexture",
+            encoder.set_vertex_texture(texture, index),
+        );
     } else {
-        report("setFragmentTexture", encoder.set_fragment_texture(texture, index));
+        report(
+            errors,
+            "setFragmentTexture",
+            encoder.set_fragment_texture(texture, index),
+        );
     }
 }
 
-extern "C" fn render_set_sampler(encoder: *mut c_void, stage: c_int, sampler: *mut c_void, index: u32) {
-    let encoder = encoder!(encoder, RenderEncoder);
-    let sampler = if sampler.is_null() { None } else { get!(sampler, Sampler).map(|value| &*value) };
-    if stage == 0 {
-        report("setVertexSamplerState", encoder.set_vertex_sampler_state(sampler, index));
+extern "C" fn render_set_sampler(
+    encoder: *mut c_void,
+    stage: c_int,
+    sampler: *mut c_void,
+    index: u32,
+) {
+    let (encoder, errors) = encoder!(encoder, RenderEncoder);
+    let _ = errors;
+    let sampler = if sampler.is_null() {
+        None
     } else {
-        report("setFragmentSamplerState", encoder.set_fragment_sampler_state(sampler, index));
+        get!(sampler, Sampler)
+    };
+    if stage == 0 {
+        report(
+            errors,
+            "setVertexSamplerState",
+            encoder.set_vertex_sampler_state(sampler, index),
+        );
+    } else {
+        report(
+            errors,
+            "setFragmentSamplerState",
+            encoder.set_fragment_sampler_state(sampler, index),
+        );
     }
 }
 
 extern "C" fn render_set_viewport(encoder: *mut c_void, viewport: *const f64) {
-    let encoder = encoder!(encoder, RenderEncoder);
+    let (encoder, errors) = encoder!(encoder, RenderEncoder);
+    let _ = errors;
     let values = unsafe { std::slice::from_raw_parts(viewport, 6) };
-    let mut value = Viewport::default();
-    value.origin_x = values[0];
-    value.origin_y = values[1];
-    value.width = values[2];
-    value.height = values[3];
-    value.znear = values[4];
-    value.zfar = values[5];
-    report("setViewport", encoder.set_viewport(value));
+    let value = Viewport {
+        origin_x: values[0],
+        origin_y: values[1],
+        width: values[2],
+        height: values[3],
+        znear: values[4],
+        zfar: values[5],
+    };
+    report(errors, "setViewport", encoder.set_viewport(value));
 }
 
 extern "C" fn render_set_scissor(encoder: *mut c_void, x: u64, y: u64, width: u64, height: u64) {
-    let encoder = encoder!(encoder, RenderEncoder);
-    let mut rect = ScissorRect::default();
-    rect.x = x;
-    rect.y = y;
-    rect.width = width;
-    rect.height = height;
-    report("setScissorRect", encoder.set_scissor_rect(rect));
+    let (encoder, errors) = encoder!(encoder, RenderEncoder);
+    let _ = errors;
+    let rect = ScissorRect {
+        x,
+        y,
+        width,
+        height,
+    };
+    report(errors, "setScissorRect", encoder.set_scissor_rect(rect));
 }
 
 extern "C" fn render_set_cull_mode(encoder: *mut c_void, mode: u32) {
-    let encoder = encoder!(encoder, RenderEncoder);
+    let (encoder, errors) = encoder!(encoder, RenderEncoder);
+    let _ = errors;
     if let Ok(mode) = CullMode::try_from(mode) {
         encoder.set_cull_mode(mode);
     }
 }
 
 extern "C" fn render_set_winding(encoder: *mut c_void, winding: u32) {
-    let encoder = encoder!(encoder, RenderEncoder);
+    let (encoder, errors) = encoder!(encoder, RenderEncoder);
+    let _ = errors;
     if let Ok(winding) = Winding::try_from(winding) {
         encoder.set_front_facing_winding(winding);
     }
 }
 
 extern "C" fn render_set_depth_bias(encoder: *mut c_void, bias: f32, slope: f32, clamp: f32) {
-    let encoder = encoder!(encoder, RenderEncoder);
-    report("setDepthBias", encoder.set_depth_bias(bias, slope, clamp));
+    let (encoder, errors) = encoder!(encoder, RenderEncoder);
+    let _ = errors;
+    report(
+        errors,
+        "setDepthBias",
+        encoder.set_depth_bias(bias, slope, clamp),
+    );
 }
 
 extern "C" fn render_set_depth_clip_mode(encoder: *mut c_void, mode: u32) {
-    let encoder = encoder!(encoder, RenderEncoder);
+    let (encoder, errors) = encoder!(encoder, RenderEncoder);
+    let _ = errors;
     if let Ok(mode) = DepthClipMode::try_from(mode) {
-        report("setDepthClipMode", encoder.set_depth_clip_mode(mode));
+        report(
+            errors,
+            "setDepthClipMode",
+            encoder.set_depth_clip_mode(mode),
+        );
     }
 }
 
 extern "C" fn render_set_fill_mode(encoder: *mut c_void, mode: u32) {
-    let encoder = encoder!(encoder, RenderEncoder);
+    let (encoder, errors) = encoder!(encoder, RenderEncoder);
+    let _ = errors;
     if let Ok(mode) = TriangleFillMode::try_from(mode) {
-        report("setTriangleFillMode", encoder.set_triangle_fill_mode(mode));
+        report(
+            errors,
+            "setTriangleFillMode",
+            encoder.set_triangle_fill_mode(mode),
+        );
     }
 }
 
 extern "C" fn render_set_depth_stencil(encoder: *mut c_void, state: *mut c_void) {
-    let encoder = encoder!(encoder, RenderEncoder);
-    let state = if state.is_null() { None } else { get!(state, DepthStencil).map(|value| &*value) };
-    report("setDepthStencilState", encoder.set_depth_stencil_state(state));
+    let (encoder, errors) = encoder!(encoder, RenderEncoder);
+    let _ = errors;
+    let state = if state.is_null() {
+        None
+    } else {
+        get!(state, DepthStencil)
+    };
+    report(
+        errors,
+        "setDepthStencilState",
+        encoder.set_depth_stencil_state(state),
+    );
 }
 
 extern "C" fn render_set_stencil_reference(encoder: *mut c_void, front: u32, back: u32) {
-    let encoder = encoder!(encoder, RenderEncoder);
+    let (encoder, errors) = encoder!(encoder, RenderEncoder);
+    let _ = errors;
     encoder.set_stencil_reference_values(front, back);
 }
 
-extern "C" fn render_set_blend_color(encoder: *mut c_void, red: f32, green: f32, blue: f32, alpha: f32) {
-    let encoder = encoder!(encoder, RenderEncoder);
+extern "C" fn render_set_blend_color(
+    encoder: *mut c_void,
+    red: f32,
+    green: f32,
+    blue: f32,
+    alpha: f32,
+) {
+    let (encoder, errors) = encoder!(encoder, RenderEncoder);
+    let _ = errors;
     encoder.set_blend_color(red, green, blue, alpha);
 }
 
 extern "C" fn render_set_visibility_mode(encoder: *mut c_void, mode: u32, offset: u64) {
-    let encoder = encoder!(encoder, RenderEncoder);
+    let (encoder, errors) = encoder!(encoder, RenderEncoder);
+    let _ = errors;
     let mode = match mode {
         1 => VisibilityResultMode::Boolean,
         2 => VisibilityResultMode::Counting,
         _ => VisibilityResultMode::Disabled,
     };
-    report("setVisibilityResultMode", encoder.set_visibility_result_mode(mode, offset));
+    report(
+        errors,
+        "setVisibilityResultMode",
+        encoder.set_visibility_result_mode(mode, offset),
+    );
 }
 
 fn primitive(raw: u32) -> Option<PrimitiveType> {
     PrimitiveType::try_from(raw).ok()
 }
 
-extern "C" fn render_draw(encoder: *mut c_void, kind: u32, start: u64, count: u64, instances: u64, base_instance: u64) {
-    let encoder = encoder!(encoder, RenderEncoder);
+extern "C" fn render_draw(
+    encoder: *mut c_void,
+    kind: u32,
+    start: u64,
+    count: u64,
+    instances: u64,
+    base_instance: u64,
+) {
+    let (encoder, errors) = encoder!(encoder, RenderEncoder);
+    let _ = errors;
     let Some(kind) = primitive(kind) else { return };
     report(
+        errors,
         "drawPrimitives",
-        encoder.draw_primitives(kind, start as u32, count as u32, instances as u32, base_instance as u32),
+        encoder.draw_primitives(
+            kind,
+            start as u32,
+            count as u32,
+            instances as u32,
+            base_instance as u32,
+        ),
     );
 }
 
@@ -1214,11 +1629,17 @@ extern "C" fn render_draw_indexed(
     base_vertex: i64,
     base_instance: u64,
 ) {
-    let encoder = encoder!(encoder, RenderEncoder);
+    let (encoder, errors) = encoder!(encoder, RenderEncoder);
+    let _ = errors;
     let Some(kind) = primitive(kind) else { return };
-    let Some(index_buffer) = get!(index_buffer, Buffer) else { return };
-    let Ok(index_type) = IndexType::try_from(index_type) else { return };
+    let Some(index_buffer) = get!(index_buffer, Buffer) else {
+        return;
+    };
+    let Ok(index_type) = IndexType::try_from(index_type) else {
+        return;
+    };
     report(
+        errors,
         "drawIndexedPrimitives",
         encoder.draw_indexed_primitives(
             kind,
@@ -1235,18 +1656,31 @@ extern "C" fn render_draw_indexed(
 
 extern "C" fn blit_encoder_new(command_buffer: *mut c_void) -> *mut c_void {
     let command_buffer = get_or!(command_buffer, CommandBuffer, std::ptr::null_mut());
-    guard(std::ptr::null_mut(), || match command_buffer.buffer.blit_command_encoder() {
-        Ok(encoder) => handle(Obj::BlitEncoder(Some(encoder))),
-        Err(error) => fail(format!("blitCommandEncoder: {error}")),
+    guard(std::ptr::null_mut(), || {
+        match command_buffer.buffer.blit_command_encoder() {
+            Ok(encoder) => handle(Obj::BlitEncoder(Box::new(EncoderObject {
+                value: Some(encoder),
+                errors: command_buffer.errors.clone(),
+            }))),
+            Err(error) => fail(format!("blitCommandEncoder: {error}")),
+        }
     })
 }
 
 extern "C" fn blit_end(encoder: *mut c_void) -> c_int {
-    let Some(Obj::BlitEncoder(slot)) = (unsafe { object_mut(encoder) }) else { return 0 };
-    let Some(value) = slot.take() else { return 0 };
+    let Some(Obj::BlitEncoder(slot)) = (unsafe { object_mut(encoder) }) else {
+        return 0;
+    };
+    let Some(value) = slot.value.take() else {
+        return 0;
+    };
     guard(0, || match value.end_encoding() {
         Ok(()) => 1,
         Err(error) => {
+            slot.errors
+                .lock()
+                .unwrap()
+                .get_or_insert_with(|| format!("blit endEncoding: {error}"));
             log_once(&format!("[Quadra Metal] blit endEncoding: {error}"));
             0
         }
@@ -1261,11 +1695,22 @@ extern "C" fn blit_copy_buffer(
     destination_offset: u64,
     length: u64,
 ) {
-    let encoder = encoder!(encoder, BlitEncoder);
-    let (Some(source), Some(destination)) = (get!(source, Buffer), get!(destination, Buffer)) else { return };
+    let (encoder, errors) = encoder!(encoder, BlitEncoder);
+    let _ = errors;
+    let (Some(source), Some(destination)) = (get!(source, Buffer), get!(destination, Buffer))
+    else {
+        return;
+    };
     report(
+        errors,
         "copyFromBuffer:toBuffer:",
-        encoder.copy_from_buffer_to_buffer(source, source_offset, destination, destination_offset, length),
+        encoder.copy_from_buffer_to_buffer(
+            source,
+            source_offset,
+            destination,
+            destination_offset,
+            length,
+        ),
     );
 }
 
@@ -1281,9 +1726,14 @@ extern "C" fn blit_copy_buffer_to_texture(
     level: u64,
     destination_origin: QmOrigin,
 ) {
-    let encoder = encoder!(encoder, BlitEncoder);
-    let (Some(source), Some(destination)) = (get!(source, Buffer), get!(destination, Texture)) else { return };
+    let (encoder, errors) = encoder!(encoder, BlitEncoder);
+    let _ = errors;
+    let (Some(source), Some(destination)) = (get!(source, Buffer), get!(destination, Texture))
+    else {
+        return;
+    };
     report(
+        errors,
         "copyFromBuffer:toTexture:",
         encoder.copy_from_buffer_to_texture(
             source,
@@ -1312,9 +1762,14 @@ extern "C" fn blit_copy_texture_to_buffer(
     bytes_per_row: u64,
     bytes_per_image: u64,
 ) {
-    let encoder = encoder!(encoder, BlitEncoder);
-    let (Some(source), Some(destination)) = (get!(source, Texture), get!(destination, Buffer)) else { return };
+    let (encoder, errors) = encoder!(encoder, BlitEncoder);
+    let _ = errors;
+    let (Some(source), Some(destination)) = (get!(source, Texture), get!(destination, Buffer))
+    else {
+        return;
+    };
     report(
+        errors,
         "copyFromTexture:toBuffer:",
         encoder.copy_from_texture_to_buffer(
             source,
@@ -1343,9 +1798,14 @@ extern "C" fn blit_copy_texture(
     destination_level: u64,
     destination_origin: QmOrigin,
 ) {
-    let encoder = encoder!(encoder, BlitEncoder);
-    let (Some(source), Some(destination)) = (get!(source, Texture), get!(destination, Texture)) else { return };
+    let (encoder, errors) = encoder!(encoder, BlitEncoder);
+    let _ = errors;
+    let (Some(source), Some(destination)) = (get!(source, Texture), get!(destination, Texture))
+    else {
+        return;
+    };
     report(
+        errors,
         "copyFromTexture:toTexture:",
         encoder.copy_from_texture_to_texture(
             source,
@@ -1372,9 +1832,14 @@ extern "C" fn blit_copy_texture_slices(
     slice_count: u64,
     level_count: u64,
 ) {
-    let encoder = encoder!(encoder, BlitEncoder);
-    let (Some(source), Some(destination)) = (get!(source, Texture), get!(destination, Texture)) else { return };
+    let (encoder, errors) = encoder!(encoder, BlitEncoder);
+    let _ = errors;
+    let (Some(source), Some(destination)) = (get!(source, Texture), get!(destination, Texture))
+    else {
+        return;
+    };
     report(
+        errors,
         "copyFromTexture:sliceCount:levelCount:",
         encoder.copy_texture_slices(
             source,
@@ -1390,35 +1855,60 @@ extern "C" fn blit_copy_texture_slices(
 }
 
 extern "C" fn blit_generate_mipmaps(encoder: *mut c_void, texture: *mut c_void) {
-    let encoder = encoder!(encoder, BlitEncoder);
-    let Some(texture) = get!(texture, Texture) else { return };
-    report("generateMipmapsForTexture", encoder.generate_mipmaps(texture));
+    let (encoder, errors) = encoder!(encoder, BlitEncoder);
+    let _ = errors;
+    let Some(texture) = get!(texture, Texture) else {
+        return;
+    };
+    report(
+        errors,
+        "generateMipmapsForTexture",
+        encoder.generate_mipmaps(texture),
+    );
 }
 
 extern "C" fn blit_synchronize(encoder: *mut c_void, resource: *mut c_void) {
-    let encoder = encoder!(encoder, BlitEncoder);
+    let (encoder, errors) = encoder!(encoder, BlitEncoder);
+    let _ = errors;
     let resource: ResourceRef<'_> = match unsafe { object(resource) } {
         Some(Obj::Buffer(buffer)) => buffer.as_resource(),
         Some(Obj::Texture(texture)) => texture.as_resource(),
         _ => return,
     };
-    report("synchronizeResource", encoder.synchronize_resource(resource));
+    report(
+        errors,
+        "synchronizeResource",
+        encoder.synchronize_resource(resource),
+    );
 }
 
 extern "C" fn compute_encoder_new(command_buffer: *mut c_void) -> *mut c_void {
     let command_buffer = get_or!(command_buffer, CommandBuffer, std::ptr::null_mut());
-    guard(std::ptr::null_mut(), || match command_buffer.buffer.compute_command_encoder() {
-        Ok(encoder) => handle(Obj::ComputeEncoder(Some(encoder))),
-        Err(error) => fail(format!("computeCommandEncoder: {error}")),
+    guard(std::ptr::null_mut(), || {
+        match command_buffer.buffer.compute_command_encoder() {
+            Ok(encoder) => handle(Obj::ComputeEncoder(Box::new(EncoderObject {
+                value: Some(encoder),
+                errors: command_buffer.errors.clone(),
+            }))),
+            Err(error) => fail(format!("computeCommandEncoder: {error}")),
+        }
     })
 }
 
 extern "C" fn compute_end(encoder: *mut c_void) -> c_int {
-    let Some(Obj::ComputeEncoder(slot)) = (unsafe { object_mut(encoder) }) else { return 0 };
-    let Some(value) = slot.take() else { return 0 };
+    let Some(Obj::ComputeEncoder(slot)) = (unsafe { object_mut(encoder) }) else {
+        return 0;
+    };
+    let Some(value) = slot.value.take() else {
+        return 0;
+    };
     guard(0, || match value.end_encoding() {
         Ok(()) => 1,
         Err(error) => {
+            slot.errors
+                .lock()
+                .unwrap()
+                .get_or_insert_with(|| format!("compute endEncoding: {error}"));
             log_once(&format!("[Quadra Metal] compute endEncoding: {error}"));
             0
         }
@@ -1426,58 +1916,429 @@ extern "C" fn compute_end(encoder: *mut c_void) -> c_int {
 }
 
 extern "C" fn compute_set_pipeline(encoder: *mut c_void, pipeline: *mut c_void) {
-    let encoder = encoder!(encoder, ComputeEncoder);
-    let Some(pipeline) = get!(pipeline, ComputePipeline) else { return };
-    report("setComputePipelineState", encoder.set_compute_pipeline_state(pipeline));
+    let (encoder, errors) = encoder!(encoder, ComputeEncoder);
+    let _ = errors;
+    let Some(pipeline) = get!(pipeline, ComputePipeline) else {
+        return;
+    };
+    report(
+        errors,
+        "setComputePipelineState",
+        encoder.set_compute_pipeline_state(pipeline),
+    );
 }
 
-extern "C" fn compute_set_buffer(encoder: *mut c_void, buffer: *mut c_void, offset: u64, index: u32) {
-    let encoder = encoder!(encoder, ComputeEncoder);
-    report("setBuffer", encoder.set_buffer(optional_buffer(buffer), offset, index));
+extern "C" fn compute_set_buffer(
+    encoder: *mut c_void,
+    buffer: *mut c_void,
+    offset: u64,
+    index: u32,
+) {
+    let (encoder, errors) = encoder!(encoder, ComputeEncoder);
+    let _ = errors;
+    report(
+        errors,
+        "setBuffer",
+        encoder.set_buffer(optional_buffer(buffer), offset, index),
+    );
 }
 
 extern "C" fn compute_set_buffer_offset(encoder: *mut c_void, offset: u64, index: u32) {
-    let encoder = encoder!(encoder, ComputeEncoder);
-    report("setBufferOffset", encoder.set_buffer_offset(offset, index));
+    let (encoder, errors) = encoder!(encoder, ComputeEncoder);
+    let _ = errors;
+    report(
+        errors,
+        "setBufferOffset",
+        encoder.set_buffer_offset(offset, index),
+    );
 }
 
-extern "C" fn compute_set_bytes(encoder: *mut c_void, bytes: *const c_void, length: u64, index: u32) {
-    let encoder = encoder!(encoder, ComputeEncoder);
-    let bytes = unsafe { std::slice::from_raw_parts(bytes as *const u8, length as usize) };
-    report("setBytes", encoder.set_bytes(bytes, index));
+extern "C" fn compute_set_bytes(
+    encoder: *mut c_void,
+    bytes: *const c_void,
+    length: u64,
+    index: u32,
+) {
+    let (encoder, errors) = encoder!(encoder, ComputeEncoder);
+    let _ = errors;
+    let bytes = match unsafe { util::input_bytes(bytes, length) } {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            record_error(errors, error);
+            return;
+        }
+    };
+    report(errors, "setBytes", encoder.set_bytes(bytes, index));
 }
 
 extern "C" fn compute_set_texture(encoder: *mut c_void, texture: *mut c_void, index: u32) {
-    let encoder = encoder!(encoder, ComputeEncoder);
-    report("setTexture", encoder.set_texture(optional_texture(texture), index));
+    let (encoder, errors) = encoder!(encoder, ComputeEncoder);
+    let _ = errors;
+    report(
+        errors,
+        "setTexture",
+        encoder.set_texture(optional_texture(texture), index),
+    );
 }
 
 extern "C" fn compute_set_sampler(encoder: *mut c_void, sampler: *mut c_void, index: u32) {
-    let encoder = encoder!(encoder, ComputeEncoder);
-    let sampler = if sampler.is_null() { None } else { get!(sampler, Sampler).map(|value| &*value) };
-    report("setSamplerState", encoder.set_sampler_state(sampler, index));
+    let (encoder, errors) = encoder!(encoder, ComputeEncoder);
+    let _ = errors;
+    let sampler = if sampler.is_null() {
+        None
+    } else {
+        get!(sampler, Sampler)
+    };
+    report(
+        errors,
+        "setSamplerState",
+        encoder.set_sampler_state(sampler, index),
+    );
 }
 
 extern "C" fn compute_dispatch(encoder: *mut c_void, groups: QmSize, threads: QmSize) {
-    let encoder = encoder!(encoder, ComputeEncoder);
-    report("dispatchThreadgroups", encoder.dispatch_threadgroups(size(groups), size(threads)));
+    let (encoder, errors) = encoder!(encoder, ComputeEncoder);
+    let _ = errors;
+    report(
+        errors,
+        "dispatchThreadgroups",
+        encoder.dispatch_threadgroups(size(groups), size(threads)),
+    );
 }
 
-extern "C" fn surface_new(device: *mut c_void, target: *const present::QmSurfaceTarget) -> *mut c_void {
-    let device = get_or!(device, Device, std::ptr::null_mut());
-    let Some(target) = (unsafe { target.as_ref() }) else { return fail("no surface target") };
-    guard(std::ptr::null_mut(), || match Surface::new(device, target) {
-        Ok(surface) => handle(Obj::Surface(surface)),
+extern "C" fn compute_dispatch_threads(encoder: *mut c_void, threads: QmSize, per_group: QmSize) {
+    let (encoder, errors) = encoder!(encoder, ComputeEncoder);
+    let _ = errors;
+    report(
+        errors,
+        "dispatchThreads",
+        encoder.dispatch_threads(size(threads), size(per_group)),
+    );
+}
+
+extern "C" fn compute_set_threadgroup_memory(encoder: *mut c_void, length: u64, index: u32) {
+    let (encoder, errors) = encoder!(encoder, ComputeEncoder);
+    let _ = errors;
+    let Ok(length) = u32::try_from(length) else {
+        record_error(errors, "threadgroup memory length exceeds 32 bits");
+        return;
+    };
+    report(
+        errors,
+        "setThreadgroupMemoryLength",
+        encoder.set_threadgroup_memory_length(length, index),
+    );
+}
+
+extern "C" fn compute_barrier(encoder: *mut c_void, scope: u32) {
+    let (encoder, errors) = encoder!(encoder, ComputeEncoder);
+    let _ = errors;
+    let Ok(scope) = BarrierScope::try_from(scope) else {
+        record_error(errors, "invalid memory barrier scope");
+        return;
+    };
+    encoder.memory_barrier_with_scope(scope);
+}
+
+extern "C" fn command_buffer_wait_scheduled(command: *mut c_void) -> c_int {
+    let command = get_or!(command, CommandBuffer, 5);
+    if command.errors.lock().unwrap().is_some() {
+        return 5;
+    }
+    guard(5, || match command.buffer.wait_until_scheduled() {
+        Ok(()) => status(command.buffer.status()),
         Err(error) => {
-            log_once(&format!("[Quadra Metal] presentation surface: {error}"));
-            fail(error)
+            set_error(format!("waitUntilScheduled: {error}"));
+            5
         }
     })
 }
 
-extern "C" fn surface_configure(surface: *mut c_void, config: *const present::QmSurfaceConfig) -> c_int {
+extern "C" fn queue_new_with_limit(device: *mut c_void, count: u64) -> *mut c_void {
+    let device = get_or!(device, Device, std::ptr::null_mut());
+    guard(std::ptr::null_mut(), || {
+        match device.new_command_queue_with_max_command_buffer_count(count as usize) {
+            Ok(queue) => handle(Obj::Queue(queue)),
+            Err(error) => fail(format!("newCommandQueueWithMaxCommandBufferCount: {error}")),
+        }
+    })
+}
+
+extern "C" fn fence_new(device: *mut c_void) -> *mut c_void {
+    let device = get_or!(device, Device, std::ptr::null_mut());
+    handle(Obj::Fence(device.new_fence()))
+}
+
+extern "C" fn encoder_fence(encoder: *mut c_void, fence: *mut c_void, update: c_int, stages: u32) {
+    let Some(fence) = get!(fence, Fence) else {
+        set_error("not a fence handle");
+        return;
+    };
+    let Some(object) = (unsafe { object_mut(encoder) }) else {
+        return;
+    };
+    match object {
+        Obj::RenderEncoder(slot) => {
+            let Some(encoder) = slot.value.as_mut() else {
+                return;
+            };
+            let Ok(stages) = RenderStages::try_from(stages) else {
+                record_error(&slot.errors, "invalid fence stages");
+                return;
+            };
+            let result = if update != 0 {
+                encoder.update_fence(fence, stages)
+            } else {
+                encoder.wait_for_fence(fence, stages)
+            };
+            report(&slot.errors, "render fence", result);
+        }
+        Obj::ComputeEncoder(slot) => {
+            let Some(encoder) = slot.value.as_mut() else {
+                return;
+            };
+            let result = if update != 0 {
+                encoder.update_fence(fence)
+            } else {
+                encoder.wait_for_fence(fence)
+            };
+            report(&slot.errors, "compute fence", result);
+        }
+        Obj::BlitEncoder(slot) => {
+            let Some(encoder) = slot.value.as_mut() else {
+                return;
+            };
+            let result = if update != 0 {
+                encoder.update_fence(fence)
+            } else {
+                encoder.wait_for_fence(fence)
+            };
+            report(&slot.errors, "blit fence", result);
+        }
+        _ => set_error("not an encoder handle"),
+    }
+}
+
+extern "C" fn encoder_use_resource(
+    encoder: *mut c_void,
+    resource: *mut c_void,
+    usage: u32,
+    stages: u32,
+) {
+    let resource = match unsafe { object(resource) } {
+        Some(Obj::Buffer(buffer)) => ResourceRef::Buffer(buffer),
+        Some(Obj::Texture(texture)) => ResourceRef::Texture(texture),
+        _ => {
+            set_error("not a buffer or texture handle");
+            return;
+        }
+    };
+    let Ok(usage) = ResourceUsage::try_from(usage) else {
+        set_error("invalid resource usage");
+        return;
+    };
+    let Some(object) = (unsafe { object_mut(encoder) }) else {
+        return;
+    };
+    match object {
+        Obj::RenderEncoder(slot) => {
+            let Some(encoder) = slot.value.as_mut() else {
+                return;
+            };
+            let Ok(stages) = RenderStages::try_from(stages) else {
+                record_error(&slot.errors, "invalid resource stages");
+                return;
+            };
+            report(
+                &slot.errors,
+                "useResource",
+                encoder.use_resource(resource, usage, stages),
+            );
+        }
+        Obj::ComputeEncoder(slot) => {
+            let Some(encoder) = slot.value.as_mut() else {
+                return;
+            };
+            report(
+                &slot.errors,
+                "useResource",
+                encoder.use_resource(resource, usage),
+            );
+        }
+        _ => set_error("not a render or compute encoder"),
+    }
+}
+
+extern "C" fn render_barrier(encoder: *mut c_void, scope: u32, after: u32, before: u32) {
+    let (encoder, errors) = encoder!(encoder, RenderEncoder);
+    match (
+        BarrierScope::try_from(scope),
+        RenderStages::try_from(after),
+        RenderStages::try_from(before),
+    ) {
+        (Ok(scope), Ok(after), Ok(before)) => {
+            encoder.memory_barrier_with_scope(scope, after, before)
+        }
+        _ => {
+            record_error(errors, "invalid render barrier mask");
+        }
+    }
+}
+
+extern "C" fn render_set_buffers(
+    encoder: *mut c_void,
+    stage: c_int,
+    handles: *const *mut c_void,
+    offsets: *const u64,
+    first: u32,
+    count: u32,
+) {
+    let (encoder, errors) = encoder!(encoder, RenderEncoder);
+    if count > 31
+        || first > 31 - count
+        || (count != 0 && handles.is_null())
+        || (count != 0 && offsets.is_null())
+        || !(0..=1).contains(&stage)
+    {
+        record_error(errors, "invalid bulk buffers range");
+        return;
+    }
+    let handles = if count == 0 {
+        &[]
+    } else {
+        unsafe { std::slice::from_raw_parts(handles, count as usize) }
+    };
+    let mut values: [Option<&Buffer>; 31] = [None; 31];
+    for (i, &handle) in handles.iter().enumerate() {
+        if !handle.is_null() {
+            let Some(value) = get!(handle, Buffer) else {
+                record_error(errors, "wrong bulk buffers handle");
+                return;
+            };
+            values[i] = Some(value);
+        }
+    }
+    let offsets = if count == 0 {
+        &[]
+    } else {
+        unsafe { std::slice::from_raw_parts(offsets, count as usize) }
+    };
+    let values = &values[..count as usize];
+    let result = if stage == 0 {
+        encoder.set_vertex_buffers(values, offsets, first)
+    } else {
+        encoder.set_fragment_buffers(values, offsets, first)
+    };
+    report(errors, "bulk buffers", result);
+}
+
+extern "C" fn render_set_textures(
+    encoder: *mut c_void,
+    stage: c_int,
+    handles: *const *mut c_void,
+    first: u32,
+    count: u32,
+) {
+    let (encoder, errors) = encoder!(encoder, RenderEncoder);
+    if count > 128
+        || first > 128 - count
+        || (count != 0 && handles.is_null())
+        || !(0..=1).contains(&stage)
+    {
+        record_error(errors, "invalid bulk textures range");
+        return;
+    }
+    let handles = if count == 0 {
+        &[]
+    } else {
+        unsafe { std::slice::from_raw_parts(handles, count as usize) }
+    };
+    let mut values: [Option<&Texture>; 128] = [None; 128];
+    for (i, &handle) in handles.iter().enumerate() {
+        if !handle.is_null() {
+            let Some(value) = get!(handle, Texture) else {
+                record_error(errors, "wrong bulk textures handle");
+                return;
+            };
+            values[i] = Some(value);
+        }
+    }
+    let values = &values[..count as usize];
+    let result = if stage == 0 {
+        encoder.set_vertex_textures(values, first)
+    } else {
+        encoder.set_fragment_textures(values, first)
+    };
+    report(errors, "bulk textures", result);
+}
+
+extern "C" fn render_set_samplers(
+    encoder: *mut c_void,
+    stage: c_int,
+    handles: *const *mut c_void,
+    first: u32,
+    count: u32,
+) {
+    let (encoder, errors) = encoder!(encoder, RenderEncoder);
+    if count > 16
+        || first > 16 - count
+        || (count != 0 && handles.is_null())
+        || !(0..=1).contains(&stage)
+    {
+        record_error(errors, "invalid bulk samplers range");
+        return;
+    }
+    let handles = if count == 0 {
+        &[]
+    } else {
+        unsafe { std::slice::from_raw_parts(handles, count as usize) }
+    };
+    let mut values: [Option<&SamplerState>; 16] = [None; 16];
+    for (i, &handle) in handles.iter().enumerate() {
+        if !handle.is_null() {
+            let Some(value) = get!(handle, Sampler) else {
+                record_error(errors, "wrong bulk samplers handle");
+                return;
+            };
+            values[i] = Some(value);
+        }
+    }
+    let values = &values[..count as usize];
+    let result = if stage == 0 {
+        encoder.set_vertex_sampler_states(values, None, first)
+    } else {
+        encoder.set_fragment_sampler_states(values, None, first)
+    };
+    report(errors, "bulk samplers", result);
+}
+
+extern "C" fn surface_new(
+    device: *mut c_void,
+    target: *const present::QmSurfaceTarget,
+) -> *mut c_void {
+    let device = get_or!(device, Device, std::ptr::null_mut());
+    let Some(target) = (unsafe { target.as_ref() }) else {
+        return fail("no surface target");
+    };
+    guard(std::ptr::null_mut(), || {
+        match Surface::new(device, target) {
+            Ok(surface) => handle(Obj::Surface(surface)),
+            Err(error) => {
+                log_once(&format!("[Quadra Metal] presentation surface: {error}"));
+                fail(error)
+            }
+        }
+    })
+}
+
+extern "C" fn surface_configure(
+    surface: *mut c_void,
+    config: *const present::QmSurfaceConfig,
+) -> c_int {
     let surface = get_or!(surface, Surface, 0);
-    let Some(config) = (unsafe { config.as_ref() }) else { return 0 };
+    let Some(config) = (unsafe { config.as_ref() }) else {
+        return 0;
+    };
     guard(0, || match surface.configure(config) {
         Ok(()) => 1,
         Err(error) => {
@@ -1488,7 +2349,10 @@ extern "C" fn surface_configure(surface: *mut c_void, config: *const present::Qm
     })
 }
 
-extern "C" fn surface_next_drawable(surface: *mut c_void, texture: *mut *mut c_void) -> *mut c_void {
+extern "C" fn surface_next_drawable(
+    surface: *mut c_void,
+    texture: *mut *mut c_void,
+) -> *mut c_void {
     let surface = get_or!(surface, Surface, std::ptr::null_mut());
     guard(std::ptr::null_mut(), || match surface.next_drawable() {
         Ok(drawable) => {
@@ -1541,8 +2405,10 @@ pub struct QmApi {
     texture_new: extern "C" fn(*mut c_void, *const QmTextureDesc) -> *mut c_void,
     texture_view: extern "C" fn(*mut c_void, u64, u64, u64, u64, u64, u64) -> *mut c_void,
     texture_describe: extern "C" fn(*mut c_void, *mut QmTextureDesc),
-    texture_replace_region: extern "C" fn(*mut c_void, QmOrigin, QmSize, u64, u64, *const c_void, u64, u64) -> c_int,
-    texture_get_bytes: extern "C" fn(*mut c_void, *mut c_void, u64, u64, u64, QmOrigin, QmSize, u64, u64) -> c_int,
+    texture_replace_region:
+        extern "C" fn(*mut c_void, QmOrigin, QmSize, u64, u64, *const c_void, u64, u64) -> c_int,
+    texture_get_bytes:
+        extern "C" fn(*mut c_void, *mut c_void, u64, u64, u64, QmOrigin, QmSize, u64, u64) -> c_int,
     sampler_new: extern "C" fn(*mut c_void, *const QmSamplerDesc) -> *mut c_void,
     depth_stencil_new: extern "C" fn(*mut c_void, *const QmDepthStencilDesc) -> *mut c_void,
     library_new: extern "C" fn(*mut c_void, *const c_void, u64) -> *mut c_void,
@@ -1583,10 +2449,44 @@ pub struct QmApi {
     blit_encoder_new: extern "C" fn(*mut c_void) -> *mut c_void,
     blit_end: extern "C" fn(*mut c_void) -> c_int,
     blit_copy_buffer: extern "C" fn(*mut c_void, *mut c_void, u64, *mut c_void, u64, u64),
-    blit_copy_buffer_to_texture: extern "C" fn(*mut c_void, *mut c_void, u64, u64, u64, QmSize, *mut c_void, u64, u64, QmOrigin),
-    blit_copy_texture_to_buffer: extern "C" fn(*mut c_void, *mut c_void, u64, u64, QmOrigin, QmSize, *mut c_void, u64, u64, u64),
-    blit_copy_texture: extern "C" fn(*mut c_void, *mut c_void, u64, u64, QmOrigin, QmSize, *mut c_void, u64, u64, QmOrigin),
-    blit_copy_texture_slices: extern "C" fn(*mut c_void, *mut c_void, u64, u64, *mut c_void, u64, u64, u64, u64),
+    blit_copy_buffer_to_texture: extern "C" fn(
+        *mut c_void,
+        *mut c_void,
+        u64,
+        u64,
+        u64,
+        QmSize,
+        *mut c_void,
+        u64,
+        u64,
+        QmOrigin,
+    ),
+    blit_copy_texture_to_buffer: extern "C" fn(
+        *mut c_void,
+        *mut c_void,
+        u64,
+        u64,
+        QmOrigin,
+        QmSize,
+        *mut c_void,
+        u64,
+        u64,
+        u64,
+    ),
+    blit_copy_texture: extern "C" fn(
+        *mut c_void,
+        *mut c_void,
+        u64,
+        u64,
+        QmOrigin,
+        QmSize,
+        *mut c_void,
+        u64,
+        u64,
+        QmOrigin,
+    ),
+    blit_copy_texture_slices:
+        extern "C" fn(*mut c_void, *mut c_void, u64, u64, *mut c_void, u64, u64, u64, u64),
     blit_generate_mipmaps: extern "C" fn(*mut c_void, *mut c_void),
     blit_synchronize: extern "C" fn(*mut c_void, *mut c_void),
     compute_encoder_new: extern "C" fn(*mut c_void) -> *mut c_void,
@@ -1603,10 +2503,24 @@ pub struct QmApi {
     surface_next_drawable: extern "C" fn(*mut c_void, *mut *mut c_void) -> *mut c_void,
     drawable_present: extern "C" fn(*mut c_void) -> c_int,
     log_once: extern "C" fn(*const c_char),
+    texture_copy_byte_length:
+        extern "C" fn(*mut c_void, QmOrigin, QmSize, u64, u64, u64, u64, *mut u64) -> c_int,
+    compute_dispatch_threads: extern "C" fn(*mut c_void, QmSize, QmSize),
+    compute_set_threadgroup_memory: extern "C" fn(*mut c_void, u64, u32),
+    compute_barrier: extern "C" fn(*mut c_void, u32),
+    command_buffer_wait_scheduled: extern "C" fn(*mut c_void) -> c_int,
+    queue_new_with_limit: extern "C" fn(*mut c_void, u64) -> *mut c_void,
+    fence_new: extern "C" fn(*mut c_void) -> *mut c_void,
+    encoder_fence: extern "C" fn(*mut c_void, *mut c_void, c_int, u32),
+    encoder_use_resource: extern "C" fn(*mut c_void, *mut c_void, u32, u32),
+    render_barrier: extern "C" fn(*mut c_void, u32, u32, u32),
+    render_set_buffers: extern "C" fn(*mut c_void, c_int, *const *mut c_void, *const u64, u32, u32),
+    render_set_textures: extern "C" fn(*mut c_void, c_int, *const *mut c_void, u32, u32),
+    render_set_samplers: extern "C" fn(*mut c_void, c_int, *const *mut c_void, u32, u32),
 }
 
 static API: QmApi = QmApi {
-    version: 1,
+    version: 2,
     size: std::mem::size_of::<QmApi>() as u32,
     last_error,
     release,
@@ -1684,6 +2598,19 @@ static API: QmApi = QmApi {
     surface_next_drawable,
     drawable_present,
     log_once: log_text_once,
+    texture_copy_byte_length,
+    compute_dispatch_threads,
+    compute_set_threadgroup_memory,
+    compute_barrier,
+    command_buffer_wait_scheduled,
+    queue_new_with_limit,
+    fence_new,
+    encoder_fence,
+    encoder_use_resource,
+    render_barrier,
+    render_set_buffers,
+    render_set_textures,
+    render_set_samplers,
 };
 
 /// Check the dynamically loaded LLVM shader upgrader before starting the game.
@@ -1705,5 +2632,18 @@ pub extern "C" fn quadra_metal_host_api(version: u32) -> *const QmApi {
         &API
     } else {
         std::ptr::null()
+    }
+}
+
+#[cfg(test)]
+mod handle_storage_tests {
+    #[test]
+    fn encoder_storage_does_not_pad_every_resource_handle() {
+        let bytes = std::mem::size_of::<super::Obj>();
+        eprintln!("host_handle_bytes={bytes}");
+        assert!(
+            bytes <= 256,
+            "every resource handle would allocate {bytes} bytes"
+        );
     }
 }
