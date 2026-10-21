@@ -309,3 +309,78 @@ kernel void icb_step3(device atomic_uint *data [[buffer(0)]],
                       uint tid [[thread_position_in_grid]]) {
     atomic_fetch_add_explicit(&data[tid], 4u + uint(NONCE), memory_order_relaxed);
 }
+
+// The icb_draws workload's frame state and objects, as Apple's "Encoding Indirect Command Buffers
+// on the GPU" lays them out: a translation and scale shared by every object, and each object's
+// position, bounding radius and mesh vertex count.
+struct IcbDrawFrame {
+    float2 translation;
+    float2 scale;
+};
+
+struct IcbDrawObject {
+    float2 position;
+    float radius;
+    uint vertices;
+};
+
+// The argument buffer that holds the indirect command buffer.
+struct IcbDrawContainer {
+    command_buffer commands;
+};
+
+// Culls `object` against the view and, where it is visible, encodes its command: the frame state,
+// the objects and the mesh as vertex buffers, and a draw of `type` of its mesh's vertices whose
+// base instance is the object's index. An object out of view keeps the command the frame's reset
+// left: nothing.
+static void icb_draw_encode_object(uint object, constant IcbDrawFrame *frame,
+                                   device const IcbDrawObject *objects, device const float2 *mesh,
+                                   device const IcbDrawContainer *container, primitive_type type) {
+    float2 center = frame->scale * (frame->translation + objects[object].position);
+    float2 radius = frame->scale * objects[object].radius;
+    bool visible = all(center + radius >= float2(-1.0)) && all(center - radius <= float2(1.0));
+    render_command command(container->commands, object);
+    if (visible) {
+        command.set_vertex_buffer(frame, 0);
+        command.set_vertex_buffer(objects, 1);
+        command.set_vertex_buffer(mesh, 2);
+        command.draw_primitives(type, 0, objects[object].vertices, 1, object);
+    }
+}
+
+// Each thread encodes one object's command, a draw of triangles.
+kernel void icb_draw_encode(uint object [[thread_position_in_grid]],
+                            constant IcbDrawFrame *frame [[buffer(0)]],
+                            device const IcbDrawObject *objects [[buffer(1)]],
+                            device const float2 *mesh [[buffer(2)]],
+                            device const IcbDrawContainer *container [[buffer(3)]]) {
+    icb_draw_encode_object(object, frame, objects, mesh, container, primitive_type::triangle);
+}
+
+// icb_draw_encode, the draws' primitive type read from `type` (the CPU writes triangles), so the
+// kernel's code does not tell which type its draws are of.
+kernel void icb_draw_encode_any_type(uint object [[thread_position_in_grid]],
+                                     constant IcbDrawFrame *frame [[buffer(0)]],
+                                     device const IcbDrawObject *objects [[buffer(1)]],
+                                     device const float2 *mesh [[buffer(2)]],
+                                     device const IcbDrawContainer *container [[buffer(3)]],
+                                     constant uint &type [[buffer(4)]]) {
+    icb_draw_encode_object(object, frame, objects, mesh, container, primitive_type(type));
+}
+
+// An object's mesh vertex, moved to the object (its instance is the object's index).
+vertex QuadOut icb_draw_vertex(uint vid [[vertex_id]], uint object [[instance_id]],
+                               constant IcbDrawFrame *frame [[buffer(0)]],
+                               device const IcbDrawObject *objects [[buffer(1)]],
+                               device const float2 *mesh [[buffer(2)]]) {
+    QuadOut out;
+    float2 at = frame->scale * (frame->translation + objects[object].position + mesh[vid]);
+    out.position = float4(at, float(NONCE) * 1.0e-12, 1.0);
+    out.uv = mesh[vid] * 0.5 + 0.5;
+    return out;
+}
+
+// The object's color from its mesh coordinates.
+fragment float4 icb_draw_fragment(QuadOut in [[stage_in]]) {
+    return float4(in.uv, float(NONCE) * 1.0e-12, 1.0);
+}

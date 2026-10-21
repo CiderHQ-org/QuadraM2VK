@@ -14,9 +14,9 @@ use objc2_metal::{
     MTLIndexType, MTLIndirectCommandBuffer, MTLIndirectCommandBufferDescriptor,
     MTLIndirectCommandType, MTLLibrary, MTLLoadAction, MTLOrigin, MTLPipelineOption,
     MTLPixelFormat, MTLPrimitiveType, MTLRegion, MTLRenderCommandEncoder, MTLRenderPassDescriptor,
-    MTLRenderPipelineDescriptor, MTLRenderPipelineState, MTLResourceOptions, MTLResourceUsage,
-    MTLSamplerDescriptor, MTLSamplerMinMagFilter, MTLSamplerState, MTLSize, MTLStorageMode,
-    MTLStoreAction, MTLTexture, MTLTextureDescriptor, MTLTextureUsage, MTLWinding,
+    MTLRenderPipelineDescriptor, MTLRenderPipelineState, MTLRenderStages, MTLResourceOptions,
+    MTLResourceUsage, MTLSamplerDescriptor, MTLSamplerMinMagFilter, MTLSamplerState, MTLSize,
+    MTLStorageMode, MTLStoreAction, MTLTexture, MTLTextureDescriptor, MTLTextureUsage, MTLWinding,
 };
 use std::ffi::c_void;
 use std::path::Path;
@@ -187,6 +187,43 @@ impl Gpu for Native {
                     &descriptor,
                     count,
                     MTLResourceOptions::StorageModePrivate,
+                )
+        }
+        .expect("newIndirectCommandBufferWithDescriptor")
+    }
+
+    fn indirect_render_pipeline(
+        &self,
+        library: &Self::Library,
+        vertex: &str,
+        fragment: &str,
+    ) -> Self::RenderPipeline {
+        let descriptor = MTLRenderPipelineDescriptor::new();
+        descriptor.setVertexFunction(Some(&function(library, vertex)));
+        descriptor.setFragmentFunction(Some(&function(library, fragment)));
+        // SAFETY: attachment 0 exists.
+        let color = unsafe { descriptor.colorAttachments().objectAtIndexedSubscript(0) };
+        color.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
+        descriptor.setSupportIndirectCommandBuffers(true);
+        self.device
+            .newRenderPipelineStateWithDescriptor_error(&descriptor)
+            .expect("newRenderPipelineStateWithDescriptor")
+    }
+
+    fn indirect_draws(&self, count: usize, vertex_buffers: usize) -> Self::IndirectCommands {
+        let descriptor = MTLIndirectCommandBufferDescriptor::new();
+        descriptor.setCommandTypes(MTLIndirectCommandType::Draw);
+        descriptor.setInheritPipelineState(true);
+        descriptor.setInheritBuffers(false);
+        descriptor.setMaxVertexBufferBindCount(vertex_buffers);
+        descriptor.setMaxFragmentBufferBindCount(0);
+        // SAFETY: the descriptor is a draw buffer's, of a count above zero.
+        unsafe {
+            self.device
+                .newIndirectCommandBufferWithDescriptor_maxCommandCount_options(
+                    &descriptor,
+                    count,
+                    MTLResourceOptions::StorageModeShared,
                 )
         }
         .expect("newIndirectCommandBufferWithDescriptor")
@@ -572,6 +609,29 @@ impl Gpu for Native {
         };
     }
 
+    fn use_in_vertex(&self, encoder: &mut Self::RenderEncoder, buffer: &Self::Buffer) {
+        encoder.useResource_usage_stages(
+            ProtocolObject::from_ref(&**buffer),
+            MTLResourceUsage::Read,
+            MTLRenderStages::Vertex,
+        );
+    }
+
+    fn execute_draws(
+        &self,
+        encoder: &mut Self::RenderEncoder,
+        commands: &Self::IndirectCommands,
+        count: usize,
+    ) {
+        let range = objc2_foundation::NSRange {
+            location: 0,
+            length: count,
+        };
+        // SAFETY: the encoder's command buffer holds `commands` until it completes, the range
+        // lies within its commands, and they inherit the encoder's pipeline state.
+        unsafe { encoder.executeCommandsInBuffer_withRange(commands, range) };
+    }
+
     fn end_render(&self, encoder: Self::RenderEncoder) {
         encoder.endEncoding();
     }
@@ -660,6 +720,24 @@ impl Gpu for Native {
 
     fn end_compute(&self, encoder: Self::ComputeEncoder) {
         encoder.endEncoding();
+    }
+
+    fn reset_commands(
+        &self,
+        command_buffer: &Self::CommandBuffer,
+        commands: &Self::IndirectCommands,
+        count: usize,
+    ) {
+        let blit = command_buffer
+            .blitCommandEncoder()
+            .expect("blitCommandEncoder");
+        let range = objc2_foundation::NSRange {
+            location: 0,
+            length: count,
+        };
+        // SAFETY: the range lies within the buffer's commands.
+        unsafe { blit.resetCommandsInBuffer_withRange(commands, range) };
+        blit.endEncoding();
     }
 
     fn fill(&self, command_buffer: &Self::CommandBuffer, buffer: &Self::Buffer, length: usize) {

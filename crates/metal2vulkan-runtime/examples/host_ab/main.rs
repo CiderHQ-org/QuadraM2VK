@@ -116,6 +116,15 @@
 //!   the encoding thread's through the commit, the process's CPU time, and on the runtime's side
 //!   its queue submissions, barriers, dispatches and indirect dispatches (`rt_*`). The first
 //!   frame's output is checked (`workloads::icb`).
+//! - `icb_draws`: a frame of Apple's "Encoding Indirect Command Buffers on the GPU": a blit
+//!   resets an indirect command buffer of 65,536 draws whose commands inherit the pipeline state,
+//!   a kernel culls 65,536 objects on a grid a little wider than the view and encodes a command for
+//!   each visible one (three vertex buffers and a draw of its mesh's 18 vertices whose base
+//!   instance is its index), and a render pass into a 1920x1080 `BGRA8Unorm` target executes them
+//!   all. Per frame, as `many_draws`; `icb_draws_any_type_*`: the same, the kernel reading the
+//!   draws' primitive type (triangles) from a buffer, where the runtime cannot tell the type from
+//!   the kernel's code and so reads the records on the host. On the runtime's side, the commands
+//!   drawn on the GPU alone and the records read on the host per frame (`rt_*`).
 //!
 //! Options: `--rounds N` (3), `--draws N` (2000), `--timed N` (30), `--latency N` (200),
 //! `--heavy-iterations N` (64), `--heavy-runs N` (15), `--many-draws N` (6000), `--frames N`
@@ -143,7 +152,7 @@ use std::process::{Command, Stdio};
 use std::time::Instant;
 use workloads::Sizes;
 
-const WORKLOADS: [&str; 13] = [
+const WORKLOADS: [&str; 14] = [
     "encode",
     "fixed",
     "latency",
@@ -157,6 +166,7 @@ const WORKLOADS: [&str; 13] = [
     "drag",
     "burst",
     "icb",
+    "icb_draws",
 ];
 
 struct Options {
@@ -367,6 +377,7 @@ fn run<G: Gpu>(g: &G, opened: Instant, metallib: &Path, options: &Options) {
             "drag" => workloads::drag(g, &scene, sizes),
             "burst" => workloads::burst(g, &scene),
             "icb" => workloads::icb(g, &library, sizes),
+            "icb_draws" => workloads::icb_draws(g, &library, sizes),
             _ => unreachable!(),
         }
     }

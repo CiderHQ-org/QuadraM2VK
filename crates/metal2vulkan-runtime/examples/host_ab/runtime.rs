@@ -168,6 +168,40 @@ impl Gpu for Runtime {
             .expect("new_compute_pipeline_state")
     }
 
+    fn indirect_render_pipeline(
+        &self,
+        library: &rt::Library,
+        vertex: &str,
+        fragment: &str,
+    ) -> rt::RenderPipelineState {
+        let function = |name: &str| {
+            let function = library
+                .new_function_with_name(name)
+                .expect("new_function_with_name");
+            StageSource::Function(function.function_descriptor())
+        };
+        let mut descriptor = RenderPipelineDescriptor::new(function(vertex));
+        descriptor.fragment = Some(function(fragment));
+        descriptor.color_attachments[0] =
+            Some(ColorAttachmentDescriptor::new(PixelFormat::BGRA8Unorm));
+        descriptor.support_indirect_command_buffers = true;
+        self.device
+            .new_render_pipeline_state(&descriptor, &rt::PipelineOptions::default())
+            .expect("new_render_pipeline_state")
+    }
+
+    fn indirect_draws(&self, count: usize, vertex_buffers: usize) -> rt::IndirectCommandBuffer {
+        let mut descriptor = rt::IndirectCommandBufferDescriptor::new();
+        descriptor.command_types = IndirectCommandType::DRAW;
+        descriptor.inherit_pipeline_state = true;
+        descriptor.inherit_buffers = false;
+        descriptor.max_vertex_buffer_bind_count = vertex_buffers as u32;
+        descriptor.max_fragment_buffer_bind_count = 0;
+        self.device
+            .new_indirect_command_buffer(&descriptor, count as u64, rt::ResourceOptions::shared())
+            .expect("new_indirect_command_buffer")
+    }
+
     fn indirect_commands(&self, count: usize) -> rt::IndirectCommandBuffer {
         let mut descriptor = rt::IndirectCommandBufferDescriptor::new();
         descriptor.command_types = IndirectCommandType::CONCURRENT_DISPATCH;
@@ -535,6 +569,27 @@ impl Gpu for Runtime {
             .expect("draw_indexed_primitives");
     }
 
+    fn use_in_vertex(&self, encoder: &mut rt::RenderCommandEncoder, buffer: &rt::Buffer) {
+        encoder
+            .use_resource(
+                buffer.as_resource(),
+                ResourceUsage::READ,
+                metal2vulkan::metal::RenderStages::VERTEX,
+            )
+            .expect("use_resource");
+    }
+
+    fn execute_draws(
+        &self,
+        encoder: &mut rt::RenderCommandEncoder,
+        commands: &rt::IndirectCommandBuffer,
+        count: usize,
+    ) {
+        encoder
+            .execute_commands_in_buffer(commands, 0..count as u64)
+            .expect("execute_commands_in_buffer");
+    }
+
     fn end_render(&self, encoder: rt::RenderCommandEncoder) {
         encoder.end_encoding().expect("end_encoding");
     }
@@ -628,6 +683,20 @@ impl Gpu for Runtime {
 
     fn end_compute(&self, encoder: rt::ComputeCommandEncoder) {
         encoder.end_encoding().expect("end_encoding");
+    }
+
+    fn reset_commands(
+        &self,
+        command_buffer: &rt::CommandBuffer,
+        commands: &rt::IndirectCommandBuffer,
+        count: usize,
+    ) {
+        let mut blit = command_buffer
+            .blit_command_encoder()
+            .expect("blit_command_encoder");
+        blit.reset_commands_in_buffer(commands, 0..count as u64)
+            .expect("reset_commands_in_buffer");
+        blit.end_encoding().expect("end_encoding");
     }
 
     fn fill(&self, command_buffer: &rt::CommandBuffer, buffer: &rt::Buffer, length: usize) {
@@ -755,6 +824,8 @@ impl Gpu for Runtime {
             ("arena_pools_made", c.arena_pools_made),
             ("command_pools_made", c.command_pools_made),
             ("dispatches", replayed.cmd_dispatch),
+            ("gpu_form_commands", c.gpu_form_commands),
+            ("indirect_records_read", c.indirect_records_read),
             ("dispatches_indirect", replayed.cmd_dispatch_indirect),
         ]
         .into_iter()

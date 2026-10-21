@@ -64,6 +64,18 @@ pub trait Gpu {
         library: &Self::Library,
         kernel: &str,
     ) -> Self::ComputePipeline;
+    /// As `render_pipeline` of `vertex` and `fragment` into `BGRA8Unorm`, without blending, with
+    /// `supportIndirectCommandBuffers`.
+    fn indirect_render_pipeline(
+        &self,
+        library: &Self::Library,
+        vertex: &str,
+        fragment: &str,
+    ) -> Self::RenderPipeline;
+    /// `newIndirectCommandBufferWithDescriptor:maxCommandCount:options:` of `count` draws of
+    /// `Shared` storage whose commands inherit the pipeline state, not the buffers, and bind
+    /// `vertex_buffers` vertex buffers and no fragment buffer.
+    fn indirect_draws(&self, count: usize, vertex_buffers: usize) -> Self::IndirectCommands;
     /// `newIndirectCommandBufferWithDescriptor:maxCommandCount:options:` of `count` concurrent
     /// dispatches, each binding one kernel buffer and inheriting nothing, of `Private` storage.
     fn indirect_commands(&self, count: usize) -> Self::IndirectCommands;
@@ -209,6 +221,15 @@ pub trait Gpu {
     /// `drawIndexedPrimitives:indexCount:indexType:indexBuffer:indexBufferOffset:` of triangles
     /// and 16-bit indices from the buffer's start.
     fn draw_indexed(&self, encoder: &mut Self::RenderEncoder, count: usize, indices: &Self::Buffer);
+    /// `useResource:usage:stages:` of `buffer`, read by the vertex stage.
+    fn use_in_vertex(&self, encoder: &mut Self::RenderEncoder, buffer: &Self::Buffer);
+    /// `executeCommandsInBuffer:withRange:` of draws `0..count`.
+    fn execute_draws(
+        &self,
+        encoder: &mut Self::RenderEncoder,
+        commands: &Self::IndirectCommands,
+        count: usize,
+    );
     fn end_render(&self, encoder: Self::RenderEncoder);
 
     /// `computeCommandEncoder`.
@@ -252,6 +273,13 @@ pub trait Gpu {
     );
     fn end_compute(&self, encoder: Self::ComputeEncoder);
 
+    /// A blit encoder of one `resetCommandsInBuffer:withRange:` of commands `0..count`.
+    fn reset_commands(
+        &self,
+        command_buffer: &Self::CommandBuffer,
+        commands: &Self::IndirectCommands,
+        count: usize,
+    );
     /// A blit encoder of one `fillBuffer:range:value:` over the buffer's first `length` bytes.
     fn fill(&self, command_buffer: &Self::CommandBuffer, buffer: &Self::Buffer, length: usize);
     /// A blit encoder of `copyFromBuffer:...toTexture:...` into each of `textures`, a

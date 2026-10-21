@@ -1936,3 +1936,160 @@ pub fn icb<G: Gpu>(g: &G, library: &G::Library, sizes: &Sizes) {
         }
     }
 }
+
+/// The icb_draws workload's objects, as many as Apple's "Encoding Indirect Command Buffers on the GPU"
+/// draws (`AAPLNumObjects`), on a grid of `ICB_DRAW_GRID` columns.
+const ICB_DRAW_OBJECTS: usize = 65536;
+const ICB_DRAW_GRID: usize = 256;
+/// Each object's mesh: a hexagon's six triangles.
+const ICB_DRAW_VERTICES: usize = 18;
+
+/// The icb_draws workload's objects and their indirect command buffer (`main.rs`'s module docs).
+struct IcbDraws<G: Gpu> {
+    encode: G::ComputePipeline,
+    draw: G::RenderPipeline,
+    /// The frame state, the objects, the mesh, the argument buffer holding the buffer's ID and the
+    /// draws' primitive type (`icb_draw_encode_any_type`'s).
+    frame: G::Buffer,
+    objects: G::Buffer,
+    mesh: G::Buffer,
+    container: G::Buffer,
+    primitive: G::Buffer,
+    commands: G::IndirectCommands,
+    target: G::Texture,
+}
+
+impl<G: Gpu> IcbDraws<G> {
+    /// The objects, encoded by `kernel`.
+    fn new(g: &G, library: &G::Library, kernel: &str) -> IcbDraws<G> {
+        // The grid spans a little more than the view, so its edge objects are culled.
+        let span = 2.2f32;
+        let cell = span / ICB_DRAW_GRID as f32;
+        let mut objects = Vec::with_capacity(ICB_DRAW_OBJECTS * 16);
+        for object in 0..ICB_DRAW_OBJECTS {
+            let (column, row) = (object % ICB_DRAW_GRID, object / ICB_DRAW_GRID);
+            let x = -span / 2.0 + (column as f32 + 0.5) * cell;
+            let y = -span / 2.0 + (row as f32 + 0.5) * cell;
+            for word in [x.to_bits(), y.to_bits(), (cell * 0.4).to_bits()] {
+                objects.extend_from_slice(&word.to_le_bytes());
+            }
+            objects.extend_from_slice(&(ICB_DRAW_VERTICES as u32).to_le_bytes());
+        }
+        let mut mesh = Vec::with_capacity(ICB_DRAW_VERTICES * 8);
+        let corner = |k: usize| {
+            let angle = k as f32 * std::f32::consts::TAU / 6.0;
+            [angle.cos() * cell * 0.4, angle.sin() * cell * 0.4]
+        };
+        for k in 0..6 {
+            for [x, y] in [[0.0, 0.0], corner(k), corner(k + 1)] {
+                mesh.extend_from_slice(&f32::to_le_bytes(x));
+                mesh.extend_from_slice(&f32::to_le_bytes(y));
+            }
+        }
+        let frame: Vec<u8> = [0.0f32, 0.0, 1.0, 1.0]
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect();
+        let commands = g.indirect_draws(ICB_DRAW_OBJECTS, 3);
+        IcbDraws {
+            encode: g.compute_pipeline(library, kernel),
+            draw: g.indirect_render_pipeline(library, "icb_draw_vertex", "icb_draw_fragment"),
+            frame: g.buffer_with(&frame),
+            objects: g.buffer_with(&objects),
+            mesh: g.buffer_with(&mesh),
+            container: g.buffer_with(&g.commands_id(&commands).to_le_bytes()),
+            // `MTLPrimitiveTypeTriangle`.
+            primitive: g.buffer_with(&3u32.to_le_bytes()),
+            commands,
+            target: g.texture(Format::Bgra8, 1920, 1080, true),
+        }
+    }
+
+    /// One frame, as the sample's: a blit resets the commands, a kernel culls the objects and
+    /// encodes a command for each visible one, and a render pass executes them all.
+    fn encode(&self, g: &G, command_buffer: &G::CommandBuffer) {
+        g.reset_commands(command_buffer, &self.commands, ICB_DRAW_OBJECTS);
+        let mut encoder = g.compute_encoder(command_buffer);
+        g.set_compute_pipeline(&mut encoder, &self.encode);
+        g.set_buffer(&mut encoder, &self.frame, 0, 0);
+        g.set_buffer(&mut encoder, &self.objects, 0, 1);
+        g.set_buffer(&mut encoder, &self.mesh, 0, 2);
+        g.set_buffer(&mut encoder, &self.container, 0, 3);
+        g.set_buffer(&mut encoder, &self.primitive, 0, 4);
+        g.use_commands(&mut encoder, &self.commands);
+        g.dispatch(&mut encoder, ICB_DRAW_OBJECTS / 64, 64);
+        g.end_compute(encoder);
+        let mut encoder = g.render_encoder(command_buffer, &self.target, true);
+        g.set_render_pipeline(&mut encoder, &self.draw);
+        for buffer in [&self.frame, &self.objects, &self.mesh] {
+            g.use_in_vertex(&mut encoder, buffer);
+        }
+        g.execute_draws(&mut encoder, &self.commands, ICB_DRAW_OBJECTS);
+        g.end_render(encoder);
+    }
+}
+
+/// The icb_draws workload (module docs of `main.rs`): per frame, the encoding thread's wall time
+/// through `endEncoding`, the commit call's, the commit's return to the wait's, the whole frame's,
+/// the process's CPU time, the encoding thread's CPU time through the commit's return, and the GPU
+/// time where the side measures it; the same of commands whose primitive type the encoding kernel
+/// reads from a buffer (`icb_draws_any_type`), and on the runtime's side its counts of commands
+/// drawn on the GPU alone and records read on the host, per frame.
+pub fn icb_draws<G: Gpu>(g: &G, library: &G::Library, sizes: &Sizes) {
+    for (name, kernel) in [
+        ("icb_draws", "icb_draw_encode"),
+        ("icb_draws_any_type", "icb_draw_encode_any_type"),
+    ] {
+        let scene = IcbDraws::new(g, library, kernel);
+        let mut times: [Vec<f64>; 7] = Default::default();
+        let mut counts = Vec::new();
+        for frame in 0..sizes.timed + 3 {
+            if frame == 3 {
+                counts = g.work_counts();
+            }
+            g.pool(|| {
+                let cpu = process_cpu();
+                let thread = thread_cpu();
+                let start = Instant::now();
+                let command_buffer = g.command_buffer();
+                scene.encode(g, &command_buffer);
+                let encoded = Instant::now();
+                g.commit(&command_buffer);
+                let committed = Instant::now();
+                let thread = thread_cpu() - thread;
+                g.wait(&command_buffer);
+                let done = Instant::now();
+                let cpu = process_cpu() - cpu;
+                if frame < 3 {
+                    return;
+                }
+                times[6].push(ms(thread));
+                times[0].push(ms(encoded - start));
+                times[1].push(ms(committed - encoded));
+                times[2].push(ms(done - committed));
+                times[3].push(ms(done - start));
+                times[4].push(ms(cpu));
+                if let Some(gpu) = g.gpu_seconds(&command_buffer) {
+                    times[5].push(gpu * 1e3);
+                }
+            });
+        }
+        let [encode, commit, wait, frame, cpu, gpu, thread] = &mut times;
+        emit(name, "encode", "ms", encode);
+        emit(name, "commit", "ms", commit);
+        emit(name, "commit_to_done", "ms", wait);
+        emit(name, "frame", "ms", frame);
+        emit(name, "cpu", "ms", cpu);
+        emit(name, "thread_cpu", "ms", thread);
+        if !gpu.is_empty() {
+            emit(name, "gpu", "ms", gpu);
+        }
+        let after = g.work_counts();
+        for ((counted, before), (_, now)) in counts.iter().zip(&after) {
+            if matches!(*counted, "gpu_form_commands" | "indirect_records_read") {
+                let per_frame = (now - before) / sizes.timed as f64;
+                emit(name, &format!("rt_{counted}"), "count", &mut [per_frame]);
+            }
+        }
+    }
+}
