@@ -852,24 +852,41 @@ pub fn memory<G: Gpu>(g: &G, sizes: &Sizes) {
     // Buffers held, as a program that grows its memory makes them: each takes memory no buffer
     // of the run used before, so neither side hands back one it made earlier (the runtime's
     // recycler lets go of what it parked above once a second passed). Each one's creation, then
-    // the first write of all its bytes from the CPU.
-    std::thread::sleep(Duration::from_millis(1100));
+    // the first touch of all its bytes: a write from the CPU, or, of another set, a blit fill
+    // from the GPU (commit to the wait's return), and that fill again.
     for (name, length, count) in [("1m", MIB, 48), ("64m", 64 * MIB, 6)] {
-        let (mut make, mut write) = (vec![], vec![]);
-        let buffers: Vec<G::Buffer> = (0..count)
-            .map(|_| {
-                let t = Instant::now();
-                let buffer = g.buffer(length);
-                make.push(us(t.elapsed()));
-                buffer
-            })
-            .collect();
-        for buffer in &buffers {
+        std::thread::sleep(Duration::from_millis(1100));
+        let mut make = vec![];
+        let mut held = || -> Vec<G::Buffer> {
+            (0..count)
+                .map(|_| {
+                    let t = Instant::now();
+                    let buffer = g.buffer(length);
+                    make.push(us(t.elapsed()));
+                    buffer
+                })
+                .collect()
+        };
+        // Both sets held to the end, so that the second takes none of the first's memory.
+        let (written, filled) = (held(), held());
+        let mut write = vec![];
+        for buffer in &written {
             let t = Instant::now();
             g.write_buffer(buffer, 0x5a);
             write.push(us(t.elapsed()));
         }
-        drop(buffers);
+        let (mut fill, mut again) = (vec![], vec![]);
+        for buffer in &filled {
+            for times in [&mut fill, &mut again] {
+                let t = Instant::now();
+                let command_buffer = g.command_buffer();
+                g.fill(&command_buffer, buffer, length);
+                g.commit(&command_buffer);
+                g.wait(&command_buffer);
+                times.push(us(t.elapsed()));
+            }
+        }
+        drop((written, filled));
         emit(
             "memory",
             &format!("new_buffer_held_{name}"),
@@ -881,6 +898,18 @@ pub fn memory<G: Gpu>(g: &G, sizes: &Sizes) {
             &format!("first_write_held_{name}"),
             "us",
             &mut write,
+        );
+        emit(
+            "memory",
+            &format!("first_fill_held_{name}"),
+            "us",
+            &mut fill,
+        );
+        emit(
+            "memory",
+            &format!("second_fill_held_{name}"),
+            "us",
+            &mut again,
         );
     }
     let side = HEAVY_TEXTURE_SIDE;

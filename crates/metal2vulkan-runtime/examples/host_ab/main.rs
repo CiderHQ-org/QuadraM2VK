@@ -78,9 +78,10 @@
 //! - `memory`: `newBufferWithLength:` and `newBufferWithBytes:` of 4 KiB, 1 MiB and 64 MiB,
 //!   `newBufferWithBytesNoCopy:` of 1 MiB and 64 MiB, each released before the next is made;
 //!   `newBufferWithLength:` of 1 MiB and 64 MiB held (`held`: 48 and 6 of them, none made in
-//!   memory an earlier one used), and the first CPU write of all of each one's bytes
-//!   (`first_write_held`); and a 1024x1024 `RGBA8Unorm` `Shared` texture's `replaceRegion` and
-//!   `getBytes`.
+//!   memory an earlier one used), and the first touch of all of each one's bytes: a CPU write
+//!   (`first_write_held`), or, of a second set, a blit fill from commit to the wait's return
+//!   (`first_fill_held`) and that fill again (`second_fill_held`); and a 1024x1024 `RGBA8Unorm`
+//!   `Shared` texture's `replaceRegion` and `getBytes`.
 //! - `churn`: each frame makes eight 1280x800 `Private` render targets, clears and releases them,
 //!   the same size each frame (`same`) or one of 64 widths in turn (`varied`); and sixteen 64-KiB
 //!   buffers, filled and released (`buffers`) (`workloads::churn`).
