@@ -576,6 +576,58 @@ mod tests {
     use super::*;
     use std::process::Stdio;
 
+    /// Ordinary child stdout with a bounded reader. Pipes work in runners that prohibit Unix
+    /// sockets and still prove EOF only after every descendant has closed its inherited writer.
+    #[cfg(unix)]
+    struct BoundedPipe {
+        reader: std::io::PipeReader,
+        deadline: Instant,
+    }
+
+    #[cfg(unix)]
+    impl std::io::Read for BoundedPipe {
+        fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+            use std::os::fd::AsRawFd;
+            loop {
+                let left = self.deadline.saturating_duration_since(Instant::now());
+                if left.is_zero() {
+                    return Err(std::io::ErrorKind::TimedOut.into());
+                }
+                let mut descriptor = libc::pollfd {
+                    fd: self.reader.as_raw_fd(),
+                    events: libc::POLLIN,
+                    revents: 0,
+                };
+                let millis = i32::try_from(left.as_millis() + 1).unwrap_or(i32::MAX);
+                // SAFETY: one initialized descriptor, borrowed from the live pipe reader.
+                let ready = unsafe { libc::poll(&mut descriptor, 1, millis) };
+                if ready < 0 {
+                    let error = std::io::Error::last_os_error();
+                    if error.kind() == std::io::ErrorKind::Interrupted {
+                        continue;
+                    }
+                    return Err(error);
+                }
+                if ready == 0 {
+                    return Err(std::io::ErrorKind::TimedOut.into());
+                }
+                return self.reader.read(bytes);
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    fn child_stdout() -> (BoundedPipe, Stdio) {
+        let (reader, writer) = std::io::pipe().unwrap();
+        (
+            BoundedPipe {
+                reader,
+                deadline: Instant::now() + Duration::from_secs(2),
+            },
+            Stdio::from(writer),
+        )
+    }
+
     /// A member reaped while the group is sampled is gone, not a monitoring failure: on Linux the
     /// `/proc/<pid>/status` a sampler opened before the reap reads `ESRCH` (a drm-shim sweep
     /// stopped a compile on it).
@@ -794,20 +846,15 @@ mod tests {
     #[test]
     fn worker_shutdown_kills_descendants_after_the_leader_exits() {
         use std::io::Read;
-        use std::os::fd::OwnedFd;
-        use std::os::unix::net::UnixStream;
 
         for leader in ["wait", "exit 0"] {
-            let (mut output, writer) = UnixStream::pair().unwrap();
-            output
-                .set_read_timeout(Some(Duration::from_secs(2)))
-                .unwrap();
+            let (mut output, writer) = child_stdout();
             let mut command = Command::new("sh");
             command.args([
                 "-c",
                 &format!("(trap '' TERM; printf ready; exec sleep 60) & {leader}"),
             ]);
-            command.stdout(Stdio::from(OwnedFd::from(writer)));
+            command.stdout(writer);
             let mut worker = MonitoredChild::spawn(&mut command).unwrap();
             // Command owns another copy of stdout until it is dropped.
             drop(command);
@@ -838,16 +885,11 @@ mod tests {
     #[test]
     fn a_reaped_leaders_descendants_are_killed() {
         use std::io::Read;
-        use std::os::fd::OwnedFd;
-        use std::os::unix::net::UnixStream;
 
-        let (mut output, writer) = UnixStream::pair().unwrap();
-        output
-            .set_read_timeout(Some(Duration::from_secs(2)))
-            .unwrap();
+        let (mut output, writer) = child_stdout();
         let mut command = Command::new("sh");
         command.args(["-c", "(trap '' TERM; printf ready; exec sleep 60) & exit 0"]);
-        command.stdout(Stdio::from(OwnedFd::from(writer)));
+        command.stdout(writer);
         let worker = MonitoredChild::spawn(&mut command).unwrap();
         drop(command);
         let group = -(worker.id() as i32);
