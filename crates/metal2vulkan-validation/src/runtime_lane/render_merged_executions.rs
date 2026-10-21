@@ -19,15 +19,17 @@
 //!   the CPU wrote one indirect draw per command, the same pixels as the host step's there;
 //! - after a rebind between the commit and the first submission, of a buffer over host pages
 //!   the commands' vertices lie in or of one they never use: recorded again at the rebind, the
-//!   new pages' points, the command buffer completing.
+//!   new pages' points, the command buffer completing; and of the buffer a shadowed target lies
+//!   over: the render encoder encoded again, its copies and its merged draw into the new pages.
 
-use super::degrade_notices::{assert_made_once, counts, on_device};
+use super::degrade_notices::{assert_made_once, assert_once, counts, expected_once, on_device};
+use super::host_memory::Mapping;
 use super::host_memory::Seen;
 use super::indirect_host_steps::{complete, HOST_STEPS};
-use super::rebind_reach::{buffer_len, buffer_over, pages};
+use super::rebind_reach::{buffer_len, buffer_of, buffer_over, pages};
 use super::rebinds::rebind;
 use super::render_executions::{forced_with, icb};
-use super::{buffer_with, WAIT};
+use super::{buffer_with, read_buffer, WAIT};
 use crate::air_library::AirLibrary;
 use metal2vulkan::metal::RenderStages;
 use metal2vulkan::metal::{
@@ -108,6 +110,14 @@ fn floats(values: impl IntoIterator<Item = f32>) -> Vec<u8> {
     values.into_iter().flat_map(f32::to_le_bytes).collect()
 }
 
+/// The target's descriptor: `RGBA32Uint`, `W` by `H`, `Shared`, a render target.
+fn target_descriptor() -> TextureDescriptor {
+    let mut target = TextureDescriptor::texture_2d(PixelFormat::RGBA32Uint, W, H, false);
+    target.usage = TextureUsage::RENDER_TARGET;
+    target.resource_options = ResourceOptions::shared();
+    target
+}
+
 /// What one run draws: the writer's inputs and the target, and the buffer it lies over where it
 /// is a texture over one.
 struct Scene {
@@ -116,7 +126,7 @@ struct Scene {
     frame: Buffer,
     xy: Buffer,
     target: Texture,
-    _over: Option<Buffer>,
+    over: Option<Buffer>,
 }
 
 impl Scene {
@@ -129,9 +139,7 @@ impl Scene {
     /// [`Scene::new`], the target a texture over a `Shared` buffer whose rows lie `rows` bytes
     /// apart where given.
     fn with_rows(device: &Device, draws: &[Draw], xy: &[[f32; 2]], rows: Option<u64>) -> Scene {
-        let mut target = TextureDescriptor::texture_2d(PixelFormat::RGBA32Uint, W, H, false);
-        target.usage = TextureUsage::RENDER_TARGET;
-        target.resource_options = ResourceOptions::shared();
+        let target = target_descriptor();
         let (target, over) = match rows {
             Some(rows) => {
                 let over = device
@@ -147,7 +155,16 @@ impl Scene {
             frame: buffer_with(device, &floats([W as f32, H as f32, ROW, 0.0])).unwrap(),
             xy: buffer_with(device, &floats(xy.iter().flatten().copied())).unwrap(),
             target,
-            _over: over,
+            over,
+        }
+    }
+
+    /// [`Scene::new`], the target a texture over `over` whose rows lie `rows` bytes apart.
+    fn over(device: &Device, draws: &[Draw], xy: &[[f32; 2]], over: Buffer, rows: u64) -> Scene {
+        Scene {
+            target: over.new_texture(&target_descriptor(), 0, rows).unwrap(),
+            over: Some(over),
+            ..Scene::new(device, draws, xy)
         }
     }
 
@@ -478,18 +495,27 @@ fn gpu_forms_draw_into_a_shadowed_target_what_the_host_step_draws() {
 /// The points `draws` of the kernel's commands draw over `scene`, committed behind an event wait
 /// and first submitted only after `rebind` ran: the commit records them in one merged draw, and
 /// the rebind records them again (`command_buffer/reencode.rs`), once, over where the buffers lie
-/// then; the command buffer completes with a clean report and announces nothing.
+/// then: as a segment of its own, or in its render encoder encoded again (`pass_encoded`), with
+/// `encoded` of the command buffer's encoders encoded again; the command buffer completes with a
+/// clean report and announces `kinds` alone.
 fn rebound_run(
     device: &Device,
-    messages: &super::Messages,
-    scene: &Scene,
-    draws: &[Draw],
-    rebind: impl FnOnce(),
+    (messages, kinds): (&super::Messages, &[Degradation]),
+    (scene, draws): (&Scene, &[Draw]),
+    (rebind, encoded, pass_encoded): (&dyn Fn(), u64, bool),
 ) {
     let library = library(device);
     let writer = writer(device, &library, "points");
     let state = state(device, &library);
     let icb = icb(device, &inheriting(), 8);
+    // Run once first, so the writer's pipeline is made: a dispatch whose pipeline is still being
+    // made leaves its recording to a host step, and its command buffer holds what it used until it
+    // completes, refusing a rebind meanwhile (`RebindProblem::EncodedUses`).
+    scene.run(
+        device,
+        (Some(&writer), &state),
+        (&icb, draws.len() as u64, 8),
+    );
     let queue = device.new_command_queue().unwrap();
     let event = device.new_shared_event().unwrap();
     let command_buffer = queue.command_buffer().unwrap();
@@ -510,23 +536,31 @@ fn rebound_run(
     let before = device.work_counts();
     rebind();
     let after = device.work_counts();
-    assert_eq!(
-        after.segments_recorded_again,
-        before.segments_recorded_again + 1,
-        "the rebind recorded the merged draw again"
-    );
-    assert_eq!(after.reencodes_refused, before.reencodes_refused);
-    assert_eq!(
+    let counted = (
+        after.segments_recorded_again - before.segments_recorded_again,
+        after.encoders_reencoded - before.encoders_reencoded,
+        after.reencodes_refused - before.reencodes_refused,
         after.merged_draw_commands - before.merged_draw_commands,
-        8,
-        "in one merged draw again"
+        after.indirect_records_read - before.indirect_records_read,
     );
-    assert_eq!(after.indirect_records_read, before.indirect_records_read);
     event.set_signaled_value(1);
     command_buffer.wait_until_completed_for(WAIT).unwrap();
-    assert_eq!(command_buffer.status(), CommandBufferStatus::Completed);
-    assert_eq!(command_buffer.error(), None);
-    assert_made_once(messages, &[], &forced_with(device, &[]));
+    let ended = (command_buffer.status(), command_buffer.error());
+    let expected = expected_once(messages, kinds, &forced_with(device, &[]));
+    let notices = messages.take_notices();
+    let reasons: Vec<String> = (notices.iter())
+        .filter_map(|message| message.degradation.as_ref())
+        .map(|notice| format!("{:?}: {}", notice.degradation, notice.reason))
+        .collect();
+    // Recorded again once, in one merged draw: as a segment of its own, or with its encoder.
+    let recorded = (u64::from(!pass_encoded), encoded, 0, 8, 0);
+    assert_eq!(
+        (counted, ended),
+        (recorded, (CommandBufferStatus::Completed, None)),
+        "(segments recorded again, encoders encoded again, refused, merged commands, records \
+         read), and the command buffer's end; notices: {reasons:#?}"
+    );
+    assert_once(&notices, &expected);
 }
 
 /// A GPU-written execution the commit recorded on the GPU alone is recorded again by a rebind
@@ -548,10 +582,12 @@ fn a_rebind_before_the_first_submission_records_the_gpu_form_again_over_the_new_
             return;
         };
         let scene = Scene::new(device, &draws, &point_row());
-        rebound_run(device, messages, &scene, &draws, || {
+        let unused_rebound = || {
             let seen = Arc::new(Seen::default());
             rebind(&unused, points(&[[1.0; 2]]), &seen).unwrap();
-        });
+        };
+        let rebound = (&unused_rebound as &dyn Fn(), 0, false);
+        rebound_run(device, (messages, &[]), (&scene, &draws), rebound);
         assert_eq!(
             scene.pixels(),
             drawn_points(&draws),
@@ -564,15 +600,163 @@ fn a_rebind_before_the_first_submission_records_the_gpu_form_again_over_the_new_
             xy,
             ..Scene::new(device, &draws, &point_row())
         };
-        rebound_run(device, messages, &scene, &draws, || {
+        // The writer reaches the vertices' buffer through its address, and the render encoder
+        // made it resident: neither names it, so neither is encoded again.
+        let xy_rebound = || {
             let seen = Arc::new(Seen::default());
             rebind(&scene.xy, points(&point_row()), &seen).unwrap();
-        });
+        };
+        let rebound = (&xy_rebound as &dyn Fn(), 0, false);
+        rebound_run(device, (messages, &[]), (&scene, &draws), rebound);
         assert_eq!(scene.pixels(), drawn_points(&draws), "the vertices rebound");
         eprintln!(
             "ICB-REBIND {}: GPU forms recorded again at rebinds before the first submission drew \
              the new pages",
             device.name()
         );
+    });
+}
+
+/// A rebind between the commit and the first submission (an event wait holds the command buffer)
+/// of the buffer over host pages a pass's target lies over, a texture whose rows the device lays
+/// out otherwise (its shadow image renders, copied in before the pass and back as the encoder
+/// ends, commands of the render encoder's own around the GPU form's segment): the rebind encodes
+/// the render encoder again from its log (`command_buffer/reencode.rs`), its copies over the new
+/// pages and its merged draw recorded again in a segment of the same part, as Metal resolves the
+/// target's bytes as it submits the command buffer. The new pages, filled with a mark, hold the
+/// pass's clear and the merged draw's points in every texel of every row, their rows' padding
+/// untouched, and the command buffer completes.
+#[test]
+fn a_rebind_of_a_shadowed_target_s_bytes_encodes_the_gpu_form_s_pass_again() {
+    on_device(|device, messages| {
+        let draws: Vec<Draw> = vec![[0, 5, 1, 0], [8, 3, 2, 1], [30, 6, 3, 2]];
+        // Rows of 1280 bytes for 64 texels of 16: past the 1024 a linear image of them lays.
+        let rows = W * 16 + 256;
+        let len = ((rows * H) as usize).next_multiple_of(buffer_len());
+        let seen = Arc::new(Seen::default());
+        let Some(bytes) = buffer_of(device, Mapping::anonymous(len), len, &seen) else {
+            return;
+        };
+        let scene = Scene::over(device, &draws, &point_row(), bytes, rows);
+        let target_rebound = || {
+            let mapping = Mapping::anonymous(len);
+            mapping.fill(0xab);
+            let seen = Arc::new(Seen::default());
+            rebind(scene.over.as_ref().unwrap(), mapping, &seen).unwrap();
+        };
+        let copies = device.work_counts().shadow_copies;
+        let rebound = (&target_rebound as &dyn Fn(), 1, true);
+        let shadowed = [Degradation::ShadowedTexture];
+        rebound_run(device, (messages, &shadowed), (&scene, &draws), rebound);
+        assert!(
+            device.work_counts().shadow_copies > copies,
+            "the target is shadowed"
+        );
+        let drawn = drawn_points(&draws);
+        assert_rows(scene.over.as_ref().unwrap(), rows, &drawn);
+        assert_eq!(scene.pixels(), drawn, "the texture over the new pages");
+        eprintln!(
+            "ICB-REBIND {}: a shadowed target's bytes rebound before the first submission took \
+             the pass's clear and merged draw",
+            device.name()
+        );
+    });
+}
+
+/// That the bytes `over` of a target whose rows lie `rows` bytes apart hold `drawn` in every
+/// texel of every row, the rows' padding the mark the rebind's pages were filled with.
+fn assert_rows(over: &Buffer, rows: u64, drawn: &[[u32; 4]]) {
+    let written = read_buffer(over, 0, rows * H).unwrap();
+    let texels = 16 * W as usize;
+    for (y, row) in written.chunks(rows as usize).enumerate() {
+        let expected: Vec<u8> = (drawn[y * W as usize..(y + 1) * W as usize].iter())
+            .flatten()
+            .flat_map(|word| word.to_le_bytes())
+            .collect();
+        assert_eq!(&row[..texels], &expected[..], "row {y} of the new pages");
+        assert!(
+            row[texels..].iter().all(|&byte| byte == 0xab),
+            "row {y}'s padding"
+        );
+    }
+}
+
+/// As [`a_rebind_of_a_shadowed_target_s_bytes_encodes_the_gpu_form_s_pass_again`], with a pass
+/// that executes no commands but draws its points itself: the encoder's copy back of the target,
+/// recorded as it ends, is the only command that names the bytes (the pass clears, so nothing is
+/// copied in), and its log is kept for it, so the rebind encodes the render encoder again and the
+/// new pages take the clear and the points.
+#[test]
+fn a_rebind_of_a_shadowed_target_s_bytes_encodes_a_pass_that_draws_again() {
+    on_device(|device, messages| {
+        let draw: Draw = [0, 5, 1, 0];
+        let rows = W * 16 + 256;
+        let len = ((rows * H) as usize).next_multiple_of(buffer_len());
+        let seen = Arc::new(Seen::default());
+        let Some(bytes) = buffer_of(device, Mapping::anonymous(len), len, &seen) else {
+            return;
+        };
+        let scene = Scene::over(device, &[draw], &point_row(), bytes, rows);
+        let state = state(device, &library(device));
+        let mut pass = RenderPassDescriptor::new();
+        let color = &mut pass.color_attachments[0];
+        color.texture = Some(scene.target.clone());
+        color.load_action = LoadAction::Clear;
+        color.store_action = StoreAction::Store;
+        color.clear_color = ClearColor::new(0.0, 0.0, 0.0, 0.0);
+        let encode = |command_buffer: &CommandBuffer| {
+            let mut encoder = command_buffer.render_command_encoder(&pass).unwrap();
+            encoder.set_render_pipeline_state(&state).unwrap();
+            for (index, buffer) in [&scene.marks, &scene.frame, &scene.xy]
+                .into_iter()
+                .enumerate()
+            {
+                encoder
+                    .set_vertex_buffer(Some(buffer), 0, index as u32)
+                    .unwrap();
+            }
+            let [start, count, instances, base] = draw;
+            encoder
+                .draw_primitives(PrimitiveType::Point, start, count, instances, base)
+                .unwrap();
+            encoder.end_encoding().unwrap();
+        };
+        let queue = device.new_command_queue().unwrap();
+        // Drawn once first, so the state's pipeline is made: a draw whose pipeline is still being
+        // made leaves its pass to a host step, and its command buffer holds what it used until it
+        // completes, refusing a rebind meanwhile (`RebindProblem::EncodedUses`).
+        let warm = queue.command_buffer().unwrap();
+        encode(&warm);
+        complete(&warm);
+        let event = device.new_shared_event().unwrap();
+        let command_buffer = queue.command_buffer().unwrap();
+        command_buffer
+            .encode_wait_for_event(EventRef::from(&event), 1)
+            .unwrap();
+        encode(&command_buffer);
+        command_buffer.commit().unwrap();
+        let before = device.work_counts();
+        let mapping = Mapping::anonymous(len);
+        mapping.fill(0xab);
+        let rebound = Arc::new(Seen::default());
+        rebind(scene.over.as_ref().unwrap(), mapping, &rebound).unwrap();
+        let after = device.work_counts();
+        event.set_signaled_value(1);
+        command_buffer.wait_until_completed_for(WAIT).unwrap();
+        let counted = (
+            after.encoders_reencoded - before.encoders_reencoded,
+            after.reencodes_refused - before.reencodes_refused,
+        );
+        let ended = (command_buffer.status(), command_buffer.error());
+        assert_eq!(
+            (counted, ended),
+            ((1, 0), (CommandBufferStatus::Completed, None)),
+            "(encoders encoded again, refused), and the command buffer's end"
+        );
+        let shadowed = [Degradation::ShadowedTexture];
+        assert_made_once(messages, &shadowed, &forced_with(device, &[]));
+        let drawn = drawn_points(&[draw]);
+        assert_rows(scene.over.as_ref().unwrap(), rows, &drawn);
+        assert_eq!(scene.pixels(), drawn, "the texture over the new pages");
     });
 }

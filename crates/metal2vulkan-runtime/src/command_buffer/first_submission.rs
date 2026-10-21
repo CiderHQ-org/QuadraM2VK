@@ -54,6 +54,7 @@
 //!   review; Metal runs it over the new pages).
 
 use super::checks::metal_submissions;
+use super::rebound_use::{ReboundAt, ReboundUse, Recording};
 use super::{write_fields, CommandBufferShared, Resident, State};
 use crate::buffer::HostPages;
 use crate::error::{CommandBufferError, Error};
@@ -305,20 +306,50 @@ impl State {
                 ended,
                 recorded,
                 retained,
+                rebound_use,
                 ..
             } = self;
             for (at, record) in ended.iter_mut().enumerate() {
                 let found = submitting.submit(&mut record.taken, retained, &mut holds);
                 moved |= found.moved;
                 judge(&mut verdicts, at, found.failure());
+                if found.failure() == Some(CommandBufferError::EncodedUseRebound) {
+                    let at_commands = match (&record.replay, &record.refused) {
+                        (None, _) => ReboundAt::Unlogged(record.unlogged),
+                        (Some(_), Some(refusal)) => ReboundAt::Refused(refusal.clone()),
+                        (Some(_), None) => ReboundAt::NotEncodedAgain,
+                    };
+                    rebound_use.get_or_insert(ReboundUse {
+                        encoder: at,
+                        kind: record.kind,
+                        at: at_commands,
+                    });
+                }
             }
             for part in recorded.iter_mut() {
-                let segments = part.segments.iter_mut().filter_map(|s| s.recorded.as_mut());
-                for done in segments {
+                let kind = ended.get(part.encoder).map(|record| record.kind);
+                for segment in &mut part.segments {
+                    let recording = match (segment.gpu_alone, segment.stepped) {
+                        (true, _) => Recording::GpuAlone,
+                        (false, true) => Recording::HostStep,
+                        (false, false) => Recording::Commit,
+                    };
+                    let Some(done) = segment.recorded.as_mut() else {
+                        continue;
+                    };
                     let found = submitting.submit(&mut done.taken, retained, &mut holds);
                     moved |= found.moved;
                     judge(&mut verdicts, part.encoder, found.failure());
                     replays |= !done.taken.resolved().is_empty();
+                    if let (Some(CommandBufferError::EncodedUseRebound), Some(kind)) =
+                        (found.failure(), kind)
+                    {
+                        rebound_use.get_or_insert(ReboundUse {
+                            encoder: part.encoder,
+                            kind,
+                            at: ReboundAt::Segment(recording),
+                        });
+                    }
                 }
             }
         }
@@ -354,13 +385,27 @@ impl State {
                         .segments
                         .iter()
                         .filter_map(|segment| segment.recorded.as_ref())
-                        .any(|done| done.taken.resolved().iter().any(|r| !now.contains(r)));
-                    if stale {
-                        judge(
-                            &mut verdicts,
-                            part.encoder,
-                            Some(CommandBufferError::EncodedUseRebound),
-                        );
+                        .find_map(|done| done.taken.resolved().iter().find(|r| !now.contains(r)));
+                    let Some(stale) = stale else {
+                        continue;
+                    };
+                    judge(
+                        &mut verdicts,
+                        part.encoder,
+                        Some(CommandBufferError::EncodedUseRebound),
+                    );
+                    // Released where no range holds its Metal address now; else rebound.
+                    let holds = |range: &ResidentRange| {
+                        (range.guest..range.guest.saturating_add(range.length.max(1)))
+                            .contains(&stale.guest)
+                    };
+                    let released = !now.iter().any(holds);
+                    if let Some(record) = self.ended.get(part.encoder) {
+                        self.rebound_use.get_or_insert(ReboundUse {
+                            encoder: part.encoder,
+                            kind: record.kind,
+                            at: ReboundAt::ResidentSet { released },
+                        });
                     }
                 }
             }
@@ -445,6 +490,7 @@ impl State {
         let range = self.batch_range(index);
         let mut later = BTreeMap::new();
         let mut holds = SubmittedHolds::new(device);
+        let mut found_later = None;
         {
             let mut submitting = device.shared().rebinds.submitting();
             let State {
@@ -456,7 +502,20 @@ impl State {
                     let found = submitting.submit(&mut done.taken, retained, &mut holds);
                     judge(&mut later, part.encoder, found.failure());
                     done.taken.judged();
+                    // Recorded after the first submission: by a host step.
+                    if found.failure() == Some(CommandBufferError::EncodedUseRebound) {
+                        found_later.get_or_insert((part.encoder, Recording::HostStep));
+                    }
                 }
+            }
+        }
+        if let Some((encoder, recording)) = found_later {
+            if let Some(kind) = self.ended.get(encoder).map(|record| record.kind) {
+                self.rebound_use.get_or_insert(ReboundUse {
+                    encoder,
+                    kind,
+                    at: ReboundAt::Segment(recording),
+                });
             }
         }
         if !holds.is_empty() {

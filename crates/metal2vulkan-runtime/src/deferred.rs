@@ -261,6 +261,13 @@ impl Deferred {
         }
     }
 
+    /// Whether a commit may record it on the GPU alone, for good
+    /// ([`record_on_gpu`](Self::record_on_gpu)): an execution's, or a render pass's that executes
+    /// render commands.
+    pub(super) fn may_run_on_gpu_alone(&self) -> bool {
+        matches!(self, Deferred::Execute(_) | Deferred::RenderPass(_))
+    }
+
     /// Its recording on the GPU alone, for good, with what its host step needs, where it runs
     /// there over the buffers as they lie now (`gpu_execute.rs`, `DeferredPass::record_on_gpu`);
     /// `None` where it does not, or is work that never runs there. With no lock of

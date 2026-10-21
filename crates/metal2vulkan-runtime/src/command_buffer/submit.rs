@@ -1022,9 +1022,10 @@ impl CommandBufferShared {
         // Its commands may reach every texture through its resource ID where one bound a heap
         // set: the stale-reach degrade's trigger decides (`detach.rs`).
         let reaches = state.heaps.bound();
+        let rebound_use = state.rebound_use.clone();
         drop(state);
         if rebound {
-            device.degrade_encoded_use_rebound();
+            device.degrade_encoded_use_rebound(rebound_use);
         }
         device.reach_stale_detached(reaches);
         let submission = Submission {

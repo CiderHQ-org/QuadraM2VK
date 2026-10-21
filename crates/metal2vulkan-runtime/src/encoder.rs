@@ -30,6 +30,7 @@
 use super::binding::{self, LastSetZero, Write, WrittenSet};
 use super::buffer::Buffer;
 use super::churn_counts::KeepBy;
+use super::command_buffer::rebound_use::Unlogged;
 use super::command_buffer::CommandBuffer;
 use super::deferred::{Deferred, StepInputs};
 use super::error::{internal, invalid, vulkan, CommandBufferError, Error, Problem};
@@ -156,6 +157,14 @@ impl Segment {
         matches!(self.work, Deferred::Pending(_))
     }
 
+    /// Whether an encoder encoded again (`replay.rs`) records it at once: a dispatch whose
+    /// pipelines were being made ([`pends`](Self::pends)), or work a commit may record on the GPU
+    /// alone, recorded there again (`Deferred::record_on_gpu`). Its log is kept only where every
+    /// segment does.
+    pub(super) fn records_again(&self) -> bool {
+        self.pends() || self.work.may_run_on_gpu_alone()
+    }
+
     /// What its recording will use, on `device`, while `commit` left it to the host step for the
     /// pipelines it records alone (and not for what the GPU may write): its work's uses, which
     /// the encoder knew, only the `VkPipeline` missing (`Deferred::known_summary`). `None` where
@@ -277,8 +286,9 @@ pub(super) struct EncoderCore {
 /// An encoder encoded again (`EncoderCore::replaying`), ended: what its place among its command
 /// buffer's recordings takes in place of what the encoder recorded (`State::splice_replay`).
 pub(super) struct Replayed {
-    pub(super) raws: Vec<vk::CommandBuffer>,
-    pub(super) summary: Summary<ResourceKey>,
+    /// Its parts, as its first encoding's: a segment the GPU may write what it reads for starts
+    /// one of its own.
+    pub(super) parts: Vec<ReplayedPart>,
     /// The images it holds in their attachment layout (`texture/held_depth.rs`).
     pub(super) held: Vec<ResourceKey>,
     pub(super) retained: Retained,
@@ -286,6 +296,44 @@ pub(super) struct Replayed {
     pub(super) keys: BTreeSet<ResourceKey>,
     pub(super) taken: Taken,
     pub(super) heaps: Vec<Heap>,
+}
+
+/// One part of an encoder encoded again ([`Replayed::parts`]): its `VkCommandBuffer`s, what they
+/// use, and its segments, each recorded at once on the GPU alone, its place among the
+/// executions counted from the encoder's first.
+pub(super) struct ReplayedPart {
+    pub(super) raws: Vec<vk::CommandBuffer>,
+    pub(super) summary: Summary<ResourceKey>,
+    pub(super) segments: Vec<Segment>,
+}
+
+/// An ended encoder's `VkCommandBuffer`s `raws`, in order, and its `segments`, in parts: a segment
+/// the GPU may write what it reads for starts a part of its own (the module's segments), each
+/// segment's place counted among its part's `VkCommandBuffer`s, and its place among the
+/// executions from `base`, the encoder's first.
+fn into_parts(
+    raws: Vec<vk::CommandBuffer>,
+    segments: Vec<Segment>,
+    base: usize,
+) -> Vec<(Vec<vk::CommandBuffer>, Vec<Segment>)> {
+    let mut raws = raws.into_iter();
+    // The raws the parts before the current one took.
+    let mut taken = 0;
+    let mut parts = Vec::new();
+    let mut current = Vec::new();
+    for mut segment in segments {
+        segment.executions_at += base;
+        if segment.host {
+            let before = segment.at - taken;
+            parts.push((raws.by_ref().take(before).collect::<Vec<_>>(), current));
+            current = Vec::new();
+            taken = segment.at;
+        }
+        segment.at -= taken;
+        current.push(segment);
+    }
+    parts.push((raws.collect(), current));
+    parts
 }
 
 /// The open encoder's hold on its command buffer: dropped before `end` ran, it marks the command
@@ -1463,7 +1511,8 @@ impl EncoderCore {
     /// The command buffer keeps `replay`, the encoder's log (`replay.rs`), where a rebind before
     /// its first submission may need the encoder encoded again (a command of it named a buffer
     /// over host pages, detached ones included) and the encoder can be (it left no segment for
-    /// later, and fails nothing as it commits); else the log goes here.
+    /// later but one an encoding again records at once, `Segment::records_again`, and fails
+    /// nothing as it commits); else the log goes here.
     pub(super) fn end_with_replay(
         mut self,
         kind: EncoderKind,
@@ -1472,9 +1521,30 @@ impl EncoderCore {
     ) -> Result<(), Error> {
         // A pass ended holds no command buffer (`render.rs`); this one ends here if one did.
         self.release_pass()?;
+        let sharing = self.shadows.sharing_truth();
+        if sharing > 0 {
+            self.device().shared().counts.shadows_sharing_truth(sharing);
+        }
+        let copies = self.shadows.finish();
+        self.count_shadow_copies(&copies);
+        self.shadow_copies(&copies);
+        // Whether it keeps its log, once its last commands, the copies back above among them,
+        // named what they name: a copy back may be the only command that names a texture's
+        // bytes over host pages (a render pass that clears a shadowed target copies nothing in).
+        // Why it keeps none, where a command named a buffer over host pages: the rebound notice
+        // says (`command_buffer/rebound_use.rs`).
+        let unlogged = match &replay {
+            _ if !self.taken.names_a_pin() => None,
+            None => Some(Unlogged::NoCalls),
+            Some(_) if !self.segments.iter().all(Segment::records_again) => {
+                Some(Unlogged::Segments)
+            }
+            Some(_) if self.fails_command_buffer.is_some() || self.faults => Some(Unlogged::Fails),
+            Some(_) => None,
+        };
         // A log not kept goes back to the device's spares (`replay.rs`).
         let replay = replay.and_then(|log| {
-            let keeps = self.segments.iter().all(Segment::pends)
+            let keeps = self.segments.iter().all(Segment::records_again)
                 && self.fails_command_buffer.is_none()
                 && !self.faults
                 && self.taken.names_a_pin();
@@ -1484,13 +1554,6 @@ impl EncoderCore {
             }
             Some(log)
         });
-        let sharing = self.shadows.sharing_truth();
-        if sharing > 0 {
-            self.device().shared().counts.shadows_sharing_truth(sharing);
-        }
-        let copies = self.shadows.finish();
-        self.count_shadow_copies(&copies);
-        self.shadow_copies(&copies);
         // Its commands were recorded for one layout of each image it holds
         // (`texture/held_depth.rs`).
         if self.uses.broke_hold() {
@@ -1540,6 +1603,9 @@ impl EncoderCore {
         }
         state.use_heaps(heaps);
         let encoder = state.encoder_ended(kind, keys, residency, taken);
+        if let Some(why) = unlogged {
+            state.encoder_unlogged(encoder, why);
+        }
         state.encoder_holds(encoder, uses.held().to_vec());
         if let Some(error) = fails_command_buffer {
             state.fail_from(encoder, error);
@@ -1559,23 +1625,7 @@ impl EncoderCore {
                 .replay_log_kept(bytes);
         }
         let mut summaries = uses.finish_parts().into_iter();
-        let mut raws = ended.into_iter();
-        // The raws the parts before the current one took.
-        let mut taken = 0;
-        let mut parts = Vec::new();
-        let mut current = Vec::new();
-        for mut segment in segments {
-            segment.executions_at += base;
-            if segment.host {
-                let before = segment.at - taken;
-                parts.push((raws.by_ref().take(before).collect::<Vec<_>>(), current));
-                current = Vec::new();
-                taken = segment.at;
-            }
-            segment.at -= taken;
-            current.push(segment);
-        }
-        parts.push((raws.collect(), current));
+        let parts = into_parts(ended, segments, base);
         // The writes into ASTC carriers go with the last part (a blit encoder's only one).
         let count = parts.len();
         let mut twin_writes = Some(twin_writes);
@@ -1622,9 +1672,10 @@ impl EncoderCore {
 
     /// End a core made by [`replaying`](Self::replaying): its shadowed textures written since
     /// their last copy back are copied back, and what it recorded comes back for its encoder's
-    /// place (`State::splice_replay`). Refused (internal) where the encoder, encoded again, left
-    /// a segment, split into parts, failed or faulted its command buffer, or met a detached
-    /// buffer: its first encoding kept none of those, so its place stays as it was.
+    /// place (`State::splice_replay`), in its parts, each segment it left recorded at once on the
+    /// GPU alone. Refused (internal) where the encoder, encoded again, failed or faulted its
+    /// command buffer, or met a detached buffer, which its first encoding kept none of, or left
+    /// work that no longer runs on the GPU alone: its place stays as it was.
     pub(super) fn finish_replay(mut self) -> Result<Replayed, Error> {
         let copies = self.shadows.finish();
         self.count_shadow_copies(&copies);
@@ -1635,6 +1686,7 @@ impl EncoderCore {
         // SAFETY: as in `barrier`.
         unsafe { self.open.command_buffer.end_raw(self.raw) }.map_err(vulkan)?;
         let EncoderCore {
+            open,
             raw,
             mut ended,
             segments,
@@ -1648,21 +1700,43 @@ impl EncoderCore {
             faults,
             ..
         } = self;
-        if !segments.is_empty() || fails_command_buffer.is_some() || faults || taken.dead() {
+        if fails_command_buffer.is_some() || faults || taken.dead() {
             return Err(internal(
                 "an encoder encoded again differs from its first encoding",
             ));
         }
         let held = uses.held().to_vec();
-        let mut summaries = uses.finish_parts();
-        let summary = match (summaries.pop(), summaries.is_empty()) {
-            (Some(summary), true) => summary,
-            _ => return Err(internal("an encoder encoded again in parts")),
-        };
+        let summaries = uses.finish_parts();
         ended.push(raw);
+        let split = into_parts(ended, segments, 0);
+        if split.len() != summaries.len() {
+            return Err(internal("an encoder's part without its summary"));
+        }
+        // Its segments recorded at once on the GPU alone, as its commit recorded the first
+        // encoding's (`command_buffer/reencode.rs`): work that no longer runs there refuses the
+        // encoding again.
+        let mut parts = Vec::with_capacity(split.len());
+        for ((raws, mut segments), summary) in split.into_iter().zip(summaries) {
+            for segment in &mut segments {
+                let recorded = segment.work.record_on_gpu(&open.command_buffer)?;
+                let Some((recorded, inputs)) = recorded else {
+                    return Err(internal(
+                        "an encoder encoded again whose work no longer runs on the GPU alone",
+                    ));
+                };
+                segment.recorded = Some(recorded);
+                segment.inputs = Some(inputs);
+                segment.stepped = true;
+                segment.gpu_alone = true;
+            }
+            parts.push(ReplayedPart {
+                raws,
+                summary,
+                segments,
+            });
+        }
         Ok(Replayed {
-            raws: ended,
-            summary,
+            parts,
             held,
             retained,
             executions,

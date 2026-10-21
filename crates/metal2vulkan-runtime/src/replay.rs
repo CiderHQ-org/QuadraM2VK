@@ -19,8 +19,9 @@
 //!   the common calls allocate nothing of their own.
 //! - **What is kept.** The command buffer keeps an ended encoder's log only where a command of
 //!   it named a buffer over host pages and the encoder can be encoded again: it left no segment
-//!   for later (an indirect command buffer's execution, an indirect stage-in region), and fails
-//!   nothing as it commits. An encoder of a command buffer that used command predication keeps
+//!   for later (an indirect stage-in region) but an indirect command buffer's execution, which
+//!   the encoding again records at once on the GPU alone, as its commit did, or refuses where it
+//!   no longer runs there (`EncoderCore::finish_replay`); and it fails nothing as it commits. An encoder of a command buffer that used command predication keeps
 //!   none (a command encoded again after the commit would run outside its block): it fails
 //!   `CommandBufferError::EncodedUseRebound` at a rebind as before, as does any other encoder
 //!   (a resource state or acceleration structure encoder's), which logs nothing. (Changed:) a

@@ -22,24 +22,31 @@
 //!   alone, for good (a GPU-written execution's preprocess and its dispatches or draws,
 //!   `gpu_execute.rs`, `render/executions/gpu.rs`), resolved there what its commands named and
 //!   the resident set its preprocess searches: the live buffers and what the encoders made
-//!   resident, as they lay then. Its commit notes the command buffer for any rebind
-//!   (`Rebinds::wait_for_rerecord`), and each rebind before the first submission records that
-//!   work again in its place, as the commit did, over where the buffers lie now: its
-//!   recording, what its commands took and what its host step needs. Its encoder, which logs
-//!   nothing, stays as it was, and so does such work a host step recorded again since (with
-//!   the barriers between its commands, `gpu_execute::Rerecord`, or as a route outgrew it,
-//!   `DeferredPass::outgrown`).
+//!   resident, as they lay then. An encoder that left such work keeps its log as one that left
+//!   none does, and its encoding again records that work at once, on the GPU alone, in segments
+//!   of the same parts (`EncoderCore::finish_replay`), its own commands (a render pass's
+//!   shadowed textures' copies and its other steps among them) recorded again around them. Its
+//!   commit notes the command buffer for any rebind too (`Rebinds::wait_for_rerecord`): each
+//!   rebind before the first submission records the work of the encoders it does not encode
+//!   again in its place, as the commit did, over where the buffers lie now: its recording, what
+//!   its commands took and what its host step needs. The commit notes it before it records that
+//!   work, with its lock free: a rebind meanwhile marks it, and leaves the mark to the commit,
+//!   which records the work again once it ended. Work a host step recorded again since
+//!   (with the barriers between its commands, `gpu_execute::Rerecord`, or as a route outgrew
+//!   it, `DeferredPass::outgrown`) keeps that step's recording.
 //! - **What cannot be encoded again stays as before.** An encoder whose log is gone (a command
 //!   predication's command buffer, failed at the commit) or whose second
-//!   encoding is refused or records otherwise (`EncoderCore::finish_replay`) keeps its first
-//!   recording, which the first submission finds rebound: `CommandBufferError::EncodedUseRebound`,
-//!   as before. So does any encoder of a kind that logs nothing (a render encoder's), past its
-//!   work recorded on the GPU alone, and such work the rebind no longer records there.
+//!   encoding is refused or records otherwise (`EncoderCore::finish_replay`), its work among
+//!   them where it no longer runs on the GPU alone, keeps its first recording, which the first
+//!   submission finds rebound: `CommandBufferError::EncodedUseRebound`, as before. So does work
+//!   on the GPU alone the rebind no longer records there.
 
+use super::rebound_use::Unlogged;
 use super::{lock, CommandBuffer, CommandBufferShared, State};
+use crate::buffer::HostPages;
 use crate::deferred::{Deferred, StepInputs};
 use crate::device::functions::Vk;
-use crate::encoder::{RecordedSegment, Replayed, Segment};
+use crate::encoder::{RecordedSegment, Replayed, ReplayedPart};
 use crate::replay::Replay;
 use crate::residency::Residency;
 use crate::resource::ResourceKey;
@@ -72,6 +79,11 @@ impl CommandBufferShared {
         if marked == 0 {
             return;
         }
+        // Its commit records its work on the GPU alone with the lock free: the mark stays, and
+        // the commit records that work again once it ended.
+        if lock(&self.state).committing {
+            return;
+        }
         let device = &self.device;
         let moved: Vec<(usize, Arc<Replay>)> = {
             let state = lock(&self.state);
@@ -94,33 +106,46 @@ impl CommandBufferShared {
             }
         };
         let handle = CommandBuffer(Arc::clone(self));
+        // The encoders encoded again, whose segments the encoding again recorded.
+        let mut spliced = Vec::new();
         for (at, replay) in moved {
             let residency = lock(&self.state).residency_before(at, replay.kind());
             let run = replay.run(&handle, residency);
             let counts = &device.shared().counts;
-            let Ok((replayed, residency)) = run else {
-                counts.reencode_refused();
-                continue;
+            let (replayed, residency) = match run {
+                Ok(replayed) => replayed,
+                Err(error) => {
+                    counts.reencode_refused();
+                    lock(&self.state).ended[at].refused = Some(error.to_string());
+                    continue;
+                }
             };
             // What a refused splice held goes after the lock.
             let vk = device.shared().vk();
-            let spliced = lock(&self.state).splice_replay(vk, at, replayed, residency);
-            match spliced {
-                Ok(()) => counts.encoder_reencoded(),
+            let spliced_now = lock(&self.state).splice_replay(vk, at, replayed, residency);
+            match spliced_now {
+                Ok(()) => {
+                    counts.encoder_reencoded();
+                    spliced.push(at);
+                }
                 Err(unspliced) => {
                     counts.reencode_refused();
+                    let refusal = "its place holds other parts or work than its encoding again's";
+                    lock(&self.state).ended[at].refused = Some(refusal.to_owned());
                     drop(unspliced);
                 }
             }
         }
-        // Its work recorded on the GPU alone, each segment by its part and its place there,
-        // which hold through this turn: only the first submission places segments, and it waits
-        // for the turn; a host step, which records one, takes the turn too.
+        // Its work recorded on the GPU alone in encoders not encoded again, each segment by its
+        // part and its place there, which hold through this turn: only the first submission
+        // places segments, and it waits for the turn; a host step, which records one, takes the
+        // turn too.
         let alone: Vec<((usize, usize), Deferred)> = {
             let state = lock(&self.state);
             match state.submitted {
                 true => Vec::new(),
                 false => (state.recorded.iter().enumerate())
+                    .filter(|(_, recorded)| !spliced.contains(&recorded.encoder))
                     .flat_map(|(part, recorded)| {
                         let segments = recorded.segments.iter().enumerate();
                         segments
@@ -140,8 +165,8 @@ impl CommandBufferShared {
                 continue;
             };
             let vk = device.shared().vk();
-            let spliced = lock(&self.state).splice_segment(vk, place, recorded, inputs);
-            match spliced {
+            let put = lock(&self.state).splice_segment(vk, place, recorded, inputs);
+            match put {
                 Ok(()) => counts.segment_recorded_again(),
                 Err(unspliced) => {
                     counts.reencode_refused();
@@ -180,14 +205,17 @@ impl State {
     }
 
     /// Put `replayed`, ended encoder `at` encoded again, and what it made resident in its place,
-    /// before the first submission: its one part's recordings and uses, its executions (the
-    /// later encoders' and segments' places among them moved by the difference), its keys, and
-    /// what its commands took (held weakly until the first submission). What its first
-    /// recording retained stays retained; its `VkCommandBuffer`s go with the pool unsubmitted.
-    /// Refused, changing nothing and giving `replayed` back, where its place is not one part
-    /// without segments but pending dispatches' (which go, the encoding again having recorded them
-    /// at once), or the command buffer was submitted. Its replays hold what its commands took
-    /// with `device`, the device's functions (`Replays::hold`).
+    /// before the first submission: each of its parts' recordings, uses and segments (recorded
+    /// on the GPU alone), its executions (the later encoders' and segments' places among them
+    /// moved by the difference), its keys, and what its commands and its segments' took (held
+    /// weakly until the first submission). What its first recording retained stays retained,
+    /// and so does what its first segments recorded and what their host steps needed; its
+    /// `VkCommandBuffer`s go with the pool unsubmitted. Refused, changing nothing and giving
+    /// `replayed` back, where its place holds other parts than the encoding again's, or a segment
+    /// but a pending dispatch's (which goes, the encoding again having recorded it at once) or
+    /// work its commit recorded on the GPU alone, or the command buffer was submitted. Its
+    /// replays hold what its commands took with `device`, the device's functions
+    /// (`Replays::hold`).
     pub(super) fn splice_replay(
         &mut self,
         device: &Vk,
@@ -195,20 +223,20 @@ impl State {
         replayed: Replayed,
         residency: Option<Residency>,
     ) -> Result<(), Box<(Replayed, Option<Residency>)>> {
-        let mut parts = self
-            .recorded
-            .iter()
-            .enumerate()
+        let parts: Vec<usize> = (self.recorded.iter().enumerate())
             .filter(|(_, part)| part.encoder == at)
-            .map(|(index, _)| index);
-        let part = match (parts.next(), parts.next()) {
-            (Some(part), None) => part,
-            _ => return Err(Box::new((replayed, residency))),
+            .map(|(index, _)| index)
+            .collect();
+        let replaces = |part: &usize| {
+            let recorded = &self.recorded[*part];
+            recorded.sparse.is_empty()
+                && (recorded.segments.iter()).all(|segment| segment.pends() || segment.gpu_alone)
         };
         let fits = !self.submitted
+            && !parts.is_empty()
+            && parts.len() == replayed.parts.len()
+            && parts.iter().all(replaces)
             && !self.unrunnable.contains(&at)
-            && self.recorded[part].segments.iter().all(Segment::pends)
-            && self.recorded[part].sparse.is_empty()
             && self
                 .ended
                 .get(at)
@@ -217,8 +245,7 @@ impl State {
             return Err(Box::new((replayed, residency)));
         }
         let Replayed {
-            raws,
-            summary,
+            parts: mut replayed_parts,
             held,
             retained,
             executions,
@@ -227,28 +254,49 @@ impl State {
             heaps,
         } = replayed;
         // Held weakly until the first submission, as the commit held what the first recording
-        // took, and by its replays until they are replayed: what they held last goes here, as
-        // it does without them (`Replays::hold`, with `device`, the device's functions).
-        match self.replays.clone() {
-            Some(replays) => drop(replays.hold(device, |pages| taken.wait(pages))),
-            None => taken.wait(&mut Vec::new()),
-        }
-        let recorded = &mut self.recorded[part];
-        recorded.raws = raws;
-        recorded.summary = summary;
-        // Its pending dispatches' segments go: the encoding again recorded those dispatches at
-        // once. What the commit recorded of one stays retained, never submitted, as the first
-        // recording does.
-        for segment in recorded.segments.drain(..) {
-            if let Some(mut before) = segment.recorded {
-                self.retained.extend(before.retained.into_entry());
-                before.taken.retain_into(&mut self.retained);
+        // and its segments took, and by its replays until they are replayed: what they held last
+        // goes here, as it does without them (`Replays::hold`, with `device`, the device's
+        // functions).
+        let mut wait = |pages: &mut Vec<Arc<HostPages>>| {
+            taken.wait(pages);
+            let segments = (replayed_parts.iter_mut())
+                .flat_map(|part| part.segments.iter_mut())
+                .filter_map(|segment| segment.recorded.as_mut());
+            for done in segments {
+                done.taken.wait(pages);
             }
-            self.retained.push(Box::new(segment.work));
+        };
+        match self.replays.clone() {
+            Some(replays) => drop(replays.hold(device, wait)),
+            None => wait(&mut Vec::new()),
+        }
+        let first = self.ended[at].executions.clone();
+        for (&part, replayed) in parts.iter().zip(replayed_parts) {
+            let ReplayedPart {
+                raws,
+                summary,
+                segments,
+            } = replayed;
+            let recorded = &mut self.recorded[part];
+            recorded.raws = raws;
+            recorded.summary = summary;
+            // Its first segments go: the encoding again recorded its pending dispatches at once,
+            // and its work on the GPU alone in segments of its own. What the commit recorded of
+            // one stays retained, never submitted, as the first recording does.
+            for segment in recorded.segments.drain(..) {
+                if let Some(mut before) = segment.recorded {
+                    self.retained.extend(before.retained.into_entry());
+                    before.taken.retain_into(&mut self.retained);
+                }
+                self.retained.push(Box::new((segment.work, segment.inputs)));
+            }
+            for mut segment in segments {
+                segment.executions_at += first.start;
+                recorded.segments.push(segment);
+            }
         }
         // Its executions in its place; an encoder that met a detached buffer at its first
         // encoding may have recorded fewer.
-        let first = self.ended[at].executions.clone();
         let count = executions.len();
         self.executions.splice(first.clone(), executions);
         if count != first.len() {
@@ -258,7 +306,8 @@ impl State {
                     later.executions = moved(later.executions.start)..moved(later.executions.end);
                 }
             }
-            let segments = self.recorded[part + 1..]
+            let last = parts.last().copied().unwrap_or_default();
+            let segments = self.recorded[last + 1..]
                 .iter_mut()
                 .flat_map(|later| later.segments.iter_mut());
             for segment in segments {
@@ -338,7 +387,13 @@ impl State {
                 .as_ref()
                 .is_some_and(|failed| failed.fails(at));
             if predicated || fails {
-                gone.extend(record.replay.take());
+                if let Some(log) = record.replay.take() {
+                    gone.push(log);
+                    record.unlogged = Some(match predicated {
+                        true => Unlogged::Predicated,
+                        false => Unlogged::Fails,
+                    });
+                }
                 continue;
             }
             if record.replay.is_some() {

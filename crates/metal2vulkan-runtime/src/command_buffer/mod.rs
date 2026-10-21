@@ -38,6 +38,7 @@ pub(super) mod gate;
 mod group;
 pub(super) mod kept_barriers;
 pub(super) mod own;
+pub(super) mod rebound_use;
 mod reencode;
 mod storage_form;
 mod submit;
@@ -45,6 +46,7 @@ mod submit;
 pub(super) use completion::Completion;
 pub(super) use first_submission::NotedTable;
 pub(super) use group::{Group, GroupEnd, GROUP_BATCHES};
+use rebound_use::{ReboundUse, Unlogged};
 pub(super) use submit::{BatchLists, Submitting};
 
 use super::contexts::{self, Run};
@@ -571,6 +573,9 @@ pub(super) struct State {
     /// its failure: each fails as its own batch is submitted, after its check
     /// (`first_submission.rs`).
     failing: Vec<(Range<usize>, CommandBufferError)>,
+    /// Where its first submission, or a later batch's, found the first use rebound, for the
+    /// notice (`rebound_use.rs`).
+    rebound_use: Option<ReboundUse>,
     /// The ended encoders whose submissions failed so: no part of one goes to a queue with work
     /// (`submit.rs` holds it to that).
     unrunnable: BTreeSet<usize>,
@@ -655,8 +660,18 @@ impl State {
             replay: None,
             executions: 0..0,
             held: Vec::new(),
+            unlogged: None,
+            refused: None,
         });
         self.ended.len() - 1
+    }
+
+    /// Ended encoder `encoder` kept no log a rebind encodes it again from (`replay.rs`), as
+    /// `why` says, for the rebound notice (`rebound_use.rs`).
+    pub(super) fn encoder_unlogged(&mut self, encoder: usize, why: Unlogged) {
+        if let Some(record) = self.ended.get_mut(encoder) {
+            record.unlogged = Some(why);
+        }
     }
 
     /// Ended encoder `encoder` holds the images `held` in their attachment layout
@@ -1433,6 +1448,7 @@ impl CommandBuffer {
                 listing: None,
                 submitted: false,
                 failing: Vec::new(),
+                rebound_use: None,
                 unrunnable: BTreeSet::new(),
                 submitted_holds: Vec::new(),
                 failed_at_commit: None,
@@ -1848,7 +1864,14 @@ impl CommandBuffer {
                 .filter(|recorded| runs(recorded.encoder))
                 .flat_map(|encoder| &encoder.segments)
                 .map(|segment| (segment.work.clone(), segment.needs_step()))
-                .collect();
+                .collect::<Vec<_>>();
+            // Work it may record on the GPU alone below resolves the live buffers as they lie
+            // then, with this lock free: any rebind from here to its first submission records
+            // it again (`reencode.rs`), one before its recording ends once the commit ended.
+            let alone = (segments.iter()).any(|(work, step)| *step && work.may_run_on_gpu_alone());
+            if alone {
+                device.shared().rebinds.wait_for_rerecord(&self.0);
+            }
             // What of it the live buffers list once used, held weakly: the device's registries'
             // locks, which take no other, inside this one.
             let reached = state.reached(device.shared(), runs);
@@ -1949,14 +1972,6 @@ impl CommandBuffer {
             if !keys.is_empty() {
                 device.shared().rebinds.wait_for_replay(&self.0, keys);
             }
-            // So does any rebind its work recorded on the GPU alone, whose resident set the
-            // commit resolved.
-            let gpu_alone = (state.recorded.iter())
-                .flat_map(|part| &part.segments)
-                .any(|segment| segment.gpu_alone);
-            if gpu_alone {
-                device.shared().rebinds.wait_for_rerecord(&self.0);
-            }
             if let Some(slot) = &mut state.slot {
                 slot.committed();
             }
@@ -2043,6 +2058,11 @@ impl CommandBuffer {
             }
         }
         drop(unreplayable);
+        // A rebind while it recorded its work on the GPU alone left that work to record again
+        // here, now that the commit ended (`reencode.rs`).
+        if self.0.reencode_pending() {
+            self.0.reencode();
+        }
         // The storage-sink degrade's trigger decides, in the program's call, before the
         // scheduler sees the command buffer (`detach.rs`).
         device.reach_storage_sinks(reaches);

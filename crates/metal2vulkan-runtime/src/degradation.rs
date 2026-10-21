@@ -1284,8 +1284,12 @@ degradations! {
         /// encoded and before the command buffer was first submitted
         /// (`CommandBufferError::EncodedUseRebound`, `command_buffer/first_submission.rs`), in an
         /// encoder the rebind could not encode again (A resource state encoder, which logs no
-        /// calls; a command predication's command buffer; a render pass recorded later or whose end
-        /// captured its draws' tile reach; a call refused again; `replay.rs`). Announced once, as
+        /// calls; a command predication's command buffer; a render pass a host step records, or
+        /// whose end captured its draws' tile reach; work recorded on the GPU alone that no longer
+        /// runs there; a call refused again; `replay.rs`). Its reason names where the first such
+        /// submission found the use (the encoder, and its own commands, work it left for later,
+        /// or the resident set work on the GPU alone resolved at the commit) and why no rebind
+        /// encoded or recorded it again. Announced once, as
         /// the first such submission is made, on the scheduler's thread, which makes it:
         /// `DeviceOptions::announce_each` does not repeat it, as no program
         /// call or host step meets it.
@@ -2685,20 +2689,29 @@ impl Device {
 
     /// Announce, once, that a command buffer's command named a buffer rebound after it was
     /// encoded and before the command buffer was first submitted
-    /// (`CommandBufferError::EncodedUseRebound`): on the thread that submits it, with no lock of
-    /// the command buffer's held.
-    pub(super) fn degrade_encoded_use_rebound(&self) {
+    /// (`CommandBufferError::EncodedUseRebound`), where its first submission `found` the first
+    /// such use, and why no rebind encoded it again (`command_buffer/rebound_use.rs`): on the
+    /// thread that submits it, with no lock of the command buffer's held.
+    pub(super) fn degrade_encoded_use_rebound(
+        &self,
+        found: Option<crate::command_buffer::rebound_use::ReboundUse>,
+    ) {
         let shared = self.shared();
         if !shared.announced.once(Degradation::EncodedUseRebound) {
             return;
         }
         let misplaced = check_announcement(Degradation::EncodedUseRebound, false);
+        let mut reason = "a buffer over host pages they named was rebound after they were \
+                          encoded and before the command buffer was submitted, and their use was \
+                          resolved as encoded"
+            .to_owned();
+        if let Some(found) = found {
+            reason.push_str(&format!(" ({found})"));
+        }
         let message = DegradeNotice::new(
             Degradation::EncodedUseRebound,
             "a command buffer's commands".to_owned(),
-            "a buffer over host pages they named was rebound after they were encoded and before \
-             the command buffer was submitted, and their use was resolved as encoded"
-                .to_owned(),
+            reason,
         )
         .message();
         self.deliver_placed(Degradation::EncodedUseRebound, message, misplaced);

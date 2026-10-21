@@ -35,7 +35,7 @@
 //! the page set's ([`A`], [`B`], [`C`]), and its output is calibrated over plain buffers holding
 //! each node, and an all-zero one for an unreached member.
 
-use super::degrade_notices::{assert_made_once, on_device as on_device_noticed};
+use super::degrade_notices::{assert_made_once, made_once, on_device as on_device_noticed};
 use super::host_memory::{gpu_read, host_page, no_copy, not_importable, on_device, recording};
 use super::host_memory::{Mapping, Seen};
 use super::no_copy_heaps::{no_copy_heap, shared, HEAP};
@@ -279,13 +279,23 @@ pub(super) fn buffer_len() -> usize {
 /// A no-copy buffer over `mapping`, whose deallocator records into `seen`; `None`, printed, where
 /// the device imports no host memory.
 pub(super) fn buffer_over(device: &Device, mapping: Mapping, seen: &Arc<Seen>) -> Option<Buffer> {
+    buffer_of(device, mapping, buffer_len(), seen)
+}
+
+/// [`buffer_over`] of `len` bytes, `mapping`'s length.
+pub(super) fn buffer_of(
+    device: &Device,
+    mapping: Mapping,
+    len: usize,
+    seen: &Arc<Seen>,
+) -> Option<Buffer> {
     let pointer = mapping.pointer();
     // SAFETY: the deallocator releases the mapping, after the buffer's last use of it.
     let made = unsafe {
         no_copy(
             device,
             pointer,
-            buffer_len(),
+            len,
             ResourceOptions::default(),
             Some(recording(seen, mapping)),
         )
@@ -638,7 +648,21 @@ fn an_encoder_a_rebind_cannot_encode_again_fails_encoded_use_rebound() {
             [0x5a; 16],
             "ran nothing"
         );
-        assert_made_once(messages, &REBOUND_USES, &shared_kinds(device));
+        let notices = made_once(messages, &REBOUND_USES, &shared_kinds(device));
+        // The notice names where the first submission found the use, and why no rebind
+        // encoded it again.
+        let reason = (notices.iter())
+            .filter_map(|message| message.degradation.as_ref())
+            .find(|notice| notice.degradation == Degradation::EncodedUseRebound)
+            .map(|notice| notice.reason.clone());
+        let found = "(found in its blit encoder 0: a command of its own named it, and its \
+                     encoding again was refused: ";
+        assert!(
+            reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains(found)),
+            "{reason:?}"
+        );
         let after = device.work_counts();
         assert_eq!(after.reencodes_refused, before.reencodes_refused + 1);
         assert_eq!(after.encoders_reencoded, before.encoders_reencoded);

@@ -120,6 +120,11 @@ pub(super) struct EncoderRecord {
     /// The images it holds in their attachment layout (`texture/held_depth.rs`): the scheduler
     /// moves each there before it.
     pub(super) held: Vec<ResourceKey>,
+    /// Why it kept no log (`replay` `None`), where it named a buffer over host pages, for the
+    /// rebound notice (`command_buffer/rebound_use.rs`).
+    pub(super) unlogged: Option<crate::command_buffer::rebound_use::Unlogged>,
+    /// Why a rebind's encoding of it again was refused (`command_buffer/reencode.rs`).
+    pub(super) refused: Option<String>,
 }
 
 /// What owns the memory under a key, held without keeping it.

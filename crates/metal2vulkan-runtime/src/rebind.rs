@@ -127,10 +127,11 @@ pub(super) struct Rebinds {
 #[derive(Default)]
 struct Waiting {
     buffers: Vec<(Weak<CommandBufferShared>, Box<[ResourceKey]>)>,
-    /// The command buffers committed with work recorded on the GPU alone (a GPU-written
-    /// execution's preprocess and its draws or dispatches) and not yet first submitted: its
-    /// resident set was resolved at the commit, so a rebind of any buffer before the first
-    /// submission records that work again ([`Rebinds::wait_for_rerecord`]).
+    /// The command buffers committing or committed with work they may record on the GPU alone (a
+    /// GPU-written execution's preprocess and its draws or dispatches) and not yet first
+    /// submitted: its resident set is resolved as the commit records it, so a rebind of any
+    /// buffer from then to the first submission records that work again
+    /// ([`Rebinds::wait_for_rerecord`]).
     resolved: Vec<Weak<CommandBufferShared>>,
     /// The length past which the next registration first lets go of the entries whose command
     /// buffer went or was submitted.
@@ -269,10 +270,10 @@ impl Rebinds {
         waiting.buffers.push((Arc::downgrade(buffer), keys));
     }
 
-    /// Note `buffer`, committed now and not yet first submitted, with work recorded on the GPU
-    /// alone: a rebind of any buffer before its first submission records that work again
-    /// ([`Rebinds::replace`], `command_buffer/reencode.rs`). Its first submission lets go of it
-    /// ([`Submitting::submitted_now`]).
+    /// Note `buffer`, committing now, with work it may record on the GPU alone, before it
+    /// records it: a rebind of any buffer from now to its first submission records that work
+    /// again ([`Rebinds::replace`], `command_buffer/reencode.rs`). Its first submission lets go of
+    /// it ([`Submitting::submitted_now`]).
     pub(super) fn wait_for_rerecord(&self, buffer: &Arc<CommandBufferShared>) {
         let mut waiting = lock(&self.waiting);
         waiting.prune();

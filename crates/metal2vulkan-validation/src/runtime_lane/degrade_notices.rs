@@ -1893,6 +1893,28 @@ pub(super) fn assert_made_once(
     kinds: &[Degradation],
     first: &BTreeSet<Degradation>,
 ) -> BTreeMap<Degradation, usize> {
+    let expected = expected_once(messages, kinds, first);
+    assert_once(&messages.take_notices(), &expected)
+}
+
+/// [`assert_made_once`], the notices it took returned, for their words.
+pub(super) fn made_once(
+    messages: &Messages,
+    kinds: &[Degradation],
+    first: &BTreeSet<Degradation>,
+) -> Vec<DebugMessage> {
+    let expected = expected_once(messages, kinds, first);
+    let notices = messages.take_notices();
+    assert_once(&notices, &expected);
+    notices
+}
+
+/// `kinds`, and those of `first` not announced before.
+pub(super) fn expected_once(
+    messages: &Messages,
+    kinds: &[Degradation],
+    first: &BTreeSet<Degradation>,
+) -> Vec<Degradation> {
     let before = messages.taken_kinds();
     let mut expected: Vec<Degradation> = kinds.to_vec();
     for kind in first.difference(&before) {
@@ -1900,7 +1922,7 @@ pub(super) fn assert_made_once(
             expected.push(*kind);
         }
     }
-    assert_once(&messages.take_notices(), &expected)
+    expected
 }
 
 /// The kinds of `kinds` whose condition holds: each paired with the device fact, or the test's
