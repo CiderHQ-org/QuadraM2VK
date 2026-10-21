@@ -5303,6 +5303,32 @@ impl Texture {
         Ok(())
     }
 
+    /// The minimum host byte span touched by Metal's `replaceRegion:mipmapLevel:slice:withBytes:
+    /// bytesPerRow:bytesPerImage:` or `getBytes:bytesPerRow:bytesPerImage:fromRegion:mipmapLevel:
+    /// slice:`, using the same format, storage, region and pitch checks as those calls. No Metal
+    /// counterpart: an FFI adapter can validate the copy before forming a host slice. Includes
+    /// padding between rows and images, but none after the last row. A copy that moves no bytes
+    /// returns zero; no pointer need be dereferenced in that case.
+    pub fn cpu_copy_byte_length(
+        &self,
+        region: Region,
+        level: u64,
+        slice: u64,
+        bytes_per_row: u64,
+        bytes_per_image: u64,
+    ) -> Result<u64, Error> {
+        Ok(self
+            .host_copy(
+                "cpu_copy_byte_length",
+                &region,
+                level,
+                slice,
+                bytes_per_row,
+                bytes_per_image,
+            )?
+            .map_or(0, |copy| copy.host.host_len()))
+    }
+
     /// Metal's checks of a CPU copy of `region` of `level` and `slice`, and its plan; `None` for
     /// a region with a size of 0 on any axis, whatever the texture's type, which copies nothing
     /// as plain Metal does.

@@ -410,6 +410,21 @@ pub(super) fn same_as_printed(a: &BoundSampler, b: &BoundSampler) -> bool {
 }
 
 impl ArgumentTable {
+    /// Whether a plain buffer binding leaves this slot's identity, offset, stride and kind
+    /// unchanged. Inline bytes and function tables must still be replaced even when their
+    /// backing buffer happens to be the same object.
+    fn same_buffer(&self, index: u32, buffer: Option<&Buffer>, offset: u64, stride: Option<u32>) -> bool {
+        let same = match (self.buffers.get(&index), buffer) {
+            (Some((bound, at)), Some(buffer)) => bound == buffer && *at == offset,
+            (None, None) => true,
+            _ => false,
+        };
+        same && self.attribute_strides.get(&index).copied() == stride
+            && !self.bytes.contains_key(&index)
+            && !self.function_tables.contains_key(&index)
+            && !self.null_tables.contains(&index)
+    }
+
     /// A compute encoder's table (the module docs).
     pub(super) fn compute() -> ArgumentTable {
         ArgumentTable {
@@ -466,12 +481,15 @@ impl ArgumentTable {
         stride: u64,
         index: u32,
     ) -> Result<(), Error> {
-        self.stamp = Stamp::fresh();
         check_index(call, index, BUFFER_SLOTS)?;
         let stride = attribute_stride(stride);
         if let Some(buffer) = buffer {
             self.check_buffer(core, call, buffer, offset)?;
         }
+        if self.same_buffer(index, buffer, offset, stride) {
+            return Ok(());
+        }
+        self.stamp = Stamp::fresh();
         let replaced = set_handle(&mut self.buffers, index, buffer, offset);
         set_entry(&mut self.attribute_strides, index, stride);
         self.function_tables.remove(&index);
@@ -509,7 +527,6 @@ impl ArgumentTable {
         strides: Option<&[u64]>,
         first: u32,
     ) -> Result<(), Error> {
-        self.stamp = Stamp::fresh();
         if buffers.len() != offsets.len() || strides.is_some_and(|s| s.len() != buffers.len()) {
             return Err(invalid(call, Problem::LengthMismatch));
         }
@@ -519,6 +536,13 @@ impl ArgumentTable {
                 self.check_buffer(core, call, buffer, offset)?;
             }
         }
+        if buffers.iter().zip(offsets).enumerate().all(|(i, (buffer, &offset))| {
+            let stride = strides.and_then(|s| attribute_stride(s[i]));
+            self.same_buffer(first + i as u32, *buffer, offset, stride)
+        }) {
+            return Ok(());
+        }
+        self.stamp = Stamp::fresh();
         let strides = (0..buffers.len()).map(|i| strides.and_then(|s| attribute_stride(s[i])));
         for (((buffer, &offset), stride), index) in
             buffers.iter().zip(offsets).zip(strides).zip(first..)
@@ -686,12 +710,15 @@ impl ArgumentTable {
         textures: &[Option<&Texture>],
         first: u32,
     ) -> Result<(), Error> {
-        self.stamp = Stamp::fresh();
         check_range(call, first, textures.len(), TEXTURE_SLOTS)?;
         for texture in textures.iter().flatten() {
             core.check_device(call, texture.device())?;
             texture.check_not_memoryless(call)?;
         }
+        if textures.iter().zip(first..).all(|(texture, index)| self.textures.get(&index) == *texture) {
+            return Ok(());
+        }
+        self.stamp = Stamp::fresh();
         for (texture, index) in textures.iter().zip(first..) {
             if let Some(replaced) = set_bare_handle(&mut self.textures, index, *texture) {
                 self.let_go(core, (SlotClass::Texture, index), Bound::Texture(&replaced));

@@ -40,14 +40,15 @@
 //! kernel or a shared event, and reads Metal's decode of the new blocks; [`cpu_block_decode_costs`]
 //! (ignored, release) times the CPU decode that takes.
 
-use super::degrade_notices::{counts, on_device};
+use super::degrade_notices::{counts, on_device_with};
+use super::Messages;
 use super::first_use::{read_mark, release, scheduled, Busy, ENDED};
 use super::host_memory::{recording, Mapping, Seen};
 use super::no_copy_heaps::{no_copy_heap, shared, HEAP};
 use super::rebinds::rebind_heap;
 use super::{buffer_with, read_buffer, WAIT};
 use crate::air_library::AirLibrary;
-use metal2vulkan::device::DriverFact;
+use metal2vulkan::device::{BlockDecodePolicy, DriverFact};
 use metal2vulkan::metal::{PixelFormat, TextureType, TextureUsage};
 use metal2vulkan::pipeline::{ComputePipelineDescriptor, StageSource};
 use metal2vulkan_devtools::{engine_dir, llvm_assemble};
@@ -58,6 +59,11 @@ use metal2vulkan_runtime::{
 };
 use std::sync::Arc;
 use std::time::Instant;
+
+/// This lane qualifies Metal's exact decoder; the native default has separate coverage.
+fn on_device(test: impl FnOnce(&Device, &Messages)) {
+    on_device_with(|options| options.policy.block_decode = BlockDecodePolicy::Exact, test);
+}
 
 /// The kinds a BC1 to BC5 texture announces on a driver not measured to decode it as Metal does:
 /// without a decoded twin, and with one.

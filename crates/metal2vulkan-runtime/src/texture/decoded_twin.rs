@@ -137,7 +137,7 @@ use metal2vulkan::bind::{
     AstcDecode, AstcTexels, BlockDecode, BlockDecodeModule, ChromaDecode, EtcDecode, EtcTexels,
     ImageViewDesc, PvrtcDecode,
 };
-use metal2vulkan::device::DecodedTexelsPolicy;
+use metal2vulkan::device::{BlockDecodePolicy, DecodedTexelsPolicy};
 use metal2vulkan::device::FormatUsage;
 use metal2vulkan::error::{Capability, Feature, Unsupported};
 use metal2vulkan::metal::format::FormatMapping;
@@ -463,8 +463,12 @@ pub(crate) fn twin_plan(
 
 impl Device {
     /// How a texture of `layout` decodes into a twin on this device: a BC1 to BC5 format of one
-    /// sample whose decode the driver is not measured to make as Metal does; `None` elsewhere.
+    /// sample whose decode the driver is not measured to make as Metal does, under the exact
+    /// block-decode policy; `None` elsewhere. Carried formats are selected separately.
     fn twin_decode(&self, layout: &TextureLayout) -> Option<BlockDecode> {
+        if self.compile_device().policy().block_decode == BlockDecodePolicy::NativeDevice {
+            return None;
+        }
         let decode = BlockDecode::of(layout.pixel_format)?;
         let fact = block_decode_fact(layout.pixel_format)?;
         let measured = self.properties().driver_facts.contains(&fact);

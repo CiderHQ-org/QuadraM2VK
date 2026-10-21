@@ -105,7 +105,8 @@ pub enum CopyProblem {
     /// buffer or of a pitch of 0 for more than one row and image (other layouts copy where plain
     /// Metal places the rows).
     BytesPerRow,
-    /// Bytes past the end of the buffer: of a no-copy buffer read from, past the end of its
+    /// Bytes past the end of the buffer, or a CPU copy's host byte span that overflows or exceeds
+    /// the maximum Rust slice length: of a no-copy buffer read from, past the end of its
     /// host pages, which plain Metal reads up to. Past that, and past another buffer's length,
     /// plain Metal reads zeros, bytes a write past the length left, or another resource's bytes (an
     /// M4 under macOS 27.0.1).
@@ -468,12 +469,17 @@ impl HostLayout {
 
     /// The bytes of the host buffer the layout reads or writes.
     pub(super) fn host_len(&self) -> u64 {
+        self.checked_host_len().expect("validated host copy span")
+    }
+
+    /// The span before it is known to fit a host slice; pitches come from the caller.
+    fn checked_host_len(&self) -> Option<u64> {
         if self.row_bytes == 0 || self.rows == 0 || self.images == 0 {
-            return 0;
+            return Some(0);
         }
-        (self.images - 1) * self.bytes_per_image
-            + (self.rows - 1) * self.bytes_per_row
-            + self.row_bytes
+        (self.images - 1).checked_mul(self.bytes_per_image)?
+            .checked_add((self.rows - 1).checked_mul(self.bytes_per_row)?)?
+            .checked_add(self.row_bytes)
     }
 
     /// Each row: its offset in the host buffer and in the packed layout.
@@ -589,14 +595,15 @@ pub(super) fn plan_host_copy(
     if !over_buffer && bytes_per_row != 0 && below_row {
         return Ok(None);
     }
-    Ok(Some((
-        image,
-        HostLayout {
+    let host = HostLayout {
             row_bytes: s.row_bytes,
             rows: s.rows,
             images: s.images,
             bytes_per_row,
             bytes_per_image,
-        },
-    )))
+        };
+    if host.checked_host_len().is_none_or(|len| len > isize::MAX as u64) {
+        return Err(CopyProblem::BufferRange);
+    }
+    Ok(Some((image, host)))
 }

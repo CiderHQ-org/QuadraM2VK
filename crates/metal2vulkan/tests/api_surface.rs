@@ -220,6 +220,7 @@ surface! {
         struct StageSimd N;
         enum ContainmentPolicy N;
         struct DevicePolicy N;
+        enum BlockDecodePolicy N;
         enum Unorm8LinearFilterPolicy N;
         enum SamplingPolicy N;
         enum YCbCrFilterPolicy N;

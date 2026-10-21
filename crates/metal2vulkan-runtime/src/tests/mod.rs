@@ -11,6 +11,12 @@ mod address_map;
 mod amplification;
 mod apple_only;
 mod argument_buffers;
+#[cfg(any(m2v_gpu, m2v_cpu_icd))]
+mod binding_repeats;
+#[cfg(any(m2v_gpu, m2v_cpu_icd))]
+mod cpu_copy_size;
+#[cfg(any(m2v_gpu, m2v_cpu_icd))]
+mod native_block_decode;
 mod argument_encoder;
 #[cfg(debug_assertions)]
 mod argument_table;

@@ -7,7 +7,7 @@
 //! classed, and so reaches the ledger.
 
 use crate::device::{
-    BatchOrderPolicy, CompletionPolicy, DecodedTexelsPolicy, DevicePolicy, FloatMathsPolicy,
+    BatchOrderPolicy, BlockDecodePolicy, CompletionPolicy, DecodedTexelsPolicy, DevicePolicy, FloatMathsPolicy,
     HalfBlendPolicy, HalfRoundingPolicy, HeapCompressionPolicy, NanMinMaxPolicy, ResolvePolicy,
     RoundingOrderPolicy, SamplingPolicy, TexelConversionPolicy, TileStorePolicy,
     Unorm8LinearFilterPolicy, YCbCrFilterPolicy,
@@ -74,6 +74,7 @@ fn choices() -> Vec<Choice> {
         // tile store, a multisampled color attachment's resolve, and how a batch begins after the
         // earlier ones of its queue.
         decoded_texels: _,
+        block_decode: _,
         heap_compression: _,
         completion: _,
         tile_store: _,
@@ -91,6 +92,7 @@ fn choices() -> Vec<Choice> {
         choice!(p.rounding_order: RoundingOrderPolicy { Native, Exact }),
         choice!(p.half_blend: HalfBlendPolicy { Device, Exact }),
         choice!(p.decoded_texels: DecodedTexelsPolicy { Compact, Exact }),
+        choice!(p.block_decode: BlockDecodePolicy { NativeDevice, Exact }),
         choice!(p.heap_compression: HeapCompressionPolicy { Compressed, Uncompressed }),
         choice!(p.completion: CompletionPolicy { Grouped, Exact }),
         choice!(p.tile_store: TileStorePolicy { Device, Exact }),
@@ -498,4 +500,21 @@ fn the_runtime_s_decoded_texels_choice_keys_no_profile() {
         assert_eq!(stem, other);
         assert_eq!(a.fingerprint(), e.fingerprint(), "{stem}");
     }
+}
+
+/// Native BC decoding is a runtime storage choice, independent of compiled pipelines.
+#[test]
+fn the_runtime_s_block_decode_choice_keys_no_profile() {
+    use crate::spirv::testing::committed_profiles_with;
+    let native = committed_profiles_with(DevicePolicy::UNTRUSTED).expect("profiles");
+    let exact = committed_profiles_with(DevicePolicy {
+        block_decode: BlockDecodePolicy::Exact,
+        ..DevicePolicy::UNTRUSTED
+    }).expect("profiles");
+    assert_eq!(native.len(), exact.len());
+    for ((name, native), (other, exact)) in native.iter().zip(&exact) {
+        assert_eq!(name, other);
+        assert_eq!(native.fingerprint(), exact.fingerprint(), "{name}");
+    }
+    assert_eq!(DevicePolicy::UNTRUSTED.exact_answers().block_decode, BlockDecodePolicy::Exact);
 }

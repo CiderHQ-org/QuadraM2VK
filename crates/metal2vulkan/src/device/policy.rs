@@ -3,9 +3,9 @@
 
 use crate::device::profile::{GuestIsolation, HandleDomain, PointerDomain};
 
-/// Policy inputs of `Device::new`. Every field but `decoded_texels`, `heap_compression`,
+/// Policy inputs of `Device::new`. Every field but `block_decode`, `decoded_texels`, `heap_compression`,
 /// `completion`, `tile_store`, `resolve` and `batch_order` can change emitted code, so the profile
-/// carries it (containment as the encoding it selects) and its fingerprint covers it; those six
+/// carries it (containment as the encoding it selects) and its fingerprint covers it; those seven
 /// are the runtime's alone (the texels of a carried texture's decoded twin, a heap's compressed
 /// texture's image, when the host sees a command buffer complete, what a render pass's load leaves
 /// in the texels its draws do not write, how a multisampled color attachment resolves, and how a
@@ -59,6 +59,12 @@ pub struct DevicePolicy {
     /// attachment in the device's blend (the default) or in Metal's `half` arithmetic, which the
     /// function computes in the shader.
     pub half_blend: HalfBlendPolicy,
+    /// Whether a BC1 to BC5 texture uses the device's block decoder (the default), or keeps a
+    /// decoded twin where the device's decode is not measured to be Metal's. The runtime's
+    /// choice alone: no emitted code changes. Formats carried because the device lacks them
+    /// still require their decoded twins under either value.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub block_decode: BlockDecodePolicy,
     /// Whether a texture whose format the device lacks, held in a carrier (an ASTC LDR texture,
     /// or an EAC 11-bit one), samples a decoded twin of compact codes (the default) or of Metal's
     /// values exactly. The runtime's choice alone: no emitted code changes.
@@ -97,7 +103,7 @@ impl DevicePolicy {
     /// native device maths, the device's own texel
     /// conversions, native half rounding, the device's NaN and minimum and maximum, the device's
     /// rounding order, the device's blend of a `half` output into a 16-bit float attachment,
-    /// compact codes in a carried texture's decoded twin, the driver's compressed image of a
+    /// native BC1 to BC5 decoding, compact codes in a carried texture's decoded twin, the driver's compressed image of a
     /// heap's texture Metal keeps compressed, command buffers ready together in one kernel
     /// submission, the device's load and store of a signed normalized or `RGB9E5Float` color
     /// attachment, the device's resolve of a multisampled color attachment, and batches of one
@@ -116,6 +122,7 @@ impl DevicePolicy {
         nan_and_min_max: NanMinMaxPolicy::Native,
         rounding_order: RoundingOrderPolicy::Native,
         half_blend: HalfBlendPolicy::Device,
+        block_decode: BlockDecodePolicy::NativeDevice,
         decoded_texels: DecodedTexelsPolicy::Compact,
         heap_compression: HeapCompressionPolicy::Compressed,
         completion: CompletionPolicy::Grouped,
@@ -131,7 +138,8 @@ impl DevicePolicy {
     /// ([`RoundingOrderPolicy::Exact`]), its 16-bit float blend of a `half` output
     /// ([`HalfBlendPolicy::Exact`]), its filter of a two-plane YCbCr texture
     /// ([`YCbCrFilterPolicy::Exact`]), its decode of a carried texture's texels
-    /// ([`DecodedTexelsPolicy::Exact`]), a heap's texture whose bytes alias the heap's
+    /// ([`DecodedTexelsPolicy::Exact`]), its BC1 to BC5 block decode
+    /// ([`BlockDecodePolicy::Exact`]), a heap's texture whose bytes alias the heap's
     /// as written ([`HeapCompressionPolicy::Uncompressed`]), each command buffer seen complete
     /// at its own end ([`CompletionPolicy::Exact`]), a loaded attachment's texels as its tile
     /// store leaves them ([`TileStorePolicy::Exact`]), its multisample color resolve
@@ -147,6 +155,7 @@ impl DevicePolicy {
             nan_and_min_max: NanMinMaxPolicy::Exact,
             rounding_order: RoundingOrderPolicy::Exact,
             half_blend: HalfBlendPolicy::Exact,
+            block_decode: BlockDecodePolicy::Exact,
             decoded_texels: DecodedTexelsPolicy::Exact,
             heap_compression: HeapCompressionPolicy::Uncompressed,
             completion: CompletionPolicy::Exact,
@@ -426,6 +435,23 @@ pub enum HalfBlendPolicy {
     /// precede, alpha to coverage, multiview, a format the device does not store, a blend of the
     /// second source), the device blends and the pipeline records the note as under
     /// [`HalfBlendPolicy::Device`].
+    Exact,
+}
+
+/// Whether a BC1 to BC5 texture uses the device's native block decode or Metal's decode in a
+/// twin. This is the runtime's choice alone: pipelines and their fingerprints do not change.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum BlockDecodePolicy {
+    /// The device's decoder, with no additional decoded image or decode work. Where not
+    /// measured to be Metal's, announced `compressed-texel-decode`: endpoint interpolation and
+    /// channel rounding may differ. Formats unavailable on the device still need emulation.
+    #[default]
+    NativeDevice,
+    /// Metal's decode in a decoded twin where the native decoder is not measured to match,
+    /// provided the device supports the twin's sampling and transfer operations. Otherwise
+    /// the native decode, announced `compressed-texel-decode`.
     Exact,
 }
 

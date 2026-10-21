@@ -339,3 +339,15 @@ option) any later version, at your choice (`GPL-2.0-or-later OR LGPL-3.0-or-late
 [LICENSE](LICENSE) is the notice; [LICENSE-GPL-2.0](LICENSE-GPL-2.0),
 [LICENSE-LGPL-3.0](LICENSE-LGPL-3.0) and [LICENSE-GPL-3.0](LICENSE-GPL-3.0) (which the LGPL v3
 incorporates) are the texts.
+
+BC1–BC5 textures use the native Vulkan decoder by default, avoiding an additional
+uncompressed image and decode work. Set `DeviceOptions::policy.block_decode` to
+`metal2vulkan::device::BlockDecodePolicy::Exact` to request the existing Metal decode
+in a twin on devices whose native decode is unmeasured. Unavailable formats still
+use their required emulation. Unmeasured native decoding announces
+`compressed-texel-decode`; small interpolation and rounding differences are possible.
+
+FFI consumers can call `Texture::cpu_copy_byte_length` before forming a host slice
+for `replace_region` or `get_bytes`. It validates the format, region and pitches
+and returns the exact span through the last copied row, including padding between
+rows and images. A zero span requires no pointer access.

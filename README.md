@@ -166,3 +166,8 @@ notice and the three texts.
 
 Metal is a trademark of Apple Inc. metal2vulkan is an independent project and is not affiliated
 with, sponsored by, or endorsed by Apple Inc.
+
+The runtime defaults to native BC1–BC5 texture decoding. Consumers that need Metal's
+block decode can select `DevicePolicy::block_decode = BlockDecodePolicy::Exact`.
+See [runtime integration](crates/metal2vulkan-runtime/README.md) for the storage
+tradeoff and checked CPU texture-copy byte spans.
