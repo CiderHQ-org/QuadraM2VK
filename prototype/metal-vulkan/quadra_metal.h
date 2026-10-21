@@ -272,4 +272,11 @@ typedef struct qm_api {
 typedef const qm_api *(*qm_api_entry)(uint32_t version);
 #define QM_API_SYMBOL "quadra_metal_host_api"
 
+/* Optional Linux host-tool exports; callbacks stay in the launcher's helper process. */
+typedef void (*qm_preload_progress)(uint32_t completed, uint32_t total, uint32_t failed, void *context);
+typedef int (*qm_preload_entry)(qm_preload_progress progress, void *context, uint32_t maximum);
+typedef uint64_t (*qm_diagnostics_entry)(void *device, char *buffer, uint64_t capacity);
+#define QM_PRELOAD_SYMBOL "quadra_metal_host_preload"
+#define QM_DIAGNOSTICS_SYMBOL "quadra_metal_host_diagnostics"
+
 #endif

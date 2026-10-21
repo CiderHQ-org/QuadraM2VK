@@ -6,6 +6,17 @@ LANGUAGES = {"en": "English", "ru": "Русский"}
 _language = "en"
 
 RU = {
+    "Shader preloading": "Предзагрузка шейдеров",
+    "Metal renderer: prepare learned shaders before playing. New shaders may still compile during play.":
+        "Рендерер Metal: подготовка известных шейдеров перед игрой. Новые шейдеры могут компилироваться во время игры.",
+    "Metal performance diagnostics": "Диагностика производительности Metal",
+    "Record compilation, encoding, GPU timing and memory use for performance reports.":
+        "Запись времени компиляции, кодирования, работы GPU и использования памяти для отчётов.",
+    "Preloading shaders": "Предзагрузка шейдеров",
+    "Preparing shaders learned from earlier sessions. You can skip and start playing.":
+        "Подготовка шейдеров из предыдущих сеансов. Можно пропустить и начать игру.",
+    "Skip and play": "Пропустить и играть",
+    "{done} of {total} shaders": "{done} из {total} шейдеров",
     "VR headset": "VR-шлем",
     "Experimental. Plays in Roblox's own VR mode on a headset connected through an OpenXR runtime such as WiVRn (Meta Quest) or Monado. Applies on next launch.":
         "Экспериментально. Запускает собственный VR-режим Roblox на шлеме, подключённом через среду OpenXR, например WiVRn (Meta Quest) или Monado. Применяется при следующем запуске.",

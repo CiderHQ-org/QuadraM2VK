@@ -4,7 +4,7 @@ use std::cell::RefCell;
 use std::collections::HashSet;
 use std::ffi::{c_char, CString};
 use std::io::Write;
-use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -79,18 +79,6 @@ pub fn message_sink() -> MessageSink {
             ));
         }
     })
-}
-
-static ALLOCATED: AtomicI64 = AtomicI64::new(0);
-
-/// MTLDevice.currentAllocatedSize: an estimate from what the guest made (never freed here:
-/// Roblox reads it only as a budget hint).
-pub fn count_allocation(bytes: i64) {
-    ALLOCATED.fetch_add(bytes, Ordering::Relaxed);
-}
-
-pub fn allocated_bytes() -> u64 {
-    ALLOCATED.load(Ordering::Relaxed).max(0) as u64
 }
 
 static PIPELINES: AtomicU64 = AtomicU64::new(0);

@@ -746,6 +746,7 @@ impl Surface {
     }
 
     pub fn next_drawable(self: &Arc<Self>) -> Result<Arc<Drawable>, String> {
+        let _timing = crate::diagnostics::timer(&self.device, crate::diagnostics::Phase::Acquire);
         let handles = unsafe { self.device.raw() };
         // Only acquisitions share this fence. Present/configure never need this lock.
         let mut acquire = self.acquire.lock().unwrap();
@@ -827,6 +828,7 @@ impl Surface {
     }
 
     fn queue_present(&self, drawable: &Drawable, wait: bool) {
+        let _timing = crate::diagnostics::timer(&self.device, crate::diagnostics::Phase::Present);
         let chain = &drawable.chain;
         let semaphores = [chain.owner.semaphores[drawable.index as usize]];
         let swapchains = [chain.owner.handle];

@@ -1281,6 +1281,22 @@ class SettingsPage(Adw.Bin):
         self._renderer_rows = []
         game.add(self._renderer_row())
 
+        self.shader_preload_switch = Adw.SwitchRow(
+            title=_("Shader preloading"),
+            subtitle=_("Metal renderer: prepare learned shaders before playing. New shaders may still compile during play."),
+            active=settings.get("metal_shader_preload", True))
+        self.shader_preload_switch.connect("notify::active", lambda row, *_args: window.set_setting(
+            "metal_shader_preload", row.get_active()))
+        game.add(self.shader_preload_switch)
+
+        metal_diagnostics = Adw.SwitchRow(
+            title=_("Metal performance diagnostics"),
+            subtitle=_("Record compilation, encoding, GPU timing and memory use for performance reports."),
+            active=settings.get("metal_diagnostics", False))
+        metal_diagnostics.connect("notify::active", lambda row, *_args: window.set_setting(
+            "metal_diagnostics", row.get_active()))
+        game.add(metal_diagnostics)
+
         self._gpu_codes = ["auto"]
         self._gpu_rows = []
         self.gpu_row = self._gpu_row()
@@ -3307,6 +3323,9 @@ class LauncherWindow(Adw.ApplicationWindow):
             return
         self.settings_page.flush()
         session = core.RobloxSession(dict(self.settings), launch_uri=launch_uri)
+        self._shader_preload_session = session
+        session.shader_preload_progress = lambda done, total: GLib.idle_add(
+            self._show_shader_preload, session, done, total)
         self.web = self._web_bridge()
         if self.web:
             session.web_socket = self.web.guest_path
@@ -3315,11 +3334,43 @@ class LauncherWindow(Adw.ApplicationWindow):
         def start():
             try:
                 session.start()  # cleans up after itself when it fails
+                GLib.idle_add(self._close_shader_preload, session)
                 GLib.idle_add(self._started, session, None)
             except Exception as error:
+                GLib.idle_add(self._close_shader_preload, session)
                 GLib.idle_add(self._started, session, error)
 
         threading.Thread(target=start, daemon=True).start()
+
+    def _show_shader_preload(self, session, done, total):
+        if (getattr(self, "_shader_preload_session", None) is not session
+                or session.shader_preload_cancel.is_set() or self.busy != "starting"):
+            return False
+        dialog = getattr(self, "_shader_preload_dialog", None)
+        if dialog is None:
+            dialog = Adw.AlertDialog(
+                heading=_("Preloading shaders"),
+                body=_("Preparing shaders learned from earlier sessions. You can skip and start playing."))
+            self._shader_preload_bar = Gtk.ProgressBar(show_text=True)
+            dialog.set_extra_child(self._shader_preload_bar)
+            dialog.add_response("skip", _("Skip and play"))
+            dialog.set_close_response("skip")
+            self._shader_preload_response = dialog.connect("response", lambda *_args: session.shader_preload_cancel.set())
+            self._shader_preload_dialog = dialog
+            dialog.present(self)
+        self._shader_preload_bar.set_fraction(done / total if total else 0)
+        self._shader_preload_bar.set_text(_("{done} of {total} shaders", done=done, total=total))
+        return False
+
+    def _close_shader_preload(self, session):
+        if getattr(self, "_shader_preload_session", None) is session:
+            dialog = getattr(self, "_shader_preload_dialog", None)
+            if dialog is not None:
+                dialog.disconnect(self._shader_preload_response)
+                dialog.close()
+            self._shader_preload_dialog = None
+            self._shader_preload_session = None
+        return False
 
     def _web_bridge(self):
         """The browser window for Roblox's embedded pages (sign-in with a

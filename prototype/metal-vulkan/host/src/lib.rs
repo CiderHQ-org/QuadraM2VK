@@ -4,6 +4,10 @@
 #![allow(clippy::missing_safety_doc, clippy::too_many_arguments)]
 
 pub mod air;
+mod cache;
+mod diagnostics;
+mod limits;
+mod preload;
 mod present;
 mod util;
 
@@ -26,6 +30,7 @@ use metal2vulkan_runtime::{
     SamplerState, ScissorRect, Size, StoreAction, Texture, TextureDescriptor, Viewport,
     VisibilityResultMode,
 };
+use serde::{Deserialize, Serialize};
 use std::ffi::{c_char, c_int, c_void, CStr};
 use std::sync::{Arc, Mutex};
 use util::{fail, guard, log_once, set_error};
@@ -98,7 +103,7 @@ pub struct QmRenderPassDesc {
 const VERTEX_SLOTS: usize = 31;
 
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Serialize, Deserialize)]
 pub struct QmVertexAttribute {
     present: u32,
     format: u32,
@@ -107,7 +112,7 @@ pub struct QmVertexAttribute {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Serialize, Deserialize)]
 pub struct QmVertexLayout {
     present: u32,
     stride: u32,
@@ -116,7 +121,7 @@ pub struct QmVertexLayout {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Serialize, Deserialize)]
 pub struct QmColorAttachmentState {
     pixel_format: u64,
     blending_enabled: u32,
@@ -130,8 +135,11 @@ pub struct QmColorAttachmentState {
 }
 
 #[repr(C)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct QmRenderPipelineDesc {
+    #[serde(skip)]
     vertex_function: *mut c_void,
+    #[serde(skip)]
     fragment_function: *mut c_void,
     has_vertex_descriptor: u32,
     pad: u32,
@@ -146,6 +154,7 @@ pub struct QmRenderPipelineDesc {
     rasterization_enabled: u32,
     input_primitive_topology: u32,
     pad2: u32,
+    #[serde(skip)]
     label: *const c_char,
 }
 
@@ -208,7 +217,7 @@ pub struct QmDeviceInfo {
 
 /// What a handle points at. Encoders are `None` once ended.
 pub enum Obj {
-    Device(Device),
+    Device(DeviceObject),
     Buffer(Buffer),
     Texture(Texture),
     Sampler(SamplerState),
@@ -227,15 +236,28 @@ pub enum Obj {
     Drawable(Arc<Drawable>),
 }
 
+pub struct DeviceObject {
+    value: Device,
+    warm: Mutex<preload::WarmStates>,
+}
+impl std::ops::Deref for DeviceObject {
+    type Target = Device;
+    fn deref(&self) -> &Device {
+        &self.value
+    }
+}
+
 pub struct EncoderObject<T> {
     value: Option<T>,
     errors: Arc<Mutex<Option<String>>>,
+    timing: Option<diagnostics::Measurement>,
 }
 
 pub struct CommandBufferObject {
     buffer: CommandBuffer,
     presents: Mutex<Vec<Arc<Drawable>>>,
     errors: Arc<Mutex<Option<String>>>,
+    timing_noted: std::sync::atomic::AtomicBool,
 }
 
 fn handle(object: Obj) -> *mut c_void {
@@ -320,14 +342,21 @@ extern "C" fn release(handle: *mut c_void) {
     if handle.is_null() {
         return;
     }
-    let _ = std::panic::catch_unwind(|| unsafe { drop(Box::from_raw(handle as *mut Obj)) });
+    let _ = std::panic::catch_unwind(|| unsafe {
+        if let Some(Obj::Device(device)) = object(handle) {
+            diagnostics::retire(device);
+        }
+        drop(Box::from_raw(handle as *mut Obj));
+    });
 }
 
 extern "C" fn device_create(_options: *const c_void) -> *mut c_void {
     guard(std::ptr::null_mut(), || {
+        limits::configure();
         let mut options = DeviceOptions::default();
         // Two timestamps less per command buffer; Roblox reads GPU times only for its stats.
-        options.gpu_times_from_host = true;
+        options.gpu_times_from_host = !diagnostics::gpu_timestamps();
+        options.shader_cache.mode = metal2vulkan_runtime::ShaderCacheMode::PreferPersistent;
         if let Some(directory) = std::env::var_os("MACOBLOX_METAL_SHADER_CACHE") {
             options.shader_cache.directory = Some(directory.into());
         }
@@ -336,7 +365,13 @@ extern "C" fn device_create(_options: *const c_void) -> *mut c_void {
         match Device::system_default_with(&options) {
             Ok(device) => {
                 log_once(&format!("[Quadra Metal] Vulkan device: {}", device.name()));
-                handle(Obj::Device(device))
+                preload::initialize();
+                diagnostics::register(&device);
+                let warm = Mutex::new(preload::warm_live(&device));
+                handle(Obj::Device(DeviceObject {
+                    value: device,
+                    warm,
+                }))
             }
             Err(error) => fail(format!("no Vulkan device for Metal: {error}")),
         }
@@ -355,10 +390,7 @@ extern "C" fn device_info(device: *mut c_void, out: *mut QmDeviceInfo) {
     out.name[count] = 0;
     out.registry_id = device.registry_id();
     out.max_buffer_length = properties.max_buffer_length;
-    out.recommended_max_working_set_size = std::env::var("MACOBLOX_VRAM_BYTES")
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(4 << 30);
+    out.recommended_max_working_set_size = limits::recommended_working_set(device);
     out.max_threadgroup_memory_length = properties.max_threadgroup_memory_length;
     out.max_threads_per_threadgroup = QmSize {
         width: properties.max_threads_per_threadgroup.width,
@@ -393,8 +425,8 @@ extern "C" fn device_supports_texture_sample_count(device: *mut c_void, count: u
 }
 
 extern "C" fn device_current_allocated_size(device: *mut c_void) -> u64 {
-    let _device = get_or!(device, Device, 0);
-    util::allocated_bytes()
+    let device = get_or!(device, Device, 0);
+    device.memory_statistics().live_bytes
 }
 
 extern "C" fn buffer_new(
@@ -419,10 +451,7 @@ extern "C" fn buffer_new(
             device.new_buffer_with_bytes(bytes, options)
         };
         match result {
-            Ok(buffer) => {
-                util::count_allocation(buffer.length() as i64);
-                handle(Obj::Buffer(buffer))
-            }
+            Ok(buffer) => handle(Obj::Buffer(buffer)),
             Err(error) => fail(format!("newBufferWithLength {length}: {error}")),
         }
     })
@@ -469,28 +498,6 @@ fn texture_descriptor(desc: &QmTextureDesc) -> Result<TextureDescriptor, String>
     Ok(descriptor)
 }
 
-fn texture_bytes(descriptor: &TextureDescriptor) -> i64 {
-    let texel = match descriptor.pixel_format as u32 {
-        10..=13 => 1,
-        20..=60 => 2,
-        70..=99 => 4,
-        100..=139 => 8,
-        _ => 4,
-    } as u64;
-    (descriptor.width
-        * descriptor.height
-        * descriptor.depth
-        * descriptor.array_length
-        * descriptor.sample_count
-        * texel
-        * if descriptor.mipmap_level_count > 1 {
-            4
-        } else {
-            3
-        }
-        / 3) as i64
-}
-
 extern "C" fn texture_new(device: *mut c_void, desc: *const QmTextureDesc) -> *mut c_void {
     let device = get_or!(device, Device, std::ptr::null_mut());
     let Some(desc) = (unsafe { desc.as_ref() }) else {
@@ -502,10 +509,7 @@ extern "C" fn texture_new(device: *mut c_void, desc: *const QmTextureDesc) -> *m
             Err(error) => return fail(error),
         };
         match device.new_texture(&descriptor) {
-            Ok(texture) => {
-                util::count_allocation(texture_bytes(&descriptor));
-                handle(Obj::Texture(texture))
-            }
+            Ok(texture) => handle(Obj::Texture(texture)),
             Err(error) => fail(format!(
                 "newTextureWithDescriptor {:?} {}x{}x{} levels {} samples {}: {error}",
                 descriptor.pixel_format,
@@ -843,6 +847,7 @@ pub fn normalize_metallib(bytes: &[u8]) -> std::borrow::Cow<'_, [u8]> {
 
 extern "C" fn library_new(device: *mut c_void, data: *const c_void, length: u64) -> *mut c_void {
     let device = get_or!(device, Device, std::ptr::null_mut());
+    let _timing = diagnostics::timer(device, diagnostics::Phase::Library);
     guard(std::ptr::null_mut(), || {
         let bytes = match unsafe { util::input_bytes(data, length) } {
             Ok(bytes) => bytes,
@@ -987,6 +992,7 @@ extern "C" fn render_pipeline_new(
     desc: *const QmRenderPipelineDesc,
 ) -> *mut c_void {
     let device = get_or!(device, Device, std::ptr::null_mut());
+    let _timing = diagnostics::timer(device, diagnostics::Phase::RenderPipeline);
     let Some(desc) = (unsafe { desc.as_ref() }) else {
         return fail("no pipeline descriptor");
     };
@@ -1007,7 +1013,11 @@ extern "C" fn render_pipeline_new(
         let result = device.new_render_pipeline_state(&descriptor, &options);
         util::note_pipeline_time(started.elapsed());
         match result {
-            Ok(state) => handle(Obj::RenderPipeline(state)),
+            Ok(state) => {
+                device.warm.lock().unwrap().forget_render(desc);
+                preload::record_render(desc);
+                handle(Obj::RenderPipeline(state))
+            }
             Err(error) => fail(format!(
                 "newRenderPipelineState {}: {error}",
                 options.label.as_deref().unwrap_or("(no label)")
@@ -1022,6 +1032,7 @@ extern "C" fn compute_pipeline_new(
     label: *const c_char,
 ) -> *mut c_void {
     let device = get_or!(device, Device, std::ptr::null_mut());
+    let _timing = diagnostics::timer(device, diagnostics::Phase::ComputePipeline);
     let function = get_or!(function, Function, std::ptr::null_mut());
     guard(std::ptr::null_mut(), || {
         let mut options = PipelineOptions::default();
@@ -1033,7 +1044,11 @@ extern "C" fn compute_pipeline_new(
             );
         }
         match device.new_compute_pipeline_state_with_function(function, &options) {
-            Ok(state) => handle(Obj::ComputePipeline(state)),
+            Ok(state) => {
+                device.warm.lock().unwrap().forget_compute(function);
+                preload::record_compute(function);
+                handle(Obj::ComputePipeline(state))
+            }
             Err(error) => fail(format!(
                 "newComputePipelineState {}: {error}",
                 function.name()
@@ -1073,6 +1088,7 @@ extern "C" fn command_buffer_new(queue: *mut c_void) -> *mut c_void {
             buffer,
             presents: Mutex::new(Vec::new()),
             errors: Arc::new(Mutex::new(None)),
+            timing_noted: std::sync::atomic::AtomicBool::new(false),
         })),
         Err(error) => fail(format!("commandBuffer: {error}")),
     })
@@ -1091,6 +1107,8 @@ extern "C" fn command_buffer_present(command_buffer: *mut c_void, drawable: *mut
 
 extern "C" fn command_buffer_commit(command_buffer: *mut c_void) -> c_int {
     let command_buffer = get_or!(command_buffer, CommandBuffer, 0);
+    let _timing = diagnostics::timer(command_buffer.buffer.device(), diagnostics::Phase::Commit);
+    diagnostics::sample(command_buffer.buffer.device(), false);
     guard(0, || {
         if let Some(error) = command_buffer.errors.lock().unwrap().as_ref() {
             set_error(error.clone());
@@ -1127,6 +1145,7 @@ fn status(status: CommandBufferStatus) -> c_int {
 
 extern "C" fn command_buffer_wait(command_buffer: *mut c_void) -> c_int {
     let command_buffer = get_or!(command_buffer, CommandBuffer, 5);
+    let _timing = diagnostics::timer(command_buffer.buffer.device(), diagnostics::Phase::Wait);
     if let Some(error) = command_buffer.errors.lock().unwrap().as_ref() {
         set_error(error.clone());
         return 5;
@@ -1136,6 +1155,19 @@ extern "C" fn command_buffer_wait(command_buffer: *mut c_void) -> c_int {
             log_once(&format!("[Quadra Metal] waitUntilCompleted: {error}"));
         }
         let result = command_buffer.buffer.status();
+        if result == CommandBufferStatus::Completed
+            && diagnostics::gpu_timestamps()
+            && !command_buffer
+                .timing_noted
+                .swap(true, std::sync::atomic::Ordering::Relaxed)
+        {
+            if let (Ok(start), Ok(end)) = (
+                command_buffer.buffer.gpu_start_time(),
+                command_buffer.buffer.gpu_end_time(),
+            ) {
+                diagnostics::gpu_span(command_buffer.buffer.device(), end - start);
+            }
+        }
         if matches!(result, CommandBufferStatus::Error) {
             let description = command_buffer
                 .buffer
@@ -1256,6 +1288,10 @@ extern "C" fn render_encoder_new(
             Ok(encoder) => handle(Obj::RenderEncoder(Box::new(EncoderObject {
                 value: Some(encoder),
                 errors: command_buffer.errors.clone(),
+                timing: diagnostics::timer(
+                    command_buffer.buffer.device(),
+                    diagnostics::Phase::Encoding,
+                ),
             }))),
             Err(error) => fail(format!("renderCommandEncoderWithDescriptor: {error}")),
         }
@@ -1305,6 +1341,7 @@ extern "C" fn render_end(encoder: *mut c_void) -> c_int {
     let Some(Obj::RenderEncoder(slot)) = (unsafe { object_mut(encoder) }) else {
         return 0;
     };
+    let _timing = slot.timing.take();
     let Some(value) = slot.value.take() else {
         return 0;
     };
@@ -1661,6 +1698,10 @@ extern "C" fn blit_encoder_new(command_buffer: *mut c_void) -> *mut c_void {
             Ok(encoder) => handle(Obj::BlitEncoder(Box::new(EncoderObject {
                 value: Some(encoder),
                 errors: command_buffer.errors.clone(),
+                timing: diagnostics::timer(
+                    command_buffer.buffer.device(),
+                    diagnostics::Phase::Encoding,
+                ),
             }))),
             Err(error) => fail(format!("blitCommandEncoder: {error}")),
         }
@@ -1671,6 +1712,7 @@ extern "C" fn blit_end(encoder: *mut c_void) -> c_int {
     let Some(Obj::BlitEncoder(slot)) = (unsafe { object_mut(encoder) }) else {
         return 0;
     };
+    let _timing = slot.timing.take();
     let Some(value) = slot.value.take() else {
         return 0;
     };
@@ -1889,6 +1931,10 @@ extern "C" fn compute_encoder_new(command_buffer: *mut c_void) -> *mut c_void {
             Ok(encoder) => handle(Obj::ComputeEncoder(Box::new(EncoderObject {
                 value: Some(encoder),
                 errors: command_buffer.errors.clone(),
+                timing: diagnostics::timer(
+                    command_buffer.buffer.device(),
+                    diagnostics::Phase::Encoding,
+                ),
             }))),
             Err(error) => fail(format!("computeCommandEncoder: {error}")),
         }
@@ -1899,6 +1945,7 @@ extern "C" fn compute_end(encoder: *mut c_void) -> c_int {
     let Some(Obj::ComputeEncoder(slot)) = (unsafe { object_mut(encoder) }) else {
         return 0;
     };
+    let _timing = slot.timing.take();
     let Some(value) = slot.value.take() else {
         return 0;
     };
@@ -2622,6 +2669,58 @@ pub extern "C" fn quadra_metal_host_check_air() -> c_int {
             set_error(error);
             0
         }
+    })
+}
+
+/// Recreate locally recorded pipeline states in the launcher's isolated helper process.
+/// Returns the successful count, or -1 with `last_error` set. Progress is counts only.
+#[no_mangle]
+pub extern "C" fn quadra_metal_host_preload(
+    progress: Option<preload::Progress>,
+    context: *mut c_void,
+    maximum: u32,
+) -> c_int {
+    guard(-1, || {
+        let pointer = device_create(std::ptr::null());
+        if pointer.is_null() {
+            return -1;
+        }
+        let device = get!(pointer, Device).unwrap().value.clone();
+        release(pointer);
+        match preload::run(&device, progress, context, maximum) {
+            Ok(count) => count as c_int,
+            Err(error) => {
+                set_error(format!("shader preloading: {error}"));
+                -1
+            }
+        }
+    })
+}
+
+/// Copy a bounded numeric JSON snapshot, including its terminating NUL, or return its required
+/// size when the buffer is absent or too short. No shader data or game tickets are included.
+///
+/// # Safety
+/// `device` must be a live host device handle. A non-null `buffer` must be writable for
+/// `capacity` bytes and must not overlap the device handle.
+#[no_mangle]
+pub unsafe extern "C" fn quadra_metal_host_diagnostics(
+    device: *mut c_void,
+    buffer: *mut c_char,
+    capacity: u64,
+) -> u64 {
+    let device = get_or!(device, Device, 0);
+    guard(0, || {
+        let mut value = diagnostics::snapshot(device);
+        value["preloaded_states_remaining"] = serde_json::json!(device.warm.lock().unwrap().len());
+        let mut bytes = serde_json::to_vec(&value).unwrap_or_default();
+        bytes.push(0);
+        if !buffer.is_null() && capacity >= bytes.len() as u64 {
+            unsafe {
+                std::ptr::copy_nonoverlapping(bytes.as_ptr(), buffer.cast(), bytes.len());
+            }
+        }
+        bytes.len() as u64
     })
 }
 

@@ -718,11 +718,32 @@ fn upgrade_library(bytes: &[u8]) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
-fn cache_directory() -> Option<PathBuf> {
-    let root = std::env::var_os("MACOBLOX_METAL_SHADER_CACHE")?;
-    let directory = PathBuf::from(root).join("air-upgrade-v2");
-    std::fs::create_dir_all(&directory).ok()?;
-    Some(directory)
+const CACHE_CAPACITY: u64 = 512 << 20;
+pub static UPGRADES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+struct UpgradeCache {
+    directory: PathBuf,
+    bytes: std::sync::atomic::AtomicU64,
+}
+impl UpgradeCache {
+    fn new(directory: PathBuf) -> Option<Self> {
+        std::fs::create_dir_all(&directory).ok()?;
+        let bytes = crate::cache::trim(&directory, CACHE_CAPACITY * 9 / 10, 8192).ok()?;
+        Some(Self {
+            directory,
+            bytes: std::sync::atomic::AtomicU64::new(bytes),
+        })
+    }
+}
+
+fn cache_directory() -> Option<&'static UpgradeCache> {
+    static CACHE: OnceLock<Option<UpgradeCache>> = OnceLock::new();
+    CACHE
+        .get_or_init(|| {
+            let root = std::env::var_os("MACOBLOX_METAL_SHADER_CACHE")?;
+            UpgradeCache::new(PathBuf::from(root).join("air-upgrade-v3"))
+        })
+        .as_ref()
 }
 
 /// The library as metal2vulkan reads it: old formats upgraded (cached), others unchanged.
@@ -730,24 +751,70 @@ pub fn prepare(bytes: &[u8]) -> Result<Cow<'_, [u8]>, String> {
     if !old_format(bytes) {
         return Ok(bytes.into());
     }
-    let key = format!("{:x}", Sha256::digest(bytes));
-    let cached = cache_directory().map(|directory| directory.join(format!("{key}.metallib")));
+    prepare_cached(bytes, cache_directory())
+}
+
+fn prepare_cached<'a>(
+    bytes: &'a [u8],
+    cache: Option<&UpgradeCache>,
+) -> Result<Cow<'a, [u8]>, String> {
+    use std::sync::atomic::Ordering;
+    if !old_format(bytes) {
+        return Ok(bytes.into());
+    }
+    let key = crate::cache::hash(bytes);
+    // Concurrent requests for one library recheck its completed cache entry. The fixed stripes
+    // also bound simultaneous upgrades without retaining an unbounded per-shader lock map.
+    static FLIGHTS: OnceLock<[std::sync::Mutex<()>; 8]> = OnceLock::new();
+    let _flight = FLIGHTS.get_or_init(|| std::array::from_fn(|_| std::sync::Mutex::new(())))
+        [key[0] as usize % 8]
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let cached = cache.map(|cache| {
+        cache
+            .directory
+            .join(format!("{}.qmc", crate::cache::hex(&key)))
+    });
     if let Some(path) = &cached {
-        if let Ok(data) = std::fs::read(path) {
+        let old_size = path.metadata().map_or(0, |data| data.len());
+        if let Ok(Some(data)) =
+            crate::cache::read(path, crate::cache::AIR, &key, crate::cache::MAX_LIBRARY)
+        {
             return Ok(data.into());
         }
-    }
-    let upgraded = upgrade_library(bytes)?;
-    if let Some(path) = cached {
-        // Roblox loads libraries on several threads; each writer needs its
-        // own inode so a rename cannot expose another writer's partial data.
-        static WRITER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let writer = WRITER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let temporary = path.with_extension(format!("tmp{}-{writer}", std::process::id()));
-        if std::fs::write(&temporary, &upgraded).is_ok() {
-            let _ = std::fs::rename(&temporary, &path);
+        if !path.exists() {
+            if let Some(cache) = cache {
+                let _ = cache
+                    .bytes
+                    .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |bytes| {
+                        Some(bytes.saturating_sub(old_size))
+                    });
+            }
         }
-        let _ = std::fs::remove_file(&temporary);
+    }
+    UPGRADES.fetch_add(1, Ordering::Relaxed);
+    let upgraded = upgrade_library(bytes)?;
+    if let (Some(path), Some(cache)) = (cached, cache) {
+        let size = upgraded.len() as u64 + 84;
+        if cache
+            .bytes
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |bytes| {
+                bytes
+                    .checked_add(size)
+                    .filter(|&total| total <= CACHE_CAPACITY)
+            })
+            .is_ok()
+            && crate::cache::write(
+                &path,
+                crate::cache::AIR,
+                &key,
+                &upgraded,
+                crate::cache::MAX_LIBRARY,
+            )
+            .is_err()
+        {
+            cache.bytes.fetch_sub(size, Ordering::Relaxed);
+        }
     }
     Ok(upgraded.into())
 }

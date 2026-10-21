@@ -176,22 +176,32 @@ def missing_metal_dependencies():
     return [] if vulkan_loader() else ["Vulkan loader"]
 
 
-def metal_environment(metal_dir, shader_cache):
+def metal_environment(metal_dir, shader_cache, *, preload=True, preload_key="unscoped",
+                      diagnostics=False, diagnostics_file=None):
     """Host and guest variables of the Metal renderer. metal_dir holds
     Metal.framework and libquadra_metal_host.so (prototype/metal-vulkan/build.sh)."""
     metal_dir = Path(metal_dir)
-    return {
+    environment = {
         "MACOBLOX_METAL": "1",
         # dlopened by the host side of Darling: a host path.
         "MACOBLOX_METAL_HOST_LIBRARY": str(metal_dir / "libquadra_metal_host.so"),
         # Read by the host library; HOME is /Users/<name> inside Darling.
         "MACOBLOX_METAL_SHADER_CACHE": str(shader_cache),
+        "MACOBLOX_METAL_PRELOAD": "1" if preload else "0",
+        "MACOBLOX_METAL_PRELOAD_KEY": preload_key,
+        "MACOBLOX_METAL_PRELOAD_IN_PROCESS": "1" if preload else "0",
+        "MACOBLOX_METAL_DIAGNOSTICS": "1" if diagnostics else "0",
+        "MACOBLOX_METAL_GPU_TIMESTAMPS": "1" if diagnostics else "0",
     }
+    if diagnostics and diagnostics_file:
+        environment["MACOBLOX_METAL_DIAGNOSTICS_FILE"] = str(diagnostics_file)
+    return environment
 
 
 def validate_metal(environment, host_library):
     """Open the Vulkan device the game will use, in a separate process."""
     probe_environment = {name: value for name, value in environment.items() if name != "LD_PRELOAD"}
+    probe_environment.update(MACOBLOX_METAL_PRELOAD_IN_PROCESS="0", MACOBLOX_METAL_DIAGNOSTICS="0")
     try:
         result = subprocess.run([sys.executable, str(Path(__file__)), "--metal-probe", str(host_library)],
                                 env=probe_environment, capture_output=True, text=True, timeout=30)
@@ -215,7 +225,7 @@ def _metal_probe(library):
     host = ctypes.CDLL(library)
     entry = host.quadra_metal_host_api
     entry.restype, entry.argtypes = ctypes.c_void_p, (ctypes.c_uint32,)
-    api = entry(1)
+    api = entry(2)
     if not api:
         raise RuntimeError("the Metal host library is from another version of Quadra")
     pointer = ctypes.c_void_p

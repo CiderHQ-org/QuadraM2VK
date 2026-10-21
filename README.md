@@ -302,6 +302,13 @@ does not include the bridge yet. VR requires OpenGL or Zink; X11 and other GPUs 
 need testing. See the [Metal prototype notes](prototype/metal-vulkan/README.md)
 for build commands and validation details.
 
+**Shader preloading** in the same Game settings learns successful Metal pipelines locally
+and prepares them on later launches for the installed client version. A progress dialog
+offers **Skip and play**. New shaders can still cause compilation during play. Optional
+**Metal performance diagnostics** records bounded timing, memory and cache observations;
+it is off by default. This fork's preload behavior has authored software Vulkan coverage;
+gameplay and hardware qualification of this revision remain open.
+
 With [MangoHud](https://github.com/flightlessmango/MangoHud) installed, enable
 **Settings → Environment → Game → MangoHud overlay** and restart Roblox.
 It works with both OpenGL and Vulkan (Zink) and is off by default. You can also

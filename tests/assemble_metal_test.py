@@ -21,6 +21,8 @@ code_offset = 0
 with tempfile.TemporaryDirectory(prefix="quadra-authored-air-") as tmp:
     for index, (name, kind) in enumerate(functions):
         text = source.read_text()
+        if not re.search(r"^source_filename\s*=", text, flags=re.MULTILINE):
+            text = 'source_filename = "quadra-authored-regression.ll"\n' + text
         for other in stages.values():
             if other != stages[kind]:
                 text = re.sub(r"^!air\." + other + r"\s*=.*$", "", text, flags=re.MULTILINE)

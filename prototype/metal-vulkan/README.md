@@ -59,8 +59,40 @@ RobloxPlayer (guest, Mach-O)            host (ELF)
   - the text is reassembled as current bitcode.
 
   `normalize_metallib` then inserts the empty extended header that format 2.7 has. Results are
-  cached by SHA-256 in `$MACOBLOX_METAL_SHADER_CACHE/air-upgrade-v2`. The new namespace
-  automatically regenerates corrected upgrades after updating from 0.32.
+  cached by SHA-256 in `$MACOBLOX_METAL_SHADER_CACHE/air-upgrade-v3`. Entries carry a
+  length, source identity and checksum; rejected entries are rebuilt. Upgrade and preload
+  namespaces each have a 512 MiB disk budget. Unavailable cache storage uses bounded
+  in-memory runtime caching so a cache directory failure need not stop the renderer.
+
+## Shader preloading and diagnostics
+
+**Settings → Environment → Game → Shader preloading** is enabled by default for Metal.
+The first session learns successful render and compute pipeline descriptions locally;
+later launches preload those descriptions for the installed client version. New shaders
+and new render-state combinations can still compile during play. Client shaders and
+cache contents stay on this machine and are not included in diagnostic exports.
+
+The launcher shows progress and **Skip and play**. Skipping or reaching the 120-second
+helper timeout ends the helper before launch and skips the game's additional warmup.
+The helper handles at most 4096 recorded pipelines. The game's own Vulkan device can
+retain at most 64 warm pipeline states, with a 128 MiB source-weight limit. It checks a
+five-second deadline and host memory pressure between creations; an individual driver
+call can exceed that deadline. This preserves actual Vulkan objects for early pipeline
+reuse while keeping warmup work off the gameplay worker pool. CPU/cgroup memory limits
+also cap pipeline compilation concurrency.
+
+**Metal performance diagnostics** is off by default. When enabled, bounded JSONL logs
+record compilation, encoder lifetime, acquire/present, submit/wait, cache counts and live
+allocation snapshots, at most once per second on commit and on final device release.
+Recent timing percentiles cover up to 512 samples. `MACOBLOX_METAL_GPU_TIMESTAMPS=1`
+additionally requests GPU spans while diagnostics is enabled. Encoder lifetime includes
+time spent by the caller; these observations are not a frame-time or FPS measurement.
+`currentAllocatedSize` now uses per-device live allocator bytes; reserved/imported bytes
+are separate. Vulkan driver allocations and wrapped external images are excluded.
+Working-set recommendations use device-local heap budgets where available.
+
+Native helpers can call `quadra_metal_host_preload` and
+`quadra_metal_host_diagnostics`; these optional exports do not change guest ABI 2.
 
 ## Baseline evidence and qualification
 

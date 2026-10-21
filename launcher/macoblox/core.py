@@ -107,6 +107,8 @@ DEFAULT_SETTINGS = {
     "display_backend": "x11",
     "dpi_scale": 1.0,
     "renderer": "opengl",
+    "metal_shader_preload": True,
+    "metal_diagnostics": False,
     "gpu": "auto",
     "roblox_channel": "",
     "mangohud": False,
@@ -1367,7 +1369,8 @@ def cleanup_logs(keep, current=None, max_bytes=LOGS_MAX_BYTES):
     total, and CiderDarling traces likewise. `current` is never removed;
     logs from run_debug.sh and other tools are left alone."""
     for glob, pattern in (("launch-*.log", r"launch-\d{8}-\d{6}\.log"),
-                          ("ciderdarling-trace-*.jsonl", r"ciderdarling-trace-\d{8}-\d{6}\.jsonl")):
+                          ("ciderdarling-trace-*.jsonl", r"ciderdarling-trace-\d{8}-\d{6}\.jsonl"),
+                          ("metal-performance-*.jsonl", r"metal-performance-\d{8}-\d{6}-\d+\.jsonl")):
         logs = []
         for path in LOGS.glob(glob):
             try:
@@ -1457,10 +1460,15 @@ def _metal_sources_hash():
     digest = hashlib.sha256(__version__.encode())
     digest.update(str(DARLING_SYSROOT).encode())
     root = PROJECT / "prototype" / "metal-vulkan"
-    for path in sorted([root / "quadra_metal.h", METAL_BUILD_SCRIPT, *(root / "framework").glob("*"),
-                        root / "host" / "Cargo.toml", root / "host" / "Cargo.lock", *(root / "host" / "src").glob("*.rs")]):
+    sources = [root / "quadra_metal.h", METAL_BUILD_SCRIPT, *(root / "framework").glob("*"),
+               root / "host" / "Cargo.toml", root / "host" / "Cargo.lock", *(root / "host" / "src").rglob("*.rs")]
+    # The path dependency's sources can change without moving the bridge's manifest or lock.
+    for crate in ("metal2vulkan-air", "metal2vulkan", "metal2vulkan-runtime"):
+        vendor = PROJECT / "vendor" / "metal2vulkan" / "crates" / crate
+        sources.extend([vendor / "Cargo.toml", vendor / "build.rs", *(vendor / "src").rglob("*.rs")])
+    for path in sorted(sources):
         try:
-            digest.update(path.name.encode() + b"\0" + path.read_bytes())
+            digest.update(str(path.relative_to(PROJECT)).encode() + b"\0" + path.read_bytes())
         except OSError:
             pass
     return digest.hexdigest()
@@ -2387,6 +2395,10 @@ class RobloxSession:
 
     def __init__(self, settings, launch_uri=None):
         self.settings = settings
+        self.shader_preload_progress = None
+        self.shader_preload_cancel = threading.Event()
+        self._metal_preload_skipped = False
+        self.metal_diagnostics_path = LOGS / (time.strftime("metal-performance-%Y%m%d-%H%M%S-") + str(os.getpid()) + ".jsonl")
         # This is intentionally opaque.  Do not split, decode, normalize or
         # otherwise inspect a browser handoff before giving it to Roblox.
         self.launch_uri = launch_uri
@@ -2421,8 +2433,14 @@ class RobloxSession:
         if self._gpu_environment is None:
             self.gpu_adapter = gpus.selected_gpu(self.settings.get("gpu", "auto"))
             self._gpu_environment = gpus.gpu_environment(self.gpu_adapter, renderer)
-        metal = graphics.metal_environment(METAL_DIR, CACHE_DIR / "metal-shader-cache") \
+        metal = graphics.metal_environment(METAL_DIR, CACHE_DIR / "metal-shader-cache",
+                                          preload=self.settings.get("metal_shader_preload", True),
+                                          preload_key=installed_version() or "unknown-client",
+                                          diagnostics=self.settings.get("metal_diagnostics", False),
+                                          diagnostics_file=self.metal_diagnostics_path) \
             if renderer == "metal" else {}
+        if metal and self._metal_preload_skipped:
+            metal["MACOBLOX_METAL_PRELOAD_IN_PROCESS"] = "0"
         return {
             **graphics.renderer_environment(renderer),
             **metal,
@@ -2587,7 +2605,10 @@ class RobloxSession:
                 ok, output = build_metal()
                 if not ok:
                     raise RuntimeError(_("Could not build Metal on Vulkan:\n{output}", output=output))
-            (CACHE_DIR / "metal-shader-cache").mkdir(parents=True, exist_ok=True)
+            try:
+                (CACHE_DIR / "metal-shader-cache").mkdir(parents=True, exist_ok=True)
+            except OSError as error:
+                self.notes.append(f"Metal shader cache unavailable; using bounded memory caching: {error}")
         env = self.environment()
         if env.get("MACOBLOX_WAYLAND") != "1":
             ensure_x11(env)
@@ -2612,6 +2633,20 @@ class RobloxSession:
         if _foreign_darlingservers():
             restart_darling()
             self.notes.append("Restarted Darling: its server came from another runtime installation")
+        if self.settings.get("renderer", "opengl") == "metal":
+            from . import metal_preload
+            try:
+                result = metal_preload.run(METAL_HOST_LIBRARY, env,
+                                          progress=self.shader_preload_progress,
+                                          cancel=self.shader_preload_cancel)
+                self.notes.append("Shader preloading: {status}, {completed}/{total} pipelines, {failed} skipped".format(**result))
+                if result["status"] in ("skipped", "timeout", "failed", "disabled"):
+                    self._metal_preload_skipped = True
+                    env["MACOBLOX_METAL_PRELOAD_IN_PROCESS"] = "0"
+            except (OSError, subprocess.SubprocessError) as error:
+                self._metal_preload_skipped = True
+                env["MACOBLOX_METAL_PRELOAD_IN_PROCESS"] = "0"
+                self.notes.append(f"Shader preloading unavailable; starting Roblox: {error}")
         self.notes.extend(prepare_prefix(env) or [])
         # The shim reads the pending file as a fallback: never an old click.
         from . import uri
@@ -2680,6 +2715,8 @@ class RobloxSession:
                 log.write(f"Requested cleanup of {orphans} selected-prefix Darling process(es) left without their darlingserver\n".encode())
             if self.trace_path:
                 log.write(f"CiderDarling trace: {self.trace_path}\n".encode())
+            if self.settings.get("renderer") == "metal" and self.settings.get("metal_diagnostics", False):
+                log.write(f"Metal performance trace: {self.metal_diagnostics_path}\n".encode())
             for note in self.notes:
                 log.write(f"[Quadra Startup] {note}\n".encode(errors="replace"))
             for _attempt in range(2):
