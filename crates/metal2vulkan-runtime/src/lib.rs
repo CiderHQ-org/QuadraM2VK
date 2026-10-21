@@ -281,10 +281,12 @@ pub use indirect_command_buffer::{
 pub use interop::SemaphoreProblem;
 pub use library::{Function, FunctionDescriptor, Library};
 pub use linear_plan::BufferTextureProblem;
+pub use memory::MemoryStatistics;
 pub use metal2vulkan::device::DriverFact;
 pub use metal_level::MetalLevel;
 pub use mipmap::MipmapVerdict;
 pub use mipmap_plan::MipmapProblem;
+pub use pipeline::budget::set_pipeline_compile_budget;
 #[doc(hidden)]
 pub use pipeline::budget::{set_making_budget_for_measurement, MakingBudgetStarted};
 pub use pipeline::{
@@ -315,7 +317,8 @@ pub use resource::{ObjectId, ResourceRef};
 pub use resource_ids::{IdPlacement, ResourceId, ResourceIdKind};
 pub use sampler::{sampler_border_color, SamplerState, SamplerStateOptions};
 pub use shader_cache::{
-    ShaderCacheOptions, ShaderCacheStatistics, DEFAULT_CAPACITY, DEFAULT_MEMORY_CAPACITY,
+    ShaderCacheMode, ShaderCacheOptions, ShaderCacheStatistics, DEFAULT_CAPACITY,
+    DEFAULT_MEMORY_CAPACITY,
 };
 pub use sparse::device::SparseFeatures;
 pub use sparse::encoder::ResourceStateCommandEncoder;

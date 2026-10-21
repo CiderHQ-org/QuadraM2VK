@@ -8,7 +8,7 @@
 use crate::error::{Error, Problem, ShaderCacheError};
 use crate::shader_cache::driver::{make, open, seal, Identity, Making, Records, Refusal};
 use crate::shader_cache::store::{entry_name, Directory, Lookup, Store, LAYOUT, UNUSED_BUILD};
-use crate::shader_cache::{CacheSetup, EntryKind, ShaderCacheOptions};
+use crate::shader_cache::{CacheSetup, EntryKind, ShaderCacheMode, ShaderCacheOptions};
 use ash::vk::{self, Handle};
 use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
@@ -406,6 +406,18 @@ fn an_unusable_directory_is_a_typed_error() {
     assert_eq!(path.as_deref(), Some(below.as_path()));
     assert!(!message.is_empty());
     assert!(error.to_string().contains(&below.display().to_string()));
+    for mode in [
+        ShaderCacheMode::PreferPersistent,
+        ShaderCacheMode::MemoryOnly,
+    ] {
+        let mut options = ShaderCacheOptions::in_directory(&below);
+        options.mode = mode;
+        CacheSetup::of(&options, "system_default_with").unwrap();
+        assert!(
+            !below.exists(),
+            "fallback attempted to create storage below a file"
+        );
+    }
     let zero_caps = |options: &mut ShaderCacheOptions| options.capacity = 0;
     let zero_memo = |options: &mut ShaderCacheOptions| options.memory_capacity = 0;
     for zero in [&zero_caps as &dyn Fn(&mut ShaderCacheOptions), &zero_memo] {

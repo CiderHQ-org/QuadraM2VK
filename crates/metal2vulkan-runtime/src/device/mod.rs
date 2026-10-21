@@ -778,6 +778,13 @@ pub(super) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 impl Device {
+    /// A snapshot of this device's allocator. `live_bytes` approximates
+    /// `MTLDevice.currentAllocatedSize`; see [`crate::MemoryStatistics`] for inclusions and
+    /// exclusions. Takes the allocator lock; sample periodically, not once per draw.
+    pub fn memory_statistics(&self) -> crate::MemoryStatistics {
+        lock(&self.shared().memory).statistics()
+    }
+
     /// `registryID`: an identifier of the physical device, from its `deviceUUID`.
     pub fn registry_id(&self) -> u64 {
         properties::registry_id(&self.0.properties.device_uuid)

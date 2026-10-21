@@ -127,6 +127,16 @@ pub(crate) const AGE: Duration = Duration::from_secs(4);
 /// [`set_making_budget_for_measurement`]'s numbers where it was called first.
 static PROCESS: OnceLock<Arc<Budget>> = OnceLock::new();
 
+/// Set the process-wide maximum concurrent driver pipeline compilations before the first
+/// device uses the budget. No Metal counterpart. Returns false if a budget was already chosen.
+/// Applications can derive this cap from CPU availability and memory headroom; this limits
+/// concurrency, not the memory of a driver call. One turn stays reserved for waited work;
+/// with a cap of one, speculative work runs once a caller or submission waits for it.
+pub fn set_pipeline_compile_budget(max_in_flight: std::num::NonZeroUsize) -> bool {
+    let turns = max_in_flight.get();
+    set_making_budget_for_measurement(turns, turns - 1).is_ok()
+}
+
 /// The counter tickets are drawn from (a pool's pieces' numbers too): one order for the process.
 static TICKETS: AtomicU64 = AtomicU64::new(0);
 

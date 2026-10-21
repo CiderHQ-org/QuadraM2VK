@@ -278,7 +278,8 @@ pub(crate) fn make<T, E>(
     exiting: impl Fn() -> bool,
     create: impl FnOnce(vk::PipelineCache) -> Result<T, E>,
 ) -> Result<T, E> {
-    if exiting() {
+    if exiting() || !store.directory().persistent() {
+        crate::pipeline::creation_log::record_loaded(false);
         return create(vk::PipelineCache::null());
     }
     let name = records.name(making);

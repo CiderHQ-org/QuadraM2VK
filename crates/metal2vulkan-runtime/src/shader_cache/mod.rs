@@ -1,11 +1,12 @@
-//! The translated-shader cache on disk: always on, so a second process does not translate again
-//! what the first already did, as Metal programs get from the OS.
+//! The translated-shader cache: persistent by default, with an explicit bounded memory-only
+//! mode and an optional fallback when its directory cannot be opened.
 //!
 //! - **The directory.** [`ShaderCacheOptions::directory`], or the platform's per-user cache
 //!   directory: `~/Library/Caches/metal2vulkan` on macOS, `$XDG_CACHE_HOME/metal2vulkan`
 //!   elsewhere, or `~/.cache/metal2vulkan` when that is unset or not absolute. Never the OS temp
 //!   directory. Creating or adopting a device makes it (owner-only) and checks that it takes a
-//!   write; if not, the call fails with [`Error::ShaderCache`], naming the path and the I/O error.
+//!   write; if not, `Persistent` fails with [`Error::ShaderCache`], naming the path and I/O error.
+//!   `PreferPersistent` instead announces a memory-only fallback. `MemoryOnly` touches no disk.
 //!   After that, a failed read or write is a miss the [statistics](ShaderCacheStatistics) count,
 //!   never an error.
 //! - **What it holds.** The compile layer's artifacts in their self-checking envelope: translated
@@ -62,11 +63,26 @@ pub const DEFAULT_CAPACITY: u64 = 25 << 30;
 /// The default cap of a device's memo of compiled pipelines, in bytes: 256 MiB.
 pub const DEFAULT_MEMORY_CAPACITY: u64 = 256 << 20;
 
+/// How a device uses shader-cache storage. No Metal counterpart; Metal manages its own cache.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ShaderCacheMode {
+    /// Require the persistent directory. An unavailable directory refuses device creation.
+    #[default]
+    Persistent,
+    /// Try persistent storage; announce and use the bounded memo alone if opening it fails.
+    PreferPersistent,
+    /// Use the bounded memo alone, without opening a directory or starting a cache thread.
+    MemoryOnly,
+}
+
 /// Where a device keeps its translated shaders, and how much it keeps. No Metal counterpart:
 /// Metal's shader cache is the OS's.
 #[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ShaderCacheOptions {
+    /// Storage policy. `Persistent` by default; the in-memory memo stays bounded in every mode.
+    pub mode: ShaderCacheMode,
     /// The cache directory; `None` is the platform's per-user cache directory (the module's
     /// documentation names it). Devices of different processes and builds may share one.
     pub directory: Option<PathBuf>,
@@ -84,6 +100,7 @@ pub struct ShaderCacheOptions {
 impl Default for ShaderCacheOptions {
     fn default() -> ShaderCacheOptions {
         ShaderCacheOptions {
+            mode: ShaderCacheMode::Persistent,
             directory: None,
             capacity: DEFAULT_CAPACITY,
             memory_capacity: DEFAULT_MEMORY_CAPACITY,
@@ -251,6 +268,7 @@ fn default_directory() -> Result<PathBuf, ShaderCacheError> {
 pub(super) struct CacheSetup {
     directory: Directory,
     memory_capacity: u64,
+    fallback: Option<String>,
 }
 
 impl CacheSetup {
@@ -263,21 +281,38 @@ impl CacheSetup {
         if options.capacity == 0 || options.memory_capacity == 0 {
             return Err(invalid(call, Problem::ShaderCacheCapacity));
         }
-        let root = match &options.directory {
-            Some(directory) => directory.clone(),
-            None => default_directory().map_err(Error::ShaderCache)?,
-        };
-        let directory =
+        if options.mode == ShaderCacheMode::MemoryOnly {
+            return Ok(CacheSetup {
+                directory: Directory::memory(this_build()),
+                memory_capacity: options.memory_capacity,
+                fallback: None,
+            });
+        }
+        let opened = (|| {
+            let root = match &options.directory {
+                Some(directory) => directory.clone(),
+                None => default_directory().map_err(Error::ShaderCache)?,
+            };
             Directory::open(root, this_build(), options.capacity).map_err(|failed| {
                 Error::ShaderCache(ShaderCacheError::new(
                     Some(failed.path),
                     failed.error.kind(),
                     &failed.error.to_string(),
                 ))
-            })?;
+            })
+        })();
+        let (directory, fallback) = match opened {
+            Ok(directory) => (directory, None),
+            Err(error) if options.mode == ShaderCacheMode::PreferPersistent => (
+                Directory::memory(this_build()),
+                Some(format!("{error}; using the bounded in-memory shader cache; later processes may compile again")),
+            ),
+            Err(error) => return Err(error),
+        };
         Ok(CacheSetup {
             directory,
             memory_capacity: options.memory_capacity,
+            fallback,
         })
     }
 }
@@ -316,8 +351,12 @@ impl ShaderCache {
         let CacheSetup {
             directory,
             memory_capacity,
+            fallback,
         } = setup;
         let store = Arc::new(Store::new(directory, sink));
+        if let Some(reason) = fallback {
+            store.warn("metal2vulkan-shader-cache-memory-fallback", reason);
+        }
         let worker = Worker::start(Arc::clone(&store))?;
         Ok(ShaderCache {
             memo: PipelineMemo::new(memory_capacity),
@@ -506,6 +545,9 @@ impl ShaderCache {
         compile: &metal2vulkan::device::Device,
         bytes: &[u8],
     ) -> u64 {
+        if !self.store.directory().persistent() {
+            return bytes.len() as u64;
+        }
         let counters = &self.store.counters;
         let name = entry_name(
             self.store.directory().build(),
@@ -552,8 +594,15 @@ impl Device {
         self.shared().shader_cache.statistics()
     }
 
-    /// The device's shader cache directory. No Metal counterpart.
+    /// The device's shader cache directory, or an empty path in memory-only mode. No Metal
+    /// counterpart. [`Device::shader_cache_is_persistent`] distinguishes the modes.
     pub fn shader_cache_directory(&self) -> &Path {
         self.shared().shader_cache.store.directory().root()
+    }
+
+    /// Whether the device opened a persistent shader-cache directory. No Metal counterpart.
+    /// False for an explicit memory-only cache or an unavailable-directory fallback.
+    pub fn shader_cache_is_persistent(&self) -> bool {
+        self.shared().shader_cache.store.directory().persistent()
     }
 }

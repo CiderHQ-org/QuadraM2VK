@@ -55,6 +55,15 @@ ash = { version = "0.38", default-features = false, features = ["std"] }
 - Every shader the runtime translates is kept on disk, by default in the platform's per-user cache
   directory, and in memory ([HOWTO](../../docs/HOWTO.md#the-runtimes-shader-cache)).
   `ShaderCacheOptions` names another directory; give each test its own.
+  Its `mode` can select `ShaderCacheMode::PreferPersistent` to announce and fall back to the
+  bounded in-memory memo if the directory cannot be opened, or `MemoryOnly` to use no disk.
+  `Device::shader_cache_is_persistent()` reports which storage was opened.
+- `Device::memory_statistics()` distinguishes live allocator placements, reserved pooled
+  blocks and imported host memory. It includes internal resources and excludes driver-owned
+  allocations and parked releases; it is neither process RSS nor an available VRAM budget.
+- `set_pipeline_compile_budget(NonZeroUsize)` sets the process-wide driver compilation cap
+  before the first device uses it. Consumers can derive a smaller cap from memory headroom;
+  the scheduler preserves priority for work a frame waits for.
 
 ## A first dispatch
 

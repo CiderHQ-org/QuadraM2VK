@@ -39,17 +39,21 @@ impl Worker {
             wake: Condvar::new(),
             stop: AtomicBool::new(false),
         });
-        let thread = {
+        let thread = if store.directory().persistent() {
             let shared = Arc::clone(&shared);
-            exit_guard::spawn(
-                std::thread::Builder::new().name("metal2vulkan-shader-cache".into()),
-                move || run(&shared, &store),
+            Some(
+                exit_guard::spawn(
+                    std::thread::Builder::new().name("metal2vulkan-shader-cache".into()),
+                    move || run(&shared, &store),
+                )
+                .map_err(|_| Error::OutOfMemory(MemoryKind::Host))?,
             )
-            .map_err(|_| Error::OutOfMemory(MemoryKind::Host))?
+        } else {
+            None
         };
         Ok(Worker {
             shared,
-            thread: Mutex::new(Some(thread)),
+            thread: Mutex::new(thread),
         })
     }
 

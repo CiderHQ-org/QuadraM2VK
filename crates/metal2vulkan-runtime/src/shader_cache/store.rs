@@ -62,6 +62,7 @@ pub(crate) struct Directory {
     root: PathBuf,
     build: Hash256,
     capacity: u64,
+    persistent: bool,
 }
 
 impl Directory {
@@ -73,6 +74,7 @@ impl Directory {
             root,
             build,
             capacity,
+            persistent: true,
         };
         let failed = |path: &Path| {
             let path = path.to_path_buf();
@@ -86,6 +88,21 @@ impl Directory {
         let removed = fs::remove_file(&probe);
         written.and(removed).map_err(failed(&directory.root))?;
         Ok(directory)
+    }
+
+    /// A cache with no filesystem backing. Its path is never used for I/O.
+    pub(super) fn memory(build: Hash256) -> Directory {
+        Directory {
+            root: PathBuf::new(),
+            build,
+            capacity: 0,
+            persistent: false,
+        }
+    }
+
+    /// Whether any filesystem operation is allowed for this cache.
+    pub(super) fn persistent(&self) -> bool {
+        self.persistent
     }
 
     /// The directory the consumer named or the platform's default.
@@ -278,7 +295,7 @@ impl Store {
     }
 
     /// Say `text` as the warning `id_name`: through the sink, else on stderr.
-    fn warn(&self, id_name: &str, text: String) {
+    pub(super) fn warn(&self, id_name: &str, text: String) {
         let message = DebugMessage {
             severity: MessageSeverity::Warning,
             kind: MessageKind {
@@ -376,6 +393,9 @@ impl Store {
 
     /// Read the file at `path`. A file larger than any entry is removed and found absent.
     fn read(&self, path: &Path) -> Found {
+        if !self.directory.persistent() {
+            return Found::Absent;
+        }
         let file = match fs::File::open(path) {
             Ok(file) => file,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Found::Absent,
@@ -418,6 +438,9 @@ impl Store {
         name: &str,
         body: impl FnOnce(&mut dyn Write) -> io::Result<()>,
     ) -> io::Result<u64> {
+        if !self.directory.persistent() {
+            return Ok(0);
+        }
         let parent = path.parent().expect("an entry has a directory");
         create_private_dir_all(parent)?;
         let temporary = parent.join(format!(".{name}.{}.tmp", unique()));
@@ -470,6 +493,9 @@ impl Store {
 
     /// [`Store::sweep`] (with `unused_builds`) or [`Store::evict`].
     fn scan(&self, stop: &AtomicBool, unused_builds: bool) {
+        if !self.directory.persistent() {
+            return;
+        }
         let now = SystemTime::now();
         let own = hex(&self.directory.build);
         let Ok(builds) = fs::read_dir(self.directory.layout_dir()) else {

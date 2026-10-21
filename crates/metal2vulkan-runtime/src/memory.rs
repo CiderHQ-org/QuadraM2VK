@@ -51,6 +51,8 @@ use super::memory_log::{self, MemoryLog};
 use super::range::RangeAllocator;
 use super::sharing::Sharing;
 use super::work_counts::Counters;
+#[cfg(test)]
+mod accounting_tests;
 use crate::release;
 use ash::vk;
 use metal2vulkan::vk::DriverId;
@@ -518,6 +520,22 @@ pub(super) struct Census {
     pub(super) imported: u64,
 }
 
+/// A device's current allocator usage. `live_bytes` supplies the runtime's approximation of
+/// `MTLDevice.currentAllocatedSize`; internal buffers and images are included. Texture views
+/// and aliases do not count their shared allocation twice. This is not a GPU budget or process
+/// RSS: driver allocations, adopted images, dma-buf imports and blocks parked after release
+/// are outside this snapshot.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MemoryStatistics {
+    /// Bytes of live placements in runtime-owned memory, including GPU-retained resources.
+    pub live_bytes: u64,
+    /// Bytes of runtime-owned Vulkan blocks, including unused space and cached empty blocks.
+    pub reserved_bytes: u64,
+    /// Bytes of imported host-memory blocks, reported separately from runtime allocations.
+    pub imported_bytes: u64,
+}
+
 /// A host pointer the runtime may send between threads: the mapping of a block it owns.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Mapped(NonNull<u8>);
@@ -910,6 +928,24 @@ impl Memory {
     /// pooled or dedicated, whether freed since or not: host memory imported counts in none.
     pub(super) fn allocated(&self) -> u64 {
         self.allocated
+    }
+
+    /// Current placements and blocks, rather than the cumulative allocation counter.
+    pub(super) fn statistics(&self) -> MemoryStatistics {
+        let mut result = MemoryStatistics::default();
+        for block in self
+            .pools
+            .iter()
+            .flat_map(|pool| pool.blocks.iter().flatten())
+        {
+            if block.payload.imported {
+                result.imported_bytes += block.payload.size;
+            } else {
+                result.live_bytes += block.ranges.used();
+                result.reserved_bytes += block.payload.size;
+            }
+        }
+        result
     }
 
     /// Its live blocks, by kind.
