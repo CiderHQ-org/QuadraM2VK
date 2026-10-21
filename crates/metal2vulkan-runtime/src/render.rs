@@ -309,7 +309,7 @@ use super::pipeline::{
 use super::rate_mapped_pass::{self, RateMappedPass};
 use super::render_pass::{
     self, check_memoryless, AspectTarget, Attachment, DepthStencilTarget, PassLayout,
-    RenderPassDescriptor, RenderPassProblem, Target, HIDDEN_DEPTH_FORMAT, MAX_COLOR_ATTACHMENTS,
+    RenderPassDescriptor, RenderPassProblem, Target, MAX_COLOR_ATTACHMENTS,
 };
 use super::render_state::{self, DepthBiasRecord, EncoderState, ViewportList, MAX_VIEWPORTS};
 use super::render_state::{Compensation, DepthBiasEffect, WrittenDepthClamp};
@@ -333,6 +333,7 @@ use super::texture::signed_depth::{self, MagnitudeCopies, SignStrip};
 use super::texture::Texture;
 use super::tracker::{self, Access, Barrier, GeometryWrites, IndirectReads, UnorderedWrites, Use};
 use super::used_resources::EncoderKind;
+use super::versioned::Versioned;
 use super::visibility::{self, Continuation, Visibility, VisibilityResultMode};
 use super::written_commands::Writers;
 use crate::device::functions::Vk;
@@ -340,6 +341,7 @@ use crate::work_counts::Begun;
 use crate::work_counts::NotInline;
 use crate::work_counts::Split;
 use ash::vk;
+use draw_shape::{PipelineInputs, ShapeInputs, ShapeMemo, ShapeToken, ShapedState};
 pub(super) use executions::DeferredPass;
 use executions::{PassInstance, PassStorage, RenderExecution, RunPasses};
 use extended_shadow::ExtendedShadows;
@@ -358,8 +360,8 @@ use metal2vulkan::error::RuntimeDriverDefect;
 use metal2vulkan::metal::format::ExtendedRange;
 use metal2vulkan::metal::state::DepthStencilDescriptor;
 use metal2vulkan::metal::{
-    CullMode, DepthClipMode, IndexType, PixelFormat, PrimitiveTopologyClass, PrimitiveType,
-    RenderStages, TriangleFillMode, Winding,
+    CullMode, DepthClipMode, IndexType, PixelFormat, PrimitiveType, RenderStages, TriangleFillMode,
+    Winding,
 };
 use metal2vulkan::pipeline::{
     ColorGroup, GraphicsState, PushField, RuntimeFact, Stage, StorageAttachmentUse,
@@ -377,6 +379,7 @@ mod arguments;
 mod bound;
 mod capture;
 mod color_groups;
+mod draw_shape;
 mod executions;
 mod extended_shadow;
 mod inline_first;
@@ -598,7 +601,7 @@ struct PatchDraw {
 
 /// What a draw assembles: primitives of a type, a tessellation pipeline's patches, or a mesh
 /// render pipeline's meshes (`render/mesh.rs`).
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum Assembly {
     Primitives(PrimitiveType),
     Patches,
@@ -624,7 +627,9 @@ fn primitive_id_indices(pipeline: &DrawingState, draw: &DrawCall) -> Option<Inde
 }
 
 /// What a draw settles from the encoder's state before its bind state
-/// (`RenderCommandEncoder::draw_settings`).
+/// (`draw_shape::ShapeInputs::settings`), kept from one draw to the next
+/// (`draw_shape::ShapeMemo`).
+#[derive(Clone, PartialEq)]
 struct DrawSettings {
     /// Points that rasterize nothing: the draw runs its vertex function alone, through empty
     /// scissors.
@@ -632,8 +637,9 @@ struct DrawSettings {
     /// Its input assembly.
     topology: metal2vulkan::vk::PrimitiveTopology,
     primitive_restart: bool,
-    /// The pass's hidden depth and stencil, which the draw gives the pass.
-    hidden: Option<Target>,
+    /// Whether the draw gives the pass its hidden depth and stencil (made for the draw:
+    /// `RenderCommandEncoder::needed_hidden`).
+    hidden: bool,
     /// The depth and stencil state of a draw whose compare fails every fragment.
     failing_state: Option<DepthStencilState>,
     /// Its vertex amplification.
@@ -651,19 +657,13 @@ struct DrawSettings {
     bias: Option<DepthBiasEffect>,
     /// Where its colors go among the pass's.
     routing: Arc<Routing>,
-    /// The pass's colors it zeroes and its own it drops, where the encoder keeps no such colors
-    /// for its pipeline state in its pass (`Routed`): found for the draw alone. `None` where the
-    /// encoder keeps them, which the draw reads in place ([`RenderCommandEncoder::draw_colors`]).
-    routed_colors: Option<RoutedColors>,
+    /// The pass's colors it zeroes and its own it drops (`ShapeInputs::routed_colors`): the
+    /// encoder's, held, where it keeps them for its pipeline state in its pass (`Routed`).
+    routed_colors: Arc<RoutedColors>,
     /// Whether the depth it renders against is `Depth16Unorm` (`BindState::depth16_pass`).
     depth16_pass: Option<bool>,
     /// The side of its depth bias (`BindState::depth16_bias_raises`).
     depth16_bias_raises: Option<bool>,
-    /// The index type of a direct indexed draw of a pipeline whose vertex function writes the
-    /// primitive ID's varying, which runs the de-indexed variant
-    /// (`BindState::primitive_id_indices`, [`primitive_id_indices`]); `None` for every other
-    /// draw.
-    primitive_id_indices: Option<IndexType>,
 }
 
 /// The render encoder state one draw takes, statically or as dynamic state, in Vulkan's terms
@@ -678,6 +678,21 @@ struct DrawState {
     /// The depth bias's factors and the command they record by.
     depth_bias: DepthBiasRecord,
     blend_color: [f32; 4],
+}
+
+impl PartialEq for DrawState {
+    /// Every field equal, each viewport's by its fields (`vk::Viewport` has no `PartialEq`).
+    fn eq(&self, other: &DrawState) -> bool {
+        let fields = |v: &vk::Viewport| [v.x, v.y, v.width, v.height, v.min_depth, v.max_depth];
+        self.viewports.len() == other.viewports.len()
+            && (self.viewports.iter().zip(other.viewports.iter()))
+                .all(|(a, b)| fields(a) == fields(b))
+            && self.scissors == other.scissors
+            && self.fixed == other.fixed
+            && self.stencil_reference == other.stencil_reference
+            && self.depth_bias == other.depth_bias
+            && self.blend_color == other.blend_color
+    }
 }
 
 /// The states a draw records with (`draw_resident`): the whole draw's, or in a rate-mapped pass
@@ -803,7 +818,8 @@ struct Instance {
     /// recorded inline after a split, which takes none (`render/inline_splits.rs`): an instance
     /// whose secondary never began recorded nothing, and its pass executes none for it.
     draws: vk::CommandBuffer,
-    shape: PassShape,
+    /// Versioned: a draw's `VkPipeline` is found by it (`render/draw_shape.rs`).
+    shape: Versioned<PassShape>,
     compatible: Arc<RenderPassObject>,
     /// Something recorded into `draws`: a draw or a visibility query's begin or end.
     recorded: bool,
@@ -1071,15 +1087,17 @@ pub struct RenderCommandEncoder {
     /// The pass's instances before the current one, which the draws record into.
     earlier: Vec<Instance>,
     current: Instance,
-    layout: PassLayout,
+    /// Versioned, as the state and the amplification are: a draw's shape is derived from them
+    /// (`render/draw_shape.rs`).
+    layout: Versioned<PassLayout>,
     /// The compatible pass of each shape the encoder's instances took.
     passes: Vec<(PassShape, Arc<RenderPassObject>)>,
     /// The descriptor's `renderTargetArrayLength`: 0 (Metal's default), 1, or the layers of a
     /// layered pass (`PassLayout::layers`).
     render_target_array_length: u32,
-    state: EncoderState,
+    state: Versioned<EncoderState>,
     pipeline: Option<RenderPipelineState>,
-    /// The routing of the drawing state last set ([`routing`](Self::routing)), which its check
+    /// The routing of the drawing state last set (`ShapeInputs::routing`), which its check
     /// and each of its draws (their settings and their coverage) read.
     routed: Option<Routed>,
     vertex: ArgumentTable,
@@ -1124,7 +1142,7 @@ pub struct RenderCommandEncoder {
     /// (`rate_mapped_pass.rs`).
     rate_map: Option<RateMappedPass>,
     /// The vertex amplification the draws take (`amplification.rs`).
-    amplification: Amplification,
+    amplification: Versioned<Amplification>,
     /// A memory barrier follows draws of the current instance: the next draw records into a new
     /// instance after a barrier from everything before (`fence.rs`).
     barrier: bool,
@@ -1279,6 +1297,8 @@ pub struct RenderCommandEncoder {
     /// The views and sampler descriptions its draws' binds made or found, taken from the
     /// device's ended render encoders' and given back as it ends (`binding::BindMemo`).
     bind_memo: binding::BindMemo,
+    /// The shapes its draws derived, with what from (`render/draw_shape.rs`).
+    shape_memo: ShapeMemo,
     /// What its draws retained of their own, each once ([`LastRetained`]).
     last_retained: LastRetained,
     /// Whether the pass's first instance records inline (`render/inline_first.rs`).
@@ -1408,21 +1428,20 @@ impl QuietBoundValues {
     }
 }
 
-/// A drawing state's routing into a pass's colors ([`RenderCommandEncoder::routing`]), with the
-/// state and the pass's color formats it was found for, and the colors a draw of it zeroes and
-/// drops by that routing ([`RenderCommandEncoder::routed_colors`]): each a function of those
-/// alone.
+/// A drawing state's routing into a pass's colors (`ShapeInputs::routing`), with the state and
+/// the pass's color formats it was found for, and the colors a draw of it zeroes and drops by
+/// that routing (`ShapeInputs::routed_colors`): each a function of those alone.
 struct Routed {
     state: DrawingState,
     pass: [Option<PixelFormat>; MAX_COLOR_ATTACHMENTS],
     routing: Result<Arc<Routing>, u32>,
     /// `None` where the state's routing is refused.
-    colors: Option<RoutedColors>,
+    colors: Option<Arc<RoutedColors>>,
 }
 
 /// The pass colors a draw of a drawing state zeroes, and the state's colors it drops, by its
-/// routing ([`RenderCommandEncoder::zeroed_colors`], [`RenderCommandEncoder::dropped_colors`]).
-#[derive(Clone)]
+/// routing (`ShapeInputs::zeroed_colors`, `ShapeInputs::dropped_colors`).
+#[derive(Clone, PartialEq)]
 struct RoutedColors {
     zeroed: BTreeMap<u32, PixelFormat>,
     dropped: BTreeSet<u32>,
@@ -1654,7 +1673,7 @@ impl RenderCommandEncoder {
             earlier: Vec::new(),
             current: Instance {
                 draws,
-                shape: shape.clone(),
+                shape: Versioned::new(shape.clone()),
                 compatible: Arc::clone(&compatible),
                 recorded: false,
                 shadow: false,
@@ -1681,14 +1700,14 @@ impl RenderCommandEncoder {
                 feedback: Feedback::NONE,
                 storage_colors: 0,
             },
-            state: EncoderState::metal_defaults(
+            state: Versioned::new(EncoderState::metal_defaults(
                 rate_map
                     .as_ref()
                     .map_or(layout.extent, RateMappedPass::area),
-            ),
+            )),
             render_target_array_length,
             visibility: Visibility::new(layout.visibility.clone()),
-            layout,
+            layout: Versioned::new(layout),
             passes: vec![(shape, compatible)],
             pipeline: None,
             routed: None,
@@ -1708,7 +1727,7 @@ impl RenderCommandEncoder {
             tile_imageblock: false,
             factors: Factors::default(),
             rate_map,
-            amplification: Amplification::default(),
+            amplification: Versioned::new(Amplification::default()),
             barrier: false,
             barrier_splits: 0,
             driver_restarts: false,
@@ -1752,6 +1771,7 @@ impl RenderCommandEncoder {
             log,
             quiet_bound_values: None,
             bind_memo,
+            shape_memo: ShapeMemo::default(),
             last_retained: LastRetained::default(),
             inline: match inline {
                 Some(splits) => inline_first::Inline::Open { splits },
@@ -1951,12 +1971,12 @@ impl RenderCommandEncoder {
         let state = self.grouped_as(drawn.clone())?;
         // Routed once here: the check and each draw read it (`routing`).
         if let RenderStateKind::Graphics(graphics) = state.kind() {
-            let pass = self.pass_formats();
-            let routing = graphics.routed(&pass, || Self::route(graphics, &pass));
+            let pass = self.layout.pass_formats();
+            let routing = graphics.routed(&pass, || ShapeInputs::route(graphics, &pass));
             let colors = routing
                 .as_ref()
                 .ok()
-                .map(|routing| self.colors_by(graphics, routing));
+                .map(|routing| Arc::new(self.shape_inputs().colors_by(graphics, routing)));
             self.routed = Some(Routed {
                 routing,
                 colors,
@@ -2690,7 +2710,7 @@ impl RenderCommandEncoder {
         view_mappings: Option<&[VertexAmplificationViewMapping]>,
     ) -> Result<(), Error> {
         self.log(|_| RenderCall::VertexAmplificationCount(count, view_mappings.map(Into::into)));
-        self.amplification = Amplification::new(count, view_mappings)
+        *self.amplification = Amplification::new(count, view_mappings)
             .map_err(|problem| draw_problem("set_vertex_amplification_count", problem))?;
         Ok(())
     }
@@ -3884,7 +3904,7 @@ impl RenderCommandEncoder {
         // last (`render/late_resolve.rs`).
         let resolving = PassShape::of(&layout)?;
         late_resolve::settle(
-            instances.iter_mut().map(|instance| &mut instance.shape),
+            instances.iter_mut().map(|instance| &mut *instance.shape),
             &resolving,
         );
         let last = instances
@@ -5017,7 +5037,7 @@ impl RenderCommandEncoder {
                     framebuffer: framebuffer.raw,
                     pieces: pieces.into_iter().chain([Piece::Draws(draws)]).collect(),
                     runs,
-                    shape,
+                    shape: shape.into_inner(),
                     position: Position {
                         first: index == 0,
                         last: index + 1 == count && !resolve_after,
@@ -5170,7 +5190,7 @@ impl RenderCommandEncoder {
             objects,
             inline_objects,
             passes,
-            layout.visibility,
+            layout.into_inner().visibility,
             tile_scratch,
             targets,
             merged,
@@ -5729,7 +5749,7 @@ impl RenderCommandEncoder {
         // after a split (`begin_new_draws`).
         let instance = Instance {
             draws: vk::CommandBuffer::null(),
-            shape,
+            shape: Versioned::new(shape),
             compatible,
             recorded: false,
             shadow,
@@ -5844,7 +5864,7 @@ impl RenderCommandEncoder {
         let draws = self.core.command_buffer().begin_draws(&compatible)?;
         let instance = Instance {
             draws,
-            shape: self.current.shape.clone(),
+            shape: Versioned::new(self.current.shape.clone()),
             compatible,
             recorded: false,
             shadow: false,
@@ -5906,7 +5926,7 @@ impl RenderCommandEncoder {
         cause: Split,
     ) {
         if let Some(layout) = stood {
-            self.layout = *layout;
+            *self.layout = *layout;
             self.kept_attachments = None;
         }
         if let Next::New {
@@ -5914,7 +5934,7 @@ impl RenderCommandEncoder {
             split,
         } = next
         {
-            if !self.passes.iter().any(|(s, _)| *s == instance.shape) {
+            if !self.passes.iter().any(|(s, _)| *s == *instance.shape) {
                 let pass = (instance.shape.clone(), Arc::clone(&instance.compatible));
                 self.passes.push(pass);
             }
@@ -6220,22 +6240,11 @@ impl RenderCommandEncoder {
         Ok(())
     }
 
-    /// Whether the pass has a depth and a stencil: of its attachments, or the hidden ones a draw
-    /// or an execution gave it.
-    fn aspects(&self) -> (bool, bool) {
-        self.layout
-            .depth_stencil
-            .as_ref()
-            .map_or((false, false), |ds| {
-                (ds.depth.is_some(), ds.stencil.is_some())
-            })
-    }
-
     /// The pass's hidden depth and stencil where a draw under the encoder's state now uses depth
     /// or the stencil the pass lacks (`EncoderState::needs_hidden`): the image
     /// `hidden_depth_stencil` makes, or what refuses it; `None` where the state needs none.
     fn needed_hidden(&self) -> Result<Option<Target>, Error> {
-        let (depth, stencil) = self.aspects();
+        let (depth, stencil) = self.layout.aspects();
         match self.state.needs_hidden(depth, stencil) {
             true => self.hidden_depth_stencil().map(Some),
             false => Ok(None),
@@ -6260,120 +6269,6 @@ impl RenderCommandEncoder {
         attachment_stand_in::hidden(self.core.command_buffer(), &self.layout)
     }
 
-    /// Whether a draw of `pipeline` writes its colors: a fragment function, rasterizing.
-    fn writes_colors(pipeline: &DrawingState) -> bool {
-        pipeline.descriptor().stage(Stage::Fragment).is_some()
-            && !pipeline.base().graphics.rasterizer_discard
-    }
-
-    /// How a draw of `pipeline` stores its colors into the pass's (`color_reformat::Routing`):
-    /// each state color into the pass color at its place in Metal's per-sample record, for a
-    /// state that writes colors (Metal probes); each color at its own index for one that writes
-    /// none. `Err(index)`, refused `AttachmentFormat(Color(index))`, where plain Metal stores part
-    /// of a color, or more than one, into an attachment (`color_reformat::routing`), `index` the
-    /// lowest color that moves. The one the encoder kept as `pipeline` was set
-    /// ([`set_render_pipeline_state`](Self::set_render_pipeline_state)) where the pass's colors
-    /// are still the ones it was found for, else found again.
-    fn routing(&self, pipeline: &DrawingState) -> Result<Arc<Routing>, u32> {
-        let pass = self.pass_formats();
-        match &self.routed {
-            Some(routed) if routed.state.same(pipeline) && routed.pass == pass => {
-                routed.routing.clone()
-            }
-            _ => pipeline.routed(&pass, || Self::route(pipeline, &pass)),
-        }
-    }
-
-    /// [`routing`](Self::routing), found for a pass of the colors `pass`.
-    fn route(pipeline: &DrawingState, pass: &[Option<PixelFormat>]) -> Result<Routing, u32> {
-        let state = pipeline.descriptor().color_formats();
-        if !Self::writes_colors(pipeline) {
-            return Ok(Routing::by_index(&state, pass));
-        }
-        match color_reformat::routing(&state, pass) {
-            Some(routing) => Ok(routing),
-            None => match color_reformat::misplaced(&state, pass) {
-                Some(index) => Err(index),
-                None => Ok(Routing::by_index(&state, pass)),
-            },
-        }
-    }
-
-    /// The pass colors a draw of `pipeline`, routed by `routing`, zeroes and the colors of its own
-    /// it drops: those the encoder kept as `pipeline` was set where the pass's colors are still
-    /// the ones they were found for (a function of the state and those colors alone, as `routing`
-    /// is), else found again.
-    fn routed_colors(
-        &self,
-        pipeline: &DrawingState,
-        routing: &Routing,
-    ) -> std::borrow::Cow<'_, RoutedColors> {
-        match &self.routed {
-            Some(Routed {
-                state,
-                pass,
-                colors: Some(colors),
-                ..
-            }) if state.same(pipeline) && *pass == self.pass_formats() => {
-                std::borrow::Cow::Borrowed(colors)
-            }
-            _ => std::borrow::Cow::Owned(self.colors_by(pipeline, routing)),
-        }
-    }
-
-    /// The pass colors a draw of `pipeline` under `settings` zeroes and the colors of its own it
-    /// drops: those its settings found for it alone, else those the encoder keeps
-    /// ([`routed_colors`](Self::routed_colors)), read in place.
-    fn draw_colors<'a>(
-        &'a self,
-        pipeline: &DrawingState,
-        settings: &'a DrawSettings,
-    ) -> std::borrow::Cow<'a, RoutedColors> {
-        match &settings.routed_colors {
-            Some(colors) => std::borrow::Cow::Borrowed(colors),
-            None => self.routed_colors(pipeline, &settings.routing),
-        }
-    }
-
-    /// [`zeroed_colors`](Self::zeroed_colors) and [`dropped_colors`](Self::dropped_colors) of a
-    /// draw of `pipeline` routed by `routing`.
-    fn colors_by(&self, pipeline: &DrawingState, routing: &Routing) -> RoutedColors {
-        let zeroed = self.zeroed_colors(pipeline, routing);
-        let dropped = self.dropped_colors(pipeline, routing, zeroed.is_empty());
-        RoutedColors { zeroed, dropped }
-    }
-
-    /// The pass's colors at no place of `pipeline`'s record (`routing`), the pass's format of
-    /// each by the location the draw references it at, where plain Metal zeroes them at every
-    /// sample a draw covers (`color_reformat::Uncovered::Zeroed`; Metal probes, probes): a draw
-    /// runs the variant whose fragment function writes the zero (`BindShape::zeroed_colors`). Empty
-    /// where Metal keeps them (a state color blended reading the destination, or writing some of
-    /// its channels alone), and for a mesh render pipeline's state and a state that writes no color
-    /// (what Metal stores there is unmeasured), which are refused such a pass.
-    fn zeroed_colors(
-        &self,
-        pipeline: &DrawingState,
-        routing: &Routing,
-    ) -> BTreeMap<u32, PixelFormat> {
-        let descriptor = pipeline.descriptor();
-        let colors = descriptor.color_attachments();
-        let zeroed = color_reformat::uncovered(colors.iter().flatten());
-        if descriptor.vertex().is_none()
-            || !Self::writes_colors(pipeline)
-            || zeroed != color_reformat::Uncovered::Zeroed
-        {
-            return BTreeMap::new();
-        }
-        routing
-            .uncovered
-            .iter()
-            .filter_map(|(&location, &index)| {
-                let color = self.layout.colors.get(index as usize)?.as_ref()?;
-                Some((location, color.target.texture.pixel_format()))
-            })
-            .collect()
-    }
-
     /// Announce `uncovered-color-kept` where a draw of `pipeline` keeps a pass color at no place
     /// of its record whose contents plain Metal zeroes when its compiler folds the fragment's
     /// output to a constant (`color_reformat::Uncovered::KeptUnlessFolded`).
@@ -6383,7 +6278,9 @@ impl RenderCommandEncoder {
         };
         let colors = pipeline.descriptor().color_attachments();
         let rule = color_reformat::uncovered(colors.iter().flatten());
-        if !Self::writes_colors(pipeline) || rule != color_reformat::Uncovered::KeptUnlessFolded {
+        if !draw_shape::writes_colors(pipeline)
+            || rule != color_reformat::Uncovered::KeptUnlessFolded
+        {
             return;
         }
         self.core
@@ -6597,45 +6494,6 @@ impl RenderCommandEncoder {
             });
     }
 
-    /// The locations where `pipeline`'s fragment function's writes plain Metal drops (a Metal
-    /// probe): a draw runs the variant whose fragment function keeps no output there
-    /// (`BindShape::dropped_colors`), so its pipeline writes no location without an attachment,
-    /// and none into a pass color it keeps. They are the state's colors at no place of the pass's
-    /// record (`routing`); a pass color the draw keeps (`none_zeroed`: its `zeroed_colors` names
-    /// none), at whose location the state has no color; and in a routed draw each location its
-    /// subpass leaves out where the state has no color, which the function may write all the same.
-    /// Empty for a state without a fragment function, which writes no color.
-    fn dropped_colors(
-        &self,
-        pipeline: &DrawingState,
-        routing: &Routing,
-        none_zeroed: bool,
-    ) -> BTreeSet<u32> {
-        let descriptor = pipeline.descriptor();
-        if descriptor.vertex().is_some_and(|d| d.fragment.is_none()) {
-            return BTreeSet::new();
-        }
-        let state = descriptor.color_formats();
-        let lacks = |location: u32| {
-            state
-                .get(location as usize)
-                .copied()
-                .flatten()
-                .is_none_or(|pf| pf == PixelFormat::Invalid)
-        };
-        let mut dropped = routing.dropped.clone();
-        if Self::writes_colors(pipeline) && none_zeroed {
-            dropped.extend(routing.uncovered.keys().copied().filter(|&l| lacks(l)));
-        }
-        let left_out = (0u32..).zip(&routing.locations);
-        dropped.extend(
-            left_out
-                .filter(|&(l, index)| index.is_none() && lacks(l))
-                .map(|(l, _)| l),
-        );
-        dropped
-    }
-
     /// Refuse `pipeline` for this pass in `call` as [`RenderCommandEncoder::set_render_pipeline_state`]
     /// says.
     fn check_pipeline(&self, call: &'static str, state: &RenderPipelineState) -> Result<(), Error> {
@@ -6656,7 +6514,7 @@ impl RenderCommandEncoder {
         // routed draw that fetches or reads a color, or declares an imageblock, and a mesh render
         // pipeline's state routed at all, are refused (unmeasured). A pass whose draws may fetch
         // through input attachments routes the others, its input attachments at their indices.
-        let routing = self.routing(pipeline).map_err(refused)?;
+        let routing = self.shape_inputs().routing(pipeline).map_err(refused)?;
         let mesh = descriptor.vertex().is_none();
         let reads = |index: u32| {
             graphics
@@ -6683,7 +6541,7 @@ impl RenderCommandEncoder {
         // the variant `dropped_colors` names, unless the fragment function reads that color or
         // the state is a mesh render pipeline's (not built).
         if let Some(&index) = routing.uncovered.values().next() {
-            if !Self::writes_colors(pipeline) || mesh {
+            if !draw_shape::writes_colors(pipeline) || mesh {
                 return Err(refused(index));
             }
             // A pass color the draw keeps takes a blend element that writes nothing
@@ -6700,7 +6558,13 @@ impl RenderCommandEncoder {
                 .iter()
                 .flatten()
                 .any(|a| !a.write_mask.is_empty() || a.blend.is_some());
-            if !independent && writes && self.zeroed_colors(pipeline, &routing).is_empty() {
+            if !independent
+                && writes
+                && self
+                    .shape_inputs()
+                    .zeroed_colors(pipeline, &routing)
+                    .is_empty()
+            {
                 return Err(Error::Unsupported(metal2vulkan::error::Unsupported::needs(
                     metal2vulkan::error::Feature::IndependentBlending,
                     metal2vulkan::error::Capability::Feature(VkFeature::IndependentBlend),
@@ -6947,19 +6811,11 @@ impl RenderCommandEncoder {
         color_reformat::view_format(state.format, color.target.format)
     }
 
-    /// The pass's color attachments' pixel formats by index, `None` where it has none.
-    fn pass_formats(&self) -> [Option<PixelFormat>; MAX_COLOR_ATTACHMENTS] {
-        std::array::from_fn(|index| {
-            let color = self.layout.colors.get(index).and_then(Option::as_ref);
-            color.map(|c| c.target.texture.pixel_format())
-        })
-    }
-
     /// The imageblock bytes per sample the pass gives a pipeline: the larger of its
     /// descriptor's `imageblock_sample_length` and its attachments' texels
     /// ([`imageblock_sample_length`](metal2vulkan::metal::format::imageblock_sample_length)).
     fn pass_sample_length(&self) -> Result<u64, Error> {
-        let formats = self.pass_formats();
+        let formats = self.layout.pass_formats();
         let packed = metal2vulkan::metal::format::imageblock_sample_length(&formats)
             .ok_or_else(|| internal("a pass attachment without a texel size"))?;
         Ok(u64::from(packed).max(self.layout.tile.sample_length))
@@ -7130,9 +6986,14 @@ impl RenderCommandEncoder {
                         Some(RenderStateKind::Graphics(state)) => {
                             let colors = &state.base().graphics.color_attachments;
                             let routing = self
+                                .shape_inputs()
                                 .routing(state)
                                 .map_err(|_| internal("a draw of a state its pass refuses"))?;
-                            let zeroed = !self.routed_colors(state, &routing).zeroed.is_empty();
+                            let zeroed = !self
+                                .shape_inputs()
+                                .routed_colors(state, &routing)
+                                .zeroed
+                                .is_empty();
                             let writes = linear_attachment::writes(colors);
                             let writes = linear_attachment::pass_writes(&writes, &routing, zeroed);
                             self.coverage.add(&writes, rects)
@@ -7252,19 +7113,21 @@ impl RenderCommandEncoder {
         // (`render/restart.rs`).
         let restarted = self.restarted(assembly, &draw);
         let assembly = restarted.map_or(assembly, |r| r.assembly());
-        let mut settings = self.draw_settings(call, &pipeline, assembly, true)?;
+        // Its settings, and the memo entry its draw state and pipeline are found and kept in
+        // (`render/draw_shape.rs`).
+        let (settings, hidden, shape_token) = self.shaped_settings(call, &pipeline, assembly)?;
         // A direct indexed draw of a pipeline that writes the primitive ID runs its de-indexed
         // variant; a restarted strip's list keeps the strip's indices, which it does not run.
-        if restarted.is_none() {
-            settings.primitive_id_indices = primitive_id_indices(&pipeline, &draw);
-        }
+        let primitive_id_indices = match restarted {
+            None => primitive_id_indices(&pipeline, &draw),
+            Some(_) => None,
+        };
         let (topology, primitive_restart) = (settings.topology, settings.primitive_restart);
         let unsized_points = settings.unsized_points;
         let (native, compensation) = (settings.native, settings.compensation);
         let bias_effect = settings.bias;
-        let written_clamp = settings.written_clamp;
-        let hidden_depth = settings.hidden.is_some();
-        let (_, stencil) = self.aspects();
+        let hidden_depth = settings.hidden;
+        let (_, stencil) = self.layout.aspects();
         let max = pipeline.base().graphics.max_vertex_amplification_count;
         let function_tables = pipeline.function_tables();
         let mut unlisted = None;
@@ -7320,7 +7183,7 @@ impl RenderCommandEncoder {
             plan,
         } = self.settle_draw(
             live,
-            (&pipeline, &settings),
+            (&pipeline, &settings, primitive_id_indices),
             (&pass_start, &sampler_maps),
             (&mut argument_samplers, &mut unlisted),
             (&function_tables, &mut snapshot),
@@ -7360,14 +7223,13 @@ impl RenderCommandEncoder {
         if device.argument_pixel_samplers_noted(stages).is_some() {
             device.degrade_argument_pixel_samplers(stages, argument_samplers.take(device));
         }
-        let zeroes_colors = !self.draw_colors(&pipeline, &settings).zeroed.is_empty();
+        let zeroes_colors = !settings.routed_colors.zeroed.is_empty();
         let DrawSettings {
-            hidden,
             failing_state,
             amplification,
             routing,
             ..
-        } = settings;
+        } = &settings;
         let graphics = &variant.pipeline().graphics;
         // A fragment function that runs the draw's depth test itself computes and clamps its
         // depth by the draw's own Vulkan depth range, read as push data.
@@ -7703,7 +7565,7 @@ impl RenderCommandEncoder {
         // (`render/inline_first.rs`).
         let deciding = matches!(self.inline, inline_first::Inline::Open { .. });
         let unheld_writes = (self.current.inline || deciding)
-            && self.writes_memoryless(&pipeline, &routing, zeroes_colors);
+            && self.writes_memoryless(&pipeline, routing, zeroes_colors);
         let first_write = self.current.inline && unheld_writes;
         // A capture draw records into the capture's instance, the current one.
         let (next, stood) = match capture {
@@ -8108,69 +7970,35 @@ impl RenderCommandEncoder {
             (live.vertex_buffers).push((bind.binding, raw, start + offset, stride.unwrap_or(0)));
         }
         let vertex_buffers = &live.vertex_buffers[..];
-        let profile = device.compile_device().profile();
-        let selects = graphics.writes_viewport_index;
-        let mut fixed = self.draw_fixed(
-            graphics,
-            failing.as_ref(),
-            (shadow_use.is_some(), tests_use.is_some()),
-        )?;
-        // The depth the draw renders against: the pass's attachment's, or the hidden one's,
-        // which Metal biases as the 32-bit float depth it is.
-        let depth_format = self
-            .layout
-            .depth_stencil
-            .as_ref()
-            .and_then(|ds| ds.depth_format)
-            .or(hidden_depth.then_some(HIDDEN_DEPTH_FORMAT));
-        // A fragment stage that adds Metal's bias itself takes none from the device.
-        let bias = match depth16 {
-            Some(true) => EncoderState::vk_no_depth_bias(topology, profile)?,
-            _ => self.state.vk_depth_bias(topology, depth_format, profile)?,
+        // Its draw state: the one an earlier draw of the variant derived under the same settings'
+        // inputs, else derived, and kept (`render/draw_shape.rs`).
+        let failed = (failing.as_ref(), shadow_use.is_some(), tests_use.is_some());
+        let kept_state = shape_token.and_then(|token| self.shape_memo.state(token, &variant));
+        let reused_state = kept_state.is_some();
+        let ShapedState {
+            state: draw_state,
+            viewports,
+            depth,
+        } = match kept_state {
+            Some(kept) => {
+                debug_assert!(
+                    (self.shape_inputs())
+                        .draw_state(graphics, &settings, failed, depth16)
+                        .is_ok_and(|fresh| fresh == kept),
+                    "a draw's state derived again differs from the one kept for its inputs"
+                );
+                kept
+            }
+            None => {
+                let inputs = self.shape_inputs();
+                let shaped = inputs.draw_state(graphics, &settings, failed, depth16)?;
+                if let Some(token) = shape_token {
+                    self.shape_memo.keep_state(token, &variant, &shaped);
+                }
+                shaped
+            }
         };
-        let depth_bias = DepthBiasRecord::of(&bias, device.shared().depth_bias_command)?;
-        // A 16-bit unorm depth, biased or not, stores Metal's codes where the fragment stage
-        // writes them or the driver is measured to (`render_state::announce_unorm_depth`).
-        let sloped =
-            matches!(bias_effect, Some(DepthBiasEffect::Factors { slope, .. }) if slope != 0.0);
-        let clamped_inside = render_state::clamps_inside(&self.state, selects);
-        render_state::announce_unorm_depth(
-            &device,
-            depth_format,
-            &fixed.depth_stencil,
-            (&bias, sloped),
-            (depth16, clamped_inside),
-        );
-        // In clip mode a natively ranged device clamps a biased depth to `[0, 1]`
-        // (`EncoderState::depth_range`); one that stores it unclamped without that announces it.
-        // A fragment stage that adds Metal's bias itself clamps the biased depth to `[0, 1]`.
-        if depth16 != Some(true) && !graphics.rasterizer_discard {
-            let compensated = compensation.is_some_and(|c| c.depth.is_some());
-            render_state::announce_unclamped_bias(&device, &self.state, bias_effect, compensated);
-        }
-        // A compensated depth's Vulkan range replaces the viewports' ranges, a saturating or
-        // offsetting bias folded into the compensation (`EncoderState::compensation`).
-        let depth = compensation.and_then(|c| c.depth);
-        let viewports = match depth {
-            Some(_) => self.state.used_viewports(selects).iter().copied().collect(),
-            None => self
-                .state
-                .draw_viewports(selects, topology, profile, native)?,
-        };
-        let clamp = (native, written_clamp, compensation, bias_effect);
-        self.clamp_draw_depth(&mut fixed, graphics, clamp)?;
-        let draw_state = DrawState {
-            viewports: EncoderState::vk_viewports(
-                &viewports,
-                depth,
-                compensation.and_then(|c| c.guard),
-            ),
-            scissors: self.state.vk_scissors(selects),
-            fixed,
-            stencil_reference: self.state.stencil_reference(),
-            depth_bias,
-            blend_color: self.state.blend_color(),
-        };
+        let fixed = draw_state.fixed;
         // A rate-mapped pass records the draw once per region of the map's layer of the slice
         // it renders (`rate_mapped_pass.rs`): each amplification drawn one at a time its own
         // slice's, else the draw's one slice, or none known where its primitives choose.
@@ -8242,16 +8070,17 @@ impl RenderCommandEncoder {
             .specialization
             .as_ref()
             .unwrap_or(&plan.specialization);
+        let strides: &[(u32, u32)] = match dynamic_strides {
+            true => &[],
+            false => &commands.vertex_strides,
+        };
         // The draw's graphics key, borrowed: made only where the draw looks it up.
-        let key = DrawKey {
+        let draw_key = || DrawKey {
             specialization,
             topology: keyed_topology,
             primitive_restart: keyed_restart,
             pass: &instance.shape,
-            strides: match dynamic_strides {
-                true => &[],
-                false => &commands.vertex_strides,
-            },
+            strides,
             fixed: FixedState::without_dynamic(fixed, &graphics.dynamic_states),
             sample_positions: &self.layout.sample_positions,
         };
@@ -8264,7 +8093,10 @@ impl RenderCommandEncoder {
                 first: true,
                 hole,
                 masks,
-                own: super::pipeline::color_write_masks(graphics, key.pass, key.fixed.masks_color),
+                own: {
+                    let key = draw_key();
+                    super::pipeline::color_write_masks(graphics, key.pass, key.fixed.masks_color)
+                },
             }),
             (Some(_), None) => return Err(internal("a snapshot without its write mask command")),
             (None, _) => None,
@@ -8313,17 +8145,53 @@ impl RenderCommandEncoder {
             && !empty
             && !culled
             && self.layout.sample_positions.is_empty();
-        let draw_pipeline = match deferrable {
-            true => {
-                variant.begin_graphics_pipeline(&device, &key, &compatible, (&pipeline, &formats))
-            }
-            false => DrawPipeline::Made(variant.graphics_pipeline_now(
-                &device,
-                &key,
-                &compatible,
-                (&pipeline, &formats),
-            )?),
+        // The one an earlier draw of the same settings' inputs found made by the same key (each
+        // of its fields compared, or what it is made of), else found, and kept where made
+        // (`render/draw_shape.rs`); not a mesh draw's, of its own specialization.
+        let looked = PipelineInputs {
+            variant: &variant,
+            plan: &plan,
+            shape: instance.shape.version(),
+            compatible: &instance.compatible,
+            strides,
+            fixed,
+            topology: (keyed_topology, keyed_restart),
         };
+        let token = shape_token.filter(|_| commands.specialization.is_none());
+        let found = token.and_then(|token| self.shape_memo.pipeline(token, &looked));
+        let reused_pipeline = found.is_some();
+        let draw_pipeline = match found {
+            Some(made) => DrawPipeline::Made(made),
+            None => {
+                let key = draw_key();
+                let (draw_pipeline, own) = match deferrable {
+                    true => variant.begin_graphics_pipeline(
+                        &device,
+                        &key,
+                        &compatible,
+                        (&pipeline, &formats),
+                    ),
+                    false => (
+                        DrawPipeline::Made(variant.graphics_pipeline_now(
+                            &device,
+                            &key,
+                            &compatible,
+                            (&pipeline, &formats),
+                        )?),
+                        true,
+                    ),
+                };
+                // Kept where it is the key's own, made: not a residual form.
+                if let (Some(token), DrawPipeline::Made(made), true) = (token, &draw_pipeline, own)
+                {
+                    self.shape_memo.keep_pipeline(token, &looked, made);
+                }
+                draw_pipeline
+            }
+        };
+        if reused_state && reused_pipeline {
+            device.shared().counts.draw_shape_reused();
+        }
         // A capture draw's pipeline is made on the pool: until it is, the capture records
         // nothing.
         if capture.is_some() && matches!(draw_pipeline, DrawPipeline::Making(_)) {
@@ -9293,12 +9161,26 @@ impl RenderCommandEncoder {
         Ok(())
     }
 
-    /// What a draw of `pipeline` as `assembly` settles from the encoder's state before its bind
-    /// state ([`DrawSettings`]), as [`draw`](Self::draw) settles it and as an execution's
-    /// precompile at commit does (`render/executions.rs`). Where the draw keeps Vulkan's clipping
-    /// of points, or a depth the fragment function writes past Metal's clamp, that is announced
-    /// once where `announce`: the precompile, which draws nothing, announces nothing. Refused as
-    /// `call`'s draw is.
+    /// The encoder's part of what a draw's shape is derived from (`render/draw_shape.rs`).
+    fn shape_inputs(&self) -> ShapeInputs<'_> {
+        ShapeInputs {
+            device: self.core.device(),
+            layout: &self.layout,
+            state: &self.state,
+            amplification: &self.amplification,
+            counts_visibility: self.counts_visibility(),
+            rate_map: self.rate_map.as_ref(),
+            routed: self.routed.as_ref(),
+            versions: [
+                self.layout.version(),
+                self.state.version(),
+                self.amplification.version(),
+            ],
+        }
+    }
+
+    /// [`ShapeInputs::settings`] of a draw of `pipeline` as `assembly`, which gives the pass its
+    /// hidden depth and stencil where its state needs them ([`needed_hidden`](Self::needed_hidden)).
     fn draw_settings(
         &self,
         call: &'static str,
@@ -9306,231 +9188,44 @@ impl RenderCommandEncoder {
         assembly: Assembly,
         announce: bool,
     ) -> Result<DrawSettings, Error> {
-        let meshes = pipeline.descriptor().vertex().is_none();
-        // A draw of another class than the pipeline's input primitive topology class, which
-        // Metal's validation stops, draws its own primitives, as plain Metal draws them (a probe).
-        // Points rasterize nothing unless the vertex function writes a point size or the class is
-        // the point class, which sizes them 1 (probes 1 and 2, the vertex function run for every
-        // point either way): the draw runs its vertex function alone, through empty scissors.
-        let class = pipeline
-            .descriptor()
-            .vertex()
-            .map_or(PrimitiveTopologyClass::Unspecified, |d| {
-                d.input_primitive_topology
-            });
-        let unsized_points = matches!(assembly, Assembly::Primitives(PrimitiveType::Point))
-            && class != PrimitiveTopologyClass::Point
-            && !pipeline.base().graphics.writes_point_size;
-        let (topology, primitive_restart) = match assembly {
-            Assembly::Primitives(primitive_type) => {
-                metal2vulkan::metal::state::input_assembly(primitive_type)
-            }
-            // An emulated tessellation pipeline draws the tessellator's triangles as a list,
-            // which Vulkan biases as Metal biases them.
-            Assembly::Patches => match pipeline.base().graphics.emulated_tessellation {
-                Some(_) => (metal2vulkan::vk::PrimitiveTopology::TRIANGLE_LIST, false),
-                None => (metal2vulkan::vk::PrimitiveTopology::PATCH_LIST, false),
-            },
-            // A mesh pipeline has no input assembly. Its key takes a triangle list, which
-            // enables the depth bias Metal applies to triangles: Vulkan biases a mesh function's
-            // triangles and none of its lines or points, as Metal does. An emulated mesh
-            // function's synthesized vertex stage draws a list of the mesh's topology, which
-            // Vulkan biases alike.
-            Assembly::Meshes => match &pipeline.base().graphics.mesh_records {
-                Some(records) => (records.topology(), false),
-                None => (metal2vulkan::vk::PrimitiveTopology::TRIANGLE_LIST, false),
-            },
-        };
-        // The pass's depth and stencil: its attachment's, or the hidden ones a draw whose state
-        // uses depth or the stencil the pass lacks gives it from that draw on, as plain Metal
-        // tests such a draw (its validation stops it; `render_state.rs`).
-        let ds = self.layout.depth_stencil.as_ref();
-        let (depth, _) = self.aspects();
+        let hidden = self.needed_hidden()?.is_some();
+        self.shape_inputs()
+            .settings(call, (pipeline, assembly), hidden, announce)
+    }
+
+    /// A draw's settings ([`draw_settings`](Self::draw_settings)), with the hidden depth and
+    /// stencil it gives the pass: those an earlier draw of the encoder derived from the same
+    /// inputs, else derived and kept (`render/draw_shape.rs`); with the token of their memo
+    /// entry, `None` on a device that announces some notice at every occurrence.
+    fn shaped_settings(
+        &mut self,
+        call: &'static str,
+        pipeline: &DrawingState,
+        assembly: Assembly,
+    ) -> Result<(DrawSettings, Option<Target>, Option<ShapeToken>), Error> {
         let hidden = self.needed_hidden()?;
-        // The depth it renders against, whose format decides what the draw stores there whatever
-        // the pipeline names (`BindState::depth16_pass`): the pass's attachment's, or the hidden
-        // `float` one's.
-        let depth16_pass = ds
-            .and_then(|ds| ds.depth_format)
-            .or(hidden.as_ref().map(|_| HIDDEN_DEPTH_FORMAT))
-            .map(|format| format == PixelFormat::Depth16Unorm);
-        // A compare of `Never` without Metal's depth attachment fails every fragment (probes), the
-        // hidden depth's too: the draw runs as `FailingDraw` says.
-        let metal_depth = depth && !ds.is_some_and(|ds| ds.hidden);
-        let failing_state = self.state.failing_depth(metal_depth).cloned();
-        let max = pipeline.base().graphics.max_vertex_amplification_count;
-        let mut amplification = self
-            .amplification
-            .bind_state(max)
-            .map_err(|problem| draw_problem(call, problem))?;
-        // A query counts an amplified draw drawn one amplification at a time, as Metal counts
-        // every amplification's samples: a multiview instance's would take one per view. Over a
-        // rate map whose layers differ each amplification records its own slice's regions
-        // (`rate_mapped_pass.rs`).
-        amplification.one_at_a_time = self.counts_visibility()
-            || self
-                .rate_map
-                .as_ref()
-                .is_some_and(|pass| !pass.layers_alike());
-        // The pass's tile threadgroup memory, which the fragment function's threadgroup
-        // arguments read, as a tile dispatch's do (`render/tile_memory.rs`): its tiles, and the
-        // arguments the encoder set.
-        let tiles = match pipeline.reads_tile_memory() {
-            true => {
-                let tile = self.tile_size()?;
-                Some((tile, self.tile_area(tile)))
-            }
-            false => None,
-        };
-        // The viewports a Vulkan viewport cannot be, compensated by the vertex function's
-        // variant; a pipeline that rasterizes nothing draws through no viewport.
-        let base = &pipeline.base().graphics;
-        let device = self.core.device();
-        let native = render_state::native_depth_range(device);
-        // A saturating or offsetting depth bias folds into a compensated depth, or is refused
-        // there (`EncoderState::compensation`).
-        let bias = self
-            .state
-            .draw_bias(topology, device.compile_device().profile())?;
-        // A clamp mode one clamp of one depth collapses the Vulkan range to it where the
-        // fragment function reads no depth of its position (`render_state::OneDepth`).
-        let one_depth = render_state::OneDepth::of(device, base);
-        // Metal clamps each vertex's depth before the interpolation: the vertex stage's
-        // compensation does too where it can, natively as well (`render_state::VertexClamp`).
-        let vertex_clamp = render_state::VertexClamp::of(
-            device,
-            &self.state,
-            base,
-            topology,
-            meshes,
-            bias,
-            announce,
-        );
-        let selects = base.writes_viewport_index;
-        let compensation = match base.rasterizer_discard {
-            true => None,
-            false => match self
-                .state
-                .compensation(selects, native, bias, one_depth, vertex_clamp)
-            {
-                // Natively, viewports whose clamped depths need different compensations keep
-                // the device's ranges, each sample clamped.
-                Err(Error::NotImplemented(RuntimeGap::ViewportDepthRange))
-                    if native && vertex_clamp.takes =>
-                {
-                    let unclamped = render_state::VertexClamp::default();
-                    let kept = self
-                        .state
-                        .compensation(selects, native, bias, one_depth, unclamped)?;
-                    render_state::VertexClamp::kept(
-                        device,
-                        &self.state,
-                        selects,
-                        "the draw's viewports have different depth ranges, and the vertex stage \
-                         holds one compensation",
-                        announce,
-                    );
-                    kept
-                }
-                compensation => compensation?,
-            },
-        };
-        render_state::VertexClamp::taken(device, &self.state, selects, compensation, announce);
-        // A fragment function that writes its depth, in depth clamp mode through a range above
-        // 0, clamps the depth to the range itself under a Vulkan clamp that holds 0, as Metal
-        // stores a negative NaN as 0 there (`render_state::written_depth_clamp`).
-        let written_clamp = match base.writes_depth && !base.rasterizer_discard {
-            true => render_state::written_depth_clamp(
-                device,
-                &self.state,
-                base.writes_viewport_index,
-                topology,
-                base.clip_distances,
-                meshes,
-                announce,
-            )?,
-            false => None,
-        };
-        // A positive NaN it writes runs no stencil depth-failure operation, where Metal runs one:
-        // announced once (`render_state::announce_nan_depth_failure`).
-        if announce && base.writes_depth && !base.rasterizer_discard {
-            render_state::announce_nan_depth_failure(device, &self.state);
+        let given = hidden.is_some();
+        if self.core.device().announces_some_each() {
+            let inputs = self.shape_inputs();
+            let settings = inputs.settings(call, (pipeline, assembly), given, true)?;
+            return Ok((settings, hidden, None));
         }
-        // Points that rasterize, which Metal sizes none of: Metal's are undefined, and the
-        // runtime's none is one of its answers. Announced at the draw, which for an execution's
-        // command is where the runtime records it (its commit, or its host step).
-        if announce && unsized_points && !base.rasterizer_discard {
-            device.degrade(Degradation::UnsizedPoints, || {
-                (
-                    format!(
-                        "{call}: a draw of points under a pipeline state whose vertex function \
-                         writes no point size, of the {class:?} input primitive topology class"
-                    ),
-                    "Metal sizes no point outside the point class without a point size, and \
-                     what it draws there is undefined"
-                        .to_owned(),
-                )
-            });
+        let inputs = self.shape_inputs();
+        let inputs = (inputs.versions, inputs.counts_visibility);
+        if let Some((kept, token)) = self.shape_memo.settings((pipeline, assembly), inputs) {
+            debug_assert!(
+                (self.shape_inputs())
+                    .settings(call, (pipeline, assembly), given, false)
+                    .is_ok_and(|fresh| fresh == kept),
+                "a draw's settings derived again differ from those kept for its inputs"
+            );
+            return Ok((kept, hidden, Some(token)));
         }
-        let compensation = written_clamp.and_then(|w| w.compensation).or(compensation);
-        // A draw of points takes Metal's guard band where it can, else keeps Vulkan's clipping
-        // of points, announced once (`render_state::guard_points`). Unsized points rasterize
-        // nothing, and a mesh pipeline's points are unmeasured on Metal.
-        let points = topology == metal2vulkan::vk::PrimitiveTopology::POINT_LIST
-            && !meshes
-            && !base.rasterizer_discard
-            && !unsized_points;
-        let compensation = match points {
-            false => compensation,
-            true => render_state::guard_points(
-                device,
-                &self.state,
-                base.writes_viewport_index,
-                compensation,
-                base.clip_distances,
-                self.rate_map.is_some(),
-                announce,
-            ),
-        };
-        // The pass's colors the pipeline lacks, zeroed where the draw covers them, and the
-        // pipeline's colors the pass lacks, whose writes are dropped.
-        // Each by its place in Metal's per-sample record (`routing`), the draw's subpass
-        // referencing each pass color at the location the state's color there writes.
-        let routing = self
-            .routing(pipeline)
-            .map_err(|_| internal("a draw of a state its pass refuses"))?;
-        let routed_colors = match self.routed_colors(pipeline, &routing) {
-            std::borrow::Cow::Borrowed(_) => None,
-            std::borrow::Cow::Owned(colors) => Some(colors),
-        };
-        // A compensated depth, which a vertex clamp takes natively too, replaces the native
-        // range (`clamp_draw_depth`).
-        let compensated = compensation.is_some_and(|c| c.depth.is_some());
-        let native = native && !compensated;
-        let depth16_bias_raises = render_state::depth16_bias_side(
-            &self.state,
-            base.writes_viewport_index,
-            bias,
-            compensation,
-        );
-        Ok(DrawSettings {
-            unsized_points,
-            topology,
-            primitive_restart,
-            hidden,
-            failing_state,
-            amplification,
-            tiles,
-            native,
-            compensation,
-            written_clamp,
-            bias,
-            routing,
-            routed_colors,
-            depth16_pass,
-            depth16_bias_raises,
-            primitive_id_indices: None,
-        })
+        let settings = self
+            .shape_inputs()
+            .settings(call, (pipeline, assembly), given, true)?;
+        let token = (self.shape_memo).keep_settings((pipeline, assembly), inputs, &settings);
+        Ok((settings, hidden, Some(token)))
     }
 
     /// The address-mode maps a draw of `pipeline` binds its runtime samplers with
@@ -9555,7 +9250,9 @@ impl RenderCommandEncoder {
     }
 
     /// Bring `live`, the encoder's kept bind state, to the bind state a draw of `pipeline` under
-    /// `settings` binds in, its vertex, object and mesh tables `pass_start`'s or the encoder's
+    /// `settings` binds in, reading its indices as `primitive_id_indices` says (`BindState::
+    /// primitive_id_indices`, [`primitive_id_indices`]), its vertex, object and mesh tables
+    /// `pass_start`'s or the encoder's
     /// ([`refresh_bind_state`](Self::refresh_bind_state)), its runtime samplers' address modes
     /// `sampler_maps` ([`sampler_maps`](Self::sampler_maps)), and answer the variant it runs on in
     /// the encoder's buffer forms ([`BufferForms`]) with its plan and the state's shape: of the
@@ -9566,7 +9263,11 @@ impl RenderCommandEncoder {
     fn settle_draw(
         &self,
         live: &mut LiveBind,
-        (pipeline, settings): (&DrawingState, &DrawSettings),
+        (pipeline, settings, primitive_id_indices): (
+            &DrawingState,
+            &DrawSettings,
+            Option<IndexType>,
+        ),
         (pass_start, sampler_maps): (&PassStartTables, &SamplerMaps),
         (argument_samplers, unlisted): (&mut ArgumentSamplers, &mut Option<(u64, u64)>),
         (function_tables, snapshot): (&[VisibleFunctionTable], &mut Option<snapshot::Wanted>),
@@ -9598,7 +9299,7 @@ impl RenderCommandEncoder {
                 settings.written_clamp.map(|w| w.range),
                 Option::is_some,
             );
-            let colors = self.draw_colors(pipeline, settings);
+            let colors = &settings.routed_colors;
             reshape.field_from(&mut state.zeroed_colors, &colors.zeroed);
             reshape.field(&mut state.depth16_pass, settings.depth16_pass);
             reshape.field(
@@ -9606,10 +9307,7 @@ impl RenderCommandEncoder {
                 render_state::biases_depth(settings.bias),
             );
             reshape.field(&mut state.depth16_bias_raises, settings.depth16_bias_raises);
-            reshape.field(
-                &mut state.primitive_id_indices,
-                settings.primitive_id_indices,
-            );
+            reshape.field(&mut state.primitive_id_indices, primitive_id_indices);
             reshape.field_from(&mut state.dropped_colors, &colors.dropped);
             reshape.field_from(&mut state.extended_shadows, shadows);
             let snapshots = snapshot.as_ref().map_or(&NO_INDICES, |w| &w.slots);
@@ -9679,77 +9377,6 @@ impl RenderCommandEncoder {
             // listed again (alike, where the kept listing is current) against them.
             argument_samplers.take(self.core.device());
         }
-    }
-
-    /// The state a draw of `graphics`, its variant's, takes statically before its depth range
-    /// ([`clamp_draw_depth`](Self::clamp_draw_depth)): the encoder's; a failing draw's depth and
-    /// stencil, masking the colors; and no stencil test where the function is the test (`shadow`, a
-    /// shader-side stencil).
-    fn draw_fixed(
-        &self,
-        graphics: &GraphicsState,
-        failing: Option<&FailingDraw>,
-        (shadow, shader_tests): (bool, bool),
-    ) -> Result<FixedState, Error> {
-        let profile = self.core.device().compile_device().profile();
-        let selects = graphics.writes_viewport_index;
-        // An amplification's viewport offset selects among the encoder's viewports too; on a
-        // device without `multiViewport` its variant stores no `ViewportIndex` (a draw there has
-        // one viewport), exact only while the encoder holds one.
-        if self.amplification.offsets_viewports() && self.state.viewport_count(true) > 1 {
-            EncoderState::needs_viewports(profile)?;
-        }
-        let mut fixed = self
-            .state
-            .fixed(self.state.viewport_count(selects), profile)?;
-        if let Some(FailingDraw::Runs(failing) | FailingDraw::Fails(failing)) = failing {
-            fixed.depth_stencil = metal2vulkan::metal::state::depth_stencil_state(failing);
-            fixed.masks_color = true;
-        }
-        // The function is the stencil test: the pass's own is off, and never writes the stencil.
-        if shadow {
-            fixed.depth_stencil.stencil_test_enable = false;
-        }
-        // The function is the depth test: the pass's own passes every fragment and never writes
-        // the depth, and the stencil test is off (the binder refuses a draw whose stencil test
-        // could drop or change anything).
-        if shader_tests {
-            let ds = &mut fixed.depth_stencil;
-            ds.depth_test_enable = true;
-            ds.depth_compare_op = metal2vulkan::vk::CompareOp::ALWAYS;
-            ds.depth_write_enable = false;
-            ds.stencil_test_enable = false;
-        }
-        Ok(fixed)
-    }
-
-    /// `fixed`'s depth range and clamp, for a draw of `graphics` under its settings' `native`,
-    /// `written_clamp`, `compensation` and `bias` ([`DrawSettings`]): a depth range past
-    /// `[0, 1]`, which the device takes natively, clamped, clipped or not (a clamp-mode saturated
-    /// depth where Metal stores it), elsewhere the vertex stage's compensation, whose clip
-    /// distances clip and whose Vulkan range `depthClamp` clamps to; and for a fragment function
-    /// that clamps its depth to the range itself, a Vulkan clamp that holds 0 and the range.
-    fn clamp_draw_depth(
-        &self,
-        fixed: &mut FixedState,
-        graphics: &GraphicsState,
-        (native, written_clamp, compensation, bias): (
-            bool,
-            Option<WrittenDepthClamp>,
-            Option<Compensation>,
-            Option<DepthBiasEffect>,
-        ),
-    ) -> Result<(), Error> {
-        fixed.depth_range = match (native, written_clamp.and_then(|w| w.native)) {
-            (true, Some(range)) => Some(range),
-            (true, None) => self
-                .state
-                .depth_range(graphics.writes_viewport_index, bias)?,
-            (false, _) => None,
-        };
-        let depth = compensation.and_then(|c| c.depth);
-        fixed.depth_clamp |= fixed.depth_range.is_some() || depth.is_some();
-        Ok(())
     }
 }
 

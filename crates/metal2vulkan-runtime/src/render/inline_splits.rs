@@ -301,7 +301,7 @@ impl RenderCommandEncoder {
         // arrived, else made now, of the pass's attachments as they stand from it on.
         let stood_now = begun.stood + u32::from(stood.is_some());
         let found = (begun.later.iter())
-            .find(|later| later.shape == instance.shape && later.stood == stood_now)
+            .find(|later| later.shape == *instance.shape && later.stood == stood_now)
             .map(|later| {
                 let framebuffer = later.framebuffer.as_ref().unwrap_or(&begun.framebuffer);
                 (later.pass.raw, framebuffer.raw)
@@ -321,7 +321,7 @@ impl RenderCommandEncoder {
                     render_target::final_pass(&device, layout, shape, at, none, general).ok()?;
                 // The first instance's framebuffer is compatible with a render pass of its
                 // shape, of the same attachments.
-                let framebuffer = match *shape == begun.shape && stood_now == 0 {
+                let framebuffer = match **shape == begun.shape && stood_now == 0 {
                     true => None,
                     false => Some(
                         render_target::framebuffer(&device, &pass, layout, shape, views, none)
@@ -329,7 +329,7 @@ impl RenderCommandEncoder {
                     ),
                 };
                 Some(Later {
-                    shape: shape.clone(),
+                    shape: PassShape::clone(shape),
                     stood: stood_now,
                     pass,
                     framebuffer,

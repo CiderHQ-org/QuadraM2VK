@@ -55,6 +55,7 @@ use crate::render_target::{self, Feedback};
 use crate::tracker::Barrier;
 use crate::tracker::{GeometryWrites, IndirectReads};
 use crate::values::ResourceOptions;
+use crate::versioned::Versioned;
 use ash::vk;
 use metal2vulkan::bind::{
     CaptureAssemblyModule, CaptureSettleModule, DrawCall, ExecutionStatus, TileReachModule,
@@ -394,7 +395,7 @@ impl RenderCommandEncoder {
         let draws = self.core.command_buffer().begin_draws(&compatible).ok()?;
         let instance = Instance {
             draws,
-            shape,
+            shape: Versioned::new(shape),
             compatible,
             recorded: false,
             shadow: false,

@@ -2367,6 +2367,11 @@ impl Announced {
         self.each[word] & bit != 0
     }
 
+    /// Whether the device announces some kind at every occurrence.
+    fn some_each(&self) -> bool {
+        self.each.iter().any(|&each| each != 0)
+    }
+
     /// Whether the device announces any kind of `kinds` at every occurrence: an AND a word.
     fn any_each(&self, kinds: &Kinds) -> bool {
         self.each
@@ -2797,6 +2802,13 @@ impl Device {
             Occurrence::Made | Occurrence::Bound(_) => {}
             Occurrence::Drawn => self.degrade(degradation, describe),
         }
+    }
+
+    /// Whether the device's options ask for some kind at every occurrence
+    /// (`DeviceOptions::announce_each`): a draw then derives its shape anew, announcing as it
+    /// does (`render/draw_shape.rs`).
+    pub(crate) fn announces_some_each(&self) -> bool {
+        self.shared().announced.some_each()
     }
 
     /// Whether a bind of a variant of `kinds` (`Kinds::of`) announces any of them: whether the

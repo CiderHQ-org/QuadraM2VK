@@ -35,6 +35,11 @@
 //! - **Pipelines.** A draw of a pipeline state one of whose last draws found its `VkPipeline`
 //!   made, of the same variant and an equal key, finds that entry again without looking the key
 //!   up (`WorkCounts::graphics_pipelines_looked_up`), states and keys switched between included.
+//! - **Shapes.** A draw takes what it derives from its encoder's state alone (its settings, its
+//!   draw state and its `VkPipeline`) from an earlier draw of its encoder that derived it from
+//!   the same inputs (`WorkCounts::draw_shapes_reused`): a draw of other bytes, and one switched
+//!   back to a pipeline state the encoder drew; one after any change of the encoder's state
+//!   derives its own.
 //! - **Recorded states.** A draw records into its secondary command buffer only the state
 //!   commands that set what changed since the draws before it there
 //!   (`WorkCounts::draw_states_recorded`): of an unchanged state, none (its set 0 the last draw's,
@@ -81,7 +86,7 @@ use metal2vulkan_devtools::{engine_dir, llvm_assemble};
 use metal2vulkan_runtime::{
     Buffer, ClearColor, CommandBuffer, CommandBufferStatus, Device, LoadAction, PipelineOptions,
     Region, RenderCommandEncoder, RenderPassDescriptor, RenderPipelineState, ResourceOptions,
-    SamplerState, StoreAction, Texture, TextureDescriptor, WorkCounts,
+    SamplerState, ScissorRect, StoreAction, Texture, TextureDescriptor, WorkCounts,
 };
 
 /// The target's side, in pixels: one column a draw.
@@ -1520,6 +1525,60 @@ fn draws_switching_pipelines_keep_the_dynamic_states_set() {
         assert!(later.iter().all(|&n| 1 <= n && n < first), "{recorded:?}");
         let pixels = scene.pixels(&command_buffer);
         assert!(pixels.iter().all(|&p| p == RED), "{pixels:?}");
+    });
+}
+
+/// Draws take their shape, what they derive from their encoder's state alone (settings, draw
+/// state, `VkPipeline`), from an earlier draw of their encoder that derived it from the same
+/// inputs (`WorkCounts::draw_shapes_reused`): a draw of other bytes takes it, and so does one
+/// switched back to a pipeline state the encoder drew before another's; the first draw, a draw of
+/// another pipeline state, and a draw after a change of the encoder's state (a scissor rectangle,
+/// the blend color) derive their own. Each column is drawn, through either state (the second
+/// blends, storing the fragment's color), those under the half-height scissor rectangle in that
+/// half alone.
+#[test]
+fn draws_take_their_shape_from_their_encoder_s_draws_of_the_same_inputs() {
+    on_device(|device, _| {
+        let scene = Scene::new(device);
+        let pipelines = [scene.pipeline.clone(), pipeline(device, true)];
+        let red = solid(device, PixelFormat::RGBA8Unorm, RED);
+        make(device, &scene, &pipelines, &red);
+        let (command_buffer, mut encoder) = scene.encoder(device);
+        encoder.set_fragment_texture(Some(&red), 0).unwrap();
+        let mut reused = Vec::new();
+        for c in 0..SIDE {
+            match c {
+                2 => encoder.set_render_pipeline_state(&pipelines[1]).unwrap(),
+                3 => encoder.set_render_pipeline_state(&pipelines[0]).unwrap(),
+                4 => {
+                    let half = ScissorRect::new(0, 0, SIDE, SIDE / 2);
+                    encoder.set_scissor_rect(half).unwrap();
+                }
+                6 => {
+                    let whole = ScissorRect::new(0, 0, SIDE, SIDE);
+                    encoder.set_scissor_rect(whole).unwrap();
+                    encoder.set_blend_color(0.5, 0.5, 0.5, 1.0);
+                }
+                _ => {}
+            }
+            encoder.set_vertex_bytes(&column(c), 0).unwrap();
+            let before = device.work_counts();
+            draw(&mut encoder);
+            reused.push(grew(&before, &device.work_counts(), |c| {
+                c.draw_shapes_reused
+            }));
+        }
+        encoder.end_encoding().unwrap();
+        assert_eq!(reused, [0, 1, 0, 1, 0, 1, 0, 1]);
+        let pixels = scene.pixels(&command_buffer);
+        for (at, &pixel) in pixels.iter().enumerate() {
+            let (row, c) = (at as u64 / SIDE, at as u64 % SIDE);
+            let want = match (4..6).contains(&c) && row >= SIDE / 2 {
+                true => CLEAR,
+                false => RED,
+            };
+            assert_eq!(pixel, want, "pixel {at}: {pixels:?}");
+        }
     });
 }
 

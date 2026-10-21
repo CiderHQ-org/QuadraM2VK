@@ -772,7 +772,7 @@ impl RenderCommandEncoder {
         let mut live = lock(&live);
         let Settled { variant, plan, .. } = self.settle_draw(
             &mut live,
-            (state, &settings),
+            (state, &settings, None),
             (&pass_start, &sampler_maps),
             (&mut argument_samplers, &mut None),
             (&function_tables, &mut None),

@@ -203,6 +203,7 @@ pub(crate) struct Counters {
     dispatches_pushing_set_zero: AtomicU64,
     set_zero_sets_reused: AtomicU64,
     set_zero_sets_found: AtomicU64,
+    draw_shapes_reused: AtomicU64,
     dispatches_settled_as_before: AtomicU64,
     baked_sampler_dispatches_apart: AtomicU64,
     host_deallocators_delayed: AtomicU64,
@@ -1419,6 +1420,12 @@ impl Counters {
     /// descriptors into a set of the same layout (`binding::SetCache`).
     pub(crate) fn set_zero_set_found(&self) {
         self.set_zero_sets_found.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A draw that took its settings, draw state and `VkPipeline` from its encoder's earlier
+    /// draws of the same inputs (`render/draw_shape.rs`).
+    pub(crate) fn draw_shape_reused(&self) {
+        self.draw_shapes_reused.fetch_add(1, Ordering::Relaxed);
     }
 
     /// A compute encoder's dispatch that took what its last dispatch settled
@@ -3119,6 +3126,15 @@ pub struct WorkCounts {
     /// a dynamic descriptor takes its offset as the set is bound, so commands that differ only in
     /// such offsets write the same set.
     pub set_zero_sets_found: u64,
+    /// Render encoders' draws that took their shape, what they derive from the encoder's state
+    /// alone, from an earlier draw of their encoder that derived it from the same inputs, rather
+    /// than deriving it again: their settings, their draw state (fixed state, viewports, scissors,
+    /// depth bias) and their `VkPipeline`. The inputs are the drawing state, variant, plan and
+    /// instance's compatible pass by identity, the pass's layout, the encoder's state and vertex
+    /// amplification and the instance's shape by version, and the assembly, the vertex strides,
+    /// the fixed state and the topology by value (`render/draw_shape.rs`). None on a device that
+    /// announces some notice at every occurrence.
+    pub draw_shapes_reused: u64,
     /// Compute encoders' dispatches that took the bind state, variant, plan, commands and made
     /// `VkPipeline`s their encoder's last dispatch settled, rather than settling them again:
     /// those of the same pipeline state, dispatch, table (no call changed it since), threadgroup
@@ -3952,6 +3968,7 @@ impl Device {
                 .load(Ordering::Relaxed),
             set_zero_sets_reused: counters.set_zero_sets_reused.load(Ordering::Relaxed),
             set_zero_sets_found: counters.set_zero_sets_found.load(Ordering::Relaxed),
+            draw_shapes_reused: counters.draw_shapes_reused.load(Ordering::Relaxed),
             dispatches_settled_as_before: (counters.dispatches_settled_as_before)
                 .load(Ordering::Relaxed),
             baked_sampler_dispatches_apart: (counters.baked_sampler_dispatches_apart)

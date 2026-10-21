@@ -2623,16 +2623,18 @@ impl RenderVariant {
     /// of the pipeline creation log logs it as [`graphics_pipeline`](Self::graphics_pipeline)
     /// does. The draw goes on meanwhile; its command buffer's batch is submitted once it is made
     /// (`render/pending.rs`). Where it is not made and its residual form's is, the draw takes that
-    /// one, and nothing waits for `key`'s making (`render/residual.rs`).
+    /// one, and nothing waits for `key`'s making (`render/residual.rs`). With whether it is
+    /// `key`'s own `VkPipeline`, made: not a residual form, nor being made, which a render encoder
+    /// keeps no draw's shape with (`render/draw_shape.rs`).
     pub(crate) fn begin_graphics_pipeline(
         self: &Arc<Self>,
         device: &Device,
         key: &DrawKey<'_>,
         compatible: &Arc<RenderPassObject>,
         (state, formats): (&GraphicsState, crate::degradation::BoundFormats<'_>),
-    ) -> DrawPipeline {
+    ) -> (DrawPipeline, bool) {
         if let Some(made) = self.last_made(state, key) {
-            return DrawPipeline::Made(made);
+            return (DrawPipeline::Made(made), true);
         }
         device.shared().counts.graphics_pipeline_looked_up();
         let key = &key.key();
@@ -2641,16 +2643,16 @@ impl RenderVariant {
                 if let Some(at) = at {
                     self.keep_last(state, key, at);
                 }
-                DrawPipeline::Made(made)
+                (DrawPipeline::Made(made), true)
             }
             // A draw of a key another caller makes takes the key's residual form where it is made
             // (`render/residual.rs`).
             (Begun::Pending(pending), _) => match self.residual_made(key) {
                 Some(drawn) => {
                     device.shared().counts.residual_form_drawn();
-                    DrawPipeline::Made(drawn)
+                    (DrawPipeline::Made(drawn), false)
                 }
-                None => DrawPipeline::Making(pending),
+                None => (DrawPipeline::Making(pending), false),
             },
             (Begun::Yours(ticket), _) => {
                 match self.make_drawn(device, key, compatible, (state, formats), ticket) {
@@ -2660,11 +2662,11 @@ impl RenderVariant {
                         Some(drawn) => {
                             device.shared().counts.residual_form_making();
                             device.shared().counts.residual_form_drawn();
-                            DrawPipeline::Made(drawn)
+                            (DrawPipeline::Made(drawn), false)
                         }
-                        None => DrawPipeline::Making(pending),
+                        None => (DrawPipeline::Making(pending), false),
                     },
-                    made => made,
+                    made => (made, true),
                 }
             }
         }

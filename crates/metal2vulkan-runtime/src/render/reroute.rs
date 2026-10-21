@@ -42,6 +42,7 @@ use crate::draw_source::{DrawSource, KeptSource};
 use crate::error::Error;
 use crate::pipeline::{GraphicsState as DrawingState, RenderPipelineState};
 use crate::render_state::EncoderState;
+use crate::render_target::PassShape;
 use crate::residency::Residency;
 use metal2vulkan::bind::{DrawCall, ViewSetup};
 use std::sync::Arc;
@@ -200,7 +201,7 @@ impl RenderCommandEncoder {
                 return Ok(false);
             }
         };
-        let previous_layout = stood.map(|layout| std::mem::replace(&mut self.layout, *layout));
+        let previous_layout = stood.map(|layout| std::mem::replace(&mut *self.layout, *layout));
         self.kept_attachments = None;
         let mut previous = std::mem::replace(&mut self.current, *instance);
         let mut again = Ok(());
@@ -216,8 +217,11 @@ impl RenderCommandEncoder {
         match again {
             Ok(()) => {
                 let shape = &self.current.shape;
-                if !self.passes.iter().any(|(s, _)| s == shape) {
-                    let pass = (shape.clone(), Arc::clone(&self.current.compatible));
+                if !self.passes.iter().any(|(s, _)| *s == **shape) {
+                    let pass = (
+                        PassShape::clone(shape),
+                        Arc::clone(&self.current.compatible),
+                    );
                     self.passes.push(pass);
                 }
                 // The instance it took the place of is never executed.
@@ -230,7 +234,7 @@ impl RenderCommandEncoder {
                 let rerouted = std::mem::replace(&mut self.current, previous);
                 self.end_unrun(rerouted);
                 if let Some(layout) = previous_layout {
-                    self.layout = layout;
+                    *self.layout = layout;
                     self.kept_attachments = None;
                 }
                 Ok(false)
@@ -287,10 +291,10 @@ impl RenderCommandEncoder {
     /// Exchange the encoder's state a draw reads with `held`.
     fn swap_held(&mut self, held: &mut Held) {
         std::mem::swap(&mut self.pipeline, &mut held.pipeline);
-        std::mem::swap(&mut self.state, &mut held.state);
+        std::mem::swap(&mut *self.state, &mut held.state);
         std::mem::swap(&mut self.vertex, &mut held.vertex);
         std::mem::swap(&mut self.fragment, &mut held.fragment);
         std::mem::swap(&mut self.residency, &mut held.residency);
-        std::mem::swap(&mut self.amplification, &mut held.amplification);
+        std::mem::swap(&mut *self.amplification, &mut held.amplification);
     }
 }

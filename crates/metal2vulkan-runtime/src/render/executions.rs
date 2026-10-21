@@ -299,6 +299,7 @@ use crate::tessellation::{FactorBuffer, Factors};
 use crate::tracker::{
     Barrier, EncoderUses, GeometryWrites, IndirectReads, Summary, UnorderedWrites, Use,
 };
+use crate::versioned::Versioned;
 use crate::visibility::{Lent, Visibility};
 use crate::written_commands::{Writers, WrittenCommands};
 use crate::Device;
@@ -599,7 +600,7 @@ impl RenderCommandEncoder {
             ExecutionRange::Fixed(range) => u64::from(range.end - range.start),
             ExecutionRange::Indirect(_) => icb.size(),
         };
-        let (depth, _) = self.aspects();
+        let (depth, _) = self.layout.aspects();
         let metal_depth = depth
             && !self
                 .layout
@@ -1687,7 +1688,7 @@ impl RenderCommandEncoder {
     /// its `VkPipeline` in the execution's instance, each made where it was not: the draw's
     /// settings, bind state, fixed state and key as `draw` settles them
     /// ([`draw_settings`](Self::draw_settings), [`settle_draw`](Self::settle_draw),
-    /// [`draw_fixed`](Self::draw_fixed)), with the encoder's tables, which are the command's own
+    /// `ShapeInputs::draw_fixed`), with the encoder's tables, which are the command's own
     /// but for its buffers. The step makes another only where a command's own buffers ask for
     /// another variant (a vertex buffer at an offset or stride fixed-function input cannot
     /// fetch, a buffer whose length a slot's form depends on outside the large-buffer form's
@@ -1709,7 +1710,7 @@ impl RenderCommandEncoder {
         let sampler_maps = self.sampler_maps(state, &pass_start)?;
         let settled = self.settle_draw(
             &mut lock(&live),
-            (state, &settings),
+            (state, &settings, None),
             (&pass_start, &sampler_maps),
             (&mut argument_samplers, &mut None),
             (&function_tables, &mut None),
@@ -1741,7 +1742,7 @@ impl RenderCommandEncoder {
         {
             return Ok((variant, None));
         }
-        let (_, stencil) = self.aspects();
+        let (_, stencil) = self.layout.aspects();
         let failing = match &settings.failing_state {
             None => None,
             Some(failing) => {
@@ -1751,14 +1752,17 @@ impl RenderCommandEncoder {
                 Some(failing.failing_draw(graphics.early_fragment_tests, stencil, writes)?)
             }
         };
-        let mut fixed = self.draw_fixed(graphics, failing.as_ref(), (false, false))?;
+        let mut fixed =
+            self.shape_inputs()
+                .draw_fixed(graphics, failing.as_ref(), (false, false))?;
         let clamp = (
             settings.native,
             settings.written_clamp,
             settings.compensation,
             settings.bias,
         );
-        self.clamp_draw_depth(&mut fixed, graphics, clamp)?;
+        self.shape_inputs()
+            .clamp_draw_depth(&mut fixed, graphics, clamp)?;
         // The class's list topology where the pipeline makes the topology dynamic.
         let (topology, primitive_restart) = crate::pipeline::keyed_assembly(
             settings.topology,
@@ -2080,7 +2084,7 @@ impl RenderExecution {
         let mut runs = Vec::with_capacity(earlier.len() + 1);
         for run in earlier.into_iter().chain([current]) {
             let other =
-                (run.shape != snapshot.shape || run.views != ViewSetup::default()).then(|| {
+                (*run.shape != snapshot.shape || run.views != ViewSetup::default()).then(|| {
                     let mut shape = run.shape.clone();
                     super::late_resolve::settle(std::iter::once(&mut shape), &ending);
                     (shape, run.views)
@@ -2128,7 +2132,7 @@ impl RenderExecution {
                 imageblock,
                 shadow,
             },
-            layout,
+            layout: layout.into_inner(),
         })
     }
 
@@ -2153,7 +2157,7 @@ impl RenderExecution {
             earlier: Vec::new(),
             current: Instance {
                 draws,
-                shape: snapshot.shape.clone(),
+                shape: Versioned::new(snapshot.shape.clone()),
                 compatible: Arc::clone(&snapshot.compatible),
                 recorded: false,
                 shadow: false,
@@ -2186,10 +2190,10 @@ impl RenderExecution {
                 feedback: Feedback::NONE,
                 storage_colors: 0,
             },
-            layout,
+            layout: Versioned::new(layout),
             passes: vec![(snapshot.shape.clone(), Arc::clone(&snapshot.compatible))],
             render_target_array_length: snapshot.render_target_array_length,
-            state: snapshot.state.clone(),
+            state: Versioned::new(snapshot.state.clone()),
             pipeline: None,
             routed: None,
             vertex: snapshot.vertex.clone(),
@@ -2213,7 +2217,7 @@ impl RenderExecution {
             tile_imageblock: snapshot.tile_imageblock,
             factors: snapshot.factors.clone(),
             rate_map: snapshot.rate_map.clone(),
-            amplification: snapshot.amplification.clone(),
+            amplification: Versioned::new(snapshot.amplification.clone()),
             barrier: false,
             barrier_splits: 0,
             driver_restarts: false,
@@ -2269,6 +2273,7 @@ impl RenderExecution {
             log: None,
             quiet_bound_values: None,
             bind_memo: crate::binding::BindMemo::default(),
+            shape_memo: Default::default(),
             last_retained: Default::default(),
             inline: super::inline_first::Inline::Never,
             held_bound: Default::default(),

@@ -119,7 +119,7 @@ pub(super) const MAX_VIEWPORTS: usize = 16;
 /// A draw's viewports or scissor rectangles, which every draw makes, or an encoder's, which every
 /// render pass starts with: the one most use held in place, so such a draw or pass allocates none
 /// for them, or a list of the others.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub(super) enum ViewportList<T> {
     One(T),
     Many(Vec<T>),
@@ -2134,7 +2134,7 @@ pub(super) struct DepthBiasSetting {
 }
 
 /// How a draw records its depth bias ([`metal2vulkan::metal::state::DepthBias`]).
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 pub(super) struct DepthBiasRecord {
     /// Constant factor, clamp, slope factor.
     factors: [f32; 3],

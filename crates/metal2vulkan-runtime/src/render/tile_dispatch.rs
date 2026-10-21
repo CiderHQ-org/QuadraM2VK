@@ -584,32 +584,13 @@ impl RenderCommandEncoder {
     /// Not measured (`NotImplemented(TileAtSampleCount)`) in a pass of a sample count Apple's
     /// GPUs lack.
     pub fn tile_width(&self) -> Result<u64, Error> {
-        self.tile_size().map(|[width, _]| width.into())
+        self.layout.tile_size().map(|[width, _]| width.into())
     }
 
     /// `tileHeight`: the pass's tile height, or the default for its samples (32, and 16 at 4
     /// samples; `tile_pass.rs`). Not measured as [`RenderCommandEncoder::tile_width`] is not.
     pub fn tile_height(&self) -> Result<u64, Error> {
-        self.tile_size().map(|[_, height]| height.into())
-    }
-
-    /// The encoder's tile size, where Metal's is measured.
-    pub(super) fn tile_size(&self) -> Result<[u32; 2], Error> {
-        self.layout
-            .tile
-            .tile
-            .ok_or(Error::NotImplemented(RuntimeGap::TileAtSampleCount))
-    }
-
-    /// The pixels a pass of tiles of `tile` covers: whole tiles over the render area, the cells
-    /// past the attachments included, which a tile dispatch's scratch holds (the module docs).
-    /// Its tiles are the render area's.
-    pub(super) fn tile_area(&self, tile: [u32; 2]) -> [u32; 2] {
-        let [ew, eh] = self.layout.extent;
-        [
-            ew.div_ceil(tile[0]).saturating_mul(tile[0]),
-            eh.div_ceil(tile[1]).saturating_mul(tile[1]),
-        ]
+        self.layout.tile_size().map(|[_, height]| height.into())
     }
 
     /// `setTileBuffer:offset:atIndex:` (`None` unbinds the index). Refused as
@@ -810,7 +791,7 @@ impl RenderCommandEncoder {
             return Err(invalid(call, Problem::EmptyThreadgroup));
         }
         // Any other depth runs as 1, as plain Metal runs it: the threadgroups below are one deep.
-        let tile = self.tile_size()?;
+        let tile = self.layout.tile_size()?;
         if width > tile[0] || height > tile[1] {
             return Err(draw_problem(
                 call,
@@ -848,7 +829,7 @@ impl RenderCommandEncoder {
         }
         // A size other than the state's required one runs as given, as plain Metal runs it
         // (Metal's API validation stops it).
-        let area = self.tile_area(tile);
+        let area = self.layout.tile_area(tile);
         // The tile function reaches what the encoder made resident in the tile stage, the
         // device's sampler states its set-1 sampler arrays hold, and the live tables its state
         // made (`render/arguments.rs`).

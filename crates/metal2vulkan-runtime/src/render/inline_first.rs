@@ -135,7 +135,7 @@ use crate::device::Device;
 use crate::error::Error;
 use crate::linear_attachment;
 use crate::nan_clear::keeps_nan_sign;
-use crate::render_pass::PassLayout;
+use crate::render_pass::{ColorTarget, PassLayout};
 use crate::render_target::{
     self, Feedback, FramebufferObject, PassShape, Position, RenderPassObject,
 };
@@ -421,9 +421,18 @@ impl RenderCommandEncoder {
         // A memoryless color loaded `DontCare` reads zero where a draw reaches a tile, as the
         // pass's end makes it where the pass draws (`clear_reach::dont_care_loads`); where no draw
         // reaches one, no fragment reads it (the module docs).
-        self.kept_attachments = None;
-        for color in self.layout.colors.iter_mut().flatten() {
-            if color.load == LoadAction::DontCare && color.memoryless {
+        // Only where one is: the layout is versioned, and a draw's shape is kept while it holds
+        // (`render/draw_shape.rs`).
+        let unread = |color: &ColorTarget| color.load == LoadAction::DontCare && color.memoryless;
+        if self.layout.colors.iter().flatten().any(unread) {
+            self.kept_attachments = None;
+            for color in self
+                .layout
+                .colors
+                .iter_mut()
+                .flatten()
+                .filter(|c| unread(c))
+            {
                 color.load = LoadAction::Clear;
                 color.clear = clear_reach::dont_care_clear(color.target.texture.pixel_format());
             }

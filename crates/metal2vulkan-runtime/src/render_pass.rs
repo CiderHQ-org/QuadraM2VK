@@ -862,6 +862,42 @@ pub(super) struct PassLayout {
     pub(super) fails_command_buffer: Option<CommandBufferError>,
 }
 
+impl PassLayout {
+    /// Whether the pass has a depth and a stencil: of its attachments, or the hidden ones a draw
+    /// or an execution gave it.
+    pub(super) fn aspects(&self) -> (bool, bool) {
+        self.depth_stencil.as_ref().map_or((false, false), |ds| {
+            (ds.depth.is_some(), ds.stencil.is_some())
+        })
+    }
+
+    /// The pass's color attachments' pixel formats by index, `None` where it has none.
+    pub(super) fn pass_formats(&self) -> [Option<PixelFormat>; MAX_COLOR_ATTACHMENTS] {
+        std::array::from_fn(|index| {
+            let color = self.colors.get(index).and_then(Option::as_ref);
+            color.map(|c| c.target.texture.pixel_format())
+        })
+    }
+
+    /// The pass's tile size, where Metal's is measured.
+    pub(super) fn tile_size(&self) -> Result<[u32; 2], Error> {
+        self.tile
+            .tile
+            .ok_or(Error::NotImplemented(RuntimeGap::TileAtSampleCount))
+    }
+
+    /// The pixels a pass of tiles of `tile` covers: whole tiles over the render area, the cells
+    /// past the attachments included, which a tile dispatch's scratch holds
+    /// (`render/tile_dispatch.rs`). Its tiles are the render area's.
+    pub(super) fn tile_area(&self, tile: [u32; 2]) -> [u32; 2] {
+        let [ew, eh] = self.extent;
+        [
+            ew.div_ceil(tile[0]).saturating_mul(tile[0]),
+            eh.div_ceil(tile[1]).saturating_mul(tile[1]),
+        ]
+    }
+}
+
 /// What [`check_target`] reads of an attachment's texture.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Facts {
