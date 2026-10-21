@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#000000">
+  <meta name="description" content="Quadra brings the macOS Roblox client to Linux through Darling. Free, open source">
+  <meta property="og:title" content="Quadra — Roblox on Linux">
+  <meta property="og:description" content="it runs on darling, and ITS FREE!!! (like that roblox slogan)">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://quadrahq.org/">
+  <meta property="og:image" content="https://quadrahq.org/assets/quadrahq.webp">
+  <link rel="canonical" href="https://quadrahq.org/">
+  <link rel="icon" href="assets/quadrahq-icon.png" type="image/png">
+  <link rel="preload" href="assets/fonts/Archivo.ttf" as="font" type="font/ttf" crossorigin>
+  <link rel="stylesheet" href="style.css">
+  <title>Quadra — Roblox on Linux</title>
+  <script src="assets/vendor/p5.min.js" defer></script>
+  <script src="assets/vendor/vanta.topology.min.js" defer></script>
+  <script src="background.js" defer></script>
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <div id="wallpaper" aria-hidden="true"></div>
+  <main id="main" class="desktop">
+    <section class="window" id="about" aria-labelledby="about-title">
+      <header class="window-bar"><span>Quadra</span><a href="https://github.com/CiderHQ-org/Cider/releases/latest">latest release</a></header>
+      <div class="window-body">
+        <img class="brand-logo" src="assets/quadrahq.webp" width="1024" height="1024" alt="Quadra logo">
+        <h1 id="about-title">MacOS Roblox Client, but on Linux. :3</h1>
+        <p>The macOS Roblox client, running on your Linux desktop through Darling.</p>
+        <div class="tags"><span>free &amp; open source</span></div>
+        <ul class="feature-list">
+          <li>runs on darling with some improvements</li>
+          <li>basic functionality</li>
+          <li>fastflags, mods, and more</li>
+          <li>roblox studio runs on wine itself</li>
+          <li>vr headsets through openxr (experimental)</li>
+        </ul>
+        <div class="about-actions"><a class="button" href="https://github.com/CiderHQ-org/Cider">GitHub</a></div>
+      </div>
+    </section>
+
+    <section class="window" id="screenshots" aria-labelledby="preview-title">
+      <header class="window-bar"><h2 id="preview-title">Roblox</h2><span>screenshots</span></header>
+      <div class="preview-tabs" role="tablist" aria-label="Project screenshots">
+        <button class="preview-tab" id="tab-roblox" role="tab" aria-selected="true" aria-controls="preview-roblox" tabindex="0" type="button">Roblox</button>
+        <button class="preview-tab" id="tab-launcher" role="tab" aria-selected="false" aria-controls="preview-launcher" tabindex="-1" type="button">Launcher</button>
+        <button class="preview-tab" id="tab-vr" role="tab" aria-selected="false" aria-controls="preview-vr" tabindex="-1" type="button">VR</button>
+        <button class="preview-tab" id="tab-vr-settings" role="tab" aria-selected="false" aria-controls="preview-vr-settings" tabindex="-1" type="button">VR settings</button>
+      </div>
+      <div class="preview-image" id="preview-roblox" role="tabpanel" aria-labelledby="tab-roblox" tabindex="0"><img src="assets/roblox.png" width="1920" height="1080" alt="The Roblox home screen running through Quadra on Linux, with the Quadra launcher beside it" fetchpriority="high"></div>
+      <div class="preview-image" id="preview-launcher" role="tabpanel" aria-labelledby="tab-launcher" tabindex="0" hidden><img src="assets/launcher.png" width="954" height="1032" alt="The Quadra launcher" loading="lazy"></div>
+      <div class="preview-image" id="preview-vr" role="tabpanel" aria-labelledby="tab-vr" tabindex="0" hidden><img src="assets/vr.jpg" width="1730" height="974" alt="Roblox's own VR mode through Quadra, seen in one lens of a Meta Quest 2: a shotgun held in the tracked hand in front of a bridge at sunset" loading="lazy"></div>
+      <div class="preview-image" id="preview-vr-settings" role="tabpanel" aria-labelledby="tab-vr-settings" tabindex="0" hidden><img src="assets/vr-settings.png" width="954" height="1032" alt="The VR tab in the Quadra launcher's settings: VR headset (OpenXR) using WiVRn, render resolution and window mirror" loading="lazy"></div>
+    </section>
+
+    <section class="window" id="install" aria-labelledby="install-title">
+      <header class="window-bar"><h2 id="install-title">install</h2><a href="https://github.com/CiderHQ-org/Cider#install">guide</a></header>
+      <div class="window-body">
+        <p>you paste this in your terminal and you run it, so simple right?</p>
+        <div class="command-box"><code id="install-command">curl -fsSL https://quadrahq.org/install.sh | bash</code></div>
+        <div class="install-actions">
+          <button class="button" id="copy-command" type="button" aria-label="Copy installation command" hidden>copy</button>
+        </div>
+        <p class="copy-status" id="copy-status" role="status" aria-live="polite"></p>
+        <p class="install-note">you run the script again and it updates, your sign in and settings will stay in place, so no need to do allat again </p>
+        <div class="small-links">
+          <a href="https://github.com/CiderHQ-org/Cider/releases">All releases</a>
+        </div>
+      </div>
+    </section>
+
+    <section class="window" id="help" aria-labelledby="help-title">
+      <header class="window-bar"><h2 id="help-title">help</h2><a href="https://github.com/CiderHQ-org/Cider/blob/main/CHANGELOG.md">release notes</a></header>
+      <div class="questions">
+        <details>
+          <summary>What do I need?<span aria-hidden="true">+</span></summary>
+          <p>An x86_64 Linux desktop with working graphics drivers (why wouldnt you have non working graphics drivers???????). The installer supports Arch (btw :3) and its relatives, Ubuntu 24.04+ (ew), Debian 13 (goat), and Linux Mint 22. Fedora needs Darling built from source because fedora doesnt have darling in their packages smh </p>
+        </details>
+        <details>
+          <summary>What’s still broken<span aria-hidden="true">+</span></summary>
+          <p>Theres still bugs, but Pull Requests are recommended and help out a lot! What we need so far is full vulkan (we are depending on zink at the moment), Native Wayland thats actually functional</p>
+        </details>
+      </div>
+      <div class="help-links">
+        <a href="https://discord.gg/jpbsf44tBE">Discord</a>
+        <a href="https://github.com/CiderHQ-org/Cider/issues">Report a bug</a>
+        <a href="https://github.com/CiderHQ-org/Cider">Source code</a>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <p>Created by <a href="https://github.com/narezy">Narezany</a>. Maintained by <a href="https://aubree.wtf">aubree.wtf</a>.</p>
+    <p>Independent of Roblox Corporation. <a href="https://github.com/CiderHQ-org/Cider/blob/main/LICENSE">GPL v3 licensed.</a></p>
+  </footer>
+</body>
+</html>

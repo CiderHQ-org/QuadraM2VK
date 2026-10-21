@@ -1,0 +1,27 @@
+MacOBlox background library sources and redistribution license files
+
+p5.js v1.1.9
+License: GNU Lesser General Public License, Version 2.1
+Exact release source: https://github.com/processing/p5.js/tree/1.1.9
+Exact release source archive: https://github.com/processing/p5.js/archive/refs/tags/1.1.9.tar.gz
+Versioned license URL: https://raw.githubusercontent.com/processing/p5.js/1.1.9/license.txt
+Local complete license: /tmp/aubree-reference-p5-license.txt
+Verified readable versioned source file: https://raw.githubusercontent.com/processing/p5.js/1.1.9/src/core/main.js
+Local source file: /tmp/aubree-reference-p5-source-main.js
+Published versioned minified library: https://cdn.jsdelivr.net/npm/p5@1.1.9/lib/p5.min.js
+Local published copy: /tmp/aubree-reference-p5-upstream.min.js
+The aubree.wtf p5 file has only the version/date banner; use the separate complete license.
+
+Vanta topology
+License: MIT, Copyright 2020 Teng Bao
+Upstream source repository: https://github.com/tengbao/vanta
+Upstream topology source: https://raw.githubusercontent.com/tengbao/vanta/master/src/vanta.topology.js
+Local upstream topology source: /tmp/aubree-reference-vanta-source.js
+Upstream license URL: https://raw.githubusercontent.com/tengbao/vanta/master/LICENSE.md
+Local complete license: /tmp/aubree-reference-vanta-license.txt
+Upstream original minified library: https://raw.githubusercontent.com/tengbao/vanta/master/dist/vanta.topology.min.js
+Local upstream original: /tmp/aubree-reference-vanta-upstream.topology.min.js
+Exact site-patched library: https://aubree.wtf/lib/vanta.topology.min.js
+Preserved local patched library: /tmp/aubree-reference-vanta.topology.min.js
+Site patch changes particle speed from .mult(2.2) to .mult(3.3).
+Both upstream and patched Vanta minified files omit the MIT notice; include the separate complete license.

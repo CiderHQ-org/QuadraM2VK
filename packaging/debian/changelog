@@ -1,0 +1,110 @@
+quadrahq (0.32-1) unstable; urgency=medium
+
+  * Ship the experimental Metal on Vulkan bridge in native packages.
+  * Fix the Metal layer compositor crash and clear renderer state on switching.
+
+ -- Quadra maintainers <noreply@aubree.wtf>  Mon, 19 Oct 2026 18:20:00 -0500
+
+quadrahq (0.31-1) unstable; urgency=medium
+
+  * Release the Quadra / QuadraHQ rebrand with migrated Cider user data.
+  * Retry public Roblox download HTTP 403s through the Quadra cache.
+  * Preserve captured right-drag motion with both mouse buttons held.
+  * Record severe FPS drops for diagnosis; the intermittent FPS issue remains open.
+
+ -- Quadra maintainers <noreply@aubree.wtf>  Mon, 19 Oct 2026 17:30:00 -0500
+
+quadrahq (0.30-1) unstable; urgency=medium
+
+  * Rebrand to Quadra / QuadraHQ at quadrahq.org; retain the existing logo.
+  * Migrate settings, cache and sign-in from Cider and MacOBlox.
+
+ -- Quadra maintainers <noreply@aubree.wtf>  Sat, 17 Oct 2026 23:30:00 -0500
+
+ciderhq (0.30-1) unstable; urgency=medium
+
+  * Add experimental VR through the host's OpenXR runtime (WiVRn, Monado).
+  * Fix duplicated typing and the Control key state with native Wayland.
+
+ -- Cider maintainers <noreply@aubree.wtf>  Sat, 17 Oct 2026 12:15:00 -0500
+
+ciderhq (0.25-1) unstable; urgency=medium
+
+  * Support Roblox 0.743.0.7431134 with verified RakNet transport patches.
+  * Warn once per launch when Roblox selects a transport other than RakNet.
+  * Apply initial fullscreen requests to native Wayland windows.
+
+ -- Cider maintainers <noreply@aubree.wtf>  Thu, 15 Oct 2026 22:55:00 -0500
+
+ciderhq (0.24p1-1) unstable; urgency=medium
+
+  * Repair Roblox 0.743 Error 256 with verified RakNet transport patches.
+  * Skip shared-config and legacy dummy connections; preserve checksum checks.
+  * Keep the cursor visible during right-button camera dragging.
+
+ -- Cider maintainers <noreply@aubree.wtf>  Tue, 13 Oct 2026 21:50:00 -0500
+
+ciderhq (0.24-1) unstable; urgency=medium
+
+  * Repair native Wayland startup and game-join freezes in IOKit queries.
+  * Align pointer coordinates and commit parent buffers on window resize.
+  * Rename the launcher backend option to Wayland.
+
+ -- Cider maintainers <noreply@aubree.wtf>  Tue, 13 Oct 2026 16:00:00 -0500
+
+ciderhq (0.23patch2-1) unstable; urgency=medium
+
+  * Repair old-runtime sincos recursion and preserve guests after shell disconnects.
+  * Add runtime rollback, resumable downloads and local hardware coverage reports.
+
+ -- Cider maintainers <noreply@aubree.wtf>  Tue, 13 Oct 2026 12:00:00 -0500
+
+ciderhq (0.23patch1-1) unstable; urgency=medium
+
+  * Relicense under the GPL v3 and show CiderHQ's Discord presence.
+  * Find terminals without xdg-terminal-exec for runtime installs.
+
+ -- Cider maintainers <noreply@aubree.wtf>  Mon, 12 Oct 2026 14:00:00 -0500
+
+ciderhq (0.23-1) unstable; urgency=medium
+
+  * Add automatic CiderDarling updates and repair exp10 game-join freezes.
+  * Include the current launcher, diagnostics and runtime settings.
+  * Let users install and choose their runtime in the launcher.
+
+ -- Cider maintainers <noreply@aubree.wtf>  Mon, 12 Oct 2026 13:00:00 -0500
+
+ciderhq (0.22Patch1-1) unstable; urgency=medium
+
+  * Add the supplied CiderHQ logo and release the installer/runtime updates.
+  * Refresh launcher, desktop, website and native package branding.
+
+ -- Cider maintainers <noreply@aubree.wtf>  Mon, 12 Oct 2026 12:00:00 -0500
+
+ciderhq (0.22-2) unstable; urgency=medium
+
+  * Follow the CiderHQ-org/Cider repository move and renamed source archive.
+  * Refresh the source checksum and installed shortcut icon payload.
+
+ -- Cider maintainers <noreply@aubree.wtf>  Sun, 11 Oct 2026 15:00:00 -0500
+
+ciderhq (0.22-1) unstable; urgency=medium
+
+  * Rebrand to Cider with the ciderhq command and migrated user directories.
+  * Repair multi-monitor mouse lock, Roblox 0.742 GLSL and public Darling builds.
+
+ -- Cider maintainers <noreply@aubree.wtf>  Sun, 11 Oct 2026 12:00:00 -0500
+
+macoblox (0.21patch1-1) unstable; urgency=medium
+
+  * Update to the 0.21patch1 source release: scaled input, X11 capture,
+    cursor overlay and verified Roblox 0.742 transport compatibility.
+
+ -- MacOBlox maintainers <noreply@aubree.wtf>  Wed, 07 Oct 2026 12:00:00 -0500
+
+macoblox (0.21-1) unstable; urgency=medium
+
+  * Initial Debian package with prebuilt compatibility shims and desktop
+    integration. Download Roblox on first launch.
+
+ -- MacOBlox maintainers <noreply@aubree.wtf>  Tue, 06 Oct 2026 21:00:00 -0500

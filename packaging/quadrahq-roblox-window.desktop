@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Roblox (Quadra)
+Exec=quadrahq
+Icon=quadrahq
+NoDisplay=true
+StartupWMClass=RobloxPlayer
