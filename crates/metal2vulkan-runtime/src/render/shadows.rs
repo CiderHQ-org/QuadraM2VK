@@ -57,10 +57,12 @@ use crate::error::Error;
 use crate::render_pass::{ColorTarget, PassLayout, Target};
 use crate::render_target;
 use crate::render_values::{LoadAction, StoreAction};
+use crate::residency::Used;
 use crate::resource::ResourceKey;
-use crate::shadow::{self, ShadowCopy, ShadowTarget, ShadowUse, Within};
+use crate::shadow::{self, ShadowCopies, ShadowCopy, ShadowTarget, ShadowUse, Within};
 use crate::tracker::{Access, Use, UseRange};
 use crate::work_counts::{ColorTaken, Counters};
+use crate::Device;
 use ash::vk;
 use metal2vulkan::metal::TextureType;
 use std::collections::BTreeMap;
@@ -234,6 +236,45 @@ impl InstanceShadows {
             .map(|(&(key, write), range)| range_use(key, write, range.clone()));
         bytes.chain(images)
     }
+}
+
+/// The shadows of the shadowed textures a pass of `layout` renders or resolves into, and of those
+/// its instances' draws and its tile dispatches use (`gathered`), each once: the truths whose
+/// copies go around its instances.
+pub(super) fn pass_shadows<'a>(
+    layout: &PassLayout,
+    gathered: impl IntoIterator<Item = &'a InstanceShadows>,
+) -> Vec<Arc<ShadowCopies>> {
+    let attachments = attachment_shadows(layout, true, None, None);
+    let used = (attachments.iter()).chain(gathered.into_iter().flat_map(|g| g.shadows.iter()));
+    let mut shadows: Vec<Arc<ShadowCopies>> = Vec::new();
+    for used in used {
+        if !shadows.iter().any(|had| Arc::ptr_eq(had, &used.copies)) {
+            shadows.push(Arc::clone(&used.copies));
+        }
+    }
+    shadows
+}
+
+/// Whether `used`, a resource an execution's commands may reach that its call did not gather (the
+/// module docs), may touch the truth of one of `shadows` (a pass's, [`pass_shadows`]): it is a
+/// shadowed texture, or a texture, buffer or heap whose image or bytes meet one's truth, the
+/// device's host aliases joining bytes that share memory. An indirect command buffer's records lie
+/// in no texture.
+pub(super) fn meets_truths(device: &Device, shadows: &[Arc<ShadowCopies>], used: &Used) -> bool {
+    let reached = match used {
+        Used::IndirectCommandBuffer(_) => return false,
+        Used::Texture(texture) if texture.shadow().is_some() => return true,
+        Used::Texture(texture) => texture.bound_use(Access::NONE, Access::NONE),
+        Used::Buffer(buffer) | Used::Heap { bytes: buffer, .. } => {
+            let (identity, range) = buffer.tracked(0..buffer.length());
+            bytes_use(identity.key, true, range)
+        }
+    };
+    let reached = [reached];
+    let augmented = device.shared().aliases.augment(&reached);
+    let reached = augmented.as_deref().unwrap_or(&reached);
+    (reached.iter()).any(|used| shadows.iter().any(|shadow| shadow.meets(used)))
 }
 
 /// The copies before each of `instances` of a pass of `layout` (its render pass instances and

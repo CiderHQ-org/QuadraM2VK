@@ -268,11 +268,11 @@ impl Residency {
         self.heaps.iter().map(|used| &used.heap)
     }
 
-    /// Whether it holds a resource `other` does not.
-    pub(super) fn beyond(&self, other: &Residency) -> bool {
-        self.used
-            .iter()
-            .any(|(used, ..)| !other.used.iter().any(|(had, ..)| same(had, used)))
+    /// The resources it holds that `other` does not.
+    pub(super) fn past<'a>(&'a self, other: &'a Residency) -> impl Iterator<Item = &'a Used> {
+        (self.used.iter())
+            .map(|(used, ..)| used)
+            .filter(|used| !other.used.iter().any(|(had, ..)| same(had, used)))
     }
 
     /// `used` resident with `usage` in `stages`, joined to the usage and stages it had: `used`,

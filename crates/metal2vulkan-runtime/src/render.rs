@@ -4428,6 +4428,16 @@ impl RenderCommandEncoder {
             || dispatches
                 .iter()
                 .any(|dispatch| !dispatch.shadows.is_empty());
+        // Their truths, which an execution's commands may reach past what its call gathered
+        // (`render/executions.rs`).
+        let pass_shadows = match texels_shadowed {
+            true => shadows::pass_shadows(
+                &layout,
+                (instances.iter().map(|instance| &instance.shadows))
+                    .chain(dispatches.iter().map(|dispatch| &dispatch.shadows)),
+            ),
+            false => Vec::new(),
+        };
         // The shadowed textures' copies before each instance: the first's before the pass's
         // other steps, the others' between the instances (`render/shadows.rs`), in the pass's
         // segment where it executes render commands (`render/executions.rs`).
@@ -5025,7 +5035,7 @@ impl RenderCommandEncoder {
                     shadow: shadow.clone(),
                 },
                 (layout.clone(), bare.clone()),
-                texels_shadowed,
+                pass_shadows,
             ));
             // The steps' objects, held with the pass until the command buffer completes.
             deferred = Some(Arc::clone(&pass));

@@ -55,14 +55,16 @@
 //!   whose addresses resolve against the resources the command buffer's encoders made resident,
 //!   every encoder's, before the call or after it (`residency.rs`), then against the device's live
 //!   buffers Metal reaches unnamed (`live_buffers.rs`), as a compute command's do; its functions
-//!   reach those resources too. Where the pass has a shadowed texture, an execution its command
-//!   buffer made more resident than its encoder had at the call is refused
+//!   reach those resources too. Where the pass has a shadowed texture, an execution whose command
+//!   buffer made resident, past what its encoder had at the call, a shadowed texture or a
+//!   resource whose bytes or image meet the truth of a shadowed texture the pass copies is refused
 //!   (`NotImplemented(IndirectRenderCommands)`): the copies around the pass's instances follow what
-//!   the call gathered (`render/shadows.rs`). An address in none of them (a no-copy buffer or a
-//!   heap's buffer no command buffer's commands used yet) misses (the slot unbound, reading zero,
-//!   counted in the execution report), and an unset buffer reads zero, as Metal's did. A command
-//!   with no draw, no pipeline state, no vertices, indices, patches or instances runs nothing, and
-//!   its neighbours run.
+//!   the call gathered (`render/shadows.rs`). Others (the records of an indirect command buffer
+//!   a kernel wrote, a buffer of other bytes) change no copy. An address in none of them (a
+//!   no-copy buffer or a heap's buffer no command buffer's commands used yet) misses (the slot
+//!   unbound, reading zero, counted in the execution report), and an unset buffer reads zero, as
+//!   Metal's did. A command with no draw, no pipeline state, no vertices, indices, patches or
+//!   instances runs nothing, and its neighbours run.
 //! - **Indexed and patch draws**. Their index, patch index and tessellation factor buffers are
 //!   addresses too, resolved as the buffers are, so one of its own that no encoder made resident
 //!   draws, as Metal drew from an index buffer it did not hold resident; a miss runs nothing and
@@ -291,7 +293,7 @@ use crate::residency::{every_render_stage, Residency};
 use crate::resource::ResourceKey;
 use crate::sample_planes::{PlanesCommands, PlanesStep};
 use crate::sampler::ArgumentSamplers;
-use crate::shadow::{self, ShadowUse};
+use crate::shadow::{self, ShadowCopies, ShadowUse};
 use crate::shadow_stencil::ShadowStencil;
 use crate::tessellation::{FactorBuffer, Factors};
 use crate::tracker::{
@@ -2432,10 +2434,10 @@ pub(crate) struct DeferredPass {
     /// passes for makes its pass and framebuffer.
     layout: PassLayout,
     bare: Option<PassLayout>,
-    /// A shadowed texture is an attachment of the pass, or one its draws or tile dispatches use
-    /// (`render/shadows.rs`): the copies around its instances follow the bytes each execution's
-    /// call gathered.
-    shadowed: bool,
+    /// The shadows of the shadowed textures that are attachments of the pass, or that its draws
+    /// or tile dispatches use (`render/shadows.rs`, `shadows::pass_shadows`): the copies around
+    /// its instances follow the bytes each execution's call gathered.
+    shadows: Vec<Arc<ShadowCopies>>,
     /// What the commit made ahead for the host step that records it (`ahead.rs`), once made.
     ahead: OnceLock<Arc<Ahead>>,
     /// Where `commit` recorded the pass with executions in their GPU form (`gpu.rs`), what each
@@ -2499,7 +2501,7 @@ impl DeferredPass {
         (executions, pending): (Vec<RenderExecution>, Vec<PendingDraw>),
         storage: PassStorage,
         (layout, bare): (PassLayout, Option<PassLayout>),
-        shadowed: bool,
+        shadows: Vec<Arc<ShadowCopies>>,
     ) -> DeferredPass {
         DeferredPass {
             instances,
@@ -2512,7 +2514,7 @@ impl DeferredPass {
             storage,
             layout,
             bare,
-            shadowed,
+            shadows,
             ahead: OnceLock::new(),
             on_gpu: Mutex::new(Vec::new()),
             cause: Mutex::new(None),
@@ -2661,7 +2663,7 @@ impl DeferredPass {
             *lock(&self.cause) = Some(cause);
             Ok(None)
         };
-        if self.shadowed {
+        if !self.shadows.is_empty() {
             return declined(HostStepCause::Rule("the pass has a shadowed texture"));
         }
         if self.executions.iter().any(|e| e.range.indirect()) {
@@ -2732,14 +2734,10 @@ impl DeferredPass {
         // The executions resolve and bind against the command buffer's resident resources,
         // every encoder's (`residency.rs`). Where the pass has a shadowed texture, the copies
         // around its instances were planned over the bytes each call gathered, from its
-        // encoder's resources then: one made resident beyond them is refused.
+        // encoder's resources then: one made resident beyond them that may touch a shadowed
+        // texture's truth is refused.
         let residency = command_buffer.residency()?;
-        if self.shadowed
-            && self
-                .executions
-                .iter()
-                .any(|execution| residency.beyond(&execution.snapshot.residency))
-        {
+        if self.reaches_past_its_copies(command_buffer.device(), &residency) {
             return Err(Error::NotImplemented(RuntimeGap::IndirectRenderCommands));
         }
         // Its tile dispatches' pipelines, waiting for those being made; a failed one fails the
@@ -3085,12 +3083,7 @@ impl DeferredPass {
             return made;
         };
         // The step refuses such a pass (`record`).
-        if self.shadowed
-            && self
-                .executions
-                .iter()
-                .any(|execution| residency.beyond(&execution.snapshot.residency))
-        {
+        if self.reaches_past_its_copies(command_buffer.device(), &residency) {
             return made;
         }
         let Ok(mut core) = EncoderCore::segment(command_buffer, false) else {
@@ -3105,6 +3098,20 @@ impl DeferredPass {
             core = execution.settle(core, inputs, &states, &mut made);
         }
         made
+    }
+
+    /// Whether an execution's commands may reach, through `residency` (the command buffer's), a
+    /// resource its call did not gather that may touch the truth of a shadowed texture the pass
+    /// copies around its instances (`shadows::meets_truths`): those copies follow what each call
+    /// gathered (`render/shadows.rs`), so the pass is refused. A resource no shadow's truth shares
+    /// (the records of an indirect command buffer a kernel wrote, a buffer of other bytes) changes
+    /// none of them.
+    fn reaches_past_its_copies(&self, device: &Device, residency: &Residency) -> bool {
+        !self.shadows.is_empty()
+            && self.executions.iter().any(|execution| {
+                (residency.past(&execution.snapshot.residency))
+                    .any(|used| super::shadows::meets_truths(device, &self.shadows, used))
+            })
     }
 
     /// Announce, once per device, that a host step records the pass, naming the rule that kept
