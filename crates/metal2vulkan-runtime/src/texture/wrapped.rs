@@ -177,6 +177,8 @@ pub(crate) struct WrappedImage {
     /// the first batch that uses it is submitted, `home` after. The scheduler's thread reads and
     /// writes it as it submits, under its lock.
     current: Mutex<ImageLayout>,
+    /// The caller's image owner, retained through views and command-buffer uses.
+    keep_alive: Mutex<Option<crate::KeepAlive>>,
 }
 
 /// One layout transition of a caller's image, recorded as one `VkImageMemoryBarrier` over all of
@@ -243,6 +245,7 @@ impl WrappedImage {
             home: layouts.home,
             object,
             current: Mutex::new(layouts.initial),
+            keep_alive: Mutex::new(None),
         }
     }
 
@@ -635,5 +638,34 @@ impl Device {
         let storage = Storage::Image(Arc::new(image));
         let id_use = IdUse::Program(descriptor.placement);
         Ok(Texture::made(self, storage, record, None, id_use))
+    }
+    /// A retained-owner form of [`Device::new_texture_with_vk_image`]. No Metal counterpart:
+    /// Vulkan interop. `keep_alive` owns the external image and its memory; the runtime holds it
+    /// until the wrapped texture, every view and every command-buffer use release the image.
+    /// A refused call drops the owner immediately. The runtime still destroys only its views.
+    ///
+    /// # Safety
+    ///
+    /// The image, creation information, layouts, queue ownership and external synchronization
+    /// obey [`Device::new_texture_with_vk_image`]'s contract. The supplied owner keeps the image
+    /// and its memory alive until dropped, and does not retain the wrapped texture itself.
+    pub unsafe fn new_texture_with_vk_image_keep_alive(
+        &self,
+        descriptor: &TextureDescriptor,
+        image: vk::Image,
+        info: &vk::ImageCreateInfo<'_>,
+        layouts: VkImageLayouts,
+        keep_alive: crate::KeepAlive,
+    ) -> Result<Texture, Error> {
+        // SAFETY: the caller supplies the same image contract and an owner for its lifetime.
+        let texture = unsafe { self.new_texture_with_vk_image(descriptor, image, info, layouts) }?;
+        let Storage::Image(image) = &texture.0.storage else {
+            unreachable!("a wrapped Vulkan image has image storage");
+        };
+        let Owner::Caller(caller) = &image.owner else {
+            unreachable!("a wrapped Vulkan image belongs to its caller");
+        };
+        *caller.keep_alive.lock().unwrap_or_else(|p| p.into_inner()) = Some(keep_alive);
+        Ok(texture)
     }
 }

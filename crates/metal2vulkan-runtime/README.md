@@ -351,3 +351,9 @@ FFI consumers can call `Texture::cpu_copy_byte_length` before forming a host sli
 for `replace_region` or `get_bytes`. It validates the format, region and pitches
 and returns the exact span through the last copied row, including padding between
 rows and images. A zero span requires no pointer access.
+
+`Device::new_texture_with_vk_image_keep_alive` retains an external image owner
+through texture views and GPU uses. A swapchain adapter can put its swapchain and
+surface ownership there, so releasing a guest drawable cannot free images still
+referenced by an encoder or command buffer. The owner must not retain its wrapped
+textures, which would form a reference cycle.
