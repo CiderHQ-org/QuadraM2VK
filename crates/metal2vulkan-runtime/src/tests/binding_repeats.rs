@@ -3,6 +3,7 @@ use super::blit_holds::{device, Scratch};
 use crate::argument_table::{ArgumentTable, ATTRIBUTE_STRIDE_STATIC};
 use crate::encoder::EncoderCore;
 use crate::{ResourceOptions, TextureDescriptor};
+use metal2vulkan::bind::SamplerDescriptor;
 use metal2vulkan::metal::PixelFormat;
 
 #[test]
@@ -28,6 +29,10 @@ fn unchanged_buffers_and_textures_preserve_the_stamp() {
     table
         .set_textures(&mut core, "test", &[Some(&texture)], 2)
         .unwrap();
+    let sampler = device.new_sampler_state(&SamplerDescriptor::new()).unwrap();
+    table
+        .set_samplers(&mut core, "test", &[Some(&sampler)], None, 0)
+        .unwrap();
     let same = table.stamp();
     for _ in 0..200 {
         table
@@ -39,6 +44,9 @@ fn unchanged_buffers_and_textures_preserve_the_stamp() {
         table
             .set_textures(&mut core, "test", &[None, Some(&texture)], 1)
             .unwrap();
+        table
+            .set_samplers(&mut core, "test", &[Some(&sampler)], None, 0)
+            .unwrap();
         assert_eq!(table.stamp(), same);
     }
     assert!(table
@@ -46,6 +54,41 @@ fn unchanged_buffers_and_textures_preserve_the_stamp() {
         .is_err());
     assert!(table.set_textures(&mut core, "test", &[None], 128).is_err());
     assert_eq!(table.stamp(), same, "a refused binding changes nothing");
+    table
+        .set_samplers(
+            &mut core,
+            "test",
+            &[Some(&sampler)],
+            Some((&[0.0], &[1.0])),
+            0,
+        )
+        .unwrap();
+    let clamped = table.stamp();
+    assert_ne!(clamped, same);
+    table
+        .set_samplers(
+            &mut core,
+            "test",
+            &[Some(&sampler)],
+            Some((&[0.0], &[1.0])),
+            0,
+        )
+        .unwrap();
+    assert_eq!(table.stamp(), clamped);
+    table
+        .set_samplers(
+            &mut core,
+            "test",
+            &[Some(&sampler)],
+            Some((&[-0.0], &[1.0])),
+            0,
+        )
+        .unwrap();
+    assert_ne!(
+        table.stamp(),
+        clamped,
+        "the sign of a LOD clamp's zero stays distinct"
+    );
     table
         .set_buffer_with_stride(&mut core, "test", Some(&buffer), 16, 32, 0)
         .unwrap();

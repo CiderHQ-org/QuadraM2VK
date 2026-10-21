@@ -754,7 +754,6 @@ impl ArgumentTable {
         clamps: Option<(&[f32], &[f32])>,
         first: u32,
     ) -> Result<(), Error> {
-        self.stamp = Stamp::fresh();
         if let Some((min, max)) = clamps {
             if min.len() != samplers.len() || max.len() != samplers.len() {
                 return Err(invalid(call, Problem::LengthMismatch));
@@ -764,6 +763,30 @@ impl ArgumentTable {
         for sampler in samplers.iter().flatten() {
             core.check_device(call, sampler.device())?;
         }
+        if samplers
+            .iter()
+            .zip(first..)
+            .enumerate()
+            .all(
+                |(i, (sampler, index))| match (self.samplers.get(&index), sampler) {
+                    (None, None) => true,
+                    (Some((bound, old)), Some(sampler)) if bound == *sampler => {
+                        let new = clamps.map(|(min, max)| [min[i], max[i]]);
+                        match (old, new) {
+                            (None, None) => true,
+                            (Some(old), Some(new)) => {
+                                old.map(f32::to_bits) == new.map(f32::to_bits)
+                            }
+                            _ => false,
+                        }
+                    }
+                    _ => false,
+                },
+            )
+        {
+            return Ok(());
+        }
+        self.stamp = Stamp::fresh();
         for (i, (sampler, index)) in samplers.iter().zip(first..).enumerate() {
             let clamp = clamps.map(|(min, max)| [min[i], max[i]]);
             if let Some(replaced) = set_handle(&mut self.samplers, index, *sampler, clamp) {
