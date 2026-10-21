@@ -42,7 +42,11 @@
 //!   wired its 1 GiB of host memory whatever the GPU wrote of it.
 //! - **Raw.** A block is a `VkBuffer` bound to private memory, outside the Metal address space,
 //!   not a `Buffer`, which would hold the device from the device's own blocks (as the mipmap
-//!   scratch's, `mipmap_scratch.rs`). The device releases the blocks left as it is destroyed.
+//!   scratch's, `mipmap_scratch.rs`). The device releases the blocks left as it is destroyed. A
+//!   block released as a lease ends goes on the thread that ends it, a queue's waiter as its
+//!   command buffer completes, so the release reaches the device inside a section of the exit
+//!   guard (`Block::release_in_section`, `exit_guard.rs`); once the process is exiting the block is
+//!   left to its end.
 //! - **Not cleared.** Nothing reads a pool's bytes before a pass of the same command buffer wrote
 //!   them:
 //!   the index pool's counter lies in the command buffer's upload arena (zero as it is uploaded),
@@ -306,9 +310,12 @@ impl Drop for PoolLease {
         let released = lock(shared.gpu_pools.blocks(self.kind)).give(self.queue, Instant::now());
         for block in released {
             // SAFETY: a lease ends when its command buffer completes or is dropped unsubmitted,
-            // and no lease holds a block released, so no command uses it.
-            unsafe { block.release(shared.vk(), &mut lock(&shared.memory)) };
-            shared.counts.gpu_pool_block_released();
+            // and no lease holds a block released, so no command uses it. It ends on the queue's
+            // waiter that finished the command buffer, a runtime thread: the release reaches the
+            // device inside a section of the exit guard.
+            if unsafe { block.release_in_section(shared) } {
+                shared.counts.gpu_pool_block_released();
+            }
         }
     }
 }
@@ -367,8 +374,9 @@ impl Device {
                 );
                 if let Some(extra) = extra {
                     // SAFETY: made just now, the block was never bound to a command.
-                    unsafe { extra.release(shared.vk(), &mut lock(&shared.memory)) };
-                    shared.counts.gpu_pool_block_released();
+                    if unsafe { extra.release_in_section(shared) } {
+                        shared.counts.gpu_pool_block_released();
+                    }
                 }
                 (raw, leases)
             }
@@ -391,8 +399,9 @@ impl Device {
             if let Some(block) = block {
                 // SAFETY: every command buffer of the queue holds it, so none is left, and no
                 // command uses the block.
-                unsafe { block.release(shared.vk(), &mut lock(&shared.memory)) };
-                shared.counts.gpu_pool_block_released();
+                if unsafe { block.release_in_section(shared) } {
+                    shared.counts.gpu_pool_block_released();
+                }
             }
         }
     }

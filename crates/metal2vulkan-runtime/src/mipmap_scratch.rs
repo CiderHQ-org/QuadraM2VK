@@ -18,8 +18,9 @@
 //!   word and else written whole by its dispatch, each level's words uploaded, the values a
 //!   level keeps written by its own dispatch), so a block's earlier bytes are never read.
 
-use super::device::lock;
+use super::device::{lock, DeviceShared};
 use super::error::{vulkan, Error};
+use super::exit_guard;
 use super::memory::{Memory, MemoryClass, Placement};
 use super::Device;
 use crate::release;
@@ -103,6 +104,24 @@ impl Block {
         unsafe { release::object(device, self.raw) };
         memory.free(device, &self.placement);
     }
+
+    /// [`release`](Self::release) it with `shared`'s functions, reached inside a section of the
+    /// exit guard, whatever thread lets it go: a lease ends as its command buffer completes, on
+    /// the queue's waiter that finishes it, a runtime thread. Once the process is exiting, the
+    /// buffer and its memory are left to its end. Whether it was released.
+    ///
+    /// # Safety
+    ///
+    /// As [`release`](Self::release).
+    pub(super) unsafe fn release_in_section(self, shared: &DeviceShared) -> bool {
+        // The Vulkan teardown is a section of the exit guard.
+        let Some(_busy) = exit_guard::enter() else {
+            return false;
+        };
+        // SAFETY: the caller's.
+        unsafe { self.release(shared.vk(), &mut lock(&shared.memory)) };
+        true
+    }
 }
 
 /// The device's spare block ([`DeviceShared::mipmap_scratch`](super::device::DeviceShared)).
@@ -144,7 +163,7 @@ impl Drop for Lease {
         if let Some(block) = released {
             // SAFETY: a lease ends when its command buffer completes or is dropped unsubmitted,
             // and the spare is leased to none, so no command uses either block.
-            unsafe { block.release(shared.vk(), &mut lock(&shared.memory)) };
+            unsafe { block.release_in_section(shared) };
         }
     }
 }
@@ -160,7 +179,7 @@ impl Device {
             Take::Make(stale) => {
                 if let Some(block) = stale {
                     // SAFETY: the spare was leased to none, so no command uses it.
-                    unsafe { block.release(shared.vk(), &mut lock(&shared.memory)) };
+                    unsafe { block.release_in_section(shared) };
                 }
                 match self.make_block(need, MIPMAP_USAGE) {
                     Ok(block) => (block, need),
