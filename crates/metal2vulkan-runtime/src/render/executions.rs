@@ -373,8 +373,7 @@ impl RenderCommandEncoder {
     /// records never calls it; nor does one that runs on the GPU alone (`render/executions/gpu.rs`),
     /// which it may only where what `icb`'s records may hold, at the commit and again as the
     /// pass's batch is ready to submit, rules out every kind `needs` names
-    /// ([`IndirectCommandCheckNeeds`]; [`IndirectCommandCheckNeeds::ALL`] keeps every such
-    /// execution on its host step). Refused as
+    /// ([`IndirectCommandCheckNeeds`], [`IndirectCommandCheckNeeds::ALL`] included). Refused as
     /// [`execute_commands_in_buffer`](Self::execute_commands_in_buffer) refuses.
     pub fn execute_commands_in_buffer_checked(
         &mut self,

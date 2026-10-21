@@ -2821,7 +2821,8 @@ pub struct IndirectCommandCheckNeeds {
 }
 
 impl IndirectCommandCheckNeeds {
-    /// Every kind: the check is called wherever a host step records the execution.
+    /// Every kind: draws of points and commands under states that may encode. Where what the
+    /// records may hold rules out both, the check still has nothing to see.
     pub const ALL: IndirectCommandCheckNeeds = IndirectCommandCheckNeeds {
         point_draws: true,
         encoding_states: true,

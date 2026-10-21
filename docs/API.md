@@ -2728,8 +2728,8 @@ each item named states the rule in full.
 - **A checked execution states what its check looks for**
   (`execute_commands_in_buffer_checked`'s `IndirectCommandCheckNeeds`, no Metal counterpart): draws
   of points, and commands under states that may encode indirect commands. Where what the records
-  may hold rules out both, the check has nothing to see, is never called, and the execution may run
-  on the GPU alone; `IndirectCommandCheckNeeds::ALL` keeps it on its host step.
+  may hold rules out every kind the check names (`IndirectCommandCheckNeeds::ALL` names both), the
+  check has nothing to see, is never called, and the execution may run on the GPU alone.
 - **Command predication** (`encode_start_if`, `encode_start_else`, `encode_end_if` and the
   while and do-while loops) runs Metal's blocks and loops. A loop is laid down as 64 copies (16
   inside another loop); one that runs past them fails its command buffer
