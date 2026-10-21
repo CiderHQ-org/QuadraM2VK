@@ -772,10 +772,12 @@ pub fn pipeline<G: Gpu>(g: &G, metallib: &std::path::Path, sizes: &Sizes) {
 }
 
 /// Memory: buffer creation (`Shared`, by length, by bytes, and over host memory without a copy)
-/// and a `Shared` texture's `replaceRegion` and `getBytes`.
-pub fn memory<G: Gpu>(g: &G, sizes: &Sizes) {
+/// and a `Shared` texture's `replaceRegion` and `getBytes`; only the parts `variants` names where
+/// it names any (`create`, `no_copy`, `held_1m`, `held_64m`, `texture`).
+pub fn memory<G: Gpu>(g: &G, sizes: &Sizes, variants: &[String]) {
     const KIB: usize = 1024;
     const MIB: usize = 1024 * 1024;
+    let runs = |name: &str| variants.is_empty() || variants.iter().any(|v| v == name);
     let repeats = |length: usize| {
         if length >= 16 * MIB {
             8
@@ -783,7 +785,8 @@ pub fn memory<G: Gpu>(g: &G, sizes: &Sizes) {
             sizes.timed.max(20)
         }
     };
-    for (name, length) in [("4k", 4 * KIB), ("1m", MIB), ("64m", 64 * MIB)] {
+    let created = [("4k", 4 * KIB), ("1m", MIB), ("64m", 64 * MIB)];
+    for (name, length) in created.into_iter().filter(|_| runs("create")) {
         let mut times = vec![];
         for _ in 0..repeats(length) {
             let t = Instant::now();
@@ -807,7 +810,8 @@ pub fn memory<G: Gpu>(g: &G, sizes: &Sizes) {
             &mut times,
         );
     }
-    for (name, length) in [("1m", MIB), ("64m", 64 * MIB)] {
+    let no_copy = [("1m", MIB), ("64m", 64 * MIB)];
+    for (name, length) in no_copy.into_iter().filter(|_| runs("no_copy")) {
         let mut times = vec![];
         let mut maps = vec![];
         for _ in 0..repeats(length) {
@@ -854,7 +858,11 @@ pub fn memory<G: Gpu>(g: &G, sizes: &Sizes) {
     // recycler lets go of what it parked above once a second passed). Each one's creation, then
     // the first touch of all its bytes: a write from the CPU, or, of another set, a blit fill
     // from the GPU (commit to the wait's return), and that fill again.
-    for (name, length, count) in [("1m", MIB, 48), ("64m", 64 * MIB, 6)] {
+    let held = [("1m", MIB, 48), ("64m", 64 * MIB, 6)];
+    for (name, length, count) in held
+        .into_iter()
+        .filter(|(name, ..)| runs(&format!("held_{name}")))
+    {
         std::thread::sleep(Duration::from_millis(1100));
         let mut make = vec![];
         let mut held = || -> Vec<G::Buffer> {
@@ -911,6 +919,9 @@ pub fn memory<G: Gpu>(g: &G, sizes: &Sizes) {
             "us",
             &mut again,
         );
+    }
+    if !runs("texture") {
+        return;
     }
     let side = HEAVY_TEXTURE_SIDE;
     let texture = g.texture(Format::Rgba8, side, side, false);

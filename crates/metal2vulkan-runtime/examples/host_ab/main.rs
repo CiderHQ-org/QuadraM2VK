@@ -124,7 +124,8 @@
 //! `--metallib PATH` (skip the compile; not with `pipeline`), `--cache DIR` (the runtime's shader
 //! cache, with `--side`), `--variants a,b,...` (the encode workload's variants alone:
 //! `draw_static`, `draw_bind`, `draw_pipeline`, `draw_passes`, `dispatch_static`,
-//! `dispatch_churn`; for a profile of one).
+//! `dispatch_churn`; for a profile of one; and the memory workload's parts alone: `create`,
+//! `no_copy`, `held_1m`, `held_64m`, `texture`).
 //!
 //! On a Mac, the runtime's device opens the Vulkan loader (`/opt/homebrew/lib` among the places
 //! it looks) and MoltenVK's `MVK_CONFIG_*` variables apply. Run timings on an otherwise idle GPU.
@@ -168,7 +169,7 @@ struct Options {
     cache: Option<PathBuf>,
     /// Where a side writes the gpu workload's kernel outputs (`--outputs`).
     outputs: Option<PathBuf>,
-    /// The encode workload's variants to run (`--variants`); all when empty.
+    /// The encode and memory workloads' variants to run (`--variants`); all when empty.
     variants: Vec<String>,
     /// Arguments passed on to each child.
     passed: Vec<String>,
@@ -354,7 +355,7 @@ fn run<G: Gpu>(g: &G, opened: Instant, metallib: &Path, options: &Options) {
             "fixed" => workloads::fixed(g, &scene, sizes),
             "latency" => workloads::latency(g, &scene, sizes),
             "gpu" => workloads::gpu(g, &scene, sizes, options.outputs.as_deref()),
-            "memory" => workloads::memory(g, sizes),
+            "memory" => workloads::memory(g, sizes, &options.variants),
             "frame" => workloads::frame(g, &scene, sizes),
             "many_draws" => workloads::many_draws(g, &library, sizes),
             "churn" => workloads::churn(g, sizes),
