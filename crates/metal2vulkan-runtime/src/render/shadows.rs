@@ -88,6 +88,10 @@ pub(super) struct InstanceShadows {
     /// refuse an instance that writes one image apart two ways), for the shadows of images'
     /// views of another layout (`texture/view_shadow.rs`).
     images: BTreeMap<(ResourceKey, bool), UseRange>,
+    /// The uses the last [`add`](InstanceShadows::add) gathered, in order: a use equal to the
+    /// one at its position there is gathered already (gathering one again changes nothing, as
+    /// each range only grows), so a draw that uses what the last one did gathers nothing new.
+    last: Vec<Use<ResourceKey>>,
 }
 
 /// `range` of the buffer `key` as a use, read or written (`write`), for `shadow.rs`, which reads
@@ -202,7 +206,10 @@ impl InstanceShadows {
         for shadow in shadows {
             shadow::join(&mut self.shadows, shadow);
         }
-        for used in uses {
+        let last = &self.last;
+        let gathered = |(at, used): &(usize, &Use<ResourceKey>)| last.get(*at) == Some(*used);
+        let fresh = uses.iter().enumerate().filter(|at| !gathered(at));
+        for (_, used) in fresh {
             for (write, access) in [(false, used.read), (true, used.write)] {
                 if access.is_empty() {
                     continue;
@@ -221,6 +228,9 @@ impl InstanceShadows {
                 }
             }
         }
+        // Its storage is kept from one draw to the next.
+        self.last.clear();
+        self.last.extend_from_slice(uses);
     }
 
     /// The gathered bytes and images as uses.

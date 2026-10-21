@@ -1040,7 +1040,8 @@ impl EncoderCore {
             shared.counts.command_noted_as_before();
             return Ok(());
         }
-        self.record_aliased(stages, uses);
+        let fresh = noted.fresh(uses, into);
+        self.record_aliased(stages, fresh);
         self.touch_reaching(uses, resident);
         noted.note(stages, (uses, resident), into);
         Ok(())

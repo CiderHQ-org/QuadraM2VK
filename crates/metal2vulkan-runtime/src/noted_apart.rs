@@ -16,6 +16,11 @@
 //! (`WorkCounts::commands_noted_as_before`); every other command is noted as before and kept.
 //! The encoder's parts and held images only grow, so their counts tell a change apart.
 //!
+//! A command noted into the same state as the last one, but with some uses changed, records
+//! only the uses that differ from the last one's at their position (`NotedApart::fresh`): each
+//! use equal to the last command's at its place, and so the host aliases' uses beside it, is in
+//! the part already, and recording it again changes nothing. Its stages widen the part as before.
+//!
 //! A render encoder keeps it with its bind state (`live_bind.rs`), which the next render encoder
 //! starts from, so its storage is kept from one encoder to the next and a draw allocates none:
 //! it names the encoder core that noted it (`EncoderCore::id`, no other core's), and another
@@ -44,6 +49,9 @@ pub(super) struct NotedApart {
     rebinds: bool,
     /// The host aliases' version then.
     aliases: u64,
+    /// The uses of the command being noted that differ from the last one's
+    /// ([`fresh`](NotedApart::fresh)), kept so their storage is too.
+    fresh: Vec<Use<ResourceKey>>,
 }
 
 /// The encoder's state a command is noted into: its core, its parts and held images (counts),
@@ -94,6 +102,29 @@ impl NotedApart {
         self.held = into.held;
         self.rebinds = into.rebinds;
         self.aliases = into.aliases;
+    }
+
+    /// The uses of `uses`, a command noted into `into`, that the encoder's current part may
+    /// lack: all of them, unless the last command noted was noted into `into`, then those that
+    /// differ from its use at the same position (the module docs).
+    pub(super) fn fresh<'s>(
+        &'s mut self,
+        uses: &'s [Use<ResourceKey>],
+        into: NotedInto,
+    ) -> &'s [Use<ResourceKey>] {
+        if self.core != Some(into.core) || NotedApart::into(self) != into {
+            return uses;
+        }
+        self.fresh.clear();
+        let last = &self.uses;
+        let differ = |(at, used): &(usize, &Use<ResourceKey>)| last.get(*at) != Some(*used);
+        self.fresh.extend(
+            uses.iter()
+                .enumerate()
+                .filter(differ)
+                .map(|(_, used)| used.clone()),
+        );
+        &self.fresh
     }
 
     fn into(&self) -> NotedInto {
