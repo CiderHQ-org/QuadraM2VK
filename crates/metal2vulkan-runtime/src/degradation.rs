@@ -77,6 +77,7 @@ use super::texture::heap_tiled::Untiled;
 use super::texture_descriptor::TextureDescriptor;
 use super::tracker::Use;
 use super::values::ResourceOptions;
+use crate::error::EncoderCall;
 use metal2vulkan::bind::PlanDiagnostic;
 use metal2vulkan::cache::SpecializationKey;
 use metal2vulkan::device::{DriverFact, FunctionStorage, ResolvePolicy, VkProperty};
@@ -2224,6 +2225,11 @@ pub struct DegradeNotice {
     /// For [`Degradation::MisplacedNotice`], the misplaced notice's kind and where it was
     /// announced; `None` for every other kind.
     pub misplaced: Option<MisplacedNotice>,
+    /// The render encoder's call whose lowering announced it, where the runtime lowered the call
+    /// after it returned (`RenderLoweringPolicy::Worker`, the default): its Metal selector and
+    /// its place among the encoder's calls. `None` for a notice announced inside the program's
+    /// call itself, and for every other notice.
+    pub call: Option<EncoderCall>,
 }
 
 /// A notice announced where the runtime's rule announces none
@@ -2285,6 +2291,7 @@ impl DegradeNotice {
             cost: degradation.cost(),
             object_id: None,
             misplaced: None,
+            call: crate::render::lowering::current(),
         }
     }
 
@@ -2648,6 +2655,13 @@ impl Device {
         describe: impl FnOnce() -> (String, String),
     ) {
         let shared = self.shared();
+        // A kind the device refuses while lowering a call after it returned refuses the call,
+        // at every occurrence, rather than being announced (`render/deferral.rs`).
+        if crate::render::lowering::current().is_some() && shared.lowering_refuses(degradation) {
+            let (object, reason) = describe();
+            crate::render::lowering::refuse(DegradeNotice::new(degradation, object, reason));
+            return;
+        }
         // A call encoded again at a rebind met what the program's call met, which announced it:
         // each kind at most once there (`replay.rs`).
         let announce = match crate::replay::is_replaying() {

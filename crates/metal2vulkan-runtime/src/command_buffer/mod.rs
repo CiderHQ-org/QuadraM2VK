@@ -1003,6 +1003,12 @@ impl State {
             .enter(place, self.batches.events(), dispatch_type);
     }
 
+    /// Keep `error`, a render encoder's call's refused as it was lowered
+    /// (`CommandBufferError::CallRefused`): the first such call's.
+    pub(super) fn refuse_call(&mut self, error: Error) {
+        self.refusal.get_or_insert(error);
+    }
+
     /// Ended encoder `encoder` fails the command buffer from it on with `error` (`fails_from`).
     pub(super) fn fail_from(&mut self, encoder: usize, error: CommandBufferError) {
         self.fails_from.get_or_insert((encoder, error));
@@ -2115,7 +2121,9 @@ impl CommandBuffer {
     /// Why a host step refused the command buffer's commands, once it failed with
     /// [`CommandBufferError::Refused`]: the refusal, typed as [`commit`](Self::commit) types it
     /// where the CPU wrote the records (`Invalid`, `Unsupported`, `NotImplemented` and the
-    /// others). No Metal counterpart.
+    /// others). Once it failed with [`CommandBufferError::CallRefused`]: the error the render
+    /// encoder's call refused as it was lowered would have returned at the call. No Metal
+    /// counterpart.
     pub fn refusal(&self) -> Option<Error> {
         self.state().refusal.clone()
     }

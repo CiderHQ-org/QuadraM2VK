@@ -1291,13 +1291,13 @@ impl RenderCommandEncoder {
     /// Not measured (`NotImplemented(TileAtSampleCount)`) in a pass of a sample count Apple's
     /// GPUs lack.
     pub fn tile_width(&self) -> Result<u64, Error> {
-        self.lowering.tile_width()
+        self.lowered(RenderLowering::tile_width)
     }
 
     /// `tileHeight`: the pass's tile height, or the default for its samples (32, and 16 at 4
     /// samples; `tile_pass.rs`). Not measured as [`RenderCommandEncoder::tile_width`] is not.
     pub fn tile_height(&self) -> Result<u64, Error> {
-        self.lowering.tile_height()
+        self.lowered(RenderLowering::tile_height)
     }
 
     /// `setTileBuffer:offset:atIndex:` (`None` unbinds the index). Refused as
@@ -1308,7 +1308,13 @@ impl RenderCommandEncoder {
         offset: u64,
         index: u32,
     ) -> Result<(), Error> {
-        self.lowering.set_tile_buffer(buffer, offset, index)
+        match self.lowers_at_call() {
+            true => self.at_call(|lowering| lowering.set_tile_buffer(buffer, offset, index)),
+            false => self.defer(|log| {
+                let buffer = buffer.map(|buffer| log.hold_buffer(buffer));
+                RenderCall::Buffer(Table::Tile, buffer, offset, index)
+            }),
+        }
     }
 
     /// `setTileBuffers:offsets:withRange:`. Refused as
@@ -1319,26 +1325,48 @@ impl RenderCommandEncoder {
         offsets: &[u64],
         first: u32,
     ) -> Result<(), Error> {
-        self.lowering.set_tile_buffers(buffers, offsets, first)
+        match self.lowers_at_call() {
+            true => self.at_call(|lowering| lowering.set_tile_buffers(buffers, offsets, first)),
+            false => self.defer(|log| {
+                RenderCall::Buffers(
+                    Table::Tile,
+                    log.buffer_span(buffers),
+                    log.word_span(offsets),
+                    first,
+                )
+            }),
+        }
     }
 
     /// `setTileBufferOffset:atIndex:`. Refused as
     /// [`RenderCommandEncoder::set_vertex_buffer_offset`] is.
     pub fn set_tile_buffer_offset(&mut self, offset: u64, index: u32) -> Result<(), Error> {
-        self.lowering.set_tile_buffer_offset(offset, index)
+        match self.lowers_at_call() {
+            true => self.at_call(|lowering| lowering.set_tile_buffer_offset(offset, index)),
+            false => self.defer(|_| RenderCall::BufferOffset(Table::Tile, offset, index)),
+        }
     }
 
     /// `setTileBytes:length:atIndex:`: as
     /// [`RenderCommandEncoder::set_vertex_bytes`], in the tile stage's table, which the pass's
     /// later tile dispatches read. Refused as that is.
     pub fn set_tile_bytes(&mut self, bytes: &[u8], index: u32) -> Result<(), Error> {
-        self.lowering.set_tile_bytes(bytes, index)
+        match self.lowers_at_call() {
+            true => self.at_call(|lowering| lowering.set_tile_bytes(bytes, index)),
+            false => self.defer(|log| RenderCall::Bytes(Table::Tile, log.byte_span(bytes), index)),
+        }
     }
 
     /// `setTileTexture:atIndex:` (`None` unbinds the index). Refused as
     /// [`RenderCommandEncoder::set_vertex_texture`] is.
     pub fn set_tile_texture(&mut self, texture: Option<&Texture>, index: u32) -> Result<(), Error> {
-        self.lowering.set_tile_texture(texture, index)
+        match self.lowers_at_call() {
+            true => self.at_call(|lowering| lowering.set_tile_texture(texture, index)),
+            false => self.defer(|log| {
+                let texture = texture.map(|texture| log.hold_texture(texture));
+                RenderCall::Texture(Table::Tile, texture, index)
+            }),
+        }
     }
 
     /// `setTileTextures:withRange:`. Refused as
@@ -1348,7 +1376,11 @@ impl RenderCommandEncoder {
         textures: &[Option<&Texture>],
         first: u32,
     ) -> Result<(), Error> {
-        self.lowering.set_tile_textures(textures, first)
+        match self.lowers_at_call() {
+            true => self.at_call(|lowering| lowering.set_tile_textures(textures, first)),
+            false => self
+                .defer(|log| RenderCall::Textures(Table::Tile, log.texture_span(textures), first)),
+        }
     }
 
     /// `setTileSamplerState:atIndex:` (`None` unbinds the index). Refused as
@@ -1358,7 +1390,13 @@ impl RenderCommandEncoder {
         sampler: Option<&SamplerState>,
         index: u32,
     ) -> Result<(), Error> {
-        self.lowering.set_tile_sampler_state(sampler, index)
+        match self.lowers_at_call() {
+            true => self.at_call(|lowering| lowering.set_tile_sampler_state(sampler, index)),
+            false => self.defer(|log| {
+                let sampler = sampler.map(|sampler| log.hold_sampler(sampler));
+                RenderCall::Sampler(Table::Tile, sampler, index)
+            }),
+        }
     }
 
     /// `setTileSamplerStates:withRange:`, or with `clamps`
@@ -1370,8 +1408,14 @@ impl RenderCommandEncoder {
         clamps: Option<(&[f32], &[f32])>,
         first: u32,
     ) -> Result<(), Error> {
-        self.lowering
-            .set_tile_sampler_states(samplers, clamps, first)
+        match self.lowers_at_call() {
+            true => {
+                self.at_call(|lowering| lowering.set_tile_sampler_states(samplers, clamps, first))
+            }
+            false => self.defer(|_| {
+                RenderCall::Samplers(Table::Tile, Samplers::of(samplers, clamps, first))
+            }),
+        }
     }
 
     /// `dispatchThreadsPerTile:`: run the tile pipeline's state set on every tile of the pass
@@ -1384,7 +1428,10 @@ impl RenderCommandEncoder {
     /// state's `max_total_threads_per_threadgroup` (this device's lower limit) among them. A
     /// refused dispatch records nothing and changes nothing.
     pub fn dispatch_threads_per_tile(&mut self, threads: Size) -> Result<(), Error> {
-        self.lowering.dispatch_threads_per_tile(threads)
+        match self.lowers_at_call() {
+            true => self.at_call(|lowering| lowering.dispatch_threads_per_tile(threads)),
+            false => self.defer(|_| RenderCall::ThreadsPerTile(Box::new(threads))),
+        }
     }
 
     /// `dispatchThreadsPerTile:inRegion:`, or with `render_target_array_index`
@@ -1398,11 +1445,22 @@ impl RenderCommandEncoder {
         region: Region,
         render_target_array_index: Option<u32>,
     ) -> Result<(), Error> {
-        self.lowering.dispatch_threads_per_tile_in_region(
-            threads,
-            region,
-            render_target_array_index,
-        )
+        match self.lowers_at_call() {
+            true => self.at_call(|lowering| {
+                lowering.dispatch_threads_per_tile_in_region(
+                    threads,
+                    region,
+                    render_target_array_index,
+                )
+            }),
+            false => self.defer(|_| {
+                RenderCall::ThreadsPerTileInRegion(Box::new((
+                    threads,
+                    region,
+                    render_target_array_index,
+                )))
+            }),
+        }
     }
 }
 

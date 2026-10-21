@@ -547,7 +547,13 @@ impl RenderCommandEncoder {
         offset: u64,
         index: u32,
     ) -> Result<(), Error> {
-        self.lowering.set_object_buffer(buffer, offset, index)
+        match self.lowers_at_call() {
+            true => self.at_call(|lowering| lowering.set_object_buffer(buffer, offset, index)),
+            false => self.defer(|log| {
+                let buffer = buffer.map(|buffer| log.hold_buffer(buffer));
+                RenderCall::Buffer(Table::Object, buffer, offset, index)
+            }),
+        }
     }
 
     /// `setObjectBuffers:offsets:withRange:`. Refused as
@@ -558,19 +564,37 @@ impl RenderCommandEncoder {
         offsets: &[u64],
         first: u32,
     ) -> Result<(), Error> {
-        self.lowering.set_object_buffers(buffers, offsets, first)
+        match self.lowers_at_call() {
+            true => self.at_call(|lowering| lowering.set_object_buffers(buffers, offsets, first)),
+            false => self.defer(|log| {
+                RenderCall::Buffers(
+                    Table::Object,
+                    log.buffer_span(buffers),
+                    log.word_span(offsets),
+                    first,
+                )
+            }),
+        }
     }
 
     /// `setObjectBufferOffset:atIndex:`. Refused as
     /// [`set_vertex_buffer_offset`](Self::set_vertex_buffer_offset) is.
     pub fn set_object_buffer_offset(&mut self, offset: u64, index: u32) -> Result<(), Error> {
-        self.lowering.set_object_buffer_offset(offset, index)
+        match self.lowers_at_call() {
+            true => self.at_call(|lowering| lowering.set_object_buffer_offset(offset, index)),
+            false => self.defer(|_| RenderCall::BufferOffset(Table::Object, offset, index)),
+        }
     }
 
     /// `setObjectBytes:length:atIndex:`: as [`set_vertex_bytes`](Self::set_vertex_bytes), in
     /// the object stage's table. Refused as that is.
     pub fn set_object_bytes(&mut self, bytes: &[u8], index: u32) -> Result<(), Error> {
-        self.lowering.set_object_bytes(bytes, index)
+        match self.lowers_at_call() {
+            true => self.at_call(|lowering| lowering.set_object_bytes(bytes, index)),
+            false => {
+                self.defer(|log| RenderCall::Bytes(Table::Object, log.byte_span(bytes), index))
+            }
+        }
     }
 
     /// `setObjectTexture:atIndex:` (`None` unbinds the index). Refused as
@@ -580,7 +604,13 @@ impl RenderCommandEncoder {
         texture: Option<&Texture>,
         index: u32,
     ) -> Result<(), Error> {
-        self.lowering.set_object_texture(texture, index)
+        match self.lowers_at_call() {
+            true => self.at_call(|lowering| lowering.set_object_texture(texture, index)),
+            false => self.defer(|log| {
+                let texture = texture.map(|texture| log.hold_texture(texture));
+                RenderCall::Texture(Table::Object, texture, index)
+            }),
+        }
     }
 
     /// `setObjectTextures:withRange:`. Refused as
@@ -590,7 +620,12 @@ impl RenderCommandEncoder {
         textures: &[Option<&Texture>],
         first: u32,
     ) -> Result<(), Error> {
-        self.lowering.set_object_textures(textures, first)
+        match self.lowers_at_call() {
+            true => self.at_call(|lowering| lowering.set_object_textures(textures, first)),
+            false => self.defer(|log| {
+                RenderCall::Textures(Table::Object, log.texture_span(textures), first)
+            }),
+        }
     }
 
     /// `setObjectSamplerState:atIndex:` (`None` unbinds the index). Refused as
@@ -600,7 +635,13 @@ impl RenderCommandEncoder {
         sampler: Option<&SamplerState>,
         index: u32,
     ) -> Result<(), Error> {
-        self.lowering.set_object_sampler_state(sampler, index)
+        match self.lowers_at_call() {
+            true => self.at_call(|lowering| lowering.set_object_sampler_state(sampler, index)),
+            false => self.defer(|log| {
+                let sampler = sampler.map(|sampler| log.hold_sampler(sampler));
+                RenderCall::Sampler(Table::Object, sampler, index)
+            }),
+        }
     }
 
     /// `setObjectSamplerStates:withRange:`, or with `clamps`
@@ -612,8 +653,14 @@ impl RenderCommandEncoder {
         clamps: Option<(&[f32], &[f32])>,
         first: u32,
     ) -> Result<(), Error> {
-        self.lowering
-            .set_object_sampler_states(samplers, clamps, first)
+        match self.lowers_at_call() {
+            true => {
+                self.at_call(|lowering| lowering.set_object_sampler_states(samplers, clamps, first))
+            }
+            false => self.defer(|_| {
+                RenderCall::Samplers(Table::Object, Samplers::of(samplers, clamps, first))
+            }),
+        }
     }
 
     /// `setObjectThreadgroupMemoryLength:atIndex:`: the length of the object function's
@@ -631,8 +678,11 @@ impl RenderCommandEncoder {
         length: u32,
         index: u32,
     ) -> Result<(), Error> {
-        self.lowering
-            .set_object_threadgroup_memory_length(length, index)
+        match self.lowers_at_call() {
+            true => self
+                .at_call(|lowering| lowering.set_object_threadgroup_memory_length(length, index)),
+            false => self.defer(|_| RenderCall::ObjectThreadgroupMemoryLength(length, index)),
+        }
     }
 
     /// `setMeshBuffer:offset:atIndex:` (`None` unbinds the index). Refused as
@@ -643,7 +693,13 @@ impl RenderCommandEncoder {
         offset: u64,
         index: u32,
     ) -> Result<(), Error> {
-        self.lowering.set_mesh_buffer(buffer, offset, index)
+        match self.lowers_at_call() {
+            true => self.at_call(|lowering| lowering.set_mesh_buffer(buffer, offset, index)),
+            false => self.defer(|log| {
+                let buffer = buffer.map(|buffer| log.hold_buffer(buffer));
+                RenderCall::Buffer(Table::Mesh, buffer, offset, index)
+            }),
+        }
     }
 
     /// `setMeshBuffers:offsets:withRange:`. Refused as
@@ -654,25 +710,47 @@ impl RenderCommandEncoder {
         offsets: &[u64],
         first: u32,
     ) -> Result<(), Error> {
-        self.lowering.set_mesh_buffers(buffers, offsets, first)
+        match self.lowers_at_call() {
+            true => self.at_call(|lowering| lowering.set_mesh_buffers(buffers, offsets, first)),
+            false => self.defer(|log| {
+                RenderCall::Buffers(
+                    Table::Mesh,
+                    log.buffer_span(buffers),
+                    log.word_span(offsets),
+                    first,
+                )
+            }),
+        }
     }
 
     /// `setMeshBufferOffset:atIndex:`. Refused as
     /// [`set_vertex_buffer_offset`](Self::set_vertex_buffer_offset) is.
     pub fn set_mesh_buffer_offset(&mut self, offset: u64, index: u32) -> Result<(), Error> {
-        self.lowering.set_mesh_buffer_offset(offset, index)
+        match self.lowers_at_call() {
+            true => self.at_call(|lowering| lowering.set_mesh_buffer_offset(offset, index)),
+            false => self.defer(|_| RenderCall::BufferOffset(Table::Mesh, offset, index)),
+        }
     }
 
     /// `setMeshBytes:length:atIndex:`: as [`set_vertex_bytes`](Self::set_vertex_bytes), in the
     /// mesh stage's table. Refused as that is.
     pub fn set_mesh_bytes(&mut self, bytes: &[u8], index: u32) -> Result<(), Error> {
-        self.lowering.set_mesh_bytes(bytes, index)
+        match self.lowers_at_call() {
+            true => self.at_call(|lowering| lowering.set_mesh_bytes(bytes, index)),
+            false => self.defer(|log| RenderCall::Bytes(Table::Mesh, log.byte_span(bytes), index)),
+        }
     }
 
     /// `setMeshTexture:atIndex:` (`None` unbinds the index). Refused as
     /// [`set_vertex_texture`](Self::set_vertex_texture) is.
     pub fn set_mesh_texture(&mut self, texture: Option<&Texture>, index: u32) -> Result<(), Error> {
-        self.lowering.set_mesh_texture(texture, index)
+        match self.lowers_at_call() {
+            true => self.at_call(|lowering| lowering.set_mesh_texture(texture, index)),
+            false => self.defer(|log| {
+                let texture = texture.map(|texture| log.hold_texture(texture));
+                RenderCall::Texture(Table::Mesh, texture, index)
+            }),
+        }
     }
 
     /// `setMeshTextures:withRange:`. Refused as
@@ -682,7 +760,11 @@ impl RenderCommandEncoder {
         textures: &[Option<&Texture>],
         first: u32,
     ) -> Result<(), Error> {
-        self.lowering.set_mesh_textures(textures, first)
+        match self.lowers_at_call() {
+            true => self.at_call(|lowering| lowering.set_mesh_textures(textures, first)),
+            false => self
+                .defer(|log| RenderCall::Textures(Table::Mesh, log.texture_span(textures), first)),
+        }
     }
 
     /// `setMeshSamplerState:atIndex:` (`None` unbinds the index). Refused as
@@ -692,7 +774,13 @@ impl RenderCommandEncoder {
         sampler: Option<&SamplerState>,
         index: u32,
     ) -> Result<(), Error> {
-        self.lowering.set_mesh_sampler_state(sampler, index)
+        match self.lowers_at_call() {
+            true => self.at_call(|lowering| lowering.set_mesh_sampler_state(sampler, index)),
+            false => self.defer(|log| {
+                let sampler = sampler.map(|sampler| log.hold_sampler(sampler));
+                RenderCall::Sampler(Table::Mesh, sampler, index)
+            }),
+        }
     }
 
     /// `setMeshSamplerStates:withRange:`, or with `clamps`
@@ -704,8 +792,14 @@ impl RenderCommandEncoder {
         clamps: Option<(&[f32], &[f32])>,
         first: u32,
     ) -> Result<(), Error> {
-        self.lowering
-            .set_mesh_sampler_states(samplers, clamps, first)
+        match self.lowers_at_call() {
+            true => {
+                self.at_call(|lowering| lowering.set_mesh_sampler_states(samplers, clamps, first))
+            }
+            false => self.defer(|_| {
+                RenderCall::Samplers(Table::Mesh, Samplers::of(samplers, clamps, first))
+            }),
+        }
     }
 
     /// `drawMeshThreadgroups:threadsPerObjectThreadgroup:threadsPerMeshThreadgroup:`: `groups`
@@ -717,11 +811,22 @@ impl RenderCommandEncoder {
         threads_per_object_group: Size,
         threads_per_mesh_group: Size,
     ) -> Result<(), Error> {
-        self.lowering.draw_mesh_threadgroups(
-            groups,
-            threads_per_object_group,
-            threads_per_mesh_group,
-        )
+        match self.lowers_at_call() {
+            true => self.at_call(|lowering| {
+                lowering.draw_mesh_threadgroups(
+                    groups,
+                    threads_per_object_group,
+                    threads_per_mesh_group,
+                )
+            }),
+            false => self.defer(|_| {
+                RenderCall::MeshThreadgroups(Box::new((
+                    groups,
+                    threads_per_object_group,
+                    threads_per_mesh_group,
+                )))
+            }),
+        }
     }
 
     /// `drawMeshThreads:threadsPerObjectThreadgroup:threadsPerMeshThreadgroup:`: the whole mesh
@@ -733,8 +838,22 @@ impl RenderCommandEncoder {
         threads_per_object_group: Size,
         threads_per_mesh_group: Size,
     ) -> Result<(), Error> {
-        self.lowering
-            .draw_mesh_threads(threads, threads_per_object_group, threads_per_mesh_group)
+        match self.lowers_at_call() {
+            true => self.at_call(|lowering| {
+                lowering.draw_mesh_threads(
+                    threads,
+                    threads_per_object_group,
+                    threads_per_mesh_group,
+                )
+            }),
+            false => self.defer(|_| {
+                RenderCall::MeshThreads(Box::new((
+                    threads,
+                    threads_per_object_group,
+                    threads_per_mesh_group,
+                )))
+            }),
+        }
     }
 
     /// `drawMeshThreadgroupsWithIndirectBuffer:indirectBufferOffset:threadsPerObjectThreadgroup:
@@ -752,12 +871,24 @@ impl RenderCommandEncoder {
         threads_per_object_group: Size,
         threads_per_mesh_group: Size,
     ) -> Result<(), Error> {
-        self.lowering.draw_mesh_threadgroups_indirect(
-            indirect_buffer,
-            indirect_buffer_offset,
-            threads_per_object_group,
-            threads_per_mesh_group,
-        )
+        match self.lowers_at_call() {
+            true => self.at_call(|lowering| {
+                lowering.draw_mesh_threadgroups_indirect(
+                    indirect_buffer,
+                    indirect_buffer_offset,
+                    threads_per_object_group,
+                    threads_per_mesh_group,
+                )
+            }),
+            false => self.defer(|_| {
+                RenderCall::MeshThreadgroupsIndirect(Box::new((
+                    indirect_buffer.clone(),
+                    indirect_buffer_offset,
+                    threads_per_object_group,
+                    threads_per_mesh_group,
+                )))
+            }),
+        }
     }
 }
 

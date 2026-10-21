@@ -832,7 +832,7 @@ impl DepthStencilTarget {
 }
 
 /// What a render encoder renders into: [`layout`] of its descriptor.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub(super) struct PassLayout {
     /// The color attachments by Metal index, up to the last with a texture.
     pub(super) colors: Vec<Option<ColorTarget>>,
@@ -860,6 +860,50 @@ pub(super) struct PassLayout {
     /// `extent` the device's largest framebuffer's within it, or of a default sample count Metal
     /// fails it at (`CommandBufferError::DefaultRasterSampleCount`, [`pass_default_samples`]).
     pub(super) fails_command_buffer: Option<CommandBufferError>,
+}
+
+impl Clone for PassLayout {
+    fn clone(&self) -> PassLayout {
+        PassLayout {
+            colors: self.colors.clone(),
+            depth_stencil: self.depth_stencil.clone(),
+            extent: self.extent,
+            layers: self.layers,
+            samples: self.samples,
+            visibility: self.visibility.clone(),
+            fetch_inputs: self.fetch_inputs,
+            tile: self.tile,
+            sample_positions: self.sample_positions.clone(),
+            fails_command_buffer: self.fails_command_buffer,
+        }
+    }
+
+    /// `source`, in this layout's lists: a render encoder's checks at the call take their
+    /// encoder's with no allocation where the lists hold room (`render/call_checks.rs`).
+    fn clone_from(&mut self, source: &PassLayout) {
+        let PassLayout {
+            colors,
+            depth_stencil,
+            extent,
+            layers,
+            samples,
+            visibility,
+            fetch_inputs,
+            tile,
+            sample_positions,
+            fails_command_buffer,
+        } = source;
+        self.colors.clone_from(colors);
+        self.depth_stencil.clone_from(depth_stencil);
+        self.extent = *extent;
+        self.layers = *layers;
+        self.samples = *samples;
+        self.visibility.clone_from(visibility);
+        self.fetch_inputs = *fetch_inputs;
+        self.tile = *tile;
+        self.sample_positions.clone_from(sample_positions);
+        self.fails_command_buffer = *fails_command_buffer;
+    }
 }
 
 impl PassLayout {

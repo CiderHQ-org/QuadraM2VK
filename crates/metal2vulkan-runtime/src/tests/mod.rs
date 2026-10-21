@@ -40,6 +40,8 @@ mod completion_seen;
 mod compute;
 mod contexts;
 mod copy_plan;
+#[cfg(any(m2v_gpu, m2v_cpu_icd))]
+mod deferred_calls;
 mod degradation;
 mod depth_copy;
 mod depth_ranges;

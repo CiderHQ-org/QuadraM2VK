@@ -3657,6 +3657,9 @@ impl Device {
     /// Metal counterpart; not part of the API.
     #[doc(hidden)]
     pub fn work_counts(&self) -> WorkCounts {
+        // What the calls of the device's render encoders logged and not yet lowered will count
+        // (`render/deferral.rs`).
+        self.shared().deferred.lower_all();
         let counters = &self.shared().counts;
         let churn = counters.churn.snapshot();
         let group_end = |end: GroupEnd| counters.group_ends[end as usize].load(Ordering::Relaxed);

@@ -93,6 +93,11 @@ pub struct RawDevice {
     /// [`DeviceOptions::announce_each`](crate::DeviceOptions::announce_each) says: none by
     /// default.
     pub announce_each: BTreeSet<crate::Degradation>,
+    /// The degradation kinds that refuse a render encoder's call met while lowering it after it
+    /// returned, as
+    /// [`DeviceOptions::lowering_refuses`](crate::DeviceOptions::lowering_refuses) says: none by
+    /// default.
+    pub lowering_refuses: BTreeSet<crate::Degradation>,
     /// The macOS release whose Metal the device answers as, as
     /// [`DeviceOptions::metal_level`](crate::DeviceOptions::metal_level) says: `None` by default,
     /// the host's.
@@ -126,6 +131,7 @@ impl RawDevice {
             host_image_copy: false,
             gpu_times_from_host: false,
             announce_each: BTreeSet::new(),
+            lowering_refuses: BTreeSet::new(),
             metal_level: None,
         }
     }
@@ -277,6 +283,7 @@ impl Device {
             // An adopted device keeps no execution record: validation makes its own devices.
             record_executions: false,
             announce_each: raw.announce_each,
+            lowering_refuses: raw.lowering_refuses,
             view_reinterpretation,
             generated_commands: false,
             host_image_copy,

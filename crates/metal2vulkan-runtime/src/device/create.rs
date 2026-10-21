@@ -153,6 +153,15 @@ pub struct DeviceOptions {
     /// scheduler thread for an indirect command's), not at the making: the device makes a
     /// variant once. No Metal counterpart.
     pub announce_each: BTreeSet<crate::Degradation>,
+    /// The kinds of degradation that, met while the runtime lowers a render encoder's call after
+    /// it returned (`RenderLoweringPolicy::Worker`), refuse the call rather than
+    /// being announced: at every occurrence there, the call fails its command buffer
+    /// (`CommandBufferError::CallRefused`), whose refusal is the notice
+    /// (`Error::Degraded`), and nothing of that encoder or of any after it runs. Empty by default,
+    /// where every degradation is announced and the work runs; a consumer that ends its program
+    /// at a kind's notice in the call names that kind here, so the work it ends at never runs.
+    /// No Metal counterpart.
+    pub lowering_refuses: BTreeSet<crate::Degradation>,
     /// The macOS release whose Metal each device answers as, where releases answer differently
     /// ([`MetalLevel`](crate::MetalLevel): which pixel formats a descriptor takes and Metal
     /// describes). `None` by default: on a macOS host, the host's own release, or the newest
@@ -1282,6 +1291,7 @@ fn create_on(
         calibration,
         gpu_times_from_host: options.gpu_times_from_host,
         announce_each: options.announce_each.clone(),
+        lowering_refuses: options.lowering_refuses.clone(),
         record_executions: options.record_executions,
         view_reinterpretation,
         generated_commands,
@@ -1389,6 +1399,7 @@ fn same_options(a: &DeviceOptions, b: &DeviceOptions) -> bool {
         instance_api_version,
         gpu_times_from_host,
         announce_each,
+        lowering_refuses,
         metal_level,
         record_executions,
         assume_unmeasured_identity,
@@ -1408,6 +1419,7 @@ fn same_options(a: &DeviceOptions, b: &DeviceOptions) -> bool {
         && *instance_api_version == b.instance_api_version
         && *gpu_times_from_host == b.gpu_times_from_host
         && *announce_each == b.announce_each
+        && *lowering_refuses == b.lowering_refuses
         && *metal_level == b.metal_level
         && *record_executions == b.record_executions
         && *assume_unmeasured_identity == b.assume_unmeasured_identity

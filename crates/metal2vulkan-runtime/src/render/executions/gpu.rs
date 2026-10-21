@@ -337,10 +337,13 @@ impl RenderExecution {
             (storage, snapshot.layout.clone(), residency),
             forms,
         );
-        let slots = encoder.check_pipeline(CALL, pipeline).and_then(|()| {
-            encoder.pipeline = Some(pipeline.clone());
-            encoder.replay_draw_of(state, primitive_type)
-        });
+        let slots = encoder
+            .shape_inputs()
+            .check_pipeline(CALL, pipeline)
+            .and_then(|()| {
+                encoder.pipeline = Some(pipeline.clone());
+                encoder.replay_draw_of(state, primitive_type)
+            });
         let RenderLowering { core, .. } = encoder;
         let form = match slots {
             Ok(Ok(slots)) => {
@@ -611,7 +614,7 @@ impl RenderExecution {
             offset: scratch.offset(),
             layout: pre.layout,
         });
-        encoder.check_pipeline(CALL, pipeline)?;
+        encoder.shape_inputs().check_pipeline(CALL, pipeline)?;
         encoder.pipeline = Some(pipeline.clone());
         let buffers = DrawBuffers {
             indirect: Some(first),

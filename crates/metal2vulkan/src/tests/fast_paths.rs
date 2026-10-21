@@ -8,9 +8,9 @@
 
 use crate::device::{
     BatchOrderPolicy, CompletionPolicy, DecodedTexelsPolicy, DevicePolicy, FloatMathsPolicy,
-    HalfBlendPolicy, HalfRoundingPolicy, HeapCompressionPolicy, NanMinMaxPolicy, ResolvePolicy,
-    RoundingOrderPolicy, SamplingPolicy, TexelConversionPolicy, TileStorePolicy,
-    Unorm8LinearFilterPolicy, YCbCrFilterPolicy,
+    HalfBlendPolicy, HalfRoundingPolicy, HeapCompressionPolicy, NanMinMaxPolicy,
+    RenderLoweringPolicy, ResolvePolicy, RoundingOrderPolicy, SamplingPolicy,
+    TexelConversionPolicy, TileStorePolicy, Unorm8LinearFilterPolicy, YCbCrFilterPolicy,
 };
 use crate::pipeline::PrecisionNote;
 use std::collections::BTreeSet;
@@ -71,14 +71,15 @@ fn choices() -> Vec<Choice> {
         half_blend: _,
         // The runtime's: the texels of a carried texture's decoded twin, a heap's compressed
         // texture's image, when the host sees a command buffer complete, a loaded attachment's
-        // tile store, a multisampled color attachment's resolve, and how a batch begins after the
-        // earlier ones of its queue.
+        // tile store, a multisampled color attachment's resolve, how a batch begins after the
+        // earlier ones of its queue, and where a render encoder's calls are lowered.
         decoded_texels: _,
         heap_compression: _,
         completion: _,
         tile_store: _,
         resolve: _,
         batch_order: _,
+        render_lowering: _,
     } = p;
     vec![
         choice!(p.unorm8_linear_filter: Unorm8LinearFilterPolicy { Exact, DeviceWithinOneCode }),
@@ -96,6 +97,7 @@ fn choices() -> Vec<Choice> {
         choice!(p.tile_store: TileStorePolicy { Device, Exact }),
         choice!(p.resolve: ResolvePolicy { Device, Exact }),
         choice!(p.batch_order: BatchOrderPolicy { Ends, Exact }),
+        choice!(p.render_lowering: RenderLoweringPolicy { AtCall, Worker }),
     ]
 }
 
@@ -479,6 +481,24 @@ fn the_runtime_s_batch_order_choice_keys_no_profile() {
     for ((stem, e), (other, x)) in ends.iter().zip(&exact) {
         assert_eq!(stem, other);
         assert_eq!(e.fingerprint(), x.fingerprint(), "{stem}");
+    }
+}
+
+/// The runtime's choice of where a render encoder's calls are lowered (`render_lowering`) moves
+/// no committed profile's fingerprint: no profile carries it, so no translation follows it.
+#[test]
+fn the_runtime_s_render_lowering_choice_keys_no_profile() {
+    use crate::spirv::testing::committed_profiles_with;
+    let at_call = committed_profiles_with(DevicePolicy::UNTRUSTED).expect("profiles");
+    let worker = committed_profiles_with(DevicePolicy {
+        render_lowering: RenderLoweringPolicy::Worker,
+        ..DevicePolicy::UNTRUSTED
+    })
+    .expect("profiles");
+    assert_eq!(worker.len(), at_call.len());
+    for ((stem, w), (other, a)) in worker.iter().zip(&at_call) {
+        assert_eq!(stem, other);
+        assert_eq!(w.fingerprint(), a.fingerprint(), "{stem}");
     }
 }
 

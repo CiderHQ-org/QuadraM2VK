@@ -285,7 +285,9 @@ use super::device::{lock, Device};
 use super::draw_source::{CopySteps, DrawSource, IndexBind};
 use super::dynamic_state::ExtendedDynamicState;
 use super::encoder::{EncoderCore, Replayed};
-use super::error::{internal, invalid, vulkan, Error, Problem, RuntimeGap};
+use super::error::{
+    internal, invalid, vulkan, CommandBufferError, EncoderCall, Error, Problem, RuntimeGap,
+};
 use super::execution::{ExecutedPipeline, Execution};
 use super::fragment_imageblock::PassImageblock;
 use super::framebuffer_fetch;
@@ -372,13 +374,16 @@ use pass_steps::{InstanceSteps, PassSteps, StagedDispatch, StagedRows};
 use pending::{OwnedRecording, PendingDraw};
 use shadows::InstanceShadows;
 use std::collections::{BTreeMap, BTreeSet};
+use std::marker::PhantomData;
 use std::sync::{Arc, Mutex, OnceLock};
 use tile_dispatch::{ScratchEdges, TileDispatch};
 
 mod arguments;
 mod bound;
+mod call_checks;
 mod capture;
 mod color_groups;
+mod deferral;
 mod draw_shape;
 mod executions;
 mod extended_shadow;
@@ -395,6 +400,7 @@ mod reroute;
 mod restart;
 mod shadows;
 mod snapshot;
+mod table_facts;
 mod tessellation_scan;
 mod tile_dispatch;
 mod tile_memory;
@@ -404,6 +410,8 @@ mod vertex_reach;
 mod vertex_strides;
 
 use bound::{Bound, EqualShapes, Now, Recorded};
+use deferral::Logged;
+pub(crate) use deferral::{lowering, DeferredEncoders};
 pub(crate) use inline_splits::SpareKept;
 use replay::{
     DrawIndexed, DrawIndexedIndirect, DrawIndexedPatches, DrawIndexedPatchesIndirect, DrawPatches,
@@ -1083,20 +1091,24 @@ enum Standing {
 /// committed, is released), as Metal holds what an encoder was handed: one a later call replaced
 /// or unbound before any draw used it, and one bound after the last draw, too.
 pub struct RenderCommandEncoder {
-    /// What runs its calls, in place: an encoder opens with no allocation of its own.
-    pub(crate) lowering: RenderLowering,
-}
-
-impl RenderCommandEncoder {
-    /// The program's encoder over `lowering`.
-    fn new(lowering: RenderLowering) -> RenderCommandEncoder {
-        RenderCommandEncoder { lowering }
-    }
+    /// Its lowering, which runs its calls, where it lowers each inside the call
+    /// (`RenderLoweringPolicy::AtCall`): no slot, no lock (`render/deferral.rs`).
+    own: Option<RenderLowering>,
+    /// Else its slot of the device's, which holds its lowering, its checks at the call and its
+    /// calls not yet lowered.
+    logged: Option<Logged>,
+    /// The index its next call takes (`EncoderCall::index`).
+    next: u32,
+    /// Not `Sync`, as every encoder.
+    unshared: PhantomData<std::cell::Cell<()>>,
 }
 
 impl std::fmt::Debug for RenderCommandEncoder {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.lowering.fmt(f)
+        f.debug_struct("RenderCommandEncoder")
+            .field("lowered_at_call", &self.lowers_at_call())
+            .field("next", &self.next)
+            .finish()
     }
 }
 
@@ -1944,6 +1956,341 @@ const RECORDED: [vk::DynamicState; 16] = [
     vk::DynamicState::STENCIL_OP,
 ];
 
+/// The checks of a pipeline state set on an encoder, over the encoder's pass and state as they stand
+/// (`ShapeInputs`): the lowering's, and the program's encoder's at the call (`render/call_checks.rs`).
+impl ShapeInputs<'_> {
+    /// Refuse `pipeline` for this pass in `call` as [`RenderCommandEncoder::set_render_pipeline_state`]
+    /// says.
+    pub(super) fn check_pipeline(
+        &self,
+        call: &'static str,
+        state: &RenderPipelineState,
+    ) -> Result<(), Error> {
+        let pipeline = match state.kind() {
+            RenderStateKind::Graphics(state) => state,
+            RenderStateKind::Tile(state) => return self.check_tile(call, state),
+        };
+        let descriptor = pipeline.descriptor();
+        let graphics = &pipeline.base().graphics;
+        let refused = |index: u32| {
+            draw_problem(
+                call,
+                DrawProblem::AttachmentFormat(Attachment::Color(index)),
+            )
+        };
+        // Each state color is drawn into the pass color at its place in Metal's per-sample record
+        // (`routing`), where it stores a whole color into one attachment; refused elsewhere. A
+        // routed draw that fetches or reads a color, or declares an imageblock, and a mesh render
+        // pipeline's state routed at all, are refused (unmeasured). A pass whose draws may fetch
+        // through input attachments routes the others, its input attachments at their indices.
+        let routing = self.routing(pipeline).map_err(refused)?;
+        let mesh = descriptor.vertex().is_none();
+        let reads = |index: u32| {
+            graphics
+                .input_attachments
+                .iter()
+                .any(|a| a.color_index == index)
+                || graphics
+                    .storage_attachments
+                    .iter()
+                    .any(|a| a.color_index == index)
+        };
+        if let Some(location) = routing.moved() {
+            let fetches = !graphics.input_attachments.is_empty()
+                || !graphics.storage_attachments.is_empty()
+                || graphics.fragment_imageblock.is_some();
+            if mesh || fetches {
+                return Err(refused(location));
+            }
+        }
+        // A color of the pass at no place of the state's record: zeroed at each draw's covered
+        // samples or kept, as plain Metal stores it (`zeroed_colors`); refused for a state that
+        // writes no color and a mesh render pipeline's state (unmeasured). A color of the
+        // pipeline at no place of the pass's: its output is dropped, as plain Metal drops it, by
+        // the variant `dropped_colors` names, unless the fragment function reads that color or
+        // the state is a mesh render pipeline's (not built).
+        if let Some(&index) = routing.uncovered.values().next() {
+            if !draw_shape::writes_colors(pipeline) || mesh {
+                return Err(refused(index));
+            }
+            // A pass color the draw keeps takes a blend element that writes nothing
+            // (`pipeline/graphics.rs`): on a device without `independentBlend` the state's
+            // elements must write nothing too.
+            let independent = self
+                .device
+                .enabled()
+                .features
+                .contains(&VkFeature::IndependentBlend);
+            let writes = graphics
+                .color_attachments
+                .iter()
+                .flatten()
+                .any(|a| !a.write_mask.is_empty() || a.blend.is_some());
+            if !independent && writes && self.zeroed_colors(pipeline, &routing).is_empty() {
+                return Err(Error::Unsupported(metal2vulkan::error::Unsupported::needs(
+                    metal2vulkan::error::Feature::IndependentBlending,
+                    metal2vulkan::error::Capability::Feature(VkFeature::IndependentBlend),
+                )));
+            }
+        }
+        if let Some(&index) = routing.dropped.iter().find(|&&index| reads(index) || mesh) {
+            return Err(refused(index));
+        }
+        let wanted = descriptor.color_formats();
+        for (&index, &other) in &routing.placed {
+            let wanted = wanted
+                .get(index as usize)
+                .copied()
+                .flatten()
+                .ok_or_else(|| internal("a placed color the state lacks"))?;
+            let pass = self
+                .layout
+                .colors
+                .get(other as usize)
+                .and_then(Option::as_ref)
+                .ok_or_else(|| internal("a placed color the pass lacks"))?;
+            if pass.target.texture.pixel_format() != wanted {
+                // A color both have in different formats: drawn where the pass's attachment
+                // stores the state's encoding as plain Metal stores it in its own format (a
+                // channel-order twin, `color_reformat.rs`); refused otherwise.
+                // Or through a view of the attachment's image in the state's encoding, where the
+                // image takes it, else a stand-in of its own (`viewing`).
+                match self.color_view_format(pipeline, index, wanted, pass) {
+                    Some(view) if view == pass.target.format => {}
+                    Some(view) if self.viewing(pipeline, index, pass, view)?.is_some() => {}
+                    Some(_) | None => return Err(refused(index)),
+                }
+                continue;
+            }
+            // An attachment the pipeline reads and writes as a storage image in the interlock is
+            // no color attachment of its subpass, in the same format (`framebuffer_fetch.rs`).
+            let format = graphics
+                .color_attachments
+                .get(index as usize)
+                .and_then(Option::as_ref)
+                .map(|a| a.format)
+                .or_else(|| {
+                    graphics
+                        .storage_attachments
+                        .iter()
+                        .find(|s| s.color_index == index)
+                        .map(|s| s.format)
+                });
+            if Some(pass.target.format) != format {
+                return Err(Error::NotImplemented(RuntimeGap::Render));
+            }
+        }
+        // The state's depth and stencil formats decide nothing: plain Metal tests and writes the
+        // pass's depth and stencil attachments in their own formats whatever the state names
+        // (one the state lacks, or another format), and a draw whose state names one the pass
+        // lacks against the pass's hidden ones, as the pass's render pass instance does here (Metal
+        // probes). A state of more samples in a pass of one is its single-sample twin here where
+        // Metal draws it as one (`drawn_as`).
+        if descriptor.raster_sample_count() != self.layout.samples {
+            return Err(draw_problem(call, DrawProblem::SampleCount));
+        }
+        // Its formats are the pass's, so a state without an explicit imageblock packs as the
+        // pass (measured on an M3 Max and an M4).
+        if graphics.fragment_imageblock.is_some() {
+            let pipeline = state.imageblock_sample_length()?;
+            let pass = self.pass_sample_length()?;
+            if pipeline > pass {
+                return Err(draw_problem(
+                    call,
+                    DrawProblem::ImageblockSampleLength { pipeline, pass },
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// How a draw of `pipeline` renders its color `index` into the pass's attachment `color` in
+    /// `format`, another format of its texel size (`Reformat`): through a view of the attachment's
+    /// image where the image takes it (`PixelFormatView` usage, or a format list holding it,
+    /// `image_plan.rs`), else through a stand-in image of `format` where the device copies both
+    /// images; `None`, refused, for an attachment of more than one sample, that resolves, is
+    /// memoryless or renders into a stand-in or sample planes already, for a 3D or 1D one, and
+    /// for a state that fetches a color. `Unsupported` naming `format` where the device lacks it
+    /// as a color attachment, or as a blended one where the state's color blends.
+    pub(super) fn viewing(
+        &self,
+        pipeline: &DrawingState,
+        index: u32,
+        color: &render_pass::ColorTarget,
+        format: metal2vulkan::vk::Format,
+    ) -> Result<Option<Viewing>, Error> {
+        let graphics = &pipeline.base().graphics;
+        let fetches =
+            !graphics.input_attachments.is_empty() || !graphics.storage_attachments.is_empty();
+        let own = color.target.samples == 1
+            && color.resolve.is_none()
+            && color.copied_resolve.is_none()
+            && !color.memoryless
+            && color.stand_in.is_none()
+            && color.planes.is_none()
+            && !render_pass::not_2d(&color.target);
+        if fetches || !own {
+            return Ok(None);
+        }
+        let device = self.device;
+        let profile = device.compile_device().profile();
+        let blends = graphics
+            .color_attachments
+            .get(index as usize)
+            .copied()
+            .flatten()
+            .is_some_and(|a| a.blend.is_some());
+        let usages = [
+            Some(FormatUsage::ColorAttachment),
+            blends.then_some(FormatUsage::ColorAttachmentBlend),
+        ];
+        for usage in usages.into_iter().flatten() {
+            if !profile.supports_format(format, usage) {
+                return Err(Error::Unsupported(metal2vulkan::error::Unsupported::needs(
+                    metal2vulkan::error::Feature::Format,
+                    metal2vulkan::error::Capability::Format { format, usage },
+                )));
+            }
+        }
+        let plan = color.target.texture.image_plan()?;
+        if super::binding_view::views_as(plan, format, false) {
+            return Ok(Some(Viewing::View));
+        }
+        let copies = metal2vulkan::vk::ImageUsageFlags::TRANSFER_SRC
+            | metal2vulkan::vk::ImageUsageFlags::TRANSFER_DST;
+        let transfer = metal2vulkan::vk::FormatFeatureFlags2::TRANSFER_SRC
+            | metal2vulkan::vk::FormatFeatureFlags2::TRANSFER_DST;
+        let facts = device.shared().textures.facts(profile);
+        let copied = plan.usage.contains(copies) && facts.optimal(format).contains(transfer);
+        Ok(copied.then_some(Viewing::StandIn))
+    }
+
+    /// The format of the view through which a draw of `pipeline` stores its color `index`, of
+    /// pixel format `wanted`, into the pass's attachment `color` at its place, of another pixel
+    /// format, as plain Metal stores it (`color_reformat::view_format`). `None`, refused, for a
+    /// mesh render pipeline's state, a state without a fragment function, that rasterizes
+    /// nothing, has a fragment imageblock or reads the color (what Metal stores there is
+    /// unmeasured), and a format held in a format other than its own (an extended-range
+    /// format's).
+    pub(super) fn color_view_format(
+        &self,
+        pipeline: &DrawingState,
+        index: u32,
+        wanted: PixelFormat,
+        color: &render_pass::ColorTarget,
+    ) -> Option<metal2vulkan::vk::Format> {
+        let descriptor = pipeline.descriptor();
+        let graphics = &pipeline.base().graphics;
+        let fragment = descriptor.vertex().and_then(|d| d.fragment.as_ref());
+        let reads = graphics
+            .input_attachments
+            .iter()
+            .any(|a| a.color_index == index)
+            || graphics
+                .storage_attachments
+                .iter()
+                .any(|a| a.color_index == index);
+        if fragment.is_none()
+            || graphics.rasterizer_discard
+            || graphics.fragment_imageblock.is_some()
+            || reads
+        {
+            return None;
+        }
+        let profile = self.device.compile_device().profile();
+        let state = graphics
+            .color_attachments
+            .get(index as usize)
+            .copied()
+            .flatten()?;
+        let own = color_reformat::held(wanted, profile) == Some(state.format)
+            && color_reformat::held(color.target.texture.pixel_format(), profile)
+                == Some(color.target.format);
+        if !own {
+            return None;
+        }
+        color_reformat::view_format(state.format, color.target.format)
+    }
+
+    /// The imageblock bytes per sample the pass gives a pipeline: the larger of its
+    /// descriptor's `imageblock_sample_length` and its attachments' texels
+    /// ([`imageblock_sample_length`](metal2vulkan::metal::format::imageblock_sample_length)).
+    pub(super) fn pass_sample_length(&self) -> Result<u64, Error> {
+        let formats = self.layout.pass_formats();
+        let packed = metal2vulkan::metal::format::imageblock_sample_length(&formats)
+            .ok_or_else(|| internal("a pass attachment without a texel size"))?;
+        Ok(u64::from(packed).max(self.layout.tile.sample_length))
+    }
+
+    /// Refuse the tile pipeline's state `state` for this pass in `call`: a color format other
+    /// than the pass's up to the last color its function reaches through its implicit imageblock
+    /// (every color where it declares an explicit one), the raster sample count other than the
+    /// pass's, and, with an explicit imageblock aliased onto the implicit one, an imageblock per
+    /// sample larger than the pass gives ([`pass_sample_length`](Self::pass_sample_length);
+    /// measured: "the pipelineState's per sample imageBlock usage(32) is greater than the
+    /// encoder's perSample imageBlock usage(4)"). An explicit imageblock standing alone runs in
+    /// a pass of fewer bytes ([`kept_imageblock_bytes`](Self::kept_imageblock_bytes)).
+    pub(super) fn check_tile(&self, call: &'static str, state: &TileState) -> Result<(), Error> {
+        let descriptor = state.descriptor();
+        // Plain Metal runs a tile function whatever the state's color formats (a Metal probe: one
+        // of another format, none, one more or one fewer than the pass's ran every tile, the
+        // attachments it does not reach untouched, and one more beside the color it reaches kept
+        // that color's texels as the pass's). The function reaches a color at its place in the
+        // state's packing, so the formats are checked up to the last color it reaches (every color
+        // for an explicit imageblock, which lies after them): a place other than the pass's is
+        // unmeasured.
+        let kernel = state.kernel();
+        let explicit =
+            kernel.aliased_imageblock_bytes().is_some() || kernel.tile_imageblock().is_some();
+        let checked = if explicit {
+            Some(MAX_COLOR_ATTACHMENTS)
+        } else {
+            kernel
+                .tile_attachments_reached()
+                .max()
+                .map(|last| last as usize + 1)
+        };
+        for index in 0..checked.unwrap_or(0).min(MAX_COLOR_ATTACHMENTS) {
+            let pass = self.layout.colors.get(index).and_then(Option::as_ref);
+            let pass = pass.map(|c| c.target.texture.pixel_format());
+            let wanted = descriptor
+                .color_attachment_formats
+                .get(index)
+                .copied()
+                .flatten()
+                .filter(|&format| format != PixelFormat::Invalid);
+            if pass != wanted {
+                return Err(draw_problem(
+                    call,
+                    DrawProblem::AttachmentFormat(Attachment::Color(index as u32)),
+                ));
+            }
+        }
+        if descriptor.raster_sample_count != self.layout.samples {
+            return Err(draw_problem(call, DrawProblem::SampleCount));
+        }
+        // Without an explicit imageblock the colors the function reaches are the pass's, at the
+        // pass's places, whatever bytes the state's other colors would take.
+        if !explicit {
+            return Ok(());
+        }
+        let pass = self.pass_sample_length()?;
+        // Its formats are the pass's, so a state without an aliased layout packs as the pass.
+        let pipeline = state
+            .imageblock_sample_length()
+            .ok_or_else(|| internal("a tile state's attachment without a texel size"))?;
+        // An explicit imageblock standing alone runs in a pass of fewer bytes, as plain Metal
+        // runs it (`kept_imageblock_bytes`); an aliased one past them is unmeasured.
+        if pipeline > pass && kernel.tile_imageblock().is_none() {
+            return Err(draw_problem(
+                call,
+                DrawProblem::ImageblockSampleLength { pipeline, pass },
+            ));
+        }
+        Ok(())
+    }
+}
+
 impl RenderLowering {
     /// The lowering of [`RenderCommandEncoder::set_render_pipeline_state`].
     pub(crate) fn set_render_pipeline_state(
@@ -1965,7 +2312,7 @@ impl RenderLowering {
     fn set_state(&mut self, state: &RenderPipelineState) -> Result<(), Error> {
         const CALL: &str = "set_render_pipeline_state";
         self.core.check_device(CALL, state.device())?;
-        let drawn = self.drawn_as(state)?;
+        let drawn = drawn_as(self.layout.samples, state)?;
         let state = self.grouped_as(drawn.clone())?;
         // Routed once here: the check and each draw read it (`routing`).
         if let RenderStateKind::Graphics(graphics) = state.kind() {
@@ -1982,45 +2329,11 @@ impl RenderLowering {
                 pass,
             });
         }
-        self.check_pipeline(CALL, &state)?;
+        self.shape_inputs().check_pipeline(CALL, &state)?;
         self.writers.state_set(state.indirect_command_writes());
         self.pipeline = Some(state);
         self.grouped_set(&drawn);
         Ok(())
-    }
-
-    /// The state the pass draws `state` as: in a pass of one sample, a render pipeline's state of
-    /// more samples draws as its single-sample twin, as plain Metal draws it (Metal probes, 2- and
-    /// 4-sample states: coverage at the pixel centre, one run per pixel even reading
-    /// `[[sample_id]]`, which reads 0, `[[position]]` and sample-interpolated inputs at the centre,
-    /// a `[[sample_mask]]` input of 1 and an output keeping the pixel by its bit 0, a framebuffer
-    /// fetch and alpha to one as at one sample). Where Metal answers otherwise the state stays
-    /// itself, which `check_pipeline` refuses (`SampleCount`): alpha to coverage (alphas of 0.3 and
-    /// 0.5 that drop the texel at one sample kept it), a fragment function that reads the sample
-    /// count (`get_num_samples()` read the state's), and, unmeasured, a fragment imageblock. Any
-    /// other state is itself.
-    fn drawn_as(&self, state: &RenderPipelineState) -> Result<RenderPipelineState, Error> {
-        let RenderStateKind::Graphics(graphics) = state.kind() else {
-            return Ok(state.clone());
-        };
-        let multisampled = graphics.descriptor().raster_sample_count() > 1;
-        let coverage = graphics
-            .descriptor()
-            .vertex()
-            .is_some_and(|d| d.alpha_to_coverage);
-        if self.layout.samples != 1 || !multisampled || coverage {
-            return Ok(state.clone());
-        }
-        let Some(twin) = state.single_sample()? else {
-            return Ok(state.clone());
-        };
-        let RenderStateKind::Graphics(drawn) = twin.kind() else {
-            return Err(internal("a drawing state's twin that does not draw"));
-        };
-        if drawn.reads_sample_count() || drawn.base().graphics.fragment_imageblock.is_some() {
-            return Ok(state.clone());
-        }
-        Ok(twin)
     }
 
     /// The lowering of [`RenderCommandEncoder::set_vertex_buffer`].
@@ -3313,7 +3626,13 @@ impl RenderLowering {
     pub(crate) fn end_encoding(self) -> Result<(), Error> {
         self.core.device().shared().counts.render_encoder_ended();
         // And the pass's later color groups, where it draws in groups (`render/color_groups.rs`).
-        let (core, residency, log) = self.end_pass()?.with_later_groups()?;
+        let (mut core, residency, log) = self.end_pass()?.with_later_groups()?;
+        // A notice of a kind the device refuses while lowering, announced by the end of an encoder
+        // that logged its calls, refuses the end (`render/deferral.rs`).
+        if let (Some(call), Some(notice)) = (lowering::current(), lowering::take_refusal()) {
+            core.fail_command_buffer(CommandBufferError::CallRefused(call));
+            (core.command_buffer().state()).refuse_call(Error::Degraded(Box::new(notice)));
+        }
         core.end_with_replay(
             EncoderKind::Render,
             Some(residency),
@@ -3337,6 +3656,16 @@ impl RenderLowering {
         residency: Residency,
     ) -> Result<RenderLowering, Error> {
         command_buffer.open_render(descriptor, Some(residency))
+    }
+
+    /// Refuse `call` as its lowering refused it, after it returned, for `error`
+    /// (`render/deferral.rs`): the command buffer fails from this encoder on
+    /// (`CommandBufferError::CallRefused`, `EncoderCore::fail_command_buffer`) and keeps `error`
+    /// for `CommandBuffer::refusal`, the first such call's.
+    pub(super) fn refuse_call(&mut self, call: EncoderCall, error: Error) {
+        self.core
+            .fail_command_buffer(CommandBufferError::CallRefused(call));
+        self.core.command_buffer().state().refuse_call(error);
     }
 
     /// [`end_encoding`](Self::end_encoding)'s pass, all but its core's end and its later color
@@ -6324,215 +6653,6 @@ impl RenderLowering {
             });
     }
 
-    /// Refuse `pipeline` for this pass in `call` as [`RenderCommandEncoder::set_render_pipeline_state`]
-    /// says.
-    fn check_pipeline(&self, call: &'static str, state: &RenderPipelineState) -> Result<(), Error> {
-        let pipeline = match state.kind() {
-            RenderStateKind::Graphics(state) => state,
-            RenderStateKind::Tile(state) => return self.check_tile(call, state),
-        };
-        let descriptor = pipeline.descriptor();
-        let graphics = &pipeline.base().graphics;
-        let refused = |index: u32| {
-            draw_problem(
-                call,
-                DrawProblem::AttachmentFormat(Attachment::Color(index)),
-            )
-        };
-        // Each state color is drawn into the pass color at its place in Metal's per-sample record
-        // (`routing`), where it stores a whole color into one attachment; refused elsewhere. A
-        // routed draw that fetches or reads a color, or declares an imageblock, and a mesh render
-        // pipeline's state routed at all, are refused (unmeasured). A pass whose draws may fetch
-        // through input attachments routes the others, its input attachments at their indices.
-        let routing = self.shape_inputs().routing(pipeline).map_err(refused)?;
-        let mesh = descriptor.vertex().is_none();
-        let reads = |index: u32| {
-            graphics
-                .input_attachments
-                .iter()
-                .any(|a| a.color_index == index)
-                || graphics
-                    .storage_attachments
-                    .iter()
-                    .any(|a| a.color_index == index)
-        };
-        if let Some(location) = routing.moved() {
-            let fetches = !graphics.input_attachments.is_empty()
-                || !graphics.storage_attachments.is_empty()
-                || graphics.fragment_imageblock.is_some();
-            if mesh || fetches {
-                return Err(refused(location));
-            }
-        }
-        // A color of the pass at no place of the state's record: zeroed at each draw's covered
-        // samples or kept, as plain Metal stores it (`zeroed_colors`); refused for a state that
-        // writes no color and a mesh render pipeline's state (unmeasured). A color of the
-        // pipeline at no place of the pass's: its output is dropped, as plain Metal drops it, by
-        // the variant `dropped_colors` names, unless the fragment function reads that color or
-        // the state is a mesh render pipeline's (not built).
-        if let Some(&index) = routing.uncovered.values().next() {
-            if !draw_shape::writes_colors(pipeline) || mesh {
-                return Err(refused(index));
-            }
-            // A pass color the draw keeps takes a blend element that writes nothing
-            // (`pipeline/graphics.rs`): on a device without `independentBlend` the state's
-            // elements must write nothing too.
-            let independent = self
-                .core
-                .device()
-                .enabled()
-                .features
-                .contains(&VkFeature::IndependentBlend);
-            let writes = graphics
-                .color_attachments
-                .iter()
-                .flatten()
-                .any(|a| !a.write_mask.is_empty() || a.blend.is_some());
-            if !independent
-                && writes
-                && self
-                    .shape_inputs()
-                    .zeroed_colors(pipeline, &routing)
-                    .is_empty()
-            {
-                return Err(Error::Unsupported(metal2vulkan::error::Unsupported::needs(
-                    metal2vulkan::error::Feature::IndependentBlending,
-                    metal2vulkan::error::Capability::Feature(VkFeature::IndependentBlend),
-                )));
-            }
-        }
-        if let Some(&index) = routing.dropped.iter().find(|&&index| reads(index) || mesh) {
-            return Err(refused(index));
-        }
-        let wanted = descriptor.color_formats();
-        for (&index, &other) in &routing.placed {
-            let wanted = wanted
-                .get(index as usize)
-                .copied()
-                .flatten()
-                .ok_or_else(|| internal("a placed color the state lacks"))?;
-            let pass = self
-                .layout
-                .colors
-                .get(other as usize)
-                .and_then(Option::as_ref)
-                .ok_or_else(|| internal("a placed color the pass lacks"))?;
-            if pass.target.texture.pixel_format() != wanted {
-                // A color both have in different formats: drawn where the pass's attachment
-                // stores the state's encoding as plain Metal stores it in its own format (a
-                // channel-order twin, `color_reformat.rs`); refused otherwise.
-                // Or through a view of the attachment's image in the state's encoding, where the
-                // image takes it, else a stand-in of its own (`viewing`).
-                match self.color_view_format(pipeline, index, wanted, pass) {
-                    Some(view) if view == pass.target.format => {}
-                    Some(view) if self.viewing(pipeline, index, pass, view)?.is_some() => {}
-                    Some(_) | None => return Err(refused(index)),
-                }
-                continue;
-            }
-            // An attachment the pipeline reads and writes as a storage image in the interlock is
-            // no color attachment of its subpass, in the same format (`framebuffer_fetch.rs`).
-            let format = graphics
-                .color_attachments
-                .get(index as usize)
-                .and_then(Option::as_ref)
-                .map(|a| a.format)
-                .or_else(|| {
-                    graphics
-                        .storage_attachments
-                        .iter()
-                        .find(|s| s.color_index == index)
-                        .map(|s| s.format)
-                });
-            if Some(pass.target.format) != format {
-                return Err(Error::NotImplemented(RuntimeGap::Render));
-            }
-        }
-        // The state's depth and stencil formats decide nothing: plain Metal tests and writes the
-        // pass's depth and stencil attachments in their own formats whatever the state names
-        // (one the state lacks, or another format), and a draw whose state names one the pass
-        // lacks against the pass's hidden ones, as the pass's render pass instance does here (Metal
-        // probes). A state of more samples in a pass of one is its single-sample twin here where
-        // Metal draws it as one (`drawn_as`).
-        if descriptor.raster_sample_count() != self.layout.samples {
-            return Err(draw_problem(call, DrawProblem::SampleCount));
-        }
-        // Its formats are the pass's, so a state without an explicit imageblock packs as the
-        // pass (measured on an M3 Max and an M4).
-        if graphics.fragment_imageblock.is_some() {
-            let pipeline = state.imageblock_sample_length()?;
-            let pass = self.pass_sample_length()?;
-            if pipeline > pass {
-                return Err(draw_problem(
-                    call,
-                    DrawProblem::ImageblockSampleLength { pipeline, pass },
-                ));
-            }
-        }
-        Ok(())
-    }
-
-    /// How a draw of `pipeline` renders its color `index` into the pass's attachment `color` in
-    /// `format`, another format of its texel size (`Reformat`): through a view of the attachment's
-    /// image where the image takes it (`PixelFormatView` usage, or a format list holding it,
-    /// `image_plan.rs`), else through a stand-in image of `format` where the device copies both
-    /// images; `None`, refused, for an attachment of more than one sample, that resolves, is
-    /// memoryless or renders into a stand-in or sample planes already, for a 3D or 1D one, and
-    /// for a state that fetches a color. `Unsupported` naming `format` where the device lacks it
-    /// as a color attachment, or as a blended one where the state's color blends.
-    fn viewing(
-        &self,
-        pipeline: &DrawingState,
-        index: u32,
-        color: &render_pass::ColorTarget,
-        format: metal2vulkan::vk::Format,
-    ) -> Result<Option<Viewing>, Error> {
-        let graphics = &pipeline.base().graphics;
-        let fetches =
-            !graphics.input_attachments.is_empty() || !graphics.storage_attachments.is_empty();
-        let own = color.target.samples == 1
-            && color.resolve.is_none()
-            && color.copied_resolve.is_none()
-            && !color.memoryless
-            && color.stand_in.is_none()
-            && color.planes.is_none()
-            && !render_pass::not_2d(&color.target);
-        if fetches || !own {
-            return Ok(None);
-        }
-        let device = self.core.device();
-        let profile = device.compile_device().profile();
-        let blends = graphics
-            .color_attachments
-            .get(index as usize)
-            .copied()
-            .flatten()
-            .is_some_and(|a| a.blend.is_some());
-        let usages = [
-            Some(FormatUsage::ColorAttachment),
-            blends.then_some(FormatUsage::ColorAttachmentBlend),
-        ];
-        for usage in usages.into_iter().flatten() {
-            if !profile.supports_format(format, usage) {
-                return Err(Error::Unsupported(metal2vulkan::error::Unsupported::needs(
-                    metal2vulkan::error::Feature::Format,
-                    metal2vulkan::error::Capability::Format { format, usage },
-                )));
-            }
-        }
-        let plan = color.target.texture.image_plan()?;
-        if super::binding_view::views_as(plan, format, false) {
-            return Ok(Some(Viewing::View));
-        }
-        let copies = metal2vulkan::vk::ImageUsageFlags::TRANSFER_SRC
-            | metal2vulkan::vk::ImageUsageFlags::TRANSFER_DST;
-        let transfer = metal2vulkan::vk::FormatFeatureFlags2::TRANSFER_SRC
-            | metal2vulkan::vk::FormatFeatureFlags2::TRANSFER_DST;
-        let facts = device.shared().textures.facts(profile);
-        let copied = plan.usage.contains(copies) && facts.optimal(format).contains(transfer);
-        Ok(copied.then_some(Viewing::StandIn))
-    }
-
     /// The pass colors a draw of `pipeline`, routed by `routing`, renders in another format
     /// (`Reformat`, decided by `viewing`), by pass color index: each a view of the attachment's
     /// image, or a stand-in image, the current instance's where it renders the color so already.
@@ -6557,12 +6677,14 @@ impl RenderLowering {
                 continue;
             }
             let format = self
+                .shape_inputs()
                 .color_view_format(pipeline, index, wanted, color)
                 .ok_or_else(|| internal("a draw of a color its pass refuses"))?;
             if format == color.target.format {
                 continue;
             }
             let viewing = self
+                .shape_inputs()
                 .viewing(pipeline, index, color, format)?
                 .ok_or_else(|| internal("a draw in a format its attachment refuses"))?;
             let index = other as usize;
@@ -6594,131 +6716,6 @@ impl RenderLowering {
         Ok(reformats)
     }
 
-    /// The format of the view through which a draw of `pipeline` stores its color `index`, of
-    /// pixel format `wanted`, into the pass's attachment `color` at its place, of another pixel
-    /// format, as plain Metal stores it (`color_reformat::view_format`). `None`, refused, for a
-    /// mesh render pipeline's state, a state without a fragment function, that rasterizes
-    /// nothing, has a fragment imageblock or reads the color (what Metal stores there is
-    /// unmeasured), and a format held in a format other than its own (an extended-range
-    /// format's).
-    fn color_view_format(
-        &self,
-        pipeline: &DrawingState,
-        index: u32,
-        wanted: PixelFormat,
-        color: &render_pass::ColorTarget,
-    ) -> Option<metal2vulkan::vk::Format> {
-        let descriptor = pipeline.descriptor();
-        let graphics = &pipeline.base().graphics;
-        let fragment = descriptor.vertex().and_then(|d| d.fragment.as_ref());
-        let reads = graphics
-            .input_attachments
-            .iter()
-            .any(|a| a.color_index == index)
-            || graphics
-                .storage_attachments
-                .iter()
-                .any(|a| a.color_index == index);
-        if fragment.is_none()
-            || graphics.rasterizer_discard
-            || graphics.fragment_imageblock.is_some()
-            || reads
-        {
-            return None;
-        }
-        let profile = self.core.device().compile_device().profile();
-        let state = graphics
-            .color_attachments
-            .get(index as usize)
-            .copied()
-            .flatten()?;
-        let own = color_reformat::held(wanted, profile) == Some(state.format)
-            && color_reformat::held(color.target.texture.pixel_format(), profile)
-                == Some(color.target.format);
-        if !own {
-            return None;
-        }
-        color_reformat::view_format(state.format, color.target.format)
-    }
-
-    /// The imageblock bytes per sample the pass gives a pipeline: the larger of its
-    /// descriptor's `imageblock_sample_length` and its attachments' texels
-    /// ([`imageblock_sample_length`](metal2vulkan::metal::format::imageblock_sample_length)).
-    fn pass_sample_length(&self) -> Result<u64, Error> {
-        let formats = self.layout.pass_formats();
-        let packed = metal2vulkan::metal::format::imageblock_sample_length(&formats)
-            .ok_or_else(|| internal("a pass attachment without a texel size"))?;
-        Ok(u64::from(packed).max(self.layout.tile.sample_length))
-    }
-
-    /// Refuse the tile pipeline's state `state` for this pass in `call`: a color format other
-    /// than the pass's up to the last color its function reaches through its implicit imageblock
-    /// (every color where it declares an explicit one), the raster sample count other than the
-    /// pass's, and, with an explicit imageblock aliased onto the implicit one, an imageblock per
-    /// sample larger than the pass gives ([`pass_sample_length`](Self::pass_sample_length);
-    /// measured: "the pipelineState's per sample imageBlock usage(32) is greater than the
-    /// encoder's perSample imageBlock usage(4)"). An explicit imageblock standing alone runs in
-    /// a pass of fewer bytes ([`kept_imageblock_bytes`](Self::kept_imageblock_bytes)).
-    fn check_tile(&self, call: &'static str, state: &TileState) -> Result<(), Error> {
-        let descriptor = state.descriptor();
-        // Plain Metal runs a tile function whatever the state's color formats (a Metal probe: one
-        // of another format, none, one more or one fewer than the pass's ran every tile, the
-        // attachments it does not reach untouched, and one more beside the color it reaches kept
-        // that color's texels as the pass's). The function reaches a color at its place in the
-        // state's packing, so the formats are checked up to the last color it reaches (every color
-        // for an explicit imageblock, which lies after them): a place other than the pass's is
-        // unmeasured.
-        let kernel = state.kernel();
-        let explicit =
-            kernel.aliased_imageblock_bytes().is_some() || kernel.tile_imageblock().is_some();
-        let checked = if explicit {
-            Some(MAX_COLOR_ATTACHMENTS)
-        } else {
-            kernel
-                .tile_attachments_reached()
-                .max()
-                .map(|last| last as usize + 1)
-        };
-        for index in 0..checked.unwrap_or(0).min(MAX_COLOR_ATTACHMENTS) {
-            let pass = self.layout.colors.get(index).and_then(Option::as_ref);
-            let pass = pass.map(|c| c.target.texture.pixel_format());
-            let wanted = descriptor
-                .color_attachment_formats
-                .get(index)
-                .copied()
-                .flatten()
-                .filter(|&format| format != PixelFormat::Invalid);
-            if pass != wanted {
-                return Err(draw_problem(
-                    call,
-                    DrawProblem::AttachmentFormat(Attachment::Color(index as u32)),
-                ));
-            }
-        }
-        if descriptor.raster_sample_count != self.layout.samples {
-            return Err(draw_problem(call, DrawProblem::SampleCount));
-        }
-        // Without an explicit imageblock the colors the function reaches are the pass's, at the
-        // pass's places, whatever bytes the state's other colors would take.
-        if !explicit {
-            return Ok(());
-        }
-        let pass = self.pass_sample_length()?;
-        // Its formats are the pass's, so a state without an aliased layout packs as the pass.
-        let pipeline = state
-            .imageblock_sample_length()
-            .ok_or_else(|| internal("a tile state's attachment without a texel size"))?;
-        // An explicit imageblock standing alone runs in a pass of fewer bytes, as plain Metal
-        // runs it (`kept_imageblock_bytes`); an aliased one past them is unmeasured.
-        if pipeline > pass && kernel.tile_imageblock().is_none() {
-            return Err(draw_problem(
-                call,
-                DrawProblem::ImageblockSampleLength { pipeline, pass },
-            ));
-        }
-        Ok(())
-    }
-
     /// The bytes of each cell of the tile function's explicit imageblock standing alone that this
     /// pass keeps, where they are fewer than its data (`BindState::kept_imageblock_bytes`);
     /// `None` for every other tile state. Plain Metal keeps the imageblock's bytes that lie below
@@ -6738,7 +6735,10 @@ impl RenderLowering {
         let at = pipeline
             .checked_sub(u64::from(data_size))
             .ok_or_else(|| internal("a tile state's imageblock before its colors"))?;
-        let pass = self.pass_sample_length()?.next_multiple_of(8);
+        let pass = self
+            .shape_inputs()
+            .pass_sample_length()?
+            .next_multiple_of(8);
         let kept = pass.saturating_sub(at).min(u64::from(data_size));
         // Below `data_size`, so a `u32`.
         Ok(u32::try_from(kept).ok().filter(|&kept| kept < data_size))
@@ -6854,35 +6854,12 @@ impl RenderLowering {
         buffers: DrawBuffers<'_>,
         empty: bool,
     ) -> Result<(), Error> {
-        let pipeline = match self.pipeline.as_ref().map(RenderPipelineState::kind) {
-            None => return Err(invalid(call, Problem::NoPipelineState)),
-            Some(RenderStateKind::Tile(_)) => {
-                return Err(draw_problem(call, DrawProblem::TileState))
-            }
-            Some(RenderStateKind::Graphics(state)) => state.clone(),
+        let Some(pipeline) = drawn_by(call, self.pipeline.as_ref(), assembly, empty)? else {
+            return Ok(());
         };
-        // A tessellation pipeline draws patches, and only it does, with the control points its
-        // function states and a factor buffer. A draw of primitives with it draws nothing, as plain
-        // Metal draws it (Metal probe case `primitives_with_tessellation` on an M4; Metal's
-        // validation stops it), and one of patches with another pipeline stops Metal.
         let tessellation = crate::tessellation::patches(&pipeline.base().graphics);
         let tessellated = tessellation.is_some();
-        if tessellated != matches!(assembly, Assembly::Patches) {
-            return match assembly {
-                Assembly::Primitives(_) if tessellated => Ok(()),
-                _ => Err(draw_problem(call, DrawProblem::DrawKind)),
-            };
-        }
-        // A mesh render pipeline draws meshes, and only it does.
         let meshes = pipeline.descriptor().vertex().is_none();
-        if meshes != matches!(assembly, Assembly::Meshes) {
-            // A mesh draw of no threadgroups with a drawing state draws nothing, as plain Metal
-            // draws it (its validation stops it).
-            if empty && matches!(assembly, Assembly::Meshes) {
-                return Ok(());
-            }
-            return Err(draw_problem(call, DrawProblem::DrawKind));
-        }
         if let (
             Some(t),
             DrawCall::Patches { control_points, .. }
@@ -9239,7 +9216,10 @@ impl RenderCommandEncoder {
     /// as zeroes), which the groups' variants do not state. A refused call keeps the state set
     /// before.
     pub fn set_render_pipeline_state(&mut self, state: &RenderPipelineState) -> Result<(), Error> {
-        self.lowering.set_render_pipeline_state(state)
+        match self.lowers_at_call() {
+            true => self.at_call(|lowering| lowering.set_render_pipeline_state(state)),
+            false => self.defer(|log| RenderCall::PipelineState(log.hold_render_state(state))),
+        }
     }
 
     /// `setVertexBuffer:offset:atIndex:` (`None` unbinds the index). Refused: an index past the
@@ -9250,7 +9230,13 @@ impl RenderCommandEncoder {
         offset: u64,
         index: u32,
     ) -> Result<(), Error> {
-        self.lowering.set_vertex_buffer(buffer, offset, index)
+        match self.lowers_at_call() {
+            true => self.at_call(|lowering| lowering.set_vertex_buffer(buffer, offset, index)),
+            false => self.defer(|log| {
+                let buffer = buffer.map(|buffer| log.hold_buffer(buffer));
+                RenderCall::Buffer(Table::Vertex, buffer, offset, index)
+            }),
+        }
     }
 
     /// `setVertexBuffers:offsets:withRange:`. Refused as
@@ -9262,7 +9248,17 @@ impl RenderCommandEncoder {
         offsets: &[u64],
         first: u32,
     ) -> Result<(), Error> {
-        self.lowering.set_vertex_buffers(buffers, offsets, first)
+        match self.lowers_at_call() {
+            true => self.at_call(|lowering| lowering.set_vertex_buffers(buffers, offsets, first)),
+            false => self.defer(|log| {
+                RenderCall::Buffers(
+                    Table::Vertex,
+                    log.buffer_span(buffers),
+                    log.word_span(offsets),
+                    first,
+                )
+            }),
+        }
     }
 
     /// `setVertexBufferOffset:atIndex:`, which clears the index's attribute stride
@@ -9273,7 +9269,10 @@ impl RenderCommandEncoder {
     /// the index is bound again, as plain Metal reads them (an M4; its debug layer asserts there is
     /// no buffer). Refused: nothing bound at the index, an offset past the buffer's length.
     pub fn set_vertex_buffer_offset(&mut self, offset: u64, index: u32) -> Result<(), Error> {
-        self.lowering.set_vertex_buffer_offset(offset, index)
+        match self.lowers_at_call() {
+            true => self.at_call(|lowering| lowering.set_vertex_buffer_offset(offset, index)),
+            false => self.defer(|_| RenderCall::BufferOffset(Table::Vertex, offset, index)),
+        }
     }
 
     /// `setVertexBytes:length:atIndex:`: `bytes`, copied now, at vertex buffer index `index` in
@@ -9286,7 +9285,12 @@ impl RenderCommandEncoder {
     /// `Bind(MissingDeviceAddress)`, at the draw. Refused: an index past the table, and more than
     /// 4096 bytes, Metal's limit for inline bytes (`Invalid(InlineBytesLength)`).
     pub fn set_vertex_bytes(&mut self, bytes: &[u8], index: u32) -> Result<(), Error> {
-        self.lowering.set_vertex_bytes(bytes, index)
+        match self.lowers_at_call() {
+            true => self.at_call(|lowering| lowering.set_vertex_bytes(bytes, index)),
+            false => {
+                self.defer(|log| RenderCall::Bytes(Table::Vertex, log.byte_span(bytes), index))
+            }
+        }
     }
 
     /// `setVertexTexture:atIndex:` (`None` unbinds the index). Refused: an index past the table,
@@ -9296,7 +9300,13 @@ impl RenderCommandEncoder {
         texture: Option<&Texture>,
         index: u32,
     ) -> Result<(), Error> {
-        self.lowering.set_vertex_texture(texture, index)
+        match self.lowers_at_call() {
+            true => self.at_call(|lowering| lowering.set_vertex_texture(texture, index)),
+            false => self.defer(|log| {
+                let texture = texture.map(|texture| log.hold_texture(texture));
+                RenderCall::Texture(Table::Vertex, texture, index)
+            }),
+        }
     }
 
     /// `setVertexTextures:withRange:`. Refused as [`RenderCommandEncoder::set_vertex_texture`]
@@ -9306,7 +9316,12 @@ impl RenderCommandEncoder {
         textures: &[Option<&Texture>],
         first: u32,
     ) -> Result<(), Error> {
-        self.lowering.set_vertex_textures(textures, first)
+        match self.lowers_at_call() {
+            true => self.at_call(|lowering| lowering.set_vertex_textures(textures, first)),
+            false => self.defer(|log| {
+                RenderCall::Textures(Table::Vertex, log.texture_span(textures), first)
+            }),
+        }
     }
 
     /// `setVertexSamplerState:atIndex:` (`None` unbinds the index). Refused: an index past the
@@ -9316,7 +9331,13 @@ impl RenderCommandEncoder {
         sampler: Option<&SamplerState>,
         index: u32,
     ) -> Result<(), Error> {
-        self.lowering.set_vertex_sampler_state(sampler, index)
+        match self.lowers_at_call() {
+            true => self.at_call(|lowering| lowering.set_vertex_sampler_state(sampler, index)),
+            false => self.defer(|log| {
+                let sampler = sampler.map(|sampler| log.hold_sampler(sampler));
+                RenderCall::Sampler(Table::Vertex, sampler, index)
+            }),
+        }
     }
 
     /// `setVertexSamplerStates:withRange:`, or with `clamps` (minimums and maximums)
@@ -9329,8 +9350,14 @@ impl RenderCommandEncoder {
         clamps: Option<(&[f32], &[f32])>,
         first: u32,
     ) -> Result<(), Error> {
-        self.lowering
-            .set_vertex_sampler_states(samplers, clamps, first)
+        match self.lowers_at_call() {
+            true => {
+                self.at_call(|lowering| lowering.set_vertex_sampler_states(samplers, clamps, first))
+            }
+            false => self.defer(|_| {
+                RenderCall::Samplers(Table::Vertex, Samplers::of(samplers, clamps, first))
+            }),
+        }
     }
 
     /// `setFragmentBuffer:offset:atIndex:` (`None` unbinds the index). Refused as
@@ -9341,7 +9368,13 @@ impl RenderCommandEncoder {
         offset: u64,
         index: u32,
     ) -> Result<(), Error> {
-        self.lowering.set_fragment_buffer(buffer, offset, index)
+        match self.lowers_at_call() {
+            true => self.at_call(|lowering| lowering.set_fragment_buffer(buffer, offset, index)),
+            false => self.defer(|log| {
+                let buffer = buffer.map(|buffer| log.hold_buffer(buffer));
+                RenderCall::Buffer(Table::Fragment, buffer, offset, index)
+            }),
+        }
     }
 
     /// `setFragmentBuffers:offsets:withRange:`. Refused as
@@ -9352,20 +9385,38 @@ impl RenderCommandEncoder {
         offsets: &[u64],
         first: u32,
     ) -> Result<(), Error> {
-        self.lowering.set_fragment_buffers(buffers, offsets, first)
+        match self.lowers_at_call() {
+            true => self.at_call(|lowering| lowering.set_fragment_buffers(buffers, offsets, first)),
+            false => self.defer(|log| {
+                RenderCall::Buffers(
+                    Table::Fragment,
+                    log.buffer_span(buffers),
+                    log.word_span(offsets),
+                    first,
+                )
+            }),
+        }
     }
 
     /// `setFragmentBufferOffset:atIndex:`. Refused as
     /// [`RenderCommandEncoder::set_vertex_buffer_offset`] is.
     pub fn set_fragment_buffer_offset(&mut self, offset: u64, index: u32) -> Result<(), Error> {
-        self.lowering.set_fragment_buffer_offset(offset, index)
+        match self.lowers_at_call() {
+            true => self.at_call(|lowering| lowering.set_fragment_buffer_offset(offset, index)),
+            false => self.defer(|_| RenderCall::BufferOffset(Table::Fragment, offset, index)),
+        }
     }
 
     /// `setFragmentBytes:length:atIndex:`: as
     /// [`set_vertex_bytes`](Self::set_vertex_bytes), in the fragment stage's table. Refused as
     /// that is.
     pub fn set_fragment_bytes(&mut self, bytes: &[u8], index: u32) -> Result<(), Error> {
-        self.lowering.set_fragment_bytes(bytes, index)
+        match self.lowers_at_call() {
+            true => self.at_call(|lowering| lowering.set_fragment_bytes(bytes, index)),
+            false => {
+                self.defer(|log| RenderCall::Bytes(Table::Fragment, log.byte_span(bytes), index))
+            }
+        }
     }
 
     /// `setFragmentTexture:atIndex:` (`None` unbinds the index). Refused as
@@ -9375,7 +9426,13 @@ impl RenderCommandEncoder {
         texture: Option<&Texture>,
         index: u32,
     ) -> Result<(), Error> {
-        self.lowering.set_fragment_texture(texture, index)
+        match self.lowers_at_call() {
+            true => self.at_call(|lowering| lowering.set_fragment_texture(texture, index)),
+            false => self.defer(|log| {
+                let texture = texture.map(|texture| log.hold_texture(texture));
+                RenderCall::Texture(Table::Fragment, texture, index)
+            }),
+        }
     }
 
     /// `setFragmentTextures:withRange:`. Refused as
@@ -9385,7 +9442,12 @@ impl RenderCommandEncoder {
         textures: &[Option<&Texture>],
         first: u32,
     ) -> Result<(), Error> {
-        self.lowering.set_fragment_textures(textures, first)
+        match self.lowers_at_call() {
+            true => self.at_call(|lowering| lowering.set_fragment_textures(textures, first)),
+            false => self.defer(|log| {
+                RenderCall::Textures(Table::Fragment, log.texture_span(textures), first)
+            }),
+        }
     }
 
     /// `setFragmentSamplerState:atIndex:` (`None` unbinds the index). Refused as
@@ -9395,7 +9457,13 @@ impl RenderCommandEncoder {
         sampler: Option<&SamplerState>,
         index: u32,
     ) -> Result<(), Error> {
-        self.lowering.set_fragment_sampler_state(sampler, index)
+        match self.lowers_at_call() {
+            true => self.at_call(|lowering| lowering.set_fragment_sampler_state(sampler, index)),
+            false => self.defer(|log| {
+                let sampler = sampler.map(|sampler| log.hold_sampler(sampler));
+                RenderCall::Sampler(Table::Fragment, sampler, index)
+            }),
+        }
     }
 
     /// `setFragmentSamplerStates:withRange:`, or with `clamps`
@@ -9407,8 +9475,13 @@ impl RenderCommandEncoder {
         clamps: Option<(&[f32], &[f32])>,
         first: u32,
     ) -> Result<(), Error> {
-        self.lowering
-            .set_fragment_sampler_states(samplers, clamps, first)
+        match self.lowers_at_call() {
+            true => self
+                .at_call(|lowering| lowering.set_fragment_sampler_states(samplers, clamps, first)),
+            false => self.defer(|_| {
+                RenderCall::Samplers(Table::Fragment, Samplers::of(samplers, clamps, first))
+            }),
+        }
     }
 
     /// `setColorStoreAction:atIndex:`: the store action of color attachment `index`, which the
@@ -9420,7 +9493,10 @@ impl RenderCommandEncoder {
     /// Refused (`Invalid`, measured): an index past the attachments, `Unknown` itself, and `Store`
     /// or `StoreAndMultisampleResolve` for a memoryless attachment.
     pub fn set_color_store_action(&mut self, action: StoreAction, index: u32) -> Result<(), Error> {
-        self.lowering.set_color_store_action(action, index)
+        match self.lowers_at_call() {
+            true => self.at_call(|lowering| lowering.set_color_store_action(action, index)),
+            false => self.defer(|_| RenderCall::ColorStoreAction(action, index)),
+        }
     }
 
     /// `setDepthStoreAction:`: the depth attachment's store action, which the descriptor left
@@ -9432,7 +9508,10 @@ impl RenderCommandEncoder {
     /// resolve texture, `Store` for a memoryless attachment, and `Store` where the stencil
     /// attachment is the same texture resolved by `MultisampleResolve`.
     pub fn set_depth_store_action(&mut self, action: StoreAction) -> Result<(), Error> {
-        self.lowering.set_depth_store_action(action)
+        match self.lowers_at_call() {
+            true => self.at_call(|lowering| lowering.set_depth_store_action(action)),
+            false => self.defer(|_| RenderCall::DepthStoreAction(action)),
+        }
     }
 
     /// `setStencilStoreAction:`: the stencil attachment's store action, which the descriptor
@@ -9440,7 +9519,10 @@ impl RenderCommandEncoder {
     /// the last: here `MultisampleResolve` where the depth attachment is the same texture,
     /// stored; and without a stencil attachment (unmeasured).
     pub fn set_stencil_store_action(&mut self, action: StoreAction) -> Result<(), Error> {
-        self.lowering.set_stencil_store_action(action)
+        match self.lowers_at_call() {
+            true => self.at_call(|lowering| lowering.set_stencil_store_action(action)),
+            false => self.defer(|_| RenderCall::StencilStoreAction(action)),
+        }
     }
 
     /// `setColorStoreActionOptions:atIndex:`: the color attachment's store action options, which
@@ -9453,8 +9535,12 @@ impl RenderCommandEncoder {
         _options: StoreActionOptions,
         index: u32,
     ) -> Result<(), Error> {
-        self.lowering
-            .set_color_store_action_options(_options, index)
+        match self.lowers_at_call() {
+            true => {
+                self.at_call(|lowering| lowering.set_color_store_action_options(_options, index))
+            }
+            false => self.defer(|_| RenderCall::ColorStoreActionOptions(_options, index)),
+        }
     }
 
     /// `setDepthStoreActionOptions:`: the depth attachment's store action options, where the
@@ -9465,7 +9551,10 @@ impl RenderCommandEncoder {
         &mut self,
         options: StoreActionOptions,
     ) -> Result<(), Error> {
-        self.lowering.set_depth_store_action_options(options)
+        match self.lowers_at_call() {
+            true => self.at_call(|lowering| lowering.set_depth_store_action_options(options)),
+            false => self.defer(|_| RenderCall::DepthStoreActionOptions(options)),
+        }
     }
 
     /// `setStencilStoreActionOptions:`: the stencil attachment's store action options. Refused
@@ -9476,7 +9565,10 @@ impl RenderCommandEncoder {
         &mut self,
         options: StoreActionOptions,
     ) -> Result<(), Error> {
-        self.lowering.set_stencil_store_action_options(options)
+        match self.lowers_at_call() {
+            true => self.at_call(|lowering| lowering.set_stencil_store_action_options(options)),
+            false => self.defer(|_| RenderCall::StencilStoreActionOptions(options)),
+        }
     }
 
     /// `setViewport:`. A NaN origin x draws nothing, as plain Metal's where its validation stops it
@@ -9486,7 +9578,10 @@ impl RenderCommandEncoder {
     /// draws the compensated depths inexactly (`render_state.rs`). A refused call keeps the
     /// viewports set before.
     pub fn set_viewport(&mut self, viewport: Viewport) -> Result<(), Error> {
-        self.lowering.set_viewport(viewport)
+        match self.lowers_at_call() {
+            true => self.at_call(|lowering| lowering.set_viewport(viewport)),
+            false => self.defer(|_| RenderCall::Viewport(Box::new(viewport))),
+        }
     }
 
     /// `setViewports:count:`. Refused as [`RenderCommandEncoder::set_viewport`] is, and for a
@@ -9495,13 +9590,19 @@ impl RenderCommandEncoder {
     /// amplification's mapping offsets the viewport) is refused at the draw,
     /// `Unsupported(LayeredRendering)` needing the feature; with one it draws through it.
     pub fn set_viewports(&mut self, viewports: &[Viewport]) -> Result<(), Error> {
-        self.lowering.set_viewports(viewports)
+        match self.lowers_at_call() {
+            true => self.at_call(|lowering| lowering.set_viewports(viewports)),
+            false => self.defer(|_| RenderCall::Viewports(viewports.into())),
+        }
     }
 
     /// `setScissorRect:`. A rectangle past the render area is clipped to it, as plain Metal clips
     /// it where its validation stops the call (measured on an M4).
     pub fn set_scissor_rect(&mut self, rect: ScissorRect) -> Result<(), Error> {
-        self.lowering.set_scissor_rect(rect)
+        match self.lowers_at_call() {
+            true => self.at_call(|lowering| lowering.set_scissor_rect(rect)),
+            false => self.defer(|_| RenderCall::ScissorRect(rect)),
+        }
     }
 
     /// `setScissorRects:count:`. Each rectangle is clipped to the render area as
@@ -9513,17 +9614,26 @@ impl RenderCommandEncoder {
     /// as plain Metal draws them where its validation stops a count other than 1 and the viewport
     /// count (probes).
     pub fn set_scissor_rects(&mut self, rects: &[ScissorRect]) -> Result<(), Error> {
-        self.lowering.set_scissor_rects(rects)
+        match self.lowers_at_call() {
+            true => self.at_call(|lowering| lowering.set_scissor_rects(rects)),
+            false => self.defer(|_| RenderCall::ScissorRects(rects.into())),
+        }
     }
 
     /// `setCullMode:`.
     pub fn set_cull_mode(&mut self, mode: CullMode) {
-        self.lowering.set_cull_mode(mode)
+        match self.lowers_at_call() {
+            true => self.at_call_unit(|lowering| lowering.set_cull_mode(mode)),
+            false => self.defer_unit(|_| RenderCall::CullMode(mode)),
+        }
     }
 
     /// `setFrontFacingWinding:`.
     pub fn set_front_facing_winding(&mut self, winding: Winding) {
-        self.lowering.set_front_facing_winding(winding)
+        match self.lowers_at_call() {
+            true => self.at_call_unit(|lowering| lowering.set_front_facing_winding(winding)),
+            false => self.defer_unit(|_| RenderCall::FrontFacingWinding(winding)),
+        }
     }
 
     /// `setDepthStencilState:`: `state` is a `&DepthStencilState`, or `None` for nil, which
@@ -9536,18 +9646,32 @@ impl RenderCommandEncoder {
         &mut self,
         state: impl Into<Option<&'a DepthStencilState>>,
     ) -> Result<(), Error> {
-        self.lowering.set_depth_stencil_state(state)
+        let state = state.into();
+        match self.lowers_at_call() {
+            true => self.at_call(|lowering| lowering.set_depth_stencil_state(state)),
+            false => self.defer(|log| {
+                RenderCall::DepthStencilState(state.map(|state| log.hold_depth_stencil(state)))
+            }),
+        }
     }
 
     /// `setStencilReferenceValue:`: both faces' reference, saturated at 255 as Metal's is
     /// (measured).
     pub fn set_stencil_reference_value(&mut self, value: u32) {
-        self.lowering.set_stencil_reference_value(value)
+        match self.lowers_at_call() {
+            true => self.at_call_unit(|lowering| lowering.set_stencil_reference_value(value)),
+            false => self.defer_unit(|_| RenderCall::StencilReferenceValue(value)),
+        }
     }
 
     /// `setStencilFrontReferenceValue:backReferenceValue:`, saturated at 255 as Metal's are.
     pub fn set_stencil_reference_values(&mut self, front: u32, back: u32) {
-        self.lowering.set_stencil_reference_values(front, back)
+        match self.lowers_at_call() {
+            true => {
+                self.at_call_unit(|lowering| lowering.set_stencil_reference_values(front, back))
+            }
+            false => self.defer_unit(|_| RenderCall::StencilReferenceValues(front, back)),
+        }
     }
 
     /// `setDepthBias:slopeScale:clamp:`. NaN and infinite factors give Metal's measured depths: a
@@ -9565,22 +9689,36 @@ impl RenderCommandEncoder {
         slope_scale: f32,
         clamp: f32,
     ) -> Result<(), Error> {
-        self.lowering.set_depth_bias(depth_bias, slope_scale, clamp)
+        match self.lowers_at_call() {
+            true => {
+                self.at_call(|lowering| lowering.set_depth_bias(depth_bias, slope_scale, clamp))
+            }
+            false => self.defer(|_| RenderCall::DepthBias(depth_bias, slope_scale, clamp)),
+        }
     }
 
     /// `setDepthClipMode:`. `Clamp` needs `depthClamp` (`Unsupported`).
     pub fn set_depth_clip_mode(&mut self, mode: DepthClipMode) -> Result<(), Error> {
-        self.lowering.set_depth_clip_mode(mode)
+        match self.lowers_at_call() {
+            true => self.at_call(|lowering| lowering.set_depth_clip_mode(mode)),
+            false => self.defer(|_| RenderCall::DepthClipMode(mode)),
+        }
     }
 
     /// `setTriangleFillMode:`. `Lines` needs `fillModeNonSolid` (`Unsupported`).
     pub fn set_triangle_fill_mode(&mut self, mode: TriangleFillMode) -> Result<(), Error> {
-        self.lowering.set_triangle_fill_mode(mode)
+        match self.lowers_at_call() {
+            true => self.at_call(|lowering| lowering.set_triangle_fill_mode(mode)),
+            false => self.defer(|_| RenderCall::TriangleFillMode(mode)),
+        }
     }
 
     /// `setBlendColorRed:green:blue:alpha:`.
     pub fn set_blend_color(&mut self, red: f32, green: f32, blue: f32, alpha: f32) {
-        self.lowering.set_blend_color(red, green, blue, alpha)
+        match self.lowers_at_call() {
+            true => self.at_call_unit(|lowering| lowering.set_blend_color(red, green, blue, alpha)),
+            false => self.defer_unit(|_| RenderCall::BlendColor([red, green, blue, alpha])),
+        }
     }
 
     /// `setTessellationFactorBuffer:offset:instanceStride:` (`tessellation.rs`): the factors a
@@ -9598,8 +9736,14 @@ impl RenderCommandEncoder {
         offset: u64,
         instance_stride: u64,
     ) -> Result<(), Error> {
-        self.lowering
-            .set_tessellation_factor_buffer(buffer, offset, instance_stride)
+        match self.lowers_at_call() {
+            true => self.at_call(|lowering| {
+                lowering.set_tessellation_factor_buffer(buffer, offset, instance_stride)
+            }),
+            false => self.defer(|_| {
+                RenderCall::TessellationFactorBuffer(buffer.cloned(), offset, instance_stride)
+            }),
+        }
     }
 
     /// `setTessellationFactorScale:` (`tessellation.rs`), which a pipeline that enables
@@ -9611,7 +9755,10 @@ impl RenderCommandEncoder {
     /// or draws as its `half` does under a pipeline that enables the scale, and a pipeline that
     /// does not draws as before.
     pub fn set_tessellation_factor_scale(&mut self, scale: f32) {
-        self.lowering.set_tessellation_factor_scale(scale)
+        match self.lowers_at_call() {
+            true => self.at_call_unit(|lowering| lowering.set_tessellation_factor_scale(scale)),
+            false => self.defer_unit(|_| RenderCall::TessellationFactorScale(scale)),
+        }
     }
 
     /// `setVertexAmplificationCount:viewMappings:` (`amplification.rs`): each later draw
@@ -9625,8 +9772,13 @@ impl RenderCommandEncoder {
         count: u64,
         view_mappings: Option<&[VertexAmplificationViewMapping]>,
     ) -> Result<(), Error> {
-        self.lowering
-            .set_vertex_amplification_count(count, view_mappings)
+        match self.lowers_at_call() {
+            true => self
+                .at_call(|lowering| lowering.set_vertex_amplification_count(count, view_mappings)),
+            false => self.defer(|_| {
+                RenderCall::VertexAmplificationCount(count, view_mappings.map(Into::into))
+            }),
+        }
     }
 
     /// `drawPrimitives:vertexStart:vertexCount:instanceCount:baseInstance:` (Metal's shorter
@@ -9640,13 +9792,26 @@ impl RenderCommandEncoder {
         instance_count: u32,
         base_instance: u32,
     ) -> Result<(), Error> {
-        self.lowering.draw_primitives(
-            primitive_type,
-            vertex_start,
-            vertex_count,
-            instance_count,
-            base_instance,
-        )
+        match self.lowers_at_call() {
+            true => self.at_call(|lowering| {
+                lowering.draw_primitives(
+                    primitive_type,
+                    vertex_start,
+                    vertex_count,
+                    instance_count,
+                    base_instance,
+                )
+            }),
+            false => self.defer(|_| {
+                RenderCall::DrawPrimitives(
+                    primitive_type,
+                    vertex_start,
+                    vertex_count,
+                    instance_count,
+                    base_instance,
+                )
+            }),
+        }
     }
 
     /// `drawIndexedPrimitives:indexCount:indexType:indexBuffer:indexBufferOffset:instanceCount:
@@ -9667,16 +9832,30 @@ impl RenderCommandEncoder {
         base_vertex: i32,
         base_instance: u32,
     ) -> Result<(), Error> {
-        self.lowering.draw_indexed_primitives(
-            primitive_type,
-            index_count,
-            index_type,
-            index_buffer,
-            index_buffer_offset,
-            instance_count,
-            base_vertex,
-            base_instance,
-        )
+        match self.lowers_at_call() {
+            true => self.at_call(|lowering| {
+                lowering.draw_indexed_primitives(
+                    primitive_type,
+                    index_count,
+                    index_type,
+                    index_buffer,
+                    index_buffer_offset,
+                    instance_count,
+                    base_vertex,
+                    base_instance,
+                )
+            }),
+            false => self.defer_indexed(|log| DrawIndexed {
+                primitive_type,
+                index_count,
+                index_type,
+                index_buffer: log.hold_buffer(index_buffer),
+                index_buffer_offset,
+                instance_count,
+                base_vertex,
+                base_instance,
+            }),
+        }
     }
 
     /// `drawPrimitives:indirectBuffer:indirectBufferOffset:`: Metal's
@@ -9688,11 +9867,22 @@ impl RenderCommandEncoder {
         indirect_buffer: &Buffer,
         indirect_buffer_offset: u64,
     ) -> Result<(), Error> {
-        self.lowering.draw_primitives_indirect(
-            primitive_type,
-            indirect_buffer,
-            indirect_buffer_offset,
-        )
+        match self.lowers_at_call() {
+            true => self.at_call(|lowering| {
+                lowering.draw_primitives_indirect(
+                    primitive_type,
+                    indirect_buffer,
+                    indirect_buffer_offset,
+                )
+            }),
+            false => self.defer(|_| {
+                RenderCall::DrawPrimitivesIndirect(
+                    primitive_type,
+                    indirect_buffer.clone(),
+                    indirect_buffer_offset,
+                )
+            }),
+        }
     }
 
     /// `drawIndexedPrimitives:indexType:indexBuffer:indexBufferOffset:indirectBuffer:
@@ -9710,14 +9900,28 @@ impl RenderCommandEncoder {
         indirect_buffer: &Buffer,
         indirect_buffer_offset: u64,
     ) -> Result<(), Error> {
-        self.lowering.draw_indexed_primitives_indirect(
-            primitive_type,
-            index_type,
-            index_buffer,
-            index_buffer_offset,
-            indirect_buffer,
-            indirect_buffer_offset,
-        )
+        match self.lowers_at_call() {
+            true => self.at_call(|lowering| {
+                lowering.draw_indexed_primitives_indirect(
+                    primitive_type,
+                    index_type,
+                    index_buffer,
+                    index_buffer_offset,
+                    indirect_buffer,
+                    indirect_buffer_offset,
+                )
+            }),
+            false => self.defer(|_| {
+                RenderCall::DrawIndexedPrimitivesIndirect(Box::new(DrawIndexedIndirect {
+                    primitive_type,
+                    index_type,
+                    index_buffer: index_buffer.clone(),
+                    index_buffer_offset,
+                    indirect_buffer: indirect_buffer.clone(),
+                    indirect_buffer_offset,
+                }))
+            }),
+        }
     }
 
     /// `drawPatches:patchStart:patchCount:patchIndexBuffer:patchIndexBufferOffset:instanceCount:
@@ -9741,15 +9945,30 @@ impl RenderCommandEncoder {
         instance_count: u32,
         base_instance: u32,
     ) -> Result<(), Error> {
-        self.lowering.draw_patches(
-            number_of_patch_control_points,
-            patch_start,
-            patch_count,
-            patch_index_buffer,
-            patch_index_buffer_offset,
-            instance_count,
-            base_instance,
-        )
+        match self.lowers_at_call() {
+            true => self.at_call(|lowering| {
+                lowering.draw_patches(
+                    number_of_patch_control_points,
+                    patch_start,
+                    patch_count,
+                    patch_index_buffer,
+                    patch_index_buffer_offset,
+                    instance_count,
+                    base_instance,
+                )
+            }),
+            false => self.defer(|_| {
+                RenderCall::DrawPatches(Box::new(DrawPatches {
+                    control_points: number_of_patch_control_points,
+                    patch_start,
+                    patch_count,
+                    patch_index_buffer: patch_index_buffer.cloned(),
+                    patch_index_buffer_offset,
+                    instance_count,
+                    base_instance,
+                }))
+            }),
+        }
     }
 
     /// `drawPatches:patchIndexBuffer:patchIndexBufferOffset:indirectBuffer:
@@ -9769,13 +9988,26 @@ impl RenderCommandEncoder {
         indirect_buffer: &Buffer,
         indirect_buffer_offset: u64,
     ) -> Result<(), Error> {
-        self.lowering.draw_patches_indirect(
-            number_of_patch_control_points,
-            patch_index_buffer,
-            patch_index_buffer_offset,
-            indirect_buffer,
-            indirect_buffer_offset,
-        )
+        match self.lowers_at_call() {
+            true => self.at_call(|lowering| {
+                lowering.draw_patches_indirect(
+                    number_of_patch_control_points,
+                    patch_index_buffer,
+                    patch_index_buffer_offset,
+                    indirect_buffer,
+                    indirect_buffer_offset,
+                )
+            }),
+            false => self.defer(|_| {
+                RenderCall::DrawPatchesIndirect(Box::new(DrawPatchesIndirect {
+                    control_points: number_of_patch_control_points,
+                    patch_index_buffer: patch_index_buffer.cloned(),
+                    patch_index_buffer_offset,
+                    indirect_buffer: indirect_buffer.clone(),
+                    indirect_buffer_offset,
+                }))
+            }),
+        }
     }
 
     /// `drawIndexedPatches:patchStart:patchCount:patchIndexBuffer:patchIndexBufferOffset:
@@ -9803,17 +10035,34 @@ impl RenderCommandEncoder {
         instance_count: u32,
         base_instance: u32,
     ) -> Result<(), Error> {
-        self.lowering.draw_indexed_patches(
-            number_of_patch_control_points,
-            patch_start,
-            patch_count,
-            patch_index_buffer,
-            patch_index_buffer_offset,
-            control_point_index_buffer,
-            control_point_index_buffer_offset,
-            instance_count,
-            base_instance,
-        )
+        match self.lowers_at_call() {
+            true => self.at_call(|lowering| {
+                lowering.draw_indexed_patches(
+                    number_of_patch_control_points,
+                    patch_start,
+                    patch_count,
+                    patch_index_buffer,
+                    patch_index_buffer_offset,
+                    control_point_index_buffer,
+                    control_point_index_buffer_offset,
+                    instance_count,
+                    base_instance,
+                )
+            }),
+            false => self.defer(|_| {
+                RenderCall::DrawIndexedPatches(Box::new(DrawIndexedPatches {
+                    control_points: number_of_patch_control_points,
+                    patch_start,
+                    patch_count,
+                    patch_index_buffer: patch_index_buffer.cloned(),
+                    patch_index_buffer_offset,
+                    control_point_index_buffer: control_point_index_buffer.clone(),
+                    control_point_index_buffer_offset,
+                    instance_count,
+                    base_instance,
+                }))
+            }),
+        }
     }
 
     /// `drawIndexedPatches:patchIndexBuffer:patchIndexBufferOffset:controlPointIndexBuffer:
@@ -9836,15 +10085,30 @@ impl RenderCommandEncoder {
         indirect_buffer: &Buffer,
         indirect_buffer_offset: u64,
     ) -> Result<(), Error> {
-        self.lowering.draw_indexed_patches_indirect(
-            number_of_patch_control_points,
-            patch_index_buffer,
-            patch_index_buffer_offset,
-            control_point_index_buffer,
-            control_point_index_buffer_offset,
-            indirect_buffer,
-            indirect_buffer_offset,
-        )
+        match self.lowers_at_call() {
+            true => self.at_call(|lowering| {
+                lowering.draw_indexed_patches_indirect(
+                    number_of_patch_control_points,
+                    patch_index_buffer,
+                    patch_index_buffer_offset,
+                    control_point_index_buffer,
+                    control_point_index_buffer_offset,
+                    indirect_buffer,
+                    indirect_buffer_offset,
+                )
+            }),
+            false => self.defer(|_| {
+                RenderCall::DrawIndexedPatchesIndirect(Box::new(DrawIndexedPatchesIndirect {
+                    control_points: number_of_patch_control_points,
+                    patch_index_buffer: patch_index_buffer.cloned(),
+                    patch_index_buffer_offset,
+                    control_point_index_buffer: control_point_index_buffer.clone(),
+                    control_point_index_buffer_offset,
+                    indirect_buffer: indirect_buffer.clone(),
+                    indirect_buffer_offset,
+                }))
+            }),
+        }
     }
 
     /// `setVisibilityResultMode:offset:` (`visibility.rs`). An offset that is not a multiple of 8
@@ -9863,7 +10127,10 @@ impl RenderCommandEncoder {
         mode: VisibilityResultMode,
         offset: u64,
     ) -> Result<(), Error> {
-        self.lowering.set_visibility_result_mode(mode, offset)
+        match self.lowers_at_call() {
+            true => self.at_call(|lowering| lowering.set_visibility_result_mode(mode, offset)),
+            false => self.defer(|_| RenderCall::VisibilityResultMode(mode, offset)),
+        }
     }
 
     /// `endEncoding`: begin the pass with its load and store operations, run the draws, and end it.
@@ -9873,7 +10140,7 @@ impl RenderCommandEncoder {
     /// is consumed either way, so a refusal leaves its command buffer abandoned, as Metal stops
     /// there.
     pub fn end_encoding(self) -> Result<(), Error> {
-        self.lowering.end_encoding()
+        self.end()
     }
 }
 
@@ -10636,6 +10903,80 @@ fn check_arguments(call: &'static str, length: u64, offset: u64, bytes: u64) -> 
         return Err(draw_problem(call, DrawProblem::IndirectBufferRange));
     }
     Ok(offset)
+}
+
+/// The state a pass of `samples` draws `state` as: in a pass of one sample, a render pipeline's state of
+/// more samples draws as its single-sample twin, as plain Metal draws it (Metal probes, 2- and
+/// 4-sample states: coverage at the pixel centre, one run per pixel even reading
+/// `[[sample_id]]`, which reads 0, `[[position]]` and sample-interpolated inputs at the centre,
+/// a `[[sample_mask]]` input of 1 and an output keeping the pixel by its bit 0, a framebuffer
+/// fetch and alpha to one as at one sample). Where Metal answers otherwise the state stays
+/// itself, which `check_pipeline` refuses (`SampleCount`): alpha to coverage (alphas of 0.3 and
+/// 0.5 that drop the texel at one sample kept it), a fragment function that reads the sample
+/// count (`get_num_samples()` read the state's), and, unmeasured, a fragment imageblock. Any
+/// other state is itself.
+pub(super) fn drawn_as(
+    samples: u32,
+    state: &RenderPipelineState,
+) -> Result<RenderPipelineState, Error> {
+    let RenderStateKind::Graphics(graphics) = state.kind() else {
+        return Ok(state.clone());
+    };
+    let multisampled = graphics.descriptor().raster_sample_count() > 1;
+    let coverage = graphics
+        .descriptor()
+        .vertex()
+        .is_some_and(|d| d.alpha_to_coverage);
+    if samples != 1 || !multisampled || coverage {
+        return Ok(state.clone());
+    }
+    let Some(twin) = state.single_sample()? else {
+        return Ok(state.clone());
+    };
+    let RenderStateKind::Graphics(drawn) = twin.kind() else {
+        return Err(internal("a drawing state's twin that does not draw"));
+    };
+    if drawn.reads_sample_count() || drawn.base().graphics.fragment_imageblock.is_some() {
+        return Ok(state.clone());
+    }
+    Ok(twin)
+}
+
+/// The drawing state a draw of `assembly` in `call` draws with, of the encoder's `pipeline`, by
+/// the checks plain Metal keeps for every draw: refused without a state, with a tile state, and
+/// with one of another kind of draw (`DrawKind`). A tessellation pipeline draws patches, and only
+/// it does: a draw of primitives with it draws nothing (`None`), as plain Metal draws it (Metal
+/// probe case `primitives_with_tessellation` on an M4; Metal's validation stops it), and one of
+/// patches with another pipeline stops Metal. A mesh render pipeline draws meshes, and only it
+/// does: a mesh draw of no threadgroups (`empty`) with another drawing state draws nothing, as
+/// plain Metal draws it (its validation stops it). The encoder's lowering and its checks at the
+/// call (`render/call_checks.rs`) both take it.
+fn drawn_by(
+    call: &'static str,
+    pipeline: Option<&RenderPipelineState>,
+    assembly: Assembly,
+    empty: bool,
+) -> Result<Option<DrawingState>, Error> {
+    let pipeline = match pipeline.map(RenderPipelineState::kind) {
+        None => return Err(invalid(call, Problem::NoPipelineState)),
+        Some(RenderStateKind::Tile(_)) => return Err(draw_problem(call, DrawProblem::TileState)),
+        Some(RenderStateKind::Graphics(state)) => state,
+    };
+    let tessellated = crate::tessellation::patches(&pipeline.base().graphics).is_some();
+    if tessellated != matches!(assembly, Assembly::Patches) {
+        return match assembly {
+            Assembly::Primitives(_) if tessellated => Ok(None),
+            _ => Err(draw_problem(call, DrawProblem::DrawKind)),
+        };
+    }
+    let meshes = pipeline.descriptor().vertex().is_none();
+    if meshes != matches!(assembly, Assembly::Meshes) {
+        if empty && matches!(assembly, Assembly::Meshes) {
+            return Ok(None);
+        }
+        return Err(draw_problem(call, DrawProblem::DrawKind));
+    }
+    Ok(Some(pipeline.clone()))
 }
 
 /// A patch draw's patch index or control-point index buffer and its offset, as the binder takes

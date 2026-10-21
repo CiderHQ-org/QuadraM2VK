@@ -153,6 +153,11 @@ pub enum Error {
     /// refused before the instance is made, where a driver need not refuse the device (no Metal
     /// counterpart).
     InstanceExtensionRequired(InstanceExtensionRequired),
+    /// A render encoder's call whose lowering, after the call returned, met a degradation the
+    /// device's options refuse there (`DeviceOptions::lowering_refuses`): its notice, which was
+    /// not announced. The call fails its command buffer (`CommandBufferError::CallRefused`), and
+    /// this is its refusal (`CommandBuffer::refusal`). No Metal counterpart.
+    Degraded(Box<crate::degradation::DegradeNotice>),
 }
 
 impl fmt::Display for Error {
@@ -226,6 +231,13 @@ impl fmt::Display for Error {
                 "the device extension {} requires the instance extension {}, which the instance \
                  does not enable",
                 missing.extension, missing.instance_extension
+            ),
+            Error::Degraded(notice) => write!(
+                f,
+                "{}: {}, refused as the device's options ask ({})",
+                notice.object,
+                notice.reason,
+                notice.degradation.code()
             ),
         }
     }
@@ -1711,6 +1723,38 @@ pub enum CommandBufferError {
     /// whatever samples its driver rasterizes; which encoders and signals Metal runs was
     /// measured for that size alone.
     DefaultRasterSampleCount,
+    /// A render encoder's call that the runtime refused as it lowered the call, after the call
+    /// returned (`RenderLoweringPolicy::Worker`): a refusal the call's own checks of its
+    /// arguments and the encoder's state could not find, such as the binder's, or a failure to
+    /// make what the lowering needs. The call, by its Metal selector and its place among the
+    /// encoder's calls ([`EncoderCall`]); [`CommandBuffer::refusal`](crate::CommandBuffer::refusal)
+    /// gives the error the call would have returned under `RenderLoweringPolicy::AtCall`. The
+    /// encoder and every encoder after it run nothing, and the event signals encoded from it on do
+    /// not fire. Metal's validation stops the process at such a call instead.
+    CallRefused(EncoderCall),
+}
+
+/// One call of a render encoder, as a refusal found after it returned names it
+/// ([`CommandBufferError::CallRefused`]), and as a notice announced while the runtime lowered it
+/// does (`DegradeNotice::call`). No Metal counterpart.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct EncoderCall {
+    /// The Metal selector of the encoder's method called (`"drawPrimitives:vertexStart:vertexCount:"`
+    /// and its kin name their full form, as the method's documentation does).
+    pub selector: &'static str,
+    /// The call's place among the encoder's calls, from 0: every call of the encoder's methods
+    /// counts, `end_encoding` and the queries (`tile_width`, `tile_height`) but none. The end of an
+    /// encoder that logged its calls names its notices `endEncoding`, at the place after its last
+    /// call.
+    pub index: u32,
+}
+
+impl EncoderCall {
+    /// Call `index` of its encoder, to the method of Metal's `selector`.
+    pub(crate) fn new(selector: &'static str, index: u32) -> EncoderCall {
+        EncoderCall { selector, index }
+    }
 }
 
 /// Whose failure a command buffer's error is ([`CommandBufferError::origin`]).
@@ -1886,7 +1930,8 @@ impl CommandBufferError {
             | CommandBufferError::HostStepObject(_)
             | CommandBufferError::EncodedUseRebound
             | CommandBufferError::PredicatedLoopPastCopies
-            | CommandBufferError::DefaultRasterSampleCount => 1,
+            | CommandBufferError::DefaultRasterSampleCount
+            | CommandBufferError::CallRefused(_) => 1,
             CommandBufferError::PageFault => 3,
             CommandBufferError::PipelineCreation(cause) => match cause {
                 PipelineCreationCause::OutOfMemory(_) => 8,
@@ -1925,7 +1970,8 @@ impl CommandBufferError {
             | CommandBufferError::PipelineCreation(_)
             | CommandBufferError::HostStepObject(_)
             | CommandBufferError::EncodedUseRebound
-            | CommandBufferError::PredicatedLoopPastCopies => FailureOrigin::Runtime,
+            | CommandBufferError::PredicatedLoopPastCopies
+            | CommandBufferError::CallRefused(_) => FailureOrigin::Runtime,
         }
     }
 

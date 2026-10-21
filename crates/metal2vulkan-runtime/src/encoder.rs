@@ -271,6 +271,10 @@ pub(super) struct EncoderCore {
     /// Its writes into ASTC carriers ([`wrote_twin`](Self::wrote_twin)): `end` hands them to the
     /// command buffer with its last part.
     twin_writes: Vec<TwinWrite>,
+    /// The commands it records now were called while no buffer of the device was detached: a
+    /// render encoder lowers calls it logged (`render/deferral.rs`), whose detachment they judge
+    /// as of their calls ([`judges_unattached`](Self::judges_unattached)).
+    unattached_as_called: bool,
     /// The core's own number in the process ([`id`](Self::id)).
     id: u64,
     /// It encodes an ended encoder's calls again, its command buffer committed (`replay.rs`), or
@@ -355,6 +359,20 @@ impl Drop for OpenGuard {
     }
 }
 
+/// Refuse an object of `other` in Metal's `call` of an encoder of `device` unless `other` is
+/// `device`: an encoder's check ([`EncoderCore::check_device`]), and a render encoder's at the call
+/// (`render/call_checks.rs`).
+pub(super) fn check_device(
+    device: &Device,
+    call: &'static str,
+    other: &Device,
+) -> Result<(), Error> {
+    match device.same(other) {
+        true => Ok(()),
+        false => Err(invalid(call, Problem::ForeignObject)),
+    }
+}
+
 impl EncoderCore {
     /// Open an encoder on `command_buffer` for Metal's `call`, `ordered` when Metal runs its
     /// commands in encoded order (a blit or serial compute encoder). Refused when the command
@@ -415,6 +433,7 @@ impl EncoderCore {
             fails_command_buffer: None,
             faults: false,
             twin_writes: Vec::new(),
+            unattached_as_called: false,
             aliased_uses: Vec::new(),
             id: CORES.fetch_add(1, Ordering::Relaxed),
             replaying: false,
@@ -494,6 +513,7 @@ impl EncoderCore {
             fails_command_buffer: None,
             faults: false,
             twin_writes: Vec::new(),
+            unattached_as_called: false,
             aliased_uses: Vec::new(),
             id: CORES.fetch_add(1, Ordering::Relaxed),
             // A segment a rebind records again, its command buffer committed.
@@ -582,11 +602,7 @@ impl EncoderCore {
 
     /// Refuse an object of `device` in Metal's `call` unless `device` is the encoder's.
     pub(super) fn check_device(&self, call: &'static str, device: &Device) -> Result<(), Error> {
-        if self.device().same(device) {
-            Ok(())
-        } else {
-            Err(invalid(call, Problem::ForeignObject))
-        }
+        check_device(self.device(), call, device)
     }
 
     /// Hold `object` until the command buffer completes: the encoder's commands use it.
@@ -995,6 +1011,13 @@ impl EncoderCore {
         }
     }
 
+    /// Whether the commands it records from now on were called while no buffer of the device was
+    /// detached (`unattached_as_called`): `true` while a render encoder lowers calls it logged,
+    /// whose [`skips`](Self::skips) then skips nothing a detach after their calls would.
+    pub(super) fn judges_unattached(&mut self, unattached: bool) {
+        self.unattached_as_called = unattached;
+    }
+
     /// Whether the encoder records nothing for a command that names `keys`: one of them is a
     /// detached buffer's (`detach.rs`), or an earlier command of the encoder named one. From
     /// that command on the encoder records nothing (`Taken::die`): its submission fails at
@@ -1005,6 +1028,9 @@ impl EncoderCore {
     /// before any Vulkan call that takes one of the buffers.
     pub(super) fn skips(&mut self, keys: impl IntoIterator<Item = ResourceKey> + Clone) -> bool {
         if !self.taken.dead() {
+            if self.unattached_as_called {
+                return false;
+            }
             let rebinds = &self.device().shared().rebinds;
             if !rebinds.any_detached(keys.clone()) {
                 return false;

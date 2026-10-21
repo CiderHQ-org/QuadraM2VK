@@ -254,6 +254,7 @@ use super::mesh::MeshGrid;
 use super::pass_start_reads::{PassStartReads, PassStartTables};
 use super::pass_steps::PassSteps;
 use super::pending_tile::TilePipelines;
+use super::replay::SharedCheck;
 use super::shadows::InstanceShadows;
 use super::tile_memory::TileMemory;
 use super::RenderCall;
@@ -760,7 +761,10 @@ impl RenderCommandEncoder {
         icb: &IndirectCommandBuffer,
         range: Range<u64>,
     ) -> Result<(), Error> {
-        self.lowering.execute_commands_in_buffer(icb, range)
+        match self.lowers_at_call() {
+            true => self.at_call(|lowering| lowering.execute_commands_in_buffer(icb, range)),
+            false => self.defer(|_| RenderCall::Execute(icb.clone(), range.clone())),
+        }
     }
 
     /// [`execute_commands_in_buffer`](Self::execute_commands_in_buffer) with a check of the
@@ -781,8 +785,15 @@ impl RenderCommandEncoder {
         check: IndirectCommandCheck,
         needs: IndirectCommandCheckNeeds,
     ) -> Result<(), Error> {
-        self.lowering
-            .execute_commands_in_buffer_checked(icb, range, check, needs)
+        match self.lowers_at_call() {
+            true => self.at_call(|lowering| {
+                lowering.execute_commands_in_buffer_checked(icb, range, check, needs)
+            }),
+            false => self.defer(|_| {
+                let check = SharedCheck::new(check);
+                RenderCall::ExecuteChecked(Box::new((icb.clone(), range.clone(), check, needs)))
+            }),
+        }
     }
 
     /// `executeCommandsInBuffer:indirectBuffer:indirectBufferOffset:`: run the render commands
@@ -815,8 +826,13 @@ impl RenderCommandEncoder {
         range_buffer: &Buffer,
         offset: u64,
     ) -> Result<(), Error> {
-        self.lowering
-            .execute_commands_in_buffer_indirect(icb, range_buffer, offset)
+        match self.lowers_at_call() {
+            true => self.at_call(|lowering| {
+                lowering.execute_commands_in_buffer_indirect(icb, range_buffer, offset)
+            }),
+            false => self
+                .defer(|_| RenderCall::ExecuteIndirect(icb.clone(), range_buffer.clone(), offset)),
+        }
     }
 
     /// [`execute_commands_in_buffer_indirect`](Self::execute_commands_in_buffer_indirect) with a
@@ -833,8 +849,21 @@ impl RenderCommandEncoder {
         offset: u64,
         check: IndirectCommandCheck,
     ) -> Result<(), Error> {
-        self.lowering
-            .execute_commands_in_buffer_indirect_checked(icb, range_buffer, offset, check)
+        match self.lowers_at_call() {
+            true => self.at_call(|lowering| {
+                lowering.execute_commands_in_buffer_indirect_checked(
+                    icb,
+                    range_buffer,
+                    offset,
+                    check,
+                )
+            }),
+            false => self.defer(|_| {
+                let check = SharedCheck::new(check);
+                let call = (icb.clone(), range_buffer.clone(), offset, check);
+                RenderCall::ExecuteIndirectChecked(Box::new(call))
+            }),
+        }
     }
 }
 
@@ -1704,7 +1733,7 @@ impl RenderLowering {
         let vertex = state.descriptor().vertex();
         if crate::tessellation::patches(&state.base().graphics).is_some()
             || vertex.is_none()
-            || self.check_pipeline(CALL, pipeline).is_err()
+            || self.shape_inputs().check_pipeline(CALL, pipeline).is_err()
         {
             return;
         }
@@ -1996,7 +2025,7 @@ impl RenderExecution {
                 None => pipeline,
             };
             encoder.factors.scale = scale;
-            encoder.check_pipeline(CALL, &pipeline)?;
+            encoder.shape_inputs().check_pipeline(CALL, &pipeline)?;
             // An object function's threadgroup memory arguments: which lengths a command's mesh
             // draw takes, its own or the encoder's, is not measured.
             if super::mesh::reads_object_threadgroup_memory(&pipeline) {

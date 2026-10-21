@@ -352,6 +352,24 @@ pub(super) fn check_range(
     check_index(call, first.saturating_add(count - 1), limit)
 }
 
+/// Refuse `buffer` at `offset` in `call` of an encoder of `device`: a buffer of another device,
+/// and, in a render stage's table (not `compute`), an offset past its length
+/// ([`ArgumentTable::compute`] holds it). The table's check, and a render encoder's at the call
+/// (`render/table_facts.rs`).
+pub(super) fn check_bound_buffer(
+    device: &Device,
+    call: &'static str,
+    (buffer, offset): (&Buffer, u64),
+    compute: bool,
+) -> Result<(), Error> {
+    super::encoder::check_device(device, call, buffer.device())?;
+    let length = buffer.length();
+    if offset > length && !compute {
+        return Err(invalid(call, Problem::OffsetOutOfRange { offset, length }));
+    }
+    Ok(())
+}
+
 /// The per-bind stride `stride` names: none for `MTLAttributeStrideStatic`, else its low 32
 /// bits. Plain Metal reads a stride past 32 bits so, and its validation takes it (an M4 under macOS
 /// 27.0.1 and an M3 Max under 26.7, compute stage-in and vertex fetch, both binding forms: `2^32 +
@@ -509,12 +527,7 @@ impl ArgumentTable {
         buffer: &Buffer,
         offset: u64,
     ) -> Result<(), Error> {
-        core.check_device(call, buffer.device())?;
-        let length = buffer.length();
-        if offset > length && !self.compute {
-            return Err(invalid(call, Problem::OffsetOutOfRange { offset, length }));
-        }
-        Ok(())
+        check_bound_buffer(core.device(), call, (buffer, offset), self.compute)
     }
 
     /// `setBuffer:offset:atIndex:` (`None` unbinds the index) in an encoder of `core`: the

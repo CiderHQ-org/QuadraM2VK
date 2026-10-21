@@ -164,7 +164,12 @@ impl RenderCommandEncoder {
         usage: ResourceUsage,
         stages: RenderStages,
     ) -> Result<(), Error> {
-        self.lowering.use_resource(resource, usage, stages)
+        match self.lowers_at_call() {
+            true => self.at_call(|lowering| lowering.use_resource(resource, usage, stages)),
+            false => {
+                self.defer(|_| RenderCall::UseResource(Resource::one(resource), usage, stages))
+            }
+        }
     }
 
     /// `useResources:count:usage:stages:`: [`use_resource`](Self::use_resource) of each of
@@ -175,7 +180,12 @@ impl RenderCommandEncoder {
         usage: ResourceUsage,
         stages: RenderStages,
     ) -> Result<(), Error> {
-        self.lowering.use_resources(resources, usage, stages)
+        match self.lowers_at_call() {
+            true => self.at_call(|lowering| lowering.use_resources(resources, usage, stages)),
+            false => {
+                self.defer(|_| RenderCall::UseResources(Resource::all(resources), usage, stages))
+            }
+        }
     }
 
     /// `useHeap:stages:`: the encoder's later draws and tile dispatches may read every buffer
@@ -188,13 +198,21 @@ impl RenderCommandEncoder {
     ///
     /// Refused, changing nothing (`Invalid`): a heap of another device.
     pub fn use_heap(&mut self, heap: &Heap, stages: RenderStages) -> Result<(), Error> {
-        self.lowering.use_heap(heap, stages)
+        match self.lowers_at_call() {
+            true => self.at_call(|lowering| lowering.use_heap(heap, stages)),
+            false => self.defer(|_| RenderCall::UseHeap(heap.clone(), stages)),
+        }
     }
 
     /// `useHeaps:count:stages:`: [`use_heap`](Self::use_heap) of each of `heaps`, refused,
     /// changing nothing, as it is for any of them.
     pub fn use_heaps(&mut self, heaps: &[&Heap], stages: RenderStages) -> Result<(), Error> {
-        self.lowering.use_heaps(heaps, stages)
+        match self.lowers_at_call() {
+            true => self.at_call(|lowering| lowering.use_heaps(heaps, stages)),
+            false => self.defer(|_| {
+                RenderCall::UseHeaps(heaps.iter().map(|&heap| heap.clone()).collect(), stages)
+            }),
+        }
     }
 }
 
@@ -302,8 +320,14 @@ impl RenderCommandEncoder {
         table: Option<&VisibleFunctionTable>,
         index: u32,
     ) -> Result<(), Error> {
-        self.lowering
-            .set_vertex_visible_function_table(table, index)
+        match self.lowers_at_call() {
+            true => {
+                self.at_call(|lowering| lowering.set_vertex_visible_function_table(table, index))
+            }
+            false => {
+                self.defer(|_| RenderCall::FunctionTable(Table::Vertex, table.cloned(), index))
+            }
+        }
     }
 
     /// `setVertexVisibleFunctionTables:withBufferRange:`: `tables[i]` at the vertex stage's
@@ -315,8 +339,18 @@ impl RenderCommandEncoder {
         tables: &[Option<&VisibleFunctionTable>],
         first: u32,
     ) -> Result<(), Error> {
-        self.lowering
-            .set_vertex_visible_function_tables(tables, first)
+        match self.lowers_at_call() {
+            true => {
+                self.at_call(|lowering| lowering.set_vertex_visible_function_tables(tables, first))
+            }
+            false => self.defer(|_| {
+                RenderCall::FunctionTables(
+                    Table::Vertex,
+                    tables.iter().map(|t| t.cloned()).collect(),
+                    first,
+                )
+            }),
+        }
     }
 
     /// `setFragmentVisibleFunctionTable:atBufferIndex:`: as
@@ -327,8 +361,14 @@ impl RenderCommandEncoder {
         table: Option<&VisibleFunctionTable>,
         index: u32,
     ) -> Result<(), Error> {
-        self.lowering
-            .set_fragment_visible_function_table(table, index)
+        match self.lowers_at_call() {
+            true => {
+                self.at_call(|lowering| lowering.set_fragment_visible_function_table(table, index))
+            }
+            false => {
+                self.defer(|_| RenderCall::FunctionTable(Table::Fragment, table.cloned(), index))
+            }
+        }
     }
 
     /// `setFragmentVisibleFunctionTables:withBufferRange:`: as
@@ -339,8 +379,17 @@ impl RenderCommandEncoder {
         tables: &[Option<&VisibleFunctionTable>],
         first: u32,
     ) -> Result<(), Error> {
-        self.lowering
-            .set_fragment_visible_function_tables(tables, first)
+        match self.lowers_at_call() {
+            true => self
+                .at_call(|lowering| lowering.set_fragment_visible_function_tables(tables, first)),
+            false => self.defer(|_| {
+                RenderCall::FunctionTables(
+                    Table::Fragment,
+                    tables.iter().map(|t| t.cloned()).collect(),
+                    first,
+                )
+            }),
+        }
     }
 
     /// `setTileVisibleFunctionTable:atBufferIndex:`: as
@@ -351,7 +400,10 @@ impl RenderCommandEncoder {
         table: Option<&VisibleFunctionTable>,
         index: u32,
     ) -> Result<(), Error> {
-        self.lowering.set_tile_visible_function_table(table, index)
+        match self.lowers_at_call() {
+            true => self.at_call(|lowering| lowering.set_tile_visible_function_table(table, index)),
+            false => self.defer(|_| RenderCall::FunctionTable(Table::Tile, table.cloned(), index)),
+        }
     }
 
     /// `setTileVisibleFunctionTables:withBufferRange:`: as
@@ -362,7 +414,17 @@ impl RenderCommandEncoder {
         tables: &[Option<&VisibleFunctionTable>],
         first: u32,
     ) -> Result<(), Error> {
-        self.lowering
-            .set_tile_visible_function_tables(tables, first)
+        match self.lowers_at_call() {
+            true => {
+                self.at_call(|lowering| lowering.set_tile_visible_function_tables(tables, first))
+            }
+            false => self.defer(|_| {
+                RenderCall::FunctionTables(
+                    Table::Tile,
+                    tables.iter().map(|t| t.cloned()).collect(),
+                    first,
+                )
+            }),
+        }
     }
 }

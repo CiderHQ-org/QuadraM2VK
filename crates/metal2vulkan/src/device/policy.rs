@@ -4,12 +4,13 @@
 use crate::device::profile::{GuestIsolation, HandleDomain, PointerDomain};
 
 /// Policy inputs of `Device::new`. Every field but `decoded_texels`, `heap_compression`,
-/// `completion`, `tile_store`, `resolve` and `batch_order` can change emitted code, so the profile
-/// carries it (containment as the encoding it selects) and its fingerprint covers it; those six
-/// are the runtime's alone (the texels of a carried texture's decoded twin, a heap's compressed
-/// texture's image, when the host sees a command buffer complete, what a render pass's load leaves
-/// in the texels its draws do not write, how a multisampled color attachment resolves, and how a
-/// batch begins after the earlier ones of its queue), and no profile carries them.
+/// `completion`, `tile_store`, `resolve`, `batch_order` and `render_lowering` can change emitted
+/// code, so the profile carries it (containment as the encoding it selects) and its fingerprint
+/// covers it; those seven are the runtime's alone (the texels of a carried texture's decoded twin,
+/// a heap's compressed texture's image, when the host sees a command buffer complete, what a render
+/// pass's load leaves in the texels its draws do not write, how a multisampled color attachment
+/// resolves, how a batch begins after the earlier ones of its queue, and where a render encoder's
+/// calls are lowered), and no profile carries them.
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -89,6 +90,10 @@ pub struct DevicePolicy {
     /// one queue side by side), or by a barrier for each access that depends on theirs. The
     /// runtime's choice alone: no emitted code changes.
     pub batch_order: BatchOrderPolicy,
+    /// Whether a render encoder's call is lowered inside the call, which returns every refusal
+    /// (the default), or after it returned, a refusal only the lowering finds failing its command
+    /// buffer. The runtime's choice alone: no emitted code changes.
+    pub render_lowering: RenderLoweringPolicy,
 }
 
 impl DevicePolicy {
@@ -100,7 +105,7 @@ impl DevicePolicy {
     /// compact codes in a carried texture's decoded twin, the driver's compressed image of a
     /// heap's texture Metal keeps compressed, command buffers ready together in one kernel
     /// submission, the device's load and store of a signed normalized or `RGB9E5Float` color
-    /// attachment, the device's resolve of a multisampled color attachment, and batches of one
+    /// attachment, the device's resolve of a multisampled color attachment, batches of one
     /// queue ordered by their ends where the driver runs them one after another.
     pub const UNTRUSTED: DevicePolicy = DevicePolicy {
         pointer_domain: PointerDomain::ResidentTable,
@@ -122,6 +127,7 @@ impl DevicePolicy {
         tile_store: TileStorePolicy::Device,
         resolve: ResolvePolicy::Device,
         batch_order: BatchOrderPolicy::Ends,
+        render_lowering: RenderLoweringPolicy::AtCall,
     };
 
     /// This policy with Metal's answer wherever the choices offer it: its maths functions,
@@ -135,9 +141,10 @@ impl DevicePolicy {
     /// as written ([`HeapCompressionPolicy::Uncompressed`]), each command buffer seen complete
     /// at its own end ([`CompletionPolicy::Exact`]), a loaded attachment's texels as its tile
     /// store leaves them ([`TileStorePolicy::Exact`]), its multisample color resolve
-    /// ([`ResolvePolicy::Exact`]), and each batch ordered after the earlier ones of its queue by
-    /// the accesses it depends on alone ([`BatchOrderPolicy::Exact`]). Sampling and every other
-    /// field are kept.
+    /// ([`ResolvePolicy::Exact`]), each batch ordered after the earlier ones of its queue by
+    /// the accesses it depends on alone ([`BatchOrderPolicy::Exact`]), and each render encoder
+    /// call lowered inside the call, which returns every refusal
+    /// ([`RenderLoweringPolicy::AtCall`]). Sampling and every other field are kept.
     pub const fn exact_answers(self) -> DevicePolicy {
         DevicePolicy {
             ycbcr_filter: YCbCrFilterPolicy::Exact,
@@ -153,6 +160,7 @@ impl DevicePolicy {
             tile_store: TileStorePolicy::Exact,
             resolve: ResolvePolicy::Exact,
             batch_order: BatchOrderPolicy::Exact,
+            render_lowering: RenderLoweringPolicy::AtCall,
             ..self
         }
     }
@@ -592,4 +600,25 @@ pub enum BatchOrderPolicy {
     /// the accesses within a batch, and its first encoder's GPU start time written as it begins,
     /// at the top of the pipe, where the driver may run it beside the batch before it.
     Exact,
+}
+
+/// Where a render encoder's calls are lowered: where each call's commands, descriptors, pipelines
+/// and resources are worked out and recorded. Metal's encoder checks a call as it is made and
+/// returns; its GPU work, and any failure found there, comes after. The runtime's choice alone: no
+/// emitted code changes.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum RenderLoweringPolicy {
+    /// After the call returned: the call makes Metal's checks of its arguments and
+    /// of the encoder's state, copies what it was lent and holds what it names, and returns; the
+    /// encoder lowers it later, in order, before its command buffer's submission. A refusal only
+    /// the lowering finds fails the command buffer
+    /// (`CommandBufferError::CallRefused`, naming the call), which then runs nothing of that
+    /// encoder or of any after it.
+    Worker,
+    /// Inside the call, as each call is made (the default): every refusal, the lowering's too,
+    /// returns from the call itself.
+    #[default]
+    AtCall,
 }

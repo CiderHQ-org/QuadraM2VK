@@ -148,17 +148,20 @@ fn watch_render_state(state: &RenderPipelineState) -> (&'static str, Lives) {
 }
 
 /// The little-endian bytes of `values`.
-fn bytes_of<T: Copy, const N: usize>(values: &[T], to_bytes: impl Fn(T) -> [u8; N]) -> Vec<u8> {
+pub(super) fn bytes_of<T: Copy, const N: usize>(
+    values: &[T],
+    to_bytes: impl Fn(T) -> [u8; N],
+) -> Vec<u8> {
     values.iter().flat_map(|&value| to_bytes(value)).collect()
 }
 
 /// The bits of `values`.
-fn bits(values: &[f32]) -> Vec<u32> {
+pub(super) fn bits(values: &[f32]) -> Vec<u32> {
     values.iter().map(|value| value.to_bits()).collect()
 }
 
 /// The words of `buffer`, a host-visible buffer no command writes now.
-fn words_of(buffer: &Buffer) -> Vec<u32> {
+pub(super) fn words_of(buffer: &Buffer) -> Vec<u32> {
     let contents = buffer.contents().unwrap();
     // SAFETY: the buffer's `length` bytes, which no command buffer writes now.
     let bytes = unsafe { std::slice::from_raw_parts(contents.as_ptr(), buffer.length() as usize) };
@@ -195,7 +198,12 @@ fn compute_state(device: &Device, path: &str, kernel: &str, icb: bool) -> Comput
 
 /// A state that draws into `RGBA8Unorm` with the functions `vertex` and `fragment` of the
 /// fixture at `path`.
-fn render_state(device: &Device, path: &str, vertex: &str, fragment: &str) -> RenderPipelineState {
+pub(super) fn render_state(
+    device: &Device,
+    path: &str,
+    vertex: &str,
+    fragment: &str,
+) -> RenderPipelineState {
     let library = library(device, path);
     let vertex = library.new_function_with_name(vertex).unwrap();
     let fragment = library.new_function_with_name(fragment).unwrap();
@@ -209,7 +217,7 @@ fn render_state(device: &Device, path: &str, vertex: &str, fragment: &str) -> Re
 }
 
 /// A pass that clears `target` to zero and stores what it draws.
-fn pass(target: &Texture) -> RenderPassDescriptor {
+pub(super) fn pass(target: &Texture) -> RenderPassDescriptor {
     let mut pass = RenderPassDescriptor::new();
     let color = &mut pass.color_attachments[0];
     color.texture = Some(target.clone());

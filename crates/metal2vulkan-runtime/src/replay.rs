@@ -128,6 +128,18 @@ impl<T> Handles<T> {
 #[derive(Clone, Copy)]
 pub(crate) struct Held(u32);
 
+/// Where a log stood ([`CallLog::mark`]): its lists' lengths and its size.
+#[derive(Clone, Copy)]
+pub(super) struct LogMark {
+    calls: usize,
+    bytes: usize,
+    buffers: usize,
+    words: usize,
+    textures: usize,
+    held: [usize; 5],
+    size: usize,
+}
+
 /// A run of elements in one of a log's arenas.
 #[derive(Clone, Copy)]
 pub(super) struct Span {
@@ -347,6 +359,16 @@ impl<C> CallLog<C> {
             .collect()
     }
 
+    /// `span`'s buffers as the log holds them.
+    pub(crate) fn buffer_slice(&self, span: Span) -> &[Option<Buffer>] {
+        &self.buffers[span.range()]
+    }
+
+    /// `span`'s textures as the log holds them.
+    pub(crate) fn texture_slice(&self, span: Span) -> &[Option<Texture>] {
+        &self.textures[span.range()]
+    }
+
     pub(crate) fn words_of(&self, span: Span) -> &[u64] {
         &self.words[span.range()]
     }
@@ -356,6 +378,59 @@ impl<C> CallLog<C> {
             .iter()
             .map(Option::as_ref)
             .collect()
+    }
+
+    /// Where the log stands now: [`truncate`](Self::truncate) takes it back there.
+    pub(super) fn mark(&self) -> LogMark {
+        LogMark {
+            calls: self.calls.len(),
+            bytes: self.bytes.len(),
+            buffers: self.buffers.len(),
+            words: self.words.len(),
+            textures: self.textures.len(),
+            held: [
+                self.held_buffers.held.len(),
+                self.held_textures.held.len(),
+                self.held_samplers.held.len(),
+                self.held_render_states.held.len(),
+                self.held_depth_stencils.held.len(),
+            ],
+            size: self.size,
+        }
+    }
+
+    /// Take the log back to `mark`: what was logged since, a call refused by its checks
+    /// (`render/deferral.rs`), let go of.
+    pub(super) fn truncate(&mut self, mark: LogMark) {
+        self.calls.truncate(mark.calls);
+        self.bytes.truncate(mark.bytes);
+        self.buffers.truncate(mark.buffers);
+        self.words.truncate(mark.words);
+        self.textures.truncate(mark.textures);
+        let [buffers, textures, samplers, states, depth_stencils] = mark.held;
+        self.held_buffers.held.truncate(buffers);
+        self.held_textures.held.truncate(textures);
+        self.held_samplers.held.truncate(samplers);
+        self.held_render_states.held.truncate(states);
+        self.held_depth_stencils.held.truncate(depth_stencils);
+        self.size = mark.size;
+    }
+
+    /// Let go of its calls and handles, keeping its lists' room: a deferred render encoder's
+    /// calls once they are lowered (`render/deferral.rs`).
+    pub(super) fn clear(&mut self) {
+        self.calls.clear();
+        self.bytes.clear();
+        self.buffers.clear();
+        self.words.clear();
+        self.textures.clear();
+        self.held_buffers.clear();
+        self.held_textures.clear();
+        self.held_samplers.clear();
+        self.held_render_states.clear();
+        self.held_depth_stencils.clear();
+        self.size = 0;
+        self.nested = 0;
     }
 
     /// The log emptied for another encoder, its calls and handles let go of and its lists' room
@@ -374,18 +449,7 @@ impl<C> CallLog<C> {
         if room > SPARE_LOG_BYTES {
             return None;
         }
-        self.calls.clear();
-        self.bytes.clear();
-        self.buffers.clear();
-        self.words.clear();
-        self.textures.clear();
-        self.held_buffers.clear();
-        self.held_textures.clear();
-        self.held_samplers.clear();
-        self.held_render_states.clear();
-        self.held_depth_stencils.clear();
-        self.size = 0;
-        self.nested = 0;
+        self.clear();
         Some(self)
     }
 }

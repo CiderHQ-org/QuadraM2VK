@@ -89,6 +89,12 @@ known. The rest of the differences are docs/API.md section 9's precision notes.
   Unorm8LinearFilterPolicy::DeviceWithinOneCode` hands it to a device measured within one code
   (`DeviceUnorm8LinearFilter`, `device-unorm8-linear-filter`): it bought no GPU time on the
   consumer's fragments and cost module size and making time.
+- `render_lowering = RenderLoweringPolicy::AtCall` (the default) lowers each render encoder call
+  inside the call, which returns every refusal. `render_lowering = RenderLoweringPolicy::Worker`
+  logs the call once its checks at the call pass, and lowers it later: as the encoder ends, on the
+  program's thread, so it buys no time yet. A refusal only the lowering finds then fails the
+  command buffer, naming the call (`CommandBufferError::CallRefused`), rather than returning from
+  it (docs/API.md section 1). The runtime's choice: no pipeline differs.
 - `pointer_domain`, `handle_domain`, `containment` and `isolation` choose how resources resolve and
   how guests are contained, not an answer of Metal's arithmetic or sampling.
 

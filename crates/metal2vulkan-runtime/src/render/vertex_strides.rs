@@ -124,8 +124,15 @@ impl RenderCommandEncoder {
         stride: u64,
         index: u32,
     ) -> Result<(), Error> {
-        self.lowering
-            .set_vertex_buffer_with_stride(buffer, offset, stride, index)
+        match self.lowers_at_call() {
+            true => self.at_call(|lowering| {
+                lowering.set_vertex_buffer_with_stride(buffer, offset, stride, index)
+            }),
+            false => self.defer(|log| {
+                let buffer = buffer.map(|buffer| log.hold_buffer(buffer));
+                RenderCall::VertexBufferWithStride(buffer, offset, stride, index)
+            }),
+        }
     }
 
     /// `setVertexBytes:length:attributeStride:atIndex:`: as
@@ -140,8 +147,14 @@ impl RenderCommandEncoder {
         stride: u64,
         index: u32,
     ) -> Result<(), Error> {
-        self.lowering
-            .set_vertex_bytes_with_stride(bytes, stride, index)
+        match self.lowers_at_call() {
+            true => {
+                self.at_call(|lowering| lowering.set_vertex_bytes_with_stride(bytes, stride, index))
+            }
+            false => self.defer(|log| {
+                RenderCall::VertexBytesWithStride(log.byte_span(bytes), stride, index)
+            }),
+        }
     }
 
     /// `setVertexBuffers:offsets:attributeStrides:withRange:`: `buffers[i]` at offset
@@ -155,8 +168,20 @@ impl RenderCommandEncoder {
         strides: &[u64],
         first: u32,
     ) -> Result<(), Error> {
-        self.lowering
-            .set_vertex_buffers_with_strides(buffers, offsets, strides, first)
+        match self.lowers_at_call() {
+            true => self.at_call(|lowering| {
+                lowering.set_vertex_buffers_with_strides(buffers, offsets, strides, first)
+            }),
+            false => self.defer(|log| {
+                let spans = (
+                    log.buffer_span(buffers),
+                    log.word_span(offsets),
+                    log.word_span(strides),
+                    first,
+                );
+                RenderCall::VertexBuffersWithStrides(Box::new(spans))
+            }),
+        }
     }
 
     /// `setVertexBufferOffset:attributeStride:atIndex:`: as
@@ -169,7 +194,13 @@ impl RenderCommandEncoder {
         stride: u64,
         index: u32,
     ) -> Result<(), Error> {
-        self.lowering
-            .set_vertex_buffer_offset_with_stride(offset, stride, index)
+        match self.lowers_at_call() {
+            true => self.at_call(|lowering| {
+                lowering.set_vertex_buffer_offset_with_stride(offset, stride, index)
+            }),
+            false => {
+                self.defer(|_| RenderCall::VertexBufferOffsetWithStride(offset, stride, index))
+            }
+        }
     }
 }

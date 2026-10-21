@@ -340,51 +340,75 @@ impl RenderCommandEncoder {
     /// `setAlphaTestReferenceValue:` (SPI): a no-op. No pipeline the runtime builds has a
     /// fixed-function alpha test, so the reference has no effect, as on Metal with the test off.
     pub fn set_alpha_test_reference_value(&mut self, value: f32) -> Result<(), Error> {
-        self.lowering.set_alpha_test_reference_value(value)
+        match self.lowers_at_call() {
+            true => self.at_call(|lowering| lowering.set_alpha_test_reference_value(value)),
+            false => self.defer(|_| RenderCall::AlphaTestReferenceValue(value)),
+        }
     }
 
     /// `setLineWidth:` (SPI): accepted at Metal's default width of 1, which every line the
     /// runtime draws has; any other width is refused ([`AppleOnly::LineWidth`]): Apple's
     /// wide-line rule is unmeasured.
     pub fn set_line_width(&mut self, width: f32) -> Result<(), Error> {
-        self.lowering.set_line_width(width)
+        match self.lowers_at_call() {
+            true => self.at_call(|lowering| lowering.set_line_width(width)),
+            false => self.defer(|_| RenderCall::LineWidth(width)),
+        }
     }
 
     /// `setPointSize:` (SPI): a no-op. On an M4 it changes nothing Metal draws at any size (0,
     /// 0.5, 1, 3, 5, 100, -2, NaN, infinity), whether the vertex function writes `[[point_size]]`
     /// or not and whether the pipeline's private `pointSizeOutputVS` is set.
     pub fn set_point_size(&mut self, size: f32) -> Result<(), Error> {
-        self.lowering.set_point_size(size)
+        match self.lowers_at_call() {
+            true => self.at_call(|lowering| lowering.set_point_size(size)),
+            false => self.defer(|_| RenderCall::PointSize(size)),
+        }
     }
 
     /// `setProvokingVertexMode:` (SPI): accepted at Metal's default, mode 0, the first vertex,
     /// from which every runtime draw takes a flat varying; any other mode is refused
     /// ([`AppleOnly::ProvokingVertexMode`]).
     pub fn set_provoking_vertex_mode(&mut self, mode: u64) -> Result<(), Error> {
-        self.lowering.set_provoking_vertex_mode(mode)
+        match self.lowers_at_call() {
+            true => self.at_call(|lowering| lowering.set_provoking_vertex_mode(mode)),
+            false => self.defer(|_| RenderCall::ProvokingVertexMode(mode)),
+        }
     }
 
     /// `setViewportTransformEnabled:` (SPI): accepted on, Metal's default and every runtime
     /// draw's; off is refused ([`AppleOnly::ViewportTransformDisabled`]): Vulkan has no form for
     /// it.
     pub fn set_viewport_transform_enabled(&mut self, enabled: bool) -> Result<(), Error> {
-        self.lowering.set_viewport_transform_enabled(enabled)
+        match self.lowers_at_call() {
+            true => self.at_call(|lowering| lowering.set_viewport_transform_enabled(enabled)),
+            false => self.defer(|_| RenderCall::ViewportTransformEnabled(enabled)),
+        }
     }
 
     /// `setVertexAmplificationMode:value:` (SPI): refused
     /// ([`AppleOnly::VertexAmplificationMode`]), its meaning unmeasured.
     pub fn set_vertex_amplification_mode(&mut self, mode: u64, value: u64) -> Result<(), Error> {
-        self.lowering.set_vertex_amplification_mode(mode, value)
+        match self.lowers_at_call() {
+            true => self.at_call(|lowering| lowering.set_vertex_amplification_mode(mode, value)),
+            false => self.defer(|_| RenderCall::VertexAmplificationMode(mode, value)),
+        }
     }
 
     /// `setDepthCleared` (SPI): refused ([`AppleOnly::DepthCleared`]), its meaning unmeasured.
     pub fn set_depth_cleared(&mut self) -> Result<(), Error> {
-        self.lowering.set_depth_cleared()
+        match self.lowers_at_call() {
+            true => self.at_call(|lowering| lowering.set_depth_cleared()),
+            false => self.defer(|_| RenderCall::DepthCleared),
+        }
     }
 
     /// `setStencilCleared` (SPI): refused ([`AppleOnly::StencilCleared`]), its meaning
     /// unmeasured.
     pub fn set_stencil_cleared(&mut self) -> Result<(), Error> {
-        self.lowering.set_stencil_cleared()
+        match self.lowers_at_call() {
+            true => self.at_call(|lowering| lowering.set_stencil_cleared()),
+            false => self.defer(|_| RenderCall::StencilCleared),
+        }
     }
 }

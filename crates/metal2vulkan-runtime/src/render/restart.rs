@@ -91,7 +91,11 @@ impl RenderCommandEncoder {
     /// strip restarting elsewhere than at the all-ones index is drawn as a list a GPU pass writes
     /// before the pass; a draw it cannot draw so is refused (`NotImplemented(RestartedStrip)`).
     pub fn set_primitive_restart_enabled(&mut self, _enabled: bool, index: u64) {
-        self.lowering.set_primitive_restart_enabled(_enabled, index)
+        match self.lowers_at_call() {
+            true => self
+                .at_call_unit(|lowering| lowering.set_primitive_restart_enabled(_enabled, index)),
+            false => self.defer_unit(|_| RenderCall::PrimitiveRestartEnabled(_enabled, index)),
+        }
     }
 }
 

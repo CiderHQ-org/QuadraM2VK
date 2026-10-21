@@ -258,7 +258,7 @@ pub use error::Nil;
 pub use error::Unproven;
 pub use error::{
     ArchivedPipeline, BinaryArchiveError, BinaryArchiveMiss, CommandBufferError, DeadlockCause,
-    DriverSetting, Error, InstanceApiVersion, Invalid, LoaderNotFound, MemoryKind,
+    DriverSetting, EncoderCall, Error, InstanceApiVersion, Invalid, LoaderNotFound, MemoryKind,
     MeshRecordsOverflow, Problem, RuntimeGap, SamplerLimit, ShaderCacheError,
     TessellationRecordsOverflow, TimedOut, VkResultCode,
 };

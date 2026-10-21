@@ -167,7 +167,10 @@ impl RenderCommandEncoder {
         offset: u64,
         index: u32,
     ) -> Result<(), Error> {
-        self.lowering
-            .set_threadgroup_memory_length(length, offset, index)
+        match self.lowers_at_call() {
+            true => self
+                .at_call(|lowering| lowering.set_threadgroup_memory_length(length, offset, index)),
+            false => self.defer(|_| RenderCall::ThreadgroupMemoryLength(length, offset, index)),
+        }
     }
 }

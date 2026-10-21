@@ -246,7 +246,12 @@ impl RenderCommandEncoder {
         target: Option<ResolveTarget>,
         index: u32,
     ) -> Result<(), Error> {
-        self.lowering.set_color_resolve_target(target, index)
+        match self.lowers_at_call() {
+            true => self.at_call(|lowering| lowering.set_color_resolve_target(target, index)),
+            false => {
+                self.defer(|_| RenderCall::ColorResolveTarget(target.clone().map(Box::new), index))
+            }
+        }
     }
 
     /// The depth attachment resolves into `target` (`None`: nowhere), whatever the descriptor
@@ -254,7 +259,10 @@ impl RenderCommandEncoder {
     /// descriptor's depth resolve is where the stencil attachment is the same texture (both
     /// aspects into one texture, the stencil stored while the depth resolves).
     pub fn set_depth_resolve_target(&mut self, target: Option<ResolveTarget>) -> Result<(), Error> {
-        self.lowering.set_depth_resolve_target(target)
+        match self.lowers_at_call() {
+            true => self.at_call(|lowering| lowering.set_depth_resolve_target(target)),
+            false => self.defer(|_| RenderCall::DepthResolveTarget(target.clone().map(Box::new))),
+        }
     }
 
     /// The stencil attachment resolves into `target` (`None`: nowhere). Refused as
@@ -263,7 +271,10 @@ impl RenderCommandEncoder {
         &mut self,
         target: Option<ResolveTarget>,
     ) -> Result<(), Error> {
-        self.lowering.set_stencil_resolve_target(target)
+        match self.lowers_at_call() {
+            true => self.at_call(|lowering| lowering.set_stencil_resolve_target(target)),
+            false => self.defer(|_| RenderCall::StencilResolveTarget(target.clone().map(Box::new))),
+        }
     }
 }
 

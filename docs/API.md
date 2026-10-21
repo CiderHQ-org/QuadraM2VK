@@ -123,6 +123,30 @@ compile does. `DevicePolicy::default()` is `DevicePolicy::UNTRUSTED`:
   Metal does (an M3 Max starts an independent command buffer committed behind running work while
   that work runs), and takes a command buffer's GPU start as its work begins. Every other driver
   takes that form under either value.
+- **A render encoder's calls lowered inside each call** (`RenderLoweringPolicy::AtCall`, the
+  default, which `exact_answers()` selects too; the runtime's choice, no pipeline differs): each
+  call works out and records its commands before it returns, and returns every refusal.
+  `render_lowering = RenderLoweringPolicy::Worker` logs each call and lowers it later, in order,
+  before the command buffer's submission (today as the encoder ends, on the program's thread).
+  The call still makes Metal's checks of its arguments and of the encoder's state, and returns
+  their refusals: the argument tables' and state setters', the objects' devices, the pipeline
+  state's against the pass, and a draw's kind, arguments and settings. It copies the bytes it
+  was lent and holds the objects it names. A call those checks do not cover is lowered inside
+  the call, as under `AtCall`: store actions, resolve targets, visibility result modes,
+  threadgroup memory lengths, fences, patch and mesh draws, a draw while a visible-function
+  table or a vertex buffer of more than 4 GiB past its offset is bound, and any call while a
+  buffer of the device is detached. From a pipeline state that fetches the pass's colors, reads
+  its tile memory, uses an imageblock, draws patches or meshes, or renders a color in another
+  format than its attachment's; a tile dispatch; an execution of indirect render commands; a
+  memory barrier; and a draw that gives the pass its hidden depth and stencil, every later call
+  of the encoder is lowered inside the call, and so is every call of a pass the device draws in
+  color groups. A refusal only the lowering finds (a runtime gap of the draw's variant or
+  instance, out of memory, a Vulkan error) fails the command buffer instead:
+  `CommandBufferError::CallRefused` names the call (`EncoderCall`: its Metal selector and its
+  index among the encoder's calls), `CommandBuffer::refusal` returns the error the call would
+  have returned, and that encoder and every one after it in the command buffer run nothing.
+  Notices a logged call's lowering announces name the call (`DegradeNotice::call`), and
+  `DeviceOptions::lowering_refuses` turns the kinds it lists into such refusals (section 9).
 
 Loops run as written: no execution bound is translated in.
 
@@ -941,7 +965,15 @@ How a notice reaches you:
   severity whose `id_name` is the kind's code and whose `degradation` holds a `DegradeNotice`: the
   `Degradation`, the object degraded, and the reason. Without a sink, one line on stderr:
   `metal2vulkan: <object>: <reason>; <cost> [<code>]`.
-- A notice is never fatal: the work runs.
+- A notice is never fatal: the work runs. The one exception is opt-in.
+  `DeviceOptions::lowering_refuses` (`RawDevice::lowering_refuses`; empty by default) lists kinds
+  that, when a render encoder lowers a call it logged (`RenderLoweringPolicy::Worker`, section 1),
+  are not announced. Instead they refuse that call: `CommandBufferError::CallRefused` names it,
+  and `CommandBuffer::refusal` returns `Error::Degraded` with the notice. A call lowered inside
+  the call announces them as any kind.
+- A notice announced while a render encoder lowers a call it logged names that call
+  (`DegradeNotice::call`: its Metal selector and its index among the encoder's calls); `None`
+  elsewhere.
 - Decode a notice by its `Degradation` or its code, never its text. The codes are a contract: none
   is renamed or reused, and a retired code stays listed below.
 - `Degradation::exactness()` says whether the program still gets Metal's answer: `Exact` (most

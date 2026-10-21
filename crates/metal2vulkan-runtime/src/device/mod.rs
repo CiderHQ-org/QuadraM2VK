@@ -195,6 +195,12 @@ pub(super) struct DeviceShared {
     properties: DeviceProperties,
     /// The kinds of degradation the device announced (`degradation.rs`).
     pub(super) announced: Announced,
+    /// The kinds that refuse a render encoder's call met while lowering it after it returned
+    /// (`DeviceOptions::lowering_refuses`, `render/deferral.rs`).
+    lowering_refuses: BTreeSet<Degradation>,
+    /// Its render encoders whose calls are logged, lowered before a read of what their lowering
+    /// leaves (`render/deferral.rs`).
+    pub(crate) deferred: crate::render::DeferredEncoders,
     /// Buffers carry Vulkan device addresses (`bufferDeviceAddress` is enabled).
     pub(super) device_address: bool,
     /// The alignment of every upload (`upload.rs`): 16 bytes, and the device's storage and
@@ -457,6 +463,12 @@ pub(super) struct DeviceShared {
 }
 
 impl DeviceShared {
+    /// Whether `kind`, met while lowering a render encoder's call after it returned, refuses the
+    /// call (`DeviceOptions::lowering_refuses`).
+    pub(crate) fn lowering_refuses(&self, kind: Degradation) -> bool {
+        self.lowering_refuses.contains(&kind)
+    }
+
     /// What `create` makes with the `VkPipelineCache` it is handed, its `vkCreate*Pipelines` call:
     /// a cache of the making's own, seeded from the record `making` names
     /// (`ShaderCache::make_pipelines`, `shader_cache/driver.rs`). On a pool's thread the exit waits
@@ -964,6 +976,9 @@ pub(super) struct Parts {
     pub(super) gpu_times_from_host: bool,
     /// The degradation kinds it announces at every occurrence (`degradation.rs`).
     pub(super) announce_each: BTreeSet<Degradation>,
+    /// The degradation kinds that refuse a render encoder's call met while lowering it after it
+    /// returned (`render/deferral.rs`).
+    pub(super) lowering_refuses: BTreeSet<Degradation>,
     /// Its command buffers keep execution records (`DeviceOptions::record_executions`).
     pub(super) record_executions: bool,
     /// Its views may reinterpret an image's components ([`DeviceShared`]'s field), outside
@@ -1031,6 +1046,7 @@ impl Device {
             calibration,
             gpu_times_from_host,
             announce_each,
+            lowering_refuses,
             record_executions,
             view_reinterpretation,
             generated_commands,
@@ -1571,6 +1587,8 @@ impl Device {
             enabled,
             properties,
             announced: Announced::new(&announce_each),
+            lowering_refuses,
+            deferred: crate::render::DeferredEncoders::default(),
             record_executions,
             views_epoch: AtomicU64::new(0),
             device_address,

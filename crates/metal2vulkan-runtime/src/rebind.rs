@@ -261,6 +261,12 @@ impl Rebinds {
         waiting.buffers.push((Arc::downgrade(buffer), keys));
     }
 
+    /// Whether a buffer of the device is detached now (`detach.rs`): a render encoder logs no call
+    /// while one is (`render/deferral.rs`).
+    pub(super) fn any_detached_now(&self) -> bool {
+        self.detached.load(Ordering::Acquire) > 0
+    }
+
     /// Whether one of `keys` names a detached buffer (`detach.rs`): at no cost while none is.
     pub(super) fn any_detached(&self, keys: impl IntoIterator<Item = ResourceKey>) -> bool {
         if self.detached.load(Ordering::Acquire) == 0 {

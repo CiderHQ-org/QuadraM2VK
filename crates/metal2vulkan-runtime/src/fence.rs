@@ -359,7 +359,10 @@ impl RenderCommandEncoder {
     /// `after_stages` and every stage before them (the module docs), and its work outside its
     /// draws; Metal's `Tile` stage, or no stage, after all of its work.
     pub fn update_fence(&mut self, fence: &Fence, after_stages: RenderStages) -> Result<(), Error> {
-        self.lowering.update_fence(fence, after_stages)
+        match self.lowers_at_call() {
+            true => self.at_call(|lowering| lowering.update_fence(fence, after_stages)),
+            false => self.defer(|_| RenderCall::UpdateFence(fence.clone(), after_stages)),
+        }
     }
 
     /// `waitForFence:beforeStages:`: the encoder's draws' work in `before_stages` and every stage
@@ -373,7 +376,10 @@ impl RenderCommandEncoder {
         fence: &Fence,
         before_stages: RenderStages,
     ) -> Result<(), Error> {
-        self.lowering.wait_for_fence(fence, before_stages)
+        match self.lowers_at_call() {
+            true => self.at_call(|lowering| lowering.wait_for_fence(fence, before_stages)),
+            false => self.defer(|_| RenderCall::WaitForFence(fence.clone(), before_stages)),
+        }
     }
 
     /// `memoryBarrierWithScope:afterStages:beforeStages:`: the writes of the encoder's draws
@@ -393,8 +399,13 @@ impl RenderCommandEncoder {
         after_stages: RenderStages,
         before_stages: RenderStages,
     ) {
-        self.lowering
-            .memory_barrier_with_scope(scope, after_stages, before_stages)
+        match self.lowers_at_call() {
+            true => self.at_call_unit(|lowering| {
+                lowering.memory_barrier_with_scope(scope, after_stages, before_stages)
+            }),
+            false => self
+                .defer_unit(|_| RenderCall::BarrierWithScope(scope, after_stages, before_stages)),
+        }
     }
 
     /// `memoryBarrierWithResources:count:afterStages:beforeStages:`: as
@@ -408,7 +419,17 @@ impl RenderCommandEncoder {
         after_stages: RenderStages,
         before_stages: RenderStages,
     ) -> Result<(), Error> {
-        self.lowering
-            .memory_barrier_with_resources(resources, after_stages, before_stages)
+        match self.lowers_at_call() {
+            true => self.at_call(|lowering| {
+                lowering.memory_barrier_with_resources(resources, after_stages, before_stages)
+            }),
+            false => self.defer(|_| {
+                RenderCall::BarrierWithResources(
+                    Resource::all(resources),
+                    after_stages,
+                    before_stages,
+                )
+            }),
+        }
     }
 }

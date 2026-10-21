@@ -19,12 +19,15 @@ use super::RenderLowering;
 use crate::amplification::VertexAmplificationViewMapping;
 use crate::buffer::Buffer;
 use crate::command_buffer::CommandBuffer;
+use crate::device::lock;
 use crate::encoder::Replayed;
 use crate::error::Error;
 use crate::fence::Fence;
 use crate::function_table::VisibleFunctionTable;
 use crate::heap::Heap;
-use crate::indirect_command_buffer::IndirectCommandBuffer;
+use crate::indirect_command_buffer::{
+    IndirectCommandBuffer, IndirectCommandCheck, IndirectCommandCheckNeeds,
+};
 use crate::render::ResolveTarget;
 use crate::render_pass::RenderPassDescriptor;
 use crate::render_values::{ScissorRect, StoreAction, StoreActionOptions, Viewport};
@@ -38,6 +41,7 @@ use metal2vulkan::metal::{
     TriangleFillMode, Winding,
 };
 use std::ops::Range;
+use std::sync::{Arc, Mutex};
 
 /// A render encoder's log: the descriptor its pass was opened with, and its calls.
 pub(crate) struct RenderLog {
@@ -189,6 +193,18 @@ pub(crate) enum RenderCall {
     UseHeaps(Box<[Heap]>, RenderStages),
     Execute(IndirectCommandBuffer, Range<u64>),
     ExecuteIndirect(IndirectCommandBuffer, Buffer, u64),
+    /// `execute_commands_in_buffer_checked`, deferred (`render/deferral.rs`): its check goes with
+    /// it. An encoder's own log keeps the unchecked call, which a rebind runs again with none.
+    ExecuteChecked(
+        Box<(
+            IndirectCommandBuffer,
+            Range<u64>,
+            SharedCheck,
+            IndirectCommandCheckNeeds,
+        )>,
+    ),
+    /// `execute_commands_in_buffer_indirect_checked`, deferred, likewise.
+    ExecuteIndirectChecked(Box<(IndirectCommandBuffer, Buffer, u64, SharedCheck)>),
     ColorResolveTarget(Option<Box<ResolveTarget>>, u32),
     DepthResolveTarget(Option<Box<ResolveTarget>>),
     StencilResolveTarget(Option<Box<ResolveTarget>>),
@@ -215,7 +231,8 @@ pub(crate) enum RenderCall {
 }
 
 impl RenderCall {
-    /// The bytes it holds in boxes of its own, besides its size.
+    /// The bytes it holds besides its size: in boxes of its own, and an indexed draw's arguments in
+    /// its log's list of them.
     pub(super) fn extra(&self) -> usize {
         use std::mem::{size_of, size_of_val};
         use RenderCall as C;
@@ -235,6 +252,7 @@ impl RenderCall {
             C::VertexAmplificationCount(_, mappings) => mappings
                 .as_ref()
                 .map_or(0, |mappings| size_of_val(&**mappings)),
+            C::DrawIndexedPrimitives(_) => size_of::<DrawIndexed>(),
             C::DrawIndexedPrimitivesIndirect(call) => size_of_val(&**call),
             C::DrawPatches(call) => size_of_val(&**call),
             C::DrawPatchesIndirect(call) => size_of_val(&**call),
@@ -251,7 +269,262 @@ impl RenderCall {
             C::MeshThreadgroupsIndirect(call) => size_of_val(&**call),
             C::ThreadsPerTile(threads) => size_of_val(&**threads),
             C::ThreadsPerTileInRegion(call) => size_of_val(&**call),
+            C::ExecuteChecked(call) => size_of_val(&**call),
+            C::ExecuteIndirectChecked(call) => size_of_val(&**call),
             _ => 0,
+        }
+    }
+}
+
+/// The check an execution's call was given ([`IndirectCommandCheck`]), shared by the call's log
+/// entry and the lowering that runs it (`RenderCall::ExecuteChecked`).
+#[derive(Clone)]
+pub(crate) struct SharedCheck(Arc<Mutex<IndirectCommandCheck>>);
+
+impl SharedCheck {
+    /// `check`, shared.
+    pub(crate) fn new(check: IndirectCommandCheck) -> SharedCheck {
+        SharedCheck(Arc::new(Mutex::new(check)))
+    }
+
+    /// A check that runs this one.
+    fn boxed(&self) -> IndirectCommandCheck {
+        let shared = Arc::clone(&self.0);
+        Box::new(move |index, command| (lock(&shared))(index, command))
+    }
+}
+
+impl RenderCall {
+    /// The Metal selector of the encoder's method that made it ([`EncoderCall::selector`]).
+    ///
+    /// [`EncoderCall::selector`]: crate::EncoderCall::selector
+    pub(super) fn selector(&self) -> &'static str {
+        use RenderCall as C;
+        use Table as T;
+        let staged = |table: &Table, selectors: [&'static str; 5]| match table {
+            T::Vertex => selectors[0],
+            T::Fragment => selectors[1],
+            T::Object => selectors[2],
+            T::Mesh => selectors[3],
+            T::Tile => selectors[4],
+        };
+        match self {
+            C::PipelineState(_) => "setRenderPipelineState:",
+            C::Buffer(table, ..) => staged(
+                table,
+                [
+                    "setVertexBuffer:offset:atIndex:",
+                    "setFragmentBuffer:offset:atIndex:",
+                    "setObjectBuffer:offset:atIndex:",
+                    "setMeshBuffer:offset:atIndex:",
+                    "setTileBuffer:offset:atIndex:",
+                ],
+            ),
+            C::Buffers(table, ..) => staged(
+                table,
+                [
+                    "setVertexBuffers:offsets:withRange:",
+                    "setFragmentBuffers:offsets:withRange:",
+                    "setObjectBuffers:offsets:withRange:",
+                    "setMeshBuffers:offsets:withRange:",
+                    "setTileBuffers:offsets:withRange:",
+                ],
+            ),
+            C::BufferOffset(table, ..) => staged(
+                table,
+                [
+                    "setVertexBufferOffset:atIndex:",
+                    "setFragmentBufferOffset:atIndex:",
+                    "setObjectBufferOffset:atIndex:",
+                    "setMeshBufferOffset:atIndex:",
+                    "setTileBufferOffset:atIndex:",
+                ],
+            ),
+            C::Bytes(table, ..) => staged(
+                table,
+                [
+                    "setVertexBytes:length:atIndex:",
+                    "setFragmentBytes:length:atIndex:",
+                    "setObjectBytes:length:atIndex:",
+                    "setMeshBytes:length:atIndex:",
+                    "setTileBytes:length:atIndex:",
+                ],
+            ),
+            C::Texture(table, ..) => staged(
+                table,
+                [
+                    "setVertexTexture:atIndex:",
+                    "setFragmentTexture:atIndex:",
+                    "setObjectTexture:atIndex:",
+                    "setMeshTexture:atIndex:",
+                    "setTileTexture:atIndex:",
+                ],
+            ),
+            C::Textures(table, ..) => staged(
+                table,
+                [
+                    "setVertexTextures:withRange:",
+                    "setFragmentTextures:withRange:",
+                    "setObjectTextures:withRange:",
+                    "setMeshTextures:withRange:",
+                    "setTileTextures:withRange:",
+                ],
+            ),
+            C::Sampler(table, ..) => staged(
+                table,
+                [
+                    "setVertexSamplerState:atIndex:",
+                    "setFragmentSamplerState:atIndex:",
+                    "setObjectSamplerState:atIndex:",
+                    "setMeshSamplerState:atIndex:",
+                    "setTileSamplerState:atIndex:",
+                ],
+            ),
+            C::Samplers(table, call) if call.clamps.is_some() => staged(
+                table,
+                [
+                    "setVertexSamplerStates:lodMinClamps:lodMaxClamps:withRange:",
+                    "setFragmentSamplerStates:lodMinClamps:lodMaxClamps:withRange:",
+                    "setObjectSamplerStates:lodMinClamps:lodMaxClamps:withRange:",
+                    "setMeshSamplerStates:lodMinClamps:lodMaxClamps:withRange:",
+                    "setTileSamplerStates:lodMinClamps:lodMaxClamps:withRange:",
+                ],
+            ),
+            C::Samplers(table, _) => staged(
+                table,
+                [
+                    "setVertexSamplerStates:withRange:",
+                    "setFragmentSamplerStates:withRange:",
+                    "setObjectSamplerStates:withRange:",
+                    "setMeshSamplerStates:withRange:",
+                    "setTileSamplerStates:withRange:",
+                ],
+            ),
+            C::FunctionTable(table, ..) => staged(
+                table,
+                [
+                    "setVertexVisibleFunctionTable:atBufferIndex:",
+                    "setFragmentVisibleFunctionTable:atBufferIndex:",
+                    "setObjectVisibleFunctionTable:atBufferIndex:",
+                    "setMeshVisibleFunctionTable:atBufferIndex:",
+                    "setTileVisibleFunctionTable:atBufferIndex:",
+                ],
+            ),
+            C::FunctionTables(table, ..) => staged(
+                table,
+                [
+                    "setVertexVisibleFunctionTables:withBufferRange:",
+                    "setFragmentVisibleFunctionTables:withBufferRange:",
+                    "setObjectVisibleFunctionTables:withBufferRange:",
+                    "setMeshVisibleFunctionTables:withBufferRange:",
+                    "setTileVisibleFunctionTables:withBufferRange:",
+                ],
+            ),
+            C::VertexBufferWithStride(..) => "setVertexBuffer:offset:attributeStride:atIndex:",
+            C::VertexBuffersWithStrides(_) => {
+                "setVertexBuffers:offsets:attributeStrides:withRange:"
+            }
+            C::VertexBufferOffsetWithStride(..) => "setVertexBufferOffset:attributeStride:atIndex:",
+            C::VertexBytesWithStride(..) => "setVertexBytes:length:attributeStride:atIndex:",
+            C::ColorStoreAction(..) => "setColorStoreAction:atIndex:",
+            C::DepthStoreAction(_) => "setDepthStoreAction:",
+            C::StencilStoreAction(_) => "setStencilStoreAction:",
+            C::ColorStoreActionOptions(..) => "setColorStoreActionOptions:atIndex:",
+            C::DepthStoreActionOptions(_) => "setDepthStoreActionOptions:",
+            C::StencilStoreActionOptions(_) => "setStencilStoreActionOptions:",
+            C::Viewport(_) => "setViewport:",
+            C::Viewports(_) => "setViewports:count:",
+            C::ScissorRect(_) => "setScissorRect:",
+            C::ScissorRects(_) => "setScissorRects:count:",
+            C::CullMode(_) => "setCullMode:",
+            C::FrontFacingWinding(_) => "setFrontFacingWinding:",
+            C::DepthStencilState(_) => "setDepthStencilState:",
+            C::StencilReferenceValue(_) => "setStencilReferenceValue:",
+            C::StencilReferenceValues(..) => "setStencilFrontReferenceValue:backReferenceValue:",
+            C::DepthBias(..) => "setDepthBias:slopeScale:clamp:",
+            C::DepthClipMode(_) => "setDepthClipMode:",
+            C::TriangleFillMode(_) => "setTriangleFillMode:",
+            C::BlendColor(_) => "setBlendColorRed:green:blue:alpha:",
+            C::TessellationFactorBuffer(..) => "setTessellationFactorBuffer:offset:instanceStride:",
+            C::TessellationFactorScale(_) => "setTessellationFactorScale:",
+            C::VertexAmplificationCount(..) => "setVertexAmplificationCount:viewMappings:",
+            C::DrawPrimitives(..) => {
+                "drawPrimitives:vertexStart:vertexCount:instanceCount:baseInstance:"
+            }
+            C::DrawIndexedPrimitives(_) => {
+                "drawIndexedPrimitives:indexCount:indexType:indexBuffer:indexBufferOffset:\
+                 instanceCount:baseVertex:baseInstance:"
+            }
+            C::DrawPrimitivesIndirect(..) => "drawPrimitives:indirectBuffer:indirectBufferOffset:",
+            C::DrawIndexedPrimitivesIndirect(_) => {
+                "drawIndexedPrimitives:indexType:indexBuffer:indexBufferOffset:indirectBuffer:\
+                 indirectBufferOffset:"
+            }
+            C::DrawPatches(_) => {
+                "drawPatches:patchStart:patchCount:patchIndexBuffer:patchIndexBufferOffset:\
+                 instanceCount:baseInstance:"
+            }
+            C::DrawPatchesIndirect(_) => {
+                "drawPatches:patchIndexBuffer:patchIndexBufferOffset:indirectBuffer:\
+                 indirectBufferOffset:"
+            }
+            C::DrawIndexedPatches(_) => {
+                "drawIndexedPatches:patchStart:patchCount:patchIndexBuffer:patchIndexBufferOffset:\
+                 controlPointIndexBuffer:controlPointIndexBufferOffset:instanceCount:baseInstance:"
+            }
+            C::DrawIndexedPatchesIndirect(_) => {
+                "drawIndexedPatches:patchIndexBuffer:patchIndexBufferOffset:\
+                 controlPointIndexBuffer:controlPointIndexBufferOffset:indirectBuffer:\
+                 indirectBufferOffset:"
+            }
+            C::VisibilityResultMode(..) => "setVisibilityResultMode:offset:",
+            C::UseResource(..) => "useResource:usage:stages:",
+            C::UseResources(..) => "useResources:count:usage:stages:",
+            C::UseHeap(..) => "useHeap:stages:",
+            C::UseHeaps(..) => "useHeaps:count:stages:",
+            C::Execute(..) | C::ExecuteChecked(_) => "executeCommandsInBuffer:withRange:",
+            C::ExecuteIndirect(..) | C::ExecuteIndirectChecked(_) => {
+                "executeCommandsInBuffer:indirectBuffer:indirectBufferOffset:"
+            }
+            C::ColorResolveTarget(..) => {
+                "setColorResolveTexture:slice:depthPlane:level:yInvert:atIndex:"
+            }
+            C::DepthResolveTarget(_) => "setDepthResolveTexture:slice:depthPlane:level:yInvert:",
+            C::StencilResolveTarget(_) => {
+                "setStencilResolveTexture:slice:depthPlane:level:yInvert:"
+            }
+            C::MeshThreadgroups(_) => {
+                "drawMeshThreadgroups:threadsPerObjectThreadgroup:threadsPerMeshThreadgroup:"
+            }
+            C::MeshThreads(_) => {
+                "drawMeshThreads:threadsPerObjectThreadgroup:threadsPerMeshThreadgroup:"
+            }
+            C::MeshThreadgroupsIndirect(_) => {
+                "drawMeshThreadgroupsWithIndirectBuffer:indirectBufferOffset:\
+                 threadsPerObjectThreadgroup:threadsPerMeshThreadgroup:"
+            }
+            C::PrimitiveRestartEnabled(..) => "setPrimitiveRestartEnabled:index:",
+            C::ThreadsPerTile(_) => "dispatchThreadsPerTile:",
+            C::ThreadsPerTileInRegion(call) if call.2.is_some() => {
+                "dispatchThreadsPerTile:inRegion:withRenderTargetArrayIndex:"
+            }
+            C::ThreadsPerTileInRegion(_) => "dispatchThreadsPerTile:inRegion:",
+            C::ThreadgroupMemoryLength(..) => "setThreadgroupMemoryLength:offset:atIndex:",
+            C::ObjectThreadgroupMemoryLength(..) => "setObjectThreadgroupMemoryLength:atIndex:",
+            C::UpdateFence(..) => "updateFence:afterStages:",
+            C::WaitForFence(..) => "waitForFence:beforeStages:",
+            C::BarrierWithScope(..) => "memoryBarrierWithScope:afterStages:beforeStages:",
+            C::BarrierWithResources(..) => {
+                "memoryBarrierWithResources:count:afterStages:beforeStages:"
+            }
+            C::AlphaTestReferenceValue(_) => "setAlphaTestReferenceValue:",
+            C::LineWidth(_) => "setLineWidth:",
+            C::PointSize(_) => "setPointSize:",
+            C::ProvokingVertexMode(_) => "setProvokingVertexMode:",
+            C::ViewportTransformEnabled(_) => "setViewportTransformEnabled:",
+            C::VertexAmplificationMode(..) => "setVertexAmplificationMode:value:",
+            C::DepthCleared => "setDepthCleared",
+            C::StencilCleared => "setStencilCleared",
         }
     }
 }
@@ -367,14 +640,16 @@ impl RenderLowering {
             let at = log.indexed.len() as u32;
             log.indexed.push(draw);
             let call = RenderCall::DrawIndexedPrimitives(at);
-            log.calls.push(call, std::mem::size_of::<DrawIndexed>());
+            let extra = call.extra();
+            log.calls.push(call, extra);
         }
     }
 }
 
 /// Run `call` again on `encoder`, its slices in `log`'s arenas and an indexed draw's arguments in
-/// `indexed`.
-fn render(
+/// `indexed`: a rebind's encoding again, a later color group's, or a deferred call's lowering
+/// (`render/deferral.rs`).
+pub(super) fn render(
     encoder: &mut RenderLowering,
     (log, indexed): (&CallLog<RenderCall>, &[DrawIndexed]),
     call: &RenderCall,
@@ -632,6 +907,14 @@ fn render(
         C::Execute(icb, range) => encoder.execute_commands_in_buffer(icb, range.clone()),
         C::ExecuteIndirect(icb, buffer, offset) => {
             encoder.execute_commands_in_buffer_indirect(icb, buffer, *offset)
+        }
+        C::ExecuteChecked(call) => {
+            let (icb, range, check, needs) = &**call;
+            encoder.execute_commands_in_buffer_checked(icb, range.clone(), check.boxed(), *needs)
+        }
+        C::ExecuteIndirectChecked(call) => {
+            let (icb, buffer, offset, check) = &**call;
+            encoder.execute_commands_in_buffer_indirect_checked(icb, buffer, *offset, check.boxed())
         }
         C::ColorResolveTarget(target, index) => {
             encoder.set_color_resolve_target(target.as_deref().cloned(), *index)
