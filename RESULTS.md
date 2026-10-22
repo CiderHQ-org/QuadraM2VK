@@ -2,10 +2,10 @@
 
 2026-10-22. The current local fork, Quadra launcher and matching ABI 2 bridge are built and
 committed. Shader preloading, live-memory accounting, cache recovery and diagnostics have
-authored software Vulkan coverage. The current `cb5b342` bridge also passed agent-run RTX
-3060 Ti checks, including native Wayland and the first-launch preparation stages. Quadra 0.33 integrates this renderer as **Quadra M2VK**
-and pins the public runtime Git revision. Its release source `460734e` has the same tree
-as companion `cb5b342`. The user reports persistent home/minimum-graphics slowdowns gone and smaller first-visit drops
+authored software Vulkan coverage. The native inputs of the current `4430bd2` bridge match `cb5b342`, which passed agent-run RTX
+3060 Ti checks, including native Wayland and the first-launch preparation stages. Quadra 0.34 integrates this renderer as **Quadra M2VK**
+and pins the public runtime Git revision. Its release source `df78a59` has the same tree
+as companion `4430bd2`. The user reports persistent home/minimum-graphics slowdowns gone and smaller first-visit drops
 with `57af2fb`. Gameplay verification of the additional launcher stages remains open.
 The older benchmark and full RTX regression results below describe `c50214a` / `5cbc9fb`.
 
@@ -16,13 +16,13 @@ The older benchmark and full RTX regression results below describe `c50214a` / `
 | Fork `development` | `8406bd26f51ff267775280024296c707deff1686` |
 | Upstream base | `a2c440b8bcdcf20d34aa1694b61ae22c2a7ea68b` |
 | Original Quadra runtime pin | `720ef1ce9ae2a2068999a8675717418b9416283e` |
-| Companion Quadra `development` | `cb5b342d78a7c76149af35e756e39847bbeab26b` |
-| Quadra 0.33 release source | `460734edcc5d3d058a016511732205cd58459eed` |
+| Companion Quadra `development` | `4430bd2ca9db2beb1d9f7059fc31a78c83b86fbc` |
+| Quadra 0.34 release source | `df78a59ff76333e6d244ba827abd5a071700eed7` |
 | Quadra source base | `94de4c6dec5e466d98ae9121cf7442f835dbf09e` |
 | Runtime cache version | `1499` |
 
 The repositories are `metal2vulkan/` and `integration/quadra/`. The original MacOBlox checkout
-is unchanged. Bridge `cb5b342` (Quadra 0.33) is installed in the user's Quadra installation, with a
+is unchanged. Bridge `cb5b342` (the preceding Quadra build) is installed in the user's Quadra installation, with a
 verified backup and isolated upgrade/rollback check. Matching
 binaries are in `build/metal/`; the guest
 framework was cross-built against CiderDarling `b0fcb070`. Both the framework and host require
@@ -65,7 +65,7 @@ GPU regressions, both exact BC regressions, and native Wayland visible/covered/r
 Khronos validation was active with no VUID/validation errors in the reviewed correctness logs.
 All 21 benchmark processes also completed and checked output; this report does not interpret
 those small workloads as gameplay gains. The actual GTK stage dialogs were previewed in an
-isolated Xvfb session and their Skip/callback cleanup was exercised. The Quadra 0.33
+isolated Xvfb session and their Skip/callback cleanup was exercised. The Quadra 0.34
 renderer UI check and the full suite of 249 Python tests also passed, alongside native
 CPU/shim regressions. The rebuilt host uses the pinned public Git dependency.
 

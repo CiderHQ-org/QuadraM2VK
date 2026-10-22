@@ -14,7 +14,7 @@ submodules in the same repository. Clone their sources together:
 git clone --recurse-submodules https://github.com/CiderHQ-org/QuadraM2VK.git
 ```
 
-[Quadra 0.33](https://github.com/CiderHQ-org/Cider/releases/tag/v0.33) integrates this
+[Quadra 0.34](https://github.com/CiderHQ-org/Cider/releases/tag/v0.34) integrates this
 fork as **Settings → Environment → Game → Renderer → Quadra M2VK (experimental)**.
 Native packages include the matching bridge and preloading controls. Existing Metal
 selections use this entry; OpenGL remains the default for new installations.
