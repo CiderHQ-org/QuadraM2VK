@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# An Instruments recording that leaves no raw trace behind (macOS).
+#
+#   scripts/xctrace-run TRACE_PATH XCTRACE_RECORD_ARGS...
+#
+# Runs `xcrun xctrace record --output TRACE_PATH XCTRACE_RECORD_ARGS...`. On exit, including an
+# aborted recording, it deletes the instruments*.ktrace files that appeared in the user temp dir
+# since it started and that no process holds open. Those are Instruments' raw recordings: a
+# finished recording folds its own into the .trace, and an aborted one leaves it behind, often
+# gigabytes. Export what you need from TRACE_PATH (`xcrun xctrace export`), then delete it.
+set -uo pipefail
+
+[ $# -ge 2 ] || {
+  echo "usage: xctrace-run TRACE_PATH XCTRACE_RECORD_ARGS..." >&2
+  exit 2
+}
+trace=$1
+shift
+tmp=$(getconf DARWIN_USER_TEMP_DIR)
+marker=$(mktemp "${tmp}xctrace-run.XXXXXX")
+
+cleanup() {
+  for f in "$tmp"instruments*.ktrace; do
+    [ -f "$f" ] && [ "$f" -nt "$marker" ] || continue
+    lsof -t -- "$f" >/dev/null 2>&1 || rm -f -- "$f"
+  done
+  rm -f -- "$marker"
+}
+trap cleanup EXIT
+trap 'exit 130' INT TERM
+
+xcrun xctrace record --output "$trace" "$@"

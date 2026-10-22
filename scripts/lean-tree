@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# Source trees of this repo without crates/metal2vulkan-validation/corpus/observations: 1.5 GiB of
+# the 1.6 GiB tracked tree, read only by validation runs. Pass --with-observations for a run that
+# validates.
+#
+#   scripts/lean-tree snapshot REV DEST_DIR [--with-observations]
+#   scripts/lean-tree worktree PATH NEW_BRANCH START_REV [--with-observations]
+#
+# snapshot extracts `git archive REV` into DEST_DIR with `tar -xm`, so every file carries the
+# extraction time and a target built before it can't take these sources as Fresh.
+#
+# worktree adds a git worktree on a new branch whose sparse checkout leaves the observations out.
+#
+# Both act on the repository this script is in, from any of its worktrees.
+set -euo pipefail
+
+die() {
+  echo "lean-tree: $*" >&2
+  exit 2
+}
+
+repo=$(git -C "$(dirname "$0")" rev-parse --show-toplevel)
+observations=crates/metal2vulkan-validation/corpus/observations
+
+case "${1:-}" in
+snapshot)
+  [ $# -ge 3 ] || die "usage: lean-tree snapshot REV DEST_DIR [--with-observations]"
+  rev=$2
+  dest=$3
+  mkdir -p "$dest"
+  if [ "${4:-}" = --with-observations ]; then
+    git -C "$repo" archive --format=tar "$rev" | tar -xm -C "$dest"
+  else
+    git -C "$repo" archive --format=tar "$rev" -- . ":(exclude)$observations" | tar -xm -C "$dest"
+  fi
+  ;;
+worktree)
+  [ $# -ge 4 ] || die "usage: lean-tree worktree PATH NEW_BRANCH START_REV [--with-observations]"
+  path=$2
+  branch=$3
+  start=$4
+  if [ "${5:-}" = --with-observations ]; then
+    git -C "$repo" worktree add -b "$branch" "$path" "$start"
+  else
+    git -C "$repo" worktree add --no-checkout -b "$branch" "$path" "$start"
+    git -C "$path" sparse-checkout set --no-cone '/*' "!/$observations/"
+    git -C "$path" checkout
+  fi
+  ;;
+*) die "usage: lean-tree snapshot|worktree ..." ;;
+esac

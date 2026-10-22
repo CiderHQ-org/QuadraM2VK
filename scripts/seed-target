@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+# Seeded cargo target directories: a new target starts as a copy-on-write clone of a warm one, so
+# only the workspace's own crates compile and the third-party ones are reused. On APFS (and on
+# Linux file systems with reflinks) the clone writes nothing until a file in it changes.
+#
+#   scripts/seed-target save WARM_TARGET SEED_DIR WORKTREE
+#   scripts/seed-target new NEW_TARGET SEED_DIR WORKTREE
+#
+# save clones an idle WARM_TARGET (no build running in it) into SEED_DIR, replacing any seed there.
+# It then removes the workspace members' artifacts from the clone, for every profile directory in
+# it (`cargo clean -p`). A worktree whose sources are older than the seed can then never take
+# another tree's build as Fresh. WORKTREE's Cargo.lock is kept beside the seed: the lockfile is
+# not tracked, and equal dependency versions are what keep the dependencies Fresh.
+#
+# new clones SEED_DIR into NEW_TARGET, which must not exist. When WORKTREE has no Cargo.lock, it
+# copies in the seed's.
+#
+# Keep one seed per set of build flags (RUSTFLAGS, such as `--cfg m2v_gpu`): different flags
+# rebuild every crate. cargo runs under the caller's toolchain (RUSTUP_TOOLCHAIN picks one).
+set -euo pipefail
+
+die() {
+  echo "seed-target: $*" >&2
+  exit 2
+}
+
+clone() {
+  if [ "$(uname)" = Darwin ]; then
+    cp -c -p -R "$1" "$2"
+  else
+    cp -a --reflink=auto "$1" "$2"
+  fi
+}
+
+[ $# -eq 4 ] || die "usage: seed-target save|new TARGET SEED_DIR WORKTREE"
+action=$1
+target=${2%/}
+seed=${3%/}
+worktree=$4
+[ -f "$worktree/Cargo.toml" ] || die "$worktree has no Cargo.toml"
+
+case "$action" in
+save)
+  [ -d "$target" ] || die "$target does not exist"
+  new="$seed.new.$$"
+  clone "$target" "$new"
+  members=$(cd "$worktree" && cargo metadata -q --no-deps --format-version 1 |
+    python3 -c 'import json, sys; print(" ".join(p["name"] for p in json.load(sys.stdin)["packages"]))')
+  for profile_dir in "$new"/*/; do
+    name=$(basename "$profile_dir")
+    case "$name" in
+    debug) profile=dev ;;
+    release | debugger) profile=$name ;;
+    *) continue ;;
+    esac
+    for member in $members; do
+      (cd "$worktree" && CARGO_TARGET_DIR="$new" cargo clean -q -p "$member" --profile "$profile")
+    done
+    rm -rf "$profile_dir/incremental"
+  done
+  if [ -f "$worktree/Cargo.lock" ]; then
+    cp "$worktree/Cargo.lock" "$new/Cargo.lock.seed"
+  fi
+  if [ -d "$seed" ]; then
+    mv -f "$seed" "$seed.old.$$"
+    rm -rf "$seed.old.$$"
+  fi
+  mv -f "$new" "$seed"
+  echo "seeded $seed from $target (members cleaned: $members)"
+  ;;
+new)
+  [ -d "$seed" ] || die "no seed at $seed: build one target, then run: seed-target save TARGET $seed WORKTREE"
+  [ ! -e "$target" ] || die "$target already exists"
+  clone "$seed" "$target"
+  rm -f "$target/Cargo.lock.seed"
+  if [ ! -f "$worktree/Cargo.lock" ] && [ -f "$seed/Cargo.lock.seed" ]; then
+    cp "$seed/Cargo.lock.seed" "$worktree/Cargo.lock"
+  fi
+  echo "cloned $seed into $target"
+  ;;
+*) die "unknown action $action (save or new)" ;;
+esac

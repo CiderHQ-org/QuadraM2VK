@@ -143,6 +143,13 @@ has the commands.
 - Remove scratch files under the OS temp dir as soon as the tool is done with them; no long-lived
   dumps under fixed `/tmp` paths. FALLBACK repro bundles under `$TMPDIR/metal2vulkan-repros` (or
   `METAL2VULKAN_REPRO_DIR`) may stay.
+- Keep disk writes down (CONTRIBUTING.md, "Many trees on one machine"):
+  - make worktrees and source snapshots with `scripts/lean-tree`, leaving the observations out
+    unless the tree runs validation;
+  - start each new target directory from a seed with `scripts/seed-target`;
+  - set `CARGO_INCREMENTAL=0` for one-shot builds;
+  - record Instruments traces through `scripts/xctrace-run`, and delete the `.trace` once
+    exported.
 - `pgrep -f` and `ps | grep` match their own command line. Always bracket the first character:
   `pgrep -f '[c]orpus-refresh'`.
 

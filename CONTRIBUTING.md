@@ -65,6 +65,24 @@ To build the command:
 cargo build --release -p metal2vulkan --features cli
 ```
 
+A debugger session that needs variables builds with `--profile debugger` (full debug info for the
+workspace and its dependencies). Dev builds keep only line tables.
+
+### Many trees on one machine
+
+Parallel worktrees and one-shot builds write a lot to disk. Three scripts keep that down:
+
+- `scripts/lean-tree worktree PATH BRANCH START` and `scripts/lean-tree snapshot REV DIR` make a
+  tree without `crates/metal2vulkan-validation/corpus/observations` (1.5 GiB of the 1.6 GiB tracked
+  tree). Pass `--with-observations` for a tree that runs validation.
+- `scripts/seed-target new TARGET SEED WORKTREE` starts a target directory as a copy-on-write clone
+  of a seed, so only the workspace's crates compile. `scripts/seed-target save TARGET SEED WORKTREE`
+  makes the seed from an idle warm target. Keep one seed per set of `RUSTFLAGS`.
+- `scripts/xctrace-run TRACE ARGS...` records with Instruments and removes the raw
+  `instruments*.ktrace` files a recording leaves in the temp dir, an aborted one included.
+
+Set `CARGO_INCREMENTAL=0` for a build that won't be edited and rebuilt.
+
 ## Where tests go
 
 - A test that names an internal item is a unit test of its crate: under `src/tests/` (or its
