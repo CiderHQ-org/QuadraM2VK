@@ -47,7 +47,7 @@ SHIM = SHIM_DIR / "libMacOBloxShims.dylib"
 # Frameworks RobloxPlayer links that Darling lacks; stubs from frameworks/.
 FRAMEWORKS = ["CoreML", "CoreHaptics", "DeviceCheck"]
 FRAMEWORKS_BUILD = SHIM_DIR / "frameworks"
-# Metal on Vulkan (renderer "metal"): Metal.framework and the host library,
+# Quadra M2VK (renderer "metal"): Metal.framework and the host library,
 # built by prototype/metal-vulkan/build.sh the first time the renderer is used.
 METAL_DIR = SHIM_DIR / "metal"
 METAL_HOST_LIBRARY = METAL_DIR / "libquadra_metal_host.so"
@@ -1464,10 +1464,7 @@ def _metal_sources_hash():
     root = PROJECT / "prototype" / "metal-vulkan"
     sources = [root / "quadra_metal.h", METAL_BUILD_SCRIPT, *(root / "framework").glob("*"),
                root / "host" / "Cargo.toml", root / "host" / "Cargo.lock", *(root / "host" / "src").rglob("*.rs")]
-    # The path dependency's sources can change without moving the bridge's manifest or lock.
-    for crate in ("metal2vulkan-air", "metal2vulkan", "metal2vulkan-runtime"):
-        vendor = PROJECT / "vendor" / "metal2vulkan" / "crates" / crate
-        sources.extend([vendor / "Cargo.toml", vendor / "build.rs", *(vendor / "src").rglob("*.rs")])
+    # Cargo.toml and Cargo.lock pin the immutable Quadra M2VK dependency.
     for path in sorted(sources):
         try:
             digest.update(str(path.relative_to(PROJECT)).encode() + b"\0" + path.read_bytes())
@@ -1491,9 +1488,9 @@ def build_metal():
     """prototype/metal-vulkan/build.sh: the framework needs clang and lld, the host library
     Rust 1.98 or newer (its first build downloads its crates)."""
     if PREBUILT_SHIM:
-        return metal_built(), _("Metal on Vulkan is not part of this package")
+        return metal_built(), _("Quadra M2VK is not part of this package")
     if not shutil.which("cargo"):
-        return False, _("Metal on Vulkan needs Rust (cargo) 1.98 or newer to build. Install Rust or select another renderer.")
+        return False, _("Quadra M2VK needs Rust (cargo) 1.98 or newer to build. Install Rust or select another renderer.")
     stamp = _metal_sources_hash()
     result = subprocess.run([str(METAL_BUILD_SCRIPT)], capture_output=True, text=True,
                             env=dict(os.environ, MACOBLOX_BUILD_DIR=str(BUILD_DIR),
@@ -2601,13 +2598,13 @@ class RobloxSession:
             from . import graphics
             missing = graphics.missing_metal_dependencies()
             if missing:
-                raise RuntimeError(_("Metal on Vulkan needs: {items}. Install them or select another renderer.",
+                raise RuntimeError(_("Quadra M2VK needs: {items}. Install them or select another renderer.",
                                      items=", ".join(missing)))
             if not metal_built():
-                self.notes.append("Building Metal on Vulkan (prototype/metal-vulkan/build.sh)")
+                self.notes.append("Building Quadra M2VK (prototype/metal-vulkan/build.sh)")
                 ok, output = build_metal()
                 if not ok:
-                    raise RuntimeError(_("Could not build Metal on Vulkan:\n{output}", output=output))
+                    raise RuntimeError(_("Could not build Quadra M2VK:\n{output}", output=output))
             try:
                 (CACHE_DIR / "metal-shader-cache").mkdir(parents=True, exist_ok=True)
             except OSError as error:
@@ -2621,7 +2618,7 @@ class RobloxSession:
             renderer_name = graphics.validate_vulkan(env)
         elif self.settings.get("renderer", "opengl") == "metal":
             from . import graphics
-            renderer_name = "Metal on Vulkan (" + graphics.validate_metal(env, METAL_HOST_LIBRARY) + ")"
+            renderer_name = "Quadra M2VK (" + graphics.validate_metal(env, METAL_HOST_LIBRARY) + ")"
         self.renderer_name = renderer_name
         # A game closed a moment ago may still be shutting down. A new one next
         # to it shared its darlingserver, and when that went both died. Give it

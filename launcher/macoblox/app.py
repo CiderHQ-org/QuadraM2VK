@@ -1283,7 +1283,7 @@ class SettingsPage(Adw.Bin):
 
         self.shader_preload_switch = Adw.SwitchRow(
             title=_("Shader preloading"),
-            subtitle=_("Metal renderer: prepare learned shaders before playing. New shaders may still compile during play."),
+            subtitle=_("Quadra M2VK: prepare learned shaders before playing. New shaders may still compile during play."),
             active=settings.get("metal_shader_preload", True))
         self.shader_preload_switch.connect("notify::active", lambda row, *_args: window.set_setting(
             "metal_shader_preload", row.get_active()))
@@ -1291,9 +1291,9 @@ class SettingsPage(Adw.Bin):
 
         for key, title, subtitle in (
                 ("metal_library_preload", "Prepare client shader libraries",
-                 "Metal renderer: prepare installed shader libraries before playing, including the first launch."),
+                 "Quadra M2VK: prepare installed shader libraries before playing, including the first launch."),
                 ("metal_resource_preload", "Preload local textures and fonts",
-                 "Metal renderer: warm bundled resources before playing. Downloaded world assets still load in game.")):
+                 "Quadra M2VK: warm bundled resources before playing. Downloaded world assets still load in game.")):
             row = Adw.SwitchRow(title=_(title), subtitle=_(subtitle), active=settings.get(key, True))
             row.set_sensitive(self.shader_preload_switch.get_active())
             self.shader_preload_switch.connect("notify::active", lambda switch, _prop, row=row:
@@ -1302,7 +1302,7 @@ class SettingsPage(Adw.Bin):
             game.add(row)
 
         metal_diagnostics = Adw.SwitchRow(
-            title=_("Metal performance diagnostics"),
+            title=_("Quadra M2VK performance diagnostics"),
             subtitle=_("Record compilation, encoding, GPU timing and memory use for performance reports."),
             active=settings.get("metal_diagnostics", False))
         metal_diagnostics.connect("notify::active", lambda row, *_args: window.set_setting(
@@ -1792,14 +1792,15 @@ class SettingsPage(Adw.Bin):
         finally:
             self.window.end(resume_pending=False)
 
+    # Keep the stored Metal key so existing selections follow Quadra M2VK.
     RENDERER_CODES = ("opengl", "vulkan", "metal")
 
     def _renderer_row(self):
         row = Adw.ComboRow(
             title=_("Renderer"),
-            subtitle=_("Applies on next launch. Zink runs Roblox's OpenGL renderer on Vulkan; Metal on Vulkan runs its Metal renderer on Vulkan (built on first use, VR stays on OpenGL)."),
+            subtitle=_("Applies on next launch. Zink uses Roblox's OpenGL renderer; Quadra M2VK uses its Metal renderer on Vulkan. VR uses OpenGL or Zink."),
             model=Gtk.StringList.new([_("OpenGL"), _("Vulkan (Zink, experimental)"),
-                                      _("Metal on Vulkan (experimental)")]))
+                                      _("Quadra M2VK (experimental)")]))
         selected = self.window.settings.get("renderer", "opengl")
         row.set_selected(self.RENDERER_CODES.index(selected) if selected in self.RENDERER_CODES else 0)
         self._renderer_rows.append((row, row.connect("notify::selected", self._select_renderer)))
@@ -1820,13 +1821,13 @@ class SettingsPage(Adw.Bin):
         if selected == "metal":
             if core.PREBUILT_SHIM and not core.metal_built():
                 self._show_renderer(window.settings.get("renderer", "opengl"))
-                _error_dialog(window, _("Metal on Vulkan is unavailable"),
-                              _("Metal on Vulkan is not part of this package"))
+                _error_dialog(window, _("Quadra M2VK is unavailable"),
+                              _("Quadra M2VK is not part of this package"))
                 return
             missing = graphics.missing_metal_dependencies()
             if missing:
                 self._show_renderer(window.settings.get("renderer", "opengl"))
-                _error_dialog(window, _("Metal on Vulkan is unavailable"),
+                _error_dialog(window, _("Quadra M2VK is unavailable"),
                               _("Install these first: {programs}", programs=", ".join(missing)))
                 return
             window.set_setting("renderer", selected)

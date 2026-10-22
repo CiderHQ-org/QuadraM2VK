@@ -7,11 +7,11 @@ _language = "en"
 
 RU = {
     "Prepare client shader libraries": "Подготовка библиотек шейдеров клиента",
-    "Metal renderer: prepare installed shader libraries before playing, including the first launch.":
-        "Рендерер Metal: подготовка установленных библиотек шейдеров перед игрой, включая первый запуск.",
+    "Quadra M2VK: prepare installed shader libraries before playing, including the first launch.":
+        "Quadra M2VK: подготовка установленных библиотек шейдеров перед игрой, включая первый запуск.",
     "Preload local textures and fonts": "Предзагрузка локальных текстур и шрифтов",
-    "Metal renderer: warm bundled resources before playing. Downloaded world assets still load in game.":
-        "Рендерер Metal: предзагрузка ресурсов клиента. Ресурсы игрового мира по-прежнему загружаются в игре.",
+    "Quadra M2VK: warm bundled resources before playing. Downloaded world assets still load in game.":
+        "Quadra M2VK: предзагрузка ресурсов клиента. Ресурсы игрового мира по-прежнему загружаются в игре.",
     "Preparing Roblox": "Подготовка Roblox",
     "Preparing shaders and local resources. You can skip and start playing.":
         "Подготовка шейдеров и локальных ресурсов. Можно пропустить и начать игру.",
@@ -20,9 +20,9 @@ RU = {
     "Warming local textures and fonts": "Предзагрузка текстур и шрифтов",
     "{done} of {total} items": "{done} из {total} элементов",
     "Shader preloading": "Предзагрузка шейдеров",
-    "Metal renderer: prepare learned shaders before playing. New shaders may still compile during play.":
-        "Рендерер Metal: подготовка известных шейдеров перед игрой. Новые шейдеры могут компилироваться во время игры.",
-    "Metal performance diagnostics": "Диагностика производительности Metal",
+    "Quadra M2VK: prepare learned shaders before playing. New shaders may still compile during play.":
+        "Quadra M2VK: подготовка известных шейдеров перед игрой. Новые шейдеры могут компилироваться во время игры.",
+    "Quadra M2VK performance diagnostics": "Диагностика производительности Quadra M2VK",
     "Record compilation, encoding, GPU timing and memory use for performance reports.":
         "Запись времени компиляции, кодирования, работы GPU и использования памяти для отчётов.",
     "Preloading shaders": "Предзагрузка шейдеров",
@@ -102,16 +102,16 @@ RU = {
     "Renderer": "Рендерер",
     "OpenGL": "OpenGL",
     "Vulkan (Zink, experimental)": "Vulkan (Zink, экспериментальный)",
-    "Metal on Vulkan (experimental)": "Metal через Vulkan (экспериментальный)",
-    "Applies on next launch. Zink runs Roblox's OpenGL renderer on Vulkan; Metal on Vulkan runs its Metal renderer on Vulkan (built on first use, VR stays on OpenGL).":
-        "Применяется при следующем запуске. Zink запускает OpenGL-рендерер Roblox через Vulkan; Metal через Vulkan запускает его Metal-рендерер через Vulkan (собирается при первом использовании, VR работает только с OpenGL).",
-    "Metal on Vulkan is unavailable": "Metal через Vulkan недоступен",
-    "Metal on Vulkan needs: {items}. Install them or select another renderer.":
-        "Для Metal через Vulkan нужны: {items}. Установите их или выберите другой рендерер.",
-    "Could not build Metal on Vulkan:\n{output}": "Не удалось собрать Metal через Vulkan:\n{output}",
-    "Metal on Vulkan needs Rust (cargo) 1.98 or newer to build. Install Rust or select another renderer.":
-        "Для сборки Metal через Vulkan нужен Rust (cargo) 1.98 или новее. Установите Rust или выберите другой рендерер.",
-    "Metal on Vulkan is not part of this package": "Metal через Vulkan не входит в этот пакет",
+    "Quadra M2VK (experimental)": "Quadra M2VK (экспериментальный)",
+    "Applies on next launch. Zink uses Roblox's OpenGL renderer; Quadra M2VK uses its Metal renderer on Vulkan. VR uses OpenGL or Zink.":
+        "Применяется при следующем запуске. Zink использует OpenGL-рендерер Roblox; Quadra M2VK запускает его Metal-рендерер через Vulkan. VR использует OpenGL или Zink.",
+    "Quadra M2VK is unavailable": "Quadra M2VK недоступен",
+    "Quadra M2VK needs: {items}. Install them or select another renderer.":
+        "Для Quadra M2VK нужны: {items}. Установите их или выберите другой рендерер.",
+    "Could not build Quadra M2VK:\n{output}": "Не удалось собрать Quadra M2VK:\n{output}",
+    "Quadra M2VK needs Rust (cargo) 1.98 or newer to build. Install Rust or select another renderer.":
+        "Для сборки Quadra M2VK нужен Rust (cargo) 1.98 или новее. Установите Rust или выберите другой рендерер.",
+    "Quadra M2VK is not part of this package": "Quadra M2VK не входит в этот пакет",
     "Installing Vulkan dependencies… Authorize the administrator prompt to continue.":
         "Устанавливаются зависимости Vulkan… Подтвердите запрос администратора для продолжения.",
     "Could not install Vulkan dependencies": "Не удалось установить зависимости Vulkan",

@@ -1,4 +1,4 @@
-"""Renderers other than OpenGL: Mesa Zink, and Metal on Vulkan.
+"""Renderers other than OpenGL: Mesa Zink, and Quadra M2VK.
 
 - "vulkan": Roblox keeps its macOS OpenGL renderer; Mesa Zink runs it on
   Vulkan.
@@ -206,7 +206,7 @@ def validate_metal(environment, host_library):
         result = subprocess.run([sys.executable, str(Path(__file__)), "--metal-probe", str(host_library)],
                                 env=probe_environment, capture_output=True, text=True, timeout=30)
     except (OSError, subprocess.TimeoutExpired) as error:
-        raise RuntimeError("Metal on Vulkan could not open a Vulkan device. Select OpenGL in Settings.") from error
+        raise RuntimeError("Quadra M2VK could not open a Vulkan device. Select OpenGL in Settings.") from error
     try:
         data = json.loads(result.stdout.strip().splitlines()[-1])
     except (ValueError, IndexError):
@@ -214,9 +214,9 @@ def validate_metal(environment, host_library):
     name = data.get("device", "")
     if result.returncode or not name:
         reason = data.get("error") or (result.stderr or "").strip()[-600:] or f"probe exited with code {result.returncode}"
-        raise RuntimeError(f"Metal on Vulkan is unavailable: {reason}. Select OpenGL in Settings.")
+        raise RuntimeError(f"Quadra M2VK is unavailable: {reason}. Select OpenGL in Settings.")
     if any(software in name.lower() for software in ("llvmpipe", "lavapipe", "swiftshader")):
-        raise RuntimeError(f"Metal on Vulkan found only a software Vulkan device ({name}). Install your GPU's Vulkan driver or select OpenGL.")
+        raise RuntimeError(f"Quadra M2VK found only a software Vulkan device ({name}). Install your GPU's Vulkan driver or select OpenGL.")
     return name
 
 
