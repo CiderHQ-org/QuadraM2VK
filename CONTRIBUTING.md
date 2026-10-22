@@ -72,9 +72,11 @@ workspace and its dependencies). Dev builds keep only line tables.
 
 Parallel worktrees and one-shot builds write a lot to disk. Three scripts keep that down:
 
-- `scripts/lean-tree worktree PATH BRANCH START` and `scripts/lean-tree snapshot REV DIR` make a
-  tree without `crates/metal2vulkan-validation/corpus/observations` (1.5 GiB of the 1.6 GiB tracked
-  tree). Pass `--with-observations` for a tree that runs validation.
+- `scripts/lean-tree worktree PATH BRANCH START` adds a full worktree whose
+  `crates/metal2vulkan-validation/corpus/observations` (1.5 GiB of the 1.6 GiB tracked tree) are
+  copy-on-write clones of the main worktree's; git rewrites only the files that differ at `START`.
+  `scripts/lean-tree snapshot REV DIR` extracts a tree without the observations (pass
+  `--with-observations` for one that runs validation).
 - `scripts/seed-target new TARGET SEED WORKTREE` starts a target directory as a copy-on-write clone
   of a seed, so only the workspace's crates compile. `scripts/seed-target save TARGET SEED WORKTREE`
   makes the seed from an idle warm target. Keep one seed per set of `RUSTFLAGS`.
