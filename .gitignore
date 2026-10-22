@@ -1,0 +1,13 @@
+/artifacts/
+/build/
+/target/
+/.cargo-home/
+/.cache/
+/.tools/
+/.validation/
+/.codex/
+/.agents/
+/.aws/
+/.ci-*/
+**/__pycache__/
+*.pyc

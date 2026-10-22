@@ -1,0 +1,100 @@
+name: Linux distributions
+
+on:
+  push:
+    branches: [quadram2vk]
+  pull_request:
+    branches: [quadram2vk]
+  workflow_dispatch:
+  schedule:
+    - cron: '23 6 * * 1'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: distros-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  host-and-launcher:
+    name: ${{ matrix.id }} / host + software Vulkan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        include:
+          - id: debian-13
+            image: debian:13-slim
+            family: debian
+          - id: ubuntu-24.04
+            image: ubuntu:24.04
+            family: debian
+          - id: ubuntu-26.04
+            image: ubuntu:26.04
+            family: debian
+          - id: fedora-44
+            image: registry.fedoraproject.org/fedora:44
+            family: fedora
+          - id: arch-rolling
+            image: archlinux:base
+            family: arch
+    container:
+      image: ${{ matrix.image }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      CARGO_BUILD_JOBS: '2'
+      LP_NUM_THREADS: '1'
+      QM_CI_DISTRO: ${{ matrix.id }}
+      QM_CI_FAMILY: ${{ matrix.family }}
+    steps:
+      - name: Bootstrap checkout tools
+        run: |
+          set -euo pipefail
+          case "$QM_CI_FAMILY" in
+            debian)
+              apt-get update
+              apt-get install -y --no-install-recommends git ca-certificates curl tar gzip
+              ;;
+            fedora) dnf install -y git-core ca-certificates curl-minimal tar gzip ;;
+            arch) pacman -Syu --noconfirm --needed git ca-certificates curl tar gzip ;;
+          esac
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+          submodules: true
+      - name: Install distro build and Vulkan dependencies
+        run: bash scripts/ci-distro.sh deps
+      - name: Install stable Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 --fail --silent --show-error https://sh.rustup.rs -o /tmp/rustup-init.sh
+          sh /tmp/rustup-init.sh -y --profile minimal --default-toolchain stable --component rustfmt,clippy
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git/db
+          key: cargo-${{ matrix.id }}-${{ hashFiles('metal2vulkan/**/Cargo.toml', 'integration/quadra/prototype/metal-vulkan/host/Cargo.lock') }}
+          restore-keys: cargo-${{ matrix.id }}-
+      - name: Build host, test launcher and execute authored Vulkan regressions
+        run: bash scripts/ci-distro.sh check
+      - name: Save distro host and numeric test evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: quadram2vk-${{ matrix.id }}-${{ github.sha }}
+          retention-days: 14
+          if-no-files-found: warn
+          path: |
+            build/metal/libquadra_metal_host.so
+            artifacts/distro/${{ matrix.id }}/*.json
+            artifacts/distro/${{ matrix.id }}/*.status
+            artifacts/distro/${{ matrix.id }}/*.log
+            artifacts/distro/${{ matrix.id }}/preload/*.json
+            artifacts/distro/${{ matrix.id }}/preload/*.status
+            artifacts/distro/${{ matrix.id }}/preload/*.log

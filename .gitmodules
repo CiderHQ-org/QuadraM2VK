@@ -1,0 +1,8 @@
+[submodule "metal2vulkan"]
+	path = metal2vulkan
+	url = https://github.com/CiderHQ-org/QuadraM2VK.git
+	branch = runtime-development
+[submodule "integration/quadra"]
+	path = integration/quadra
+	url = https://github.com/CiderHQ-org/QuadraM2VK.git
+	branch = quadra-development
