@@ -1,10 +1,11 @@
 # QuadraM2VK implementation and qualification
 
-2026-10-21. The current local fork, Quadra launcher and matching ABI 2 bridge are built and
+2026-10-22. The current local fork, Quadra launcher and matching ABI 2 bridge are built and
 committed. Shader preloading, live-memory accounting, cache recovery and diagnostics have
-authored software Vulkan coverage. The current `146ad14` bridge also passed agent-run RTX
-3060 Ti checks, including native Wayland and the new first-launch preparation stages. The
-user reports persistent home/minimum-graphics slowdowns gone and smaller first-visit drops
+authored software Vulkan coverage. The current `cb5b342` bridge also passed agent-run RTX
+3060 Ti checks, including native Wayland and the first-launch preparation stages. Quadra 0.33 integrates this renderer as **Quadra M2VK**
+and pins the public runtime Git revision. Its release source `460734e` has the same tree
+as companion `cb5b342`. The user reports persistent home/minimum-graphics slowdowns gone and smaller first-visit drops
 with `57af2fb`. Gameplay verification of the additional launcher stages remains open.
 The older benchmark and full RTX regression results below describe `c50214a` / `5cbc9fb`.
 
@@ -15,12 +16,13 @@ The older benchmark and full RTX regression results below describe `c50214a` / `
 | Fork `development` | `8406bd26f51ff267775280024296c707deff1686` |
 | Upstream base | `a2c440b8bcdcf20d34aa1694b61ae22c2a7ea68b` |
 | Original Quadra runtime pin | `720ef1ce9ae2a2068999a8675717418b9416283e` |
-| Companion Quadra `development` | `146ad14204d2cea4f2e93c305e2b276a7286bf8c` |
+| Companion Quadra `development` | `cb5b342d78a7c76149af35e756e39847bbeab26b` |
+| Quadra 0.33 release source | `460734edcc5d3d058a016511732205cd58459eed` |
 | Quadra source base | `94de4c6dec5e466d98ae9121cf7442f835dbf09e` |
 | Runtime cache version | `1499` |
 
 The repositories are `metal2vulkan/` and `integration/quadra/`. The original MacOBlox checkout
-is unchanged. Bridge `146ad14` is installed in the user's Quadra installation, with a
+is unchanged. Bridge `cb5b342` (Quadra 0.33) is installed in the user's Quadra installation, with a
 verified backup and isolated upgrade/rollback check. Matching
 binaries are in `build/metal/`; the guest
 framework was cross-built against CiderDarling `b0fcb070`. Both the framework and host require
@@ -40,13 +42,13 @@ share one helper and expose progress and Skip. Pack ranges are validated, identi
 containers are deduplicated, and each library is released after preparation. These calls use
 the existing library loader; they do not precompile all unseen pipeline/state combinations.
 
-On this machine the installed-client preparation completed 2,275 library loads with zero
+On this machine the previous `146ad14` installed-client preparation completed 2,275 library loads with zero
 failures, 359 learned pipeline descriptions, and 2,756 local resource files/87,901,418 bytes.
 The first observed pass using the existing cache took 19.905 seconds; the repeat took 1.034
 seconds. The maximum child peak RSS across the two passes was 495,833,088 bytes. These are
 prelaunch call/file-cache observations, not a shader-semantic census or game FPS measurements.
 Only numeric summaries are retained in [the local preparation review](artifacts/launcher-preload-local-review.json).
-The installed launcher completed the same preparation in 1.211 seconds with zero library
+That installed launcher completed the same preparation in 1.211 seconds with zero library
 failures and the expected library → pipeline → resource progress order. Its child peak RSS
 was 448,425,984 bytes. This repeat used the existing local caches.
 
@@ -56,14 +58,16 @@ checks helper RSS and host/cgroup headroom every 250 ms, stops stalled progress 
 and keeps the 120-second overall timeout. A skipped or memory-limited helper ends before play.
 These are sampled operational bounds; host RSS does not account for all driver/VRAM memory.
 
-The current [RTX qualification](artifacts/hardware-20261022T034304Z-568993/review.json) passed
+The current [RTX qualification](artifacts/hardware-20261022T050006Z-25608/review.json) passed
 bridge rendering/compute/transfer/error checks, 98-state same-device reuse with zero additional
-creation pipelines, the new first-launch preparation stages, all 56 launcher tests, four runtime
+creation pipelines, the new first-launch preparation stages, all 56 focused launcher tests, four runtime
 GPU regressions, both exact BC regressions, and native Wayland visible/covered/restore/resize.
 Khronos validation was active with no VUID/validation errors in the reviewed correctness logs.
 All 21 benchmark processes also completed and checked output; this report does not interpret
 those small workloads as gameplay gains. The actual GTK stage dialogs were previewed in an
-isolated Xvfb session and their Skip/callback cleanup was exercised.
+isolated Xvfb session and their Skip/callback cleanup was exercised. The Quadra 0.33
+renderer UI check and the full suite of 249 Python tests also passed, alongside native
+CPU/shim regressions. The rebuilt host uses the pinned public Git dependency.
 
 The current presentation candidate also changes automatic vsync presentation from FIFO to
 mailbox where the surface supports it, requests the driver's minimum image count plus one
@@ -274,7 +278,7 @@ Counts in these rows overlap; they must not be added as unique test coverage.
 | Rustdoc and API reference | Passed with warnings denied |
 | Doctest command | Passed; no doctest examples were present |
 | Darwin framework and Linux host | Both built successfully; current retention candidate guest execution not tested |
-| Current RTX/native Wayland qualification | [Passed](artifacts/hardware-20261022T034304Z-568993/review.json), validation enabled; gameplay/long sessions remain separate |
+| Current RTX/native Wayland qualification | [Passed](artifacts/hardware-20261022T050006Z-25608/review.json), validation enabled; gameplay/long sessions remain separate |
 | Numeric trace analysis | [4 passed](artifacts/trace-analysis-tests.log), including cumulative deltas, reset boundaries and a partially written final line |
 
 CPU execution and bridge logs record the loader inserting `VK_LAYER_KHRONOS_validation`;
