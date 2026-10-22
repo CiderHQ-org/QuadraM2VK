@@ -22,7 +22,7 @@ The older benchmark and full RTX regression results below describe `c50214a` / `
 | Runtime cache version | `1499` |
 
 The repositories are `metal2vulkan/` and `integration/quadra/`. The original MacOBlox checkout
-is unchanged. Bridge `cb5b342` (the preceding Quadra build) is installed in the user's Quadra installation, with a
+is unchanged. Bridge `4430bd2` (Quadra 0.34) is installed in the user's Quadra installation, with a
 verified backup and isolated upgrade/rollback check. Matching
 binaries are in `build/metal/`; the guest
 framework was cross-built against CiderDarling `b0fcb070`. Both the framework and host require
@@ -315,3 +315,8 @@ Published sources are at https://github.com/CiderHQ-org/QuadraM2VK. The workspac
 workflow exercises Debian, Fedora, Arch and Ubuntu with software Vulkan; physical AMD/Intel/
 additional NVIDIA testing remains separate. The matching release also includes offline
 source archives, patches and binaries.
+
+Quadra 0.34 qualification: the 249-test Python suite and renderer-settings UI passed.
+Its native source inputs match the preceding rebuilt candidate. Distribution CI at
+`c814bb0` passed all five containers with the same native and preload implementation;
+0.34 changes the release metadata and launcher version.
