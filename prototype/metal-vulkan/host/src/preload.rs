@@ -15,7 +15,12 @@ use std::sync::{Mutex, OnceLock};
 const CAPACITY: u64 = 512 << 20;
 const MAX_RECORDS: usize = 4096;
 const MAX_RECIPE: u64 = 64 << 10;
-const MAX_RESIDENT: usize = 64;
+const MAX_RESIDENT: usize = 256;
+const UNKNOWN_MEMORY_RESIDENT: usize = 64;
+// Driver allocations are not exposed by the runtime allocator. This estimate bounds the
+// count rather than promising an exact byte cap; also recheck actual pressure between calls.
+const ESTIMATED_STATE_BYTES: u64 = 8 << 20;
+const MEMORY_RESERVE: u64 = 768 << 20;
 const RESIDENT_SOURCE_BYTES: u64 = 128 << 20;
 pub static RECORDED: AtomicU64 = AtomicU64::new(0);
 pub static WARMED: AtomicU64 = AtomicU64::new(0);
@@ -58,10 +63,16 @@ impl ReadyPipeline {
 /// Strong holds until the live game creates the matching state, so its runtime can reuse the
 /// variant's Vulkan objects. Owned by the C device handle, never by the runtime device itself.
 #[derive(Default)]
-pub struct WarmStates(BTreeMap<[u8; 32], ReadyPipeline>);
+pub struct WarmStates {
+    states: BTreeMap<[u8; 32], ReadyPipeline>,
+    limit: usize,
+}
 impl WarmStates {
     pub fn len(&self) -> usize {
-        self.0.len()
+        self.states.len()
+    }
+    pub fn limit(&self) -> usize {
+        self.limit
     }
     pub fn forget_render(&mut self, desc: &QmRenderPipelineDesc) {
         if let Ok(recipe) = render_recipe(desc) {
@@ -75,7 +86,7 @@ impl WarmStates {
     }
     fn forget(&mut self, recipe: &Recipe) {
         if let Ok(bytes) = serde_json::to_vec(recipe) {
-            if let Some(state) = self.0.remove(&cache::hash(&bytes)) {
+            if let Some(state) = self.states.remove(&cache::hash(&bytes)) {
                 state.release();
             }
         }
@@ -345,16 +356,11 @@ pub fn warm_live(device: &Device) -> WarmStates {
     if std::env::var("MACOBLOX_METAL_PRELOAD_IN_PROCESS").as_deref() != Ok("1") {
         return WarmStates::default();
     }
-    match run_inner(
-        device,
-        None,
-        std::ptr::null_mut(),
-        MAX_RESIDENT as u32,
-        true,
-    ) {
+    let maximum = resident_limit(crate::limits::available_memory());
+    match run_inner(device, None, std::ptr::null_mut(), maximum as u32, true) {
         Ok((count, states)) => {
             crate::util::log_once(&format!(
-                "[Quadra Metal] retained {count} preloaded pipeline states for the game device"
+                "[Quadra Metal] retained {count} preloaded pipeline states for the game device (memory-based limit {maximum})"
             ));
             states
         }
@@ -367,6 +373,13 @@ pub fn warm_live(device: &Device) -> WarmStates {
     }
 }
 
+fn resident_limit(available: Option<u64>) -> usize {
+    available.map_or(UNKNOWN_MEMORY_RESIDENT, |bytes| {
+        let budget = (bytes / 4).min(bytes.saturating_sub(MEMORY_RESERVE));
+        (budget / ESTIMATED_STATE_BYTES).min(MAX_RESIDENT as u64) as usize
+    })
+}
+
 fn run_inner(
     device: &Device,
     progress: Option<Progress>,
@@ -374,7 +387,14 @@ fn run_inner(
     maximum: u32,
     retain: bool,
 ) -> Result<(u32, WarmStates), String> {
-    let mut states = WarmStates::default();
+    let mut states = WarmStates {
+        states: BTreeMap::new(),
+        limit: if retain {
+            (maximum as usize).min(MAX_RESIDENT)
+        } else {
+            0
+        },
+    };
     let Some(root) = root() else {
         return Ok((0, states));
     };
@@ -421,7 +441,7 @@ fn run_inner(
     for (index, (_, path, key)) in records.into_iter().enumerate() {
         if retain
             && (started.elapsed().as_secs() >= 5
-                || crate::limits::available_memory().is_some_and(|bytes| bytes < 768 << 20))
+                || crate::limits::available_memory().is_some_and(|bytes| bytes < MEMORY_RESERVE))
         {
             break;
         }
@@ -460,7 +480,7 @@ fn run_inner(
                 WARMED.fetch_add(1, Ordering::Relaxed);
                 completed += 1;
                 if retain {
-                    states.0.insert(key, state);
+                    states.states.insert(key, state);
                 } else {
                     state.release();
                 }
@@ -479,4 +499,21 @@ fn run_inner(
         }
     }
     Ok((completed, states))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn residency_preserves_headroom_on_small_and_memory_limited_hosts() {
+        assert_eq!(resident_limit(Some(0)), 0);
+        assert_eq!(resident_limit(Some(768 << 20)), 0);
+        assert_eq!(resident_limit(Some(1 << 30)), 32);
+        assert_eq!(resident_limit(Some(2 << 30)), 64);
+        assert_eq!(resident_limit(Some(3 << 30)), 96);
+        assert_eq!(resident_limit(Some(8 << 30)), 256);
+        assert_eq!(resident_limit(Some(u64::MAX)), 256);
+        assert_eq!(resident_limit(None), 64);
+    }
 }

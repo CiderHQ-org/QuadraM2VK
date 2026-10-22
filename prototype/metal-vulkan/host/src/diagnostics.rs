@@ -26,9 +26,13 @@ pub enum Phase {
     Wait,
     GpuSpan,
     PresentQueue,
+    BufferCreate,
+    BufferUpload,
+    TextureCreate,
+    TextureUpload,
 }
 
-const NAMES: [&str; 10] = [
+const NAMES: [&str; 14] = [
     "library",
     "render_pipeline",
     "compute_pipeline",
@@ -39,6 +43,10 @@ const NAMES: [&str; 10] = [
     "completion_wait",
     "command_buffer_gpu_span",
     "present_queue_delay",
+    "buffer_create",
+    "buffer_upload",
+    "texture_create",
+    "texture_upload",
 ];
 
 pub fn enabled() -> bool {
@@ -143,7 +151,7 @@ impl PresentationStatistics {
 struct Stats {
     started: Instant,
     last_sample: AtomicU64,
-    phases: [Mutex<Times>; 10],
+    phases: [Mutex<Times>; NAMES.len()],
     presentation: Arc<PresentationStatistics>,
     trace: Mutex<Option<Trace>>,
 }

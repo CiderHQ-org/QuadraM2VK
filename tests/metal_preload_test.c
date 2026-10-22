@@ -53,7 +53,8 @@ static void memory(void *device) {
 }
 
 int main(int argc,char **argv) {
-    CHECK(argc==4);
+    CHECK(argc==4 || (argc==5 && !strcmp(argv[4],"--many-pipelines")));
+    const unsigned extra_count=argc==5?96:0;
     void *host=dlopen(argv[1],RTLD_NOW|RTLD_LOCAL); CHECK(host);
     qm_api_entry entry=(qm_api_entry)dlsym(host,QM_API_SYMBOL); CHECK(entry);
     api=entry(QM_API_VERSION); CHECK(api && api->size==sizeof(qm_api));
@@ -68,10 +69,31 @@ int main(int argc,char **argv) {
     qm_render_pipeline_desc desc={0}; desc.vertex_function=vertex;desc.fragment_function=fragment;
     desc.color[0].pixel_format=70;desc.color[0].write_mask=15;desc.sample_count=1;desc.rasterization_enabled=1;
     void *render=api->render_pipeline_new(device,&desc),*compute=api->compute_pipeline_new(device,kernel,"authored preload"); CHECK(render&&compute);
+    /* Distinct legal blend/write states exceed the old 64-state residency limit. Keep the
+     * application's states alive through the snapshot so weak-cache eviction cannot mask reuse. */
+    void *extra[96]={0};
+    for(unsigned i=0;i<extra_count;i++) {
+        qm_render_pipeline_desc variant=desc;
+        variant.color[0].blending_enabled=1;
+        variant.color[0].write_mask=i%16;
+        variant.color[0].source_rgb=1;
+        variant.color[0].destination_rgb=i/16;
+        variant.color[0].source_alpha=1;
+        extra[i]=api->render_pipeline_new(device,&variant); CHECK(extra[i]);
+    }
     snapshot(device,"CREATED");
+    for(unsigned i=0;i<extra_count;i++) api->release(extra[i]);
     qm_texture_desc td={.texture_type=2,.pixel_format=70,.width=8,.height=8,.depth=1,
         .mipmap_level_count=1,.sample_count=1,.array_length=1,.usage=4,.resource_options=2<<4};
     void *texture=api->texture_new(device,&td); CHECK(texture);
+    qm_texture_desc upload_td=td; upload_td.resource_options=0;
+    void *upload_texture=api->texture_new(device,&upload_td); CHECK(upload_texture);
+    unsigned char uploaded[8*8*4],copied[sizeof uploaded];
+    for(unsigned i=0;i<sizeof uploaded;i++) uploaded[i]=(unsigned char)(i*7);
+    CHECK(api->texture_replace_region(upload_texture,(qm_origin){0},(qm_size){8,8,1},0,0,uploaded,32,sizeof uploaded));
+    CHECK(api->texture_get_bytes(upload_texture,copied,sizeof copied,32,sizeof copied,(qm_origin){0},(qm_size){8,8,1},0,0));
+    CHECK(!memcmp(uploaded,copied,sizeof copied));
+    api->release(upload_texture);
     float one=1; void *constants=api->buffer_new(device,sizeof one,0,&one); CHECK(constants);
     void *readback=api->buffer_new(device,8*8*4,0,NULL); CHECK(readback);
     uint32_t input[128]; for (unsigned i=0;i<128;i++) input[i]=0xcafebabe;

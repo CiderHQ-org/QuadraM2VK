@@ -3,8 +3,11 @@
 This checkout uses QuadraM2VK's `development` branch, based on upstream `a2c440b`,
 and requires guest/host ABI **2**. Build and deploy the framework and host library together.
 The original Quadra dependency was `720ef1c`; its recorded gameplay evidence below does
-not qualify this modified build. The new host regressions run on software Vulkan; the
-guest completion worker and the modified X11/Wayland presenter still need live qualification.
+not qualify this modified build. The preceding `0b73dd0` bridge passed an authored RTX 3060 Ti
+native Wayland lifecycle test, and the user reported that home and minimum-graphics stalls
+were gone. First-visit area hitches remain under investigation. The increased warm-state
+limit below has software Vulkan coverage; hardware testing and longer guest lifetime
+qualification remain open for this candidate.
 
 A third renderer next to OpenGL and Vulkan (Zink): Roblox's own **Metal** renderer, with every
 Metal call run on the host's Vulkan driver. Native 0.32 packages and source builds expose it in
@@ -75,14 +78,19 @@ cache contents stay on this machine and are not included in diagnostic exports.
 The launcher shows progress and **Skip and play**. Skipping or reaching the 120-second
 helper timeout ends the helper before launch and skips the game's additional warmup.
 The helper handles at most 4096 recorded pipelines. The game's own Vulkan device can
-retain at most 64 warm pipeline states, with a 128 MiB source-weight limit. It checks a
+retain up to 256 warm pipeline states on a host with enough available memory, with a
+128 MiB source-weight limit. The count uses at most a quarter of available host/cgroup
+memory, an estimated 8 MiB per state, and 768 MiB of headroom. Unknown memory availability
+keeps the previous 64-state limit. Driver allocations are not directly measured, so this
+is a count limit rather than an exact memory cap. It checks a
 five-second deadline and host memory pressure between creations; an individual driver
 call can exceed that deadline. This preserves actual Vulkan objects for early pipeline
 reuse while keeping warmup work off the gameplay worker pool. CPU/cgroup memory limits
 also cap pipeline compilation concurrency.
 
 **Metal performance diagnostics** is off by default. When enabled, bounded JSONL logs
-record compilation, encoder lifetime, acquire/present, submit/wait, cache counts and live
+record compilation, buffer creation/initial-data upload, texture creation/region upload,
+encoder lifetime, acquire/present, submit/wait, cache counts and live
 allocation snapshots, at most once per second on commit and on final device release.
 Recent timing percentiles cover up to 512 samples. `MACOBLOX_METAL_GPU_TIMESTAMPS=1`
 additionally requests GPU spans while diagnostics is enabled. Encoder lifetime includes

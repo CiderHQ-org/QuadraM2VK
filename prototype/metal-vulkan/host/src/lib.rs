@@ -436,6 +436,14 @@ extern "C" fn buffer_new(
     bytes: *const c_void,
 ) -> *mut c_void {
     let device = get_or!(device, Device, std::ptr::null_mut());
+    let _timing = diagnostics::timer(
+        device,
+        if bytes.is_null() {
+            diagnostics::Phase::BufferCreate
+        } else {
+            diagnostics::Phase::BufferUpload
+        },
+    );
     guard(std::ptr::null_mut(), || {
         let options = match ResourceOptions::from_raw(options) {
             Ok(options) => options,
@@ -500,6 +508,7 @@ fn texture_descriptor(desc: &QmTextureDesc) -> Result<TextureDescriptor, String>
 
 extern "C" fn texture_new(device: *mut c_void, desc: *const QmTextureDesc) -> *mut c_void {
     let device = get_or!(device, Device, std::ptr::null_mut());
+    let _timing = diagnostics::timer(device, diagnostics::Phase::TextureCreate);
     let Some(desc) = (unsafe { desc.as_ref() }) else {
         return fail("no texture descriptor");
     };
@@ -587,6 +596,7 @@ extern "C" fn texture_replace_region(
     bytes_per_image: u64,
 ) -> c_int {
     let texture = get_or!(texture, Texture, 0);
+    let _timing = diagnostics::timer(texture.device(), diagnostics::Phase::TextureUpload);
     guard(0, || {
         let region = metal2vulkan_runtime::Region::new_3d(
             region_origin.x,
@@ -2712,7 +2722,10 @@ pub unsafe extern "C" fn quadra_metal_host_diagnostics(
     let device = get_or!(device, Device, 0);
     guard(0, || {
         let mut value = diagnostics::snapshot(device);
-        value["preloaded_states_remaining"] = serde_json::json!(device.warm.lock().unwrap().len());
+        let warm = device.warm.lock().unwrap();
+        value["preloaded_states_remaining"] = serde_json::json!(warm.len());
+        value["preloaded_state_limit"] = serde_json::json!(warm.limit());
+        drop(warm);
         let mut bytes = serde_json::to_vec(&value).unwrap_or_default();
         bytes.push(0);
         if !buffer.is_null() && capacity >= bytes.len() as u64 {
