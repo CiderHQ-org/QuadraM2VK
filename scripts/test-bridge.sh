@@ -34,8 +34,9 @@ args=()
 if [[ $mode == --offscreen ]]; then args+=(--offscreen); fi
 timeout 120s "$out/metal-fork-test" "$library" "$out/metal_dispatch.metallib" "${args[@]}" >"$out/abi-regressions.log" 2>&1
 manifest="$root/integration/quadra/prototype/metal-vulkan/host/Cargo.toml"
-cargo +stable test --locked --release --manifest-path "$manifest" --lib -- --include-ignored --nocapture >"$out/host-rust-tests.log" 2>&1
-cargo +stable clippy --locked --manifest-path "$manifest" --all-targets -- -D warnings >"$out/clippy-bridge.log" 2>&1
+rust_toolchain=${RUSTUP_TOOLCHAIN:-stable}
+cargo "+$rust_toolchain" test --locked --release --manifest-path "$manifest" --lib -- --include-ignored --nocapture >"$out/host-rust-tests.log" 2>&1
+cargo "+$rust_toolchain" clippy --locked --manifest-path "$manifest" --all-targets -- -D warnings >"$out/clippy-bridge.log" 2>&1
 if rg -n 'Validation Error|VUID-|ERROR.*VK_LAYER|Failed to find.*VK_LAYER' "$out/host-smoke.log" "$out/abi-regressions.log" "$out/host-rust-tests.log"; then
   printf '%s\n' 'Validation reported errors; inspect the logs.' >&2
   exit 1

@@ -49,6 +49,7 @@ check() {
   export CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-2}
   export LP_NUM_THREADS=${LP_NUM_THREADS:-1}
   local out="$root/artifacts/distro/${QM_CI_DISTRO:-local}"
+  local rust_toolchain=${RUSTUP_TOOLCHAIN:-stable}
   mkdir -p "$out"
   printf 'RUNNING\n' > "$out/distro-tests.status"
   export QM_TEST_OUTPUT="$out"
@@ -80,12 +81,12 @@ elif target.exists():
     target.rmdir()  # Only an empty checkout placeholder may be replaced.
 target.symlink_to(root/'metal2vulkan',target_is_directory=True)
 PY
-  rustc +stable --version > "$out/versions.log"
+  rustc "+$rust_toolchain" --version > "$out/versions.log"
   clang --version >> "$out/versions.log"
   llvm-as --version >> "$out/versions.log"
   vulkaninfo --summary >> "$out/versions.log" 2>&1
-  cargo +stable fmt --manifest-path integration/quadra/prototype/metal-vulkan/host/Cargo.toml --check
-  cargo +stable fetch --locked --manifest-path integration/quadra/prototype/metal-vulkan/host/Cargo.toml
+  cargo "+$rust_toolchain" fmt --manifest-path integration/quadra/prototype/metal-vulkan/host/Cargo.toml --check
+  cargo "+$rust_toolchain" fetch --locked --manifest-path integration/quadra/prototype/metal-vulkan/host/Cargo.toml
   bash scripts/build.sh host > "$out/build.log" 2>&1
   bash scripts/test-bridge.sh --offscreen > "$out/bridge.log" 2>&1
   python3 -m unittest discover -s scripts/tests -v > "$out/trace-analysis-tests.log" 2>&1

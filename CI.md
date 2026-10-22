@@ -14,8 +14,8 @@ and trace-reader checks. Native Wayland test code is also compiled with warnings
 | Arch rolling | `archlinux:base` | Distro lavapipe |
 
 APT jobs use LLVM's signed LLVM 23 repository for the IR tools and legacy AIR library;
-Fedora/Arch use their LLVM packages. Rust stable and its format/clippy components are installed
-in each container. The Vulkan loader, Mesa implementation and validation layers remain the
+Fedora/Arch use their LLVM packages. The tested Rust 1.98.1 release and its format/clippy
+components are pinned in each container. The Vulkan loader, Mesa implementation and validation layers remain the
 distribution's own packages, so driver/package compatibility failures are visible.
 
 Jobs have a 45-minute timeout, keep running when another distro fails, use two build jobs,
@@ -25,10 +25,11 @@ Darling guest execution, game performance and AMD/Intel/NVIDIA hardware qualific
 separate runs; a distro CI pass describes the software driver and checks listed above.
 
 To repeat the checks in a disposable container, mount the source workspace, set
-`QM_CI_FAMILY` to `debian`, `fedora` or `arch`, install Rust stable, and run:
+`QM_CI_FAMILY` to `debian`, `fedora` or `arch`, install Rust 1.98.1, and run:
 
 ```sh
 bash scripts/ci-distro.sh deps
+export RUSTUP_TOOLCHAIN=1.98.1
 bash scripts/ci-distro.sh check
 ```
 

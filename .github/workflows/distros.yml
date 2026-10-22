@@ -49,6 +49,7 @@ jobs:
     env:
       CARGO_BUILD_JOBS: '2'
       LP_NUM_THREADS: '1'
+      RUSTUP_TOOLCHAIN: '1.98.1'
       QM_CI_DISTRO: ${{ matrix.id }}
       QM_CI_FAMILY: ${{ matrix.family }}
     steps:
@@ -69,18 +70,18 @@ jobs:
           submodules: true
       - name: Install distro build and Vulkan dependencies
         run: bash scripts/ci-distro.sh deps
-      - name: Install stable Rust
+      - name: Install tested Rust 1.98.1
         run: |
           curl --proto '=https' --tlsv1.2 --fail --silent --show-error https://sh.rustup.rs -o /tmp/rustup-init.sh
-          sh /tmp/rustup-init.sh -y --profile minimal --default-toolchain stable --component rustfmt,clippy
+          sh /tmp/rustup-init.sh -y --profile minimal --default-toolchain "$RUSTUP_TOOLCHAIN" --component rustfmt,clippy
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git/db
-          key: cargo-${{ matrix.id }}-${{ hashFiles('metal2vulkan/**/Cargo.toml', 'integration/quadra/prototype/metal-vulkan/host/Cargo.lock') }}
-          restore-keys: cargo-${{ matrix.id }}-
+          key: cargo-${{ matrix.id }}-rust1.98.1-${{ hashFiles('metal2vulkan/**/Cargo.toml', 'integration/quadra/prototype/metal-vulkan/host/Cargo.lock') }}
+          restore-keys: cargo-${{ matrix.id }}-rust1.98.1-
       - name: Build host, test launcher and execute authored Vulkan regressions
         run: bash scripts/ci-distro.sh check
       - name: Save distro host and numeric test evidence
