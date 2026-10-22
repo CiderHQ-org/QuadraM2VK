@@ -35,28 +35,22 @@ serde_json = "1"
 # detected at run time; nothing here uses the default `alloc` and `oid` features.
 sha2 = { version = "0.11", default-features = false }
 
-# Cargo's default release profile turns incremental compilation OFF, which means every rebuild of
-# the translator is a full rebuild of all ~262k lines of it. That is the whole cost: measured on an
-# idle machine, a one-line source edit cost 24.97s to rebuild without incremental and 1.67s with it.
-#
-# It buys that back for nothing measurable. A cold build is unchanged (23.4s incremental vs 24.0s
-# not), and translation throughput is unchanged: 300 corpus modules translated four times each took
-# 46.2s incremental against 46.6s not, run to run repeatable to within 0.5s. The 20-second/500 MiB
-# per-translation contract in AGENTS.md is unaffected.
-#
-# Profile settings only apply to builds whose workspace root this is, so this changes how the repo
-# builds itself and nothing about how a consumer builds the published crates.
-[profile.release]
-incremental = true
-
 # Dev and test builds keep line tables (file and line in backtraces) and no other debug info, and
 # dependencies none. Full debug info made each link of a binary holding the translator, the runtime
 # and validation take 35-47 s; on an i9-13900 the clean workspace build's links
 # summed to 726 s against 94 s with this, and its target to half the size. A debugger session that
-# needs variables builds with CARGO_PROFILE_DEV_DEBUG=full. Like the release profile above, this
-# changes only how the repo builds itself.
+# needs variables builds with `--profile debugger`. Profile settings only apply to builds whose
+# workspace root this is, so they change how the repo builds itself and nothing about how a
+# consumer builds the published crates.
 [profile.dev]
 debug = "line-tables-only"
 
 [profile.dev.package."*"]
 debug = false
+
+[profile.debugger]
+inherits = "dev"
+debug = "full"
+
+[profile.debugger.package."*"]
+debug = "full"
