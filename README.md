@@ -14,6 +14,11 @@ submodules in the same repository. Clone their sources together:
 git clone --recurse-submodules https://github.com/CiderHQ-org/QuadraM2VK.git
 ```
 
+[Quadra 0.33](https://github.com/CiderHQ-org/Cider/releases/tag/v0.33) integrates this
+fork as **Settings → Environment → Game → Renderer → Quadra M2VK (experimental)**.
+Native packages include the matching bridge and preloading controls. Existing Metal
+selections use this entry; OpenGL remains the default for new installations.
+
 This experimental build includes shader preloading in the Quadra launcher, live memory
 accounting, cache recovery and optional performance diagnostics. The current revision passed
 authored RTX 3060 Ti and software Vulkan checks, including native Wayland lifecycle, learned
@@ -85,7 +90,8 @@ The current agent-run RTX checks used the now-accessible GPU and desktop. The
 
 Requires Rust 1.98+, clang/lld, LLVM tools, SPIR-V Tools, Vulkan, libX11, and a CiderDarling
 sysroot for the Darwin framework. The framework is x86_64 Darwin; the host is Linux x86_64.
-The local integration's ignored `vendor/metal2vulkan` link points at this workspace's fork.
+The companion pins the reviewed runtime Git revision in its Cargo manifest and lock file;
+the separate runtime checkout in this workspace is used for core qualification.
 
 ```sh
 export DARLING_SYSROOT=/path/to/ciderdarling/libexec/darling
