@@ -108,6 +108,8 @@ DEFAULT_SETTINGS = {
     "dpi_scale": 1.0,
     "renderer": "opengl",
     "metal_shader_preload": True,
+    "metal_library_preload": True,
+    "metal_resource_preload": True,
     "metal_diagnostics": False,
     "gpu": "auto",
     "roblox_channel": "",
@@ -2396,6 +2398,7 @@ class RobloxSession:
     def __init__(self, settings, launch_uri=None):
         self.settings = settings
         self.shader_preload_progress = None
+        self.preload_stage_progress = None
         self.shader_preload_cancel = threading.Event()
         self._metal_preload_skipped = False
         self.metal_diagnostics_path = LOGS / (time.strftime("metal-performance-%Y%m%d-%H%M%S-") + str(os.getpid()) + ".jsonl")
@@ -2638,9 +2641,16 @@ class RobloxSession:
             try:
                 result = metal_preload.run(METAL_HOST_LIBRARY, env,
                                           progress=self.shader_preload_progress,
-                                          cancel=self.shader_preload_cancel)
+                                          cancel=self.shader_preload_cancel,
+                                          library_pack=(APP_BUNDLE / "Contents/Resources/shaders/shaders_metal_osx.pack"
+                                                        if self.settings.get("metal_library_preload", True) else None),
+                                          resource_root=(APP_BUNDLE / "Contents/Resources"
+                                                         if self.settings.get("metal_resource_preload", True) else None),
+                                          stage_progress=self.preload_stage_progress)
                 self.notes.append("Shader preloading: {status}, {completed}/{total} pipelines, {failed} skipped".format(**result))
-                if result["status"] in ("skipped", "timeout", "failed", "disabled"):
+                for phase, counts in result.get("stages", {}).items():
+                    self.notes.append(f"Preload {phase}: " + json.dumps(counts, sort_keys=True))
+                if result["status"] in ("skipped", "timeout", "failed", "disabled", "memory-limited"):
                     self._metal_preload_skipped = True
                     env["MACOBLOX_METAL_PRELOAD_IN_PROCESS"] = "0"
             except (OSError, subprocess.SubprocessError) as error:

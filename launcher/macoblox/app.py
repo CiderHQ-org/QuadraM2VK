@@ -1289,6 +1289,18 @@ class SettingsPage(Adw.Bin):
             "metal_shader_preload", row.get_active()))
         game.add(self.shader_preload_switch)
 
+        for key, title, subtitle in (
+                ("metal_library_preload", "Prepare client shader libraries",
+                 "Metal renderer: prepare installed shader libraries before playing, including the first launch."),
+                ("metal_resource_preload", "Preload local textures and fonts",
+                 "Metal renderer: warm bundled resources before playing. Downloaded world assets still load in game.")):
+            row = Adw.SwitchRow(title=_(title), subtitle=_(subtitle), active=settings.get(key, True))
+            row.set_sensitive(self.shader_preload_switch.get_active())
+            self.shader_preload_switch.connect("notify::active", lambda switch, _prop, row=row:
+                                               row.set_sensitive(switch.get_active()))
+            row.connect("notify::active", lambda row, _prop, key=key: window.set_setting(key, row.get_active()))
+            game.add(row)
+
         metal_diagnostics = Adw.SwitchRow(
             title=_("Metal performance diagnostics"),
             subtitle=_("Record compilation, encoding, GPU timing and memory use for performance reports."),
@@ -3326,6 +3338,8 @@ class LauncherWindow(Adw.ApplicationWindow):
         self._shader_preload_session = session
         session.shader_preload_progress = lambda done, total: GLib.idle_add(
             self._show_shader_preload, session, done, total)
+        session.preload_stage_progress = lambda phase, done, total: GLib.idle_add(
+            self._show_shader_preload, session, done, total, phase)
         self.web = self._web_bridge()
         if self.web:
             session.web_socket = self.web.guest_path
@@ -3342,15 +3356,15 @@ class LauncherWindow(Adw.ApplicationWindow):
 
         threading.Thread(target=start, daemon=True).start()
 
-    def _show_shader_preload(self, session, done, total):
+    def _show_shader_preload(self, session, done, total, phase="pipelines"):
         if (getattr(self, "_shader_preload_session", None) is not session
                 or session.shader_preload_cancel.is_set() or self.busy != "starting"):
             return False
         dialog = getattr(self, "_shader_preload_dialog", None)
         if dialog is None:
             dialog = Adw.AlertDialog(
-                heading=_("Preloading shaders"),
-                body=_("Preparing shaders learned from earlier sessions. You can skip and start playing."))
+                heading=_("Preparing Roblox"),
+                body=_("Preparing shaders and local resources. You can skip and start playing."))
             self._shader_preload_bar = Gtk.ProgressBar(show_text=True)
             dialog.set_extra_child(self._shader_preload_bar)
             dialog.add_response("skip", _("Skip and play"))
@@ -3358,8 +3372,11 @@ class LauncherWindow(Adw.ApplicationWindow):
             self._shader_preload_response = dialog.connect("response", lambda *_args: session.shader_preload_cancel.set())
             self._shader_preload_dialog = dialog
             dialog.present(self)
+        labels = {"libraries": _("Preparing shader libraries"), "pipelines": _("Warming learned shaders"),
+                  "resources": _("Warming local textures and fonts")}
+        dialog.set_heading(labels.get(phase, _("Preparing Roblox")))
         self._shader_preload_bar.set_fraction(done / total if total else 0)
-        self._shader_preload_bar.set_text(_("{done} of {total} shaders", done=done, total=total))
+        self._shader_preload_bar.set_text(_("{done} of {total} items", done=done, total=total))
         return False
 
     def _close_shader_preload(self, session):

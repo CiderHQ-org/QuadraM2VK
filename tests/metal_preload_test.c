@@ -2,6 +2,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "../prototype/metal-vulkan/quadra_metal.h"
 #include <dlfcn.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -9,6 +10,7 @@
 
 static const qm_api *api;
 static qm_diagnostics_entry diagnostics;
+_Static_assert(offsetof(qm_api,library_new)==8+18*sizeof(void*),"launcher's ABI 2 library prefix");
 #define CHECK(c) do { if (!(c)) { fprintf(stderr,"FAIL %d %s: %s\n",__LINE__,#c,api?api->last_error():dlerror());exit(1); } } while(0)
 
 static void snapshot(void *device, const char *name) {
@@ -59,6 +61,8 @@ int main(int argc,char **argv) {
     qm_api_entry entry=(qm_api_entry)dlsym(host,QM_API_SYMBOL); CHECK(entry);
     api=entry(QM_API_VERSION); CHECK(api && api->size==sizeof(qm_api));
     diagnostics=(qm_diagnostics_entry)dlsym(host,QM_DIAGNOSTICS_SYMBOL); CHECK(diagnostics);
+    qm_preload_device_entry preload=(qm_preload_device_entry)dlsym(host,QM_PRELOAD_DEVICE_SYMBOL); CHECK(preload);
+    CHECK(preload(NULL,NULL,NULL,1)==-1);
     void *device=api->device_create(NULL); CHECK(device);
     memory(device); snapshot(device,"BEFORE");
     void *queue=api->queue_new_with_limit(device,8); CHECK(queue);

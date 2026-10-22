@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import tempfile
 import threading
+import time
 import unittest
 from unittest.mock import patch
 
@@ -24,6 +25,14 @@ if mode=='hang':
     print(json.dumps({'completed':0,'total':2,'failed':0}),flush=True)
     while True: time.sleep(.1)
 if mode=='fail': sys.exit(2)
+if mode=='orphan':
+    child=subprocess.Popen([sys.executable,'-c','import signal,time; signal.signal(signal.SIGTERM,signal.SIG_IGN); print("ready",flush=True); time.sleep(60)'],stdout=subprocess.PIPE)
+    child.stdout.readline()
+    with open(os.environ['PRELOAD_TEST_PIDS'],'w') as file: json.dump([os.getpid(),child.pid],file)
+    sys.exit(0)
+if mode=='stages':
+    print(json.dumps({'phase':'libraries','completed':2,'total':2,'failed':0,'prepared':2,'stage_status':'complete'}),flush=True)
+    print(json.dumps({'phase':'resources','completed':1,'total':1,'failed':0,'read_bytes':32,'stage_status':'complete'}),flush=True)
 print('noise from a loader',flush=True)
 print(json.dumps({'completed':0,'total':2,'failed':0}),flush=True)
 print(json.dumps({'completed':2,'total':2,'failed':0,'status':'complete'}),flush=True)
@@ -77,6 +86,44 @@ class MetalPreloadTests(unittest.TestCase):
         with patch.object(metal_preload, "__file__", str(self.helper)):
             result = metal_preload.run("unused", self.environment, timeout=0)
         self.assertEqual(result["status"], "timeout")
+
+    def test_first_launch_can_run_library_and_resource_stages_without_pipeline_records(self):
+        progress = []
+        with patch.object(metal_preload, "__file__", str(self.helper)):
+            result = metal_preload.run("unused", {**self.environment, "MACOBLOX_METAL_PRELOAD_KEY": "new-client", "PRELOAD_TEST_MODE": "stages"},
+                library_pack=self.root / "pack", resource_root=self.root,
+                stage_progress=lambda *row: progress.append(row))
+        self.assertEqual(result["status"], "complete")
+        self.assertEqual(result["stages"]["libraries"]["prepared"], 2)
+        self.assertEqual(result["stages"]["resources"]["read_bytes"], 32)
+        self.assertTrue(all(stage in {row[0] for row in progress} for stage in ("libraries", "resources", "pipelines")))
+
+    def test_memory_pressure_skips_or_terminates_preparation(self):
+        with patch.object(metal_preload.startup_preload, "available_memory", return_value=1), \
+                patch.object(metal_preload.subprocess, "Popen") as start:
+            self.assertEqual(metal_preload.run("unused", self.environment)["status"], "memory-limited")
+            start.assert_not_called()
+        with patch.object(metal_preload, "__file__", str(self.helper)), \
+                patch.object(metal_preload.startup_preload, "resident_bytes", return_value=2 << 30):
+            self.assertEqual(metal_preload.run("unused", self.environment)["status"], "memory-limited")
+
+    def test_descendant_is_stopped_after_its_helper_leader_exits(self):
+        pids = self.root / "orphan.json"
+        with patch.object(metal_preload, "__file__", str(self.helper)):
+            metal_preload.run("unused", {**self.environment, "PRELOAD_TEST_MODE": "orphan", "PRELOAD_TEST_PIDS": str(pids)}, timeout=2)
+        child = json.loads(pids.read_text())[1]
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            try:
+                state = Path(f"/proc/{child}/stat").read_text().rsplit(")", 1)[1].split()[0]
+            except FileNotFoundError:
+                break
+            if state == "Z":  # An adopted zombie cannot execute; only its new parent can reap it.
+                break
+            time.sleep(0.01)
+        else:
+            os.kill(child, 9)
+            self.fail("preload descendant survived its helper's exit")
 
     def test_metal_settings_and_skip_reach_host_and_guest(self):
         session = bare_session(dict(core.DEFAULT_SETTINGS, renderer="metal", metal_diagnostics=True))

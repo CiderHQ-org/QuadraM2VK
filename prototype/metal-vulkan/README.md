@@ -70,13 +70,36 @@ RobloxPlayer (guest, Mach-O)            host (ELF)
 ## Shader preloading and diagnostics
 
 **Settings → Environment → Game → Shader preloading** is enabled by default for Metal.
+The launcher prepares the installed client's shader libraries, including on the first
+launch. This uses the existing library loader to normalize/cache legacy AIR and validate
+containers; it does not guess unseen render states or compile every shader into a pipeline.
 The first session learns successful render and compute pipeline descriptions locally;
 later launches preload those descriptions for the installed client version. New shaders
 and new render-state combinations can still compile during play. Client shaders and
 cache contents stay on this machine and are not included in diagnostic exports.
 
-The launcher shows progress and **Skip and play**. Skipping or reaching the 120-second
-helper timeout ends the helper before launch and skips the game's additional warmup.
+**Prepare client shader libraries** and **Preload local textures and fonts** can be changed
+separately under Shader preloading. Progress identifies library preparation, learned pipelines
+and local resources. Resource warming reads bundled textures, fonts and models into the OS
+file cache; it does not allocate their GPU textures, decode them, or download world assets.
+
+The launcher shows **Skip and play**. Skipping, a 20-second interval without progress, or
+reaching the 120-second helper timeout ends the helper before launch and skips the game's
+additional warmup. Memory pressure does the same: the launcher samples host/cgroup headroom
+and helper RSS every 250 ms, with 768 MiB reserved and a helper RSS threshold of the smaller
+of 1.5 GiB and one quarter of initially available memory (512 MiB when unknown). These are
+sampled host-memory limits rather than exact VRAM or instantaneous allocation caps.
+Process-group cleanup includes descendants even after the helper leader exits.
+
+Library preparation validates RBXS v11 ranges before reading them, uses at most 4096 unique
+payload ranges and 128 MiB of input from a pack no larger than 256 MiB, deduplicates identical
+Metal containers, and releases each library immediately. A missing/unsupported library is
+nonfatal; the game can still use its normal loading path. The helper reuses one Vulkan device
+for library preparation and pipeline replay through an optional host export, keeping ABI 2.
+Resource warming scans at most 8192 entries/4096 files, skips symlinks and special files, and
+reads at most 128 MiB over three seconds with a smaller cap under memory pressure. Only
+bundled asset file types are selected; settings, cookies and downloaded caches are excluded.
+
 The helper handles at most 4096 recorded pipelines. The game's own Vulkan device can
 retain up to 256 warm pipeline states on a host with enough available memory, with a
 128 MiB source-weight limit. The count uses at most a quarter of available host/cgroup

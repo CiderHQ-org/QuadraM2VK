@@ -2707,6 +2707,30 @@ pub extern "C" fn quadra_metal_host_preload(
     })
 }
 
+/// Replay learned states on the launcher's existing host device, so library preparation
+/// and pipeline replay share one Vulkan initialization. This optional export keeps ABI 2.
+///
+/// # Safety
+/// `device` must be a live host device handle throughout this call. Progress must not release it.
+#[no_mangle]
+pub unsafe extern "C" fn quadra_metal_host_preload_device(
+    device: *mut c_void,
+    progress: Option<preload::Progress>,
+    context: *mut c_void,
+    maximum: u32,
+) -> c_int {
+    let device = get_or!(device, Device, -1);
+    guard(-1, || {
+        match preload::run(device, progress, context, maximum) {
+            Ok(count) => count as c_int,
+            Err(error) => {
+                set_error(format!("shader preloading: {error}"));
+                -1
+            }
+        }
+    })
+}
+
 /// Copy a bounded numeric JSON snapshot, including its terminating NUL, or return its required
 /// size when the buffer is absent or too short. No shader data or game tickets are included.
 ///

@@ -6,6 +6,19 @@ LANGUAGES = {"en": "English", "ru": "Русский"}
 _language = "en"
 
 RU = {
+    "Prepare client shader libraries": "Подготовка библиотек шейдеров клиента",
+    "Metal renderer: prepare installed shader libraries before playing, including the first launch.":
+        "Рендерер Metal: подготовка установленных библиотек шейдеров перед игрой, включая первый запуск.",
+    "Preload local textures and fonts": "Предзагрузка локальных текстур и шрифтов",
+    "Metal renderer: warm bundled resources before playing. Downloaded world assets still load in game.":
+        "Рендерер Metal: предзагрузка ресурсов клиента. Ресурсы игрового мира по-прежнему загружаются в игре.",
+    "Preparing Roblox": "Подготовка Roblox",
+    "Preparing shaders and local resources. You can skip and start playing.":
+        "Подготовка шейдеров и локальных ресурсов. Можно пропустить и начать игру.",
+    "Preparing shader libraries": "Подготовка библиотек шейдеров",
+    "Warming learned shaders": "Подготовка известных шейдеров",
+    "Warming local textures and fonts": "Предзагрузка текстур и шрифтов",
+    "{done} of {total} items": "{done} из {total} элементов",
     "Shader preloading": "Предзагрузка шейдеров",
     "Metal renderer: prepare learned shaders before playing. New shaders may still compile during play.":
         "Рендерер Metal: подготовка известных шейдеров перед игрой. Новые шейдеры могут компилироваться во время игры.",
