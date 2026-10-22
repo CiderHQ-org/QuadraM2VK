@@ -8,7 +8,8 @@
 # worktree adds a git worktree on a new branch, with every tracked file. The observations are
 # copy-on-write clones of the main worktree's (cp -c on APFS, --reflink=auto elsewhere), which write
 # nothing until a file in them changes. git then hashes the clones against START_REV and rewrites
-# only the files that differ, so the tree is exactly START_REV's whatever the main worktree holds.
+# only the files that differ; files START_REV doesn't track are removed from the clone, so the tree
+# is exactly START_REV's whatever the main worktree holds.
 # When the main worktree has no observations to clone, git checks them out as usual.
 #
 # snapshot extracts `git archive REV` into DEST_DIR with `tar -xm`, so every file carries the
@@ -51,10 +52,11 @@ worktree)
   mkdir -p "$path/$(dirname "$observations")"
   clone "$main/$observations" "$path/$observations"
   # The index from START_REV with the working tree untouched; hashing the clones records the ones
-  # that match, and the checkout writes everything else.
+  # that match, the checkout writes everything else, and clean removes what START_REV doesn't track.
   git -C "$path" reset -q
   git -C "$path" update-index -q --refresh || true
   git -C "$path" checkout -q -- .
+  git -C "$path" clean -q -f -d -x -- "$observations"
   ;;
 snapshot)
   [ $# -ge 3 ] || die "usage: lean-tree snapshot REV DEST_DIR [--with-observations]"
