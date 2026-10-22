@@ -21,8 +21,61 @@ use metal2vulkan_runtime::{
 };
 use std::ffi::{c_char, c_int, c_uint, c_ulong, c_void, CStr, CString};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{channel, Sender};
+use std::sync::mpsc::{sync_channel, SyncSender};
 use std::sync::{Arc, Mutex, Weak};
+
+/// Mailbox stays synchronized to vblank while replacing obsolete pending frames. FIFO's
+/// compositor backpressure must not be mistaken for a shader or GPU bottleneck.
+fn select_present_mode(
+    available: &[vk::PresentModeKHR],
+    display_sync: bool,
+    requested: Option<&str>,
+) -> vk::PresentModeKHR {
+    let wanted: &[vk::PresentModeKHR] = match requested {
+        Some("fifo") => &[vk::PresentModeKHR::FIFO],
+        Some("mailbox") => &[vk::PresentModeKHR::MAILBOX, vk::PresentModeKHR::FIFO],
+        Some("immediate") => &[
+            vk::PresentModeKHR::IMMEDIATE,
+            vk::PresentModeKHR::MAILBOX,
+            vk::PresentModeKHR::FIFO,
+        ],
+        _ if display_sync => &[vk::PresentModeKHR::MAILBOX, vk::PresentModeKHR::FIFO],
+        _ => &[
+            vk::PresentModeKHR::IMMEDIATE,
+            vk::PresentModeKHR::MAILBOX,
+            vk::PresentModeKHR::FIFO,
+        ],
+    };
+    wanted
+        .iter()
+        .copied()
+        .find(|mode| available.contains(mode))
+        .unwrap_or(vk::PresentModeKHR::FIFO)
+}
+
+fn image_count(requested: u32, minimum: u32, maximum: u32, mode: vk::PresentModeKHR) -> u32 {
+    let mut count = requested.clamp(2, 3).max(minimum);
+    // Mailbox's nonblocking guarantee, when the application owns no other images, needs
+    // minImageCount + 1, rather than a hardcoded assumption of three images on every driver.
+    if mode == vk::PresentModeKHR::MAILBOX {
+        count = count.max(minimum.saturating_add(1));
+    }
+    if maximum != 0 {
+        count = count.min(maximum);
+    }
+    count
+}
+
+fn composite_alpha(supported: vk::CompositeAlphaFlagsKHR) -> Option<vk::CompositeAlphaFlagsKHR> {
+    [
+        vk::CompositeAlphaFlagsKHR::OPAQUE,
+        vk::CompositeAlphaFlagsKHR::INHERIT,
+        vk::CompositeAlphaFlagsKHR::PRE_MULTIPLIED,
+        vk::CompositeAlphaFlagsKHR::POST_MULTIPLIED,
+    ]
+    .into_iter()
+    .find(|mode| supported.contains(*mode))
+}
 
 #[repr(C)]
 pub struct QmSurfaceTarget {
@@ -349,6 +402,7 @@ pub struct Chain {
     textures: Vec<Texture>,
     owner: Arc<ChainOwner>,
     abandoned: AtomicBool,
+    statistics: Option<Arc<crate::diagnostics::PresentationStatistics>>,
 }
 
 struct Acquire {
@@ -387,7 +441,8 @@ pub struct Surface {
     inner: Mutex<Inner>,
     life: Arc<SurfaceLife>,
     acquire: Mutex<Acquire>,
-    presenter: Mutex<Option<Sender<Arc<Drawable>>>>,
+    presenter: Mutex<Option<SyncSender<QueuedDrawable>>>,
+    statistics: Option<Arc<crate::diagnostics::PresentationStatistics>>,
     presented: std::sync::atomic::AtomicU64,
 }
 
@@ -401,6 +456,11 @@ pub struct Drawable {
     index: u32,
     texture: Texture,
     queued: std::sync::atomic::AtomicBool,
+}
+
+struct QueuedDrawable {
+    drawable: Arc<Drawable>,
+    ready: Option<std::time::Instant>,
 }
 
 impl Surface {
@@ -479,16 +539,25 @@ impl Surface {
                 pending: None,
             }),
             presenter: Mutex::new(None),
+            statistics: crate::diagnostics::presentation(device),
             presented: std::sync::atomic::AtomicU64::new(0),
         });
-        let (sender, receiver) = channel::<Arc<Drawable>>();
+        // A blocked compositor must not accumulate an unbounded queue through resizes.
+        let (sender, receiver) = sync_channel::<QueuedDrawable>(16);
         let weak = Arc::downgrade(&surface);
         std::thread::Builder::new()
             .name("quadra-metal-present".into())
             .spawn(move || {
-                for drawable in receiver {
+                for queued in receiver {
                     let Some(surface) = weak.upgrade() else { break };
-                    surface.queue_present(&drawable, true);
+                    if let Some(ready) = queued.ready {
+                        crate::diagnostics::duration(
+                            &surface.device,
+                            crate::diagnostics::Phase::PresentQueue,
+                            ready.elapsed(),
+                        );
+                    }
+                    surface.queue_present(&queued.drawable, true);
                 }
             })
             .map_err(|error| format!("presenter thread: {error}"))?;
@@ -527,17 +596,8 @@ impl Surface {
                 .get_physical_device_surface_present_modes(handles.physical_device, surface)
         }
         .unwrap_or_default();
-        let wanted = match std::env::var("MACOBLOX_METAL_PRESENT_MODE").as_deref() {
-            Ok("fifo") => vec![vk::PresentModeKHR::FIFO],
-            Ok("mailbox") => vec![vk::PresentModeKHR::MAILBOX, vk::PresentModeKHR::IMMEDIATE],
-            Ok("immediate") => vec![vk::PresentModeKHR::IMMEDIATE, vk::PresentModeKHR::MAILBOX],
-            _ if display_sync => vec![vk::PresentModeKHR::FIFO],
-            _ => vec![vk::PresentModeKHR::MAILBOX, vk::PresentModeKHR::IMMEDIATE],
-        };
-        wanted
-            .into_iter()
-            .find(|mode| modes.contains(mode))
-            .unwrap_or(vk::PresentModeKHR::FIFO)
+        let requested = std::env::var("MACOBLOX_METAL_PRESENT_MODE").ok();
+        select_present_mode(&modes, display_sync, requested.as_deref())
     }
 
     /// Makes the swapchain for the current configuration, retiring the old one.
@@ -560,7 +620,10 @@ impl Surface {
                 .get_physical_device_surface_formats(handles.physical_device, self.life.handle)
         }
         .map_err(|error| format!("surface formats: {error}"))?;
-        let Some(surface_format) = formats.iter().find(|entry| entry.format == format) else {
+        let Some(surface_format) = formats
+            .iter()
+            .find(|entry| entry.format == format || entry.format == vk::Format::UNDEFINED)
+        else {
             return Err(format!(
                 "the window cannot show Vulkan format {} (it offers {:?})",
                 format.as_raw(),
@@ -587,11 +650,15 @@ impl Surface {
             caps.min_image_extent.height.max(1),
             caps.max_image_extent.height.max(1),
         );
-        let wanted_images = config.maximum_drawable_count.clamp(2, 3);
-        let mut images = wanted_images.max(caps.min_image_count);
-        if caps.max_image_count != 0 {
-            images = images.min(caps.max_image_count);
-        }
+        let mode = self.present_mode(self.life.handle, config.display_sync != 0);
+        let images = image_count(
+            config.maximum_drawable_count,
+            caps.min_image_count,
+            caps.max_image_count,
+            mode,
+        );
+        let alpha = composite_alpha(caps.supported_composite_alpha)
+            .ok_or("the surface offers no supported composite alpha mode")?;
         let mut usage = vk::ImageUsageFlags::COLOR_ATTACHMENT
             | vk::ImageUsageFlags::TRANSFER_SRC
             | vk::ImageUsageFlags::TRANSFER_DST;
@@ -601,7 +668,9 @@ impl Surface {
             texture_usage |= TextureUsage::SHADER_READ;
         }
         usage &= caps.supported_usage_flags;
-        let mode = self.present_mode(self.life.handle, config.display_sync != 0);
+        if !usage.contains(vk::ImageUsageFlags::COLOR_ATTACHMENT) {
+            return Err("the surface does not support rendering into its swapchain images".into());
+        }
         let old_handle = inner
             .chain
             .as_ref()
@@ -620,16 +689,7 @@ impl Surface {
             .image_usage(usage)
             .image_sharing_mode(vk::SharingMode::EXCLUSIVE)
             .pre_transform(caps.current_transform)
-            .composite_alpha(
-                if caps
-                    .supported_composite_alpha
-                    .contains(vk::CompositeAlphaFlagsKHR::OPAQUE)
-                {
-                    vk::CompositeAlphaFlagsKHR::OPAQUE
-                } else {
-                    vk::CompositeAlphaFlagsKHR::INHERIT
-                },
-            )
+            .composite_alpha(alpha)
             .present_mode(mode)
             .clipped(true)
             .old_swapchain(old_handle);
@@ -720,10 +780,14 @@ impl Surface {
             vk_images.len(),
             mode.as_raw()
         ));
+        if let Some(statistics) = &self.statistics {
+            statistics.rebuilt(mode, vk_images.len() as u64);
+        }
         inner.chain = Some(Arc::new(Chain {
             textures,
             owner,
             abandoned: AtomicBool::new(false),
+            statistics: self.statistics.clone(),
         }));
         inner.dirty = false;
         Ok(())
@@ -748,6 +812,9 @@ impl Surface {
     pub fn next_drawable(self: &Arc<Self>) -> Result<Arc<Drawable>, String> {
         let _timing = crate::diagnostics::timer(&self.device, crate::diagnostics::Phase::Acquire);
         let handles = unsafe { self.device.raw() };
+        if let Some(statistics) = &self.statistics {
+            statistics.acquire_calls.fetch_add(1, Ordering::Relaxed);
+        }
         // Only acquisitions share this fence. Present/configure never need this lock.
         let mut acquire = self.acquire.lock().unwrap();
         if acquire.pending.is_some() {
@@ -806,6 +873,9 @@ impl Surface {
                     unsafe { handles.device.reset_fences(&[acquire.fence]) }
                         .map_err(|error| format!("vkResetFences: {error}"))?;
                     acquire.pending = None;
+                    if let Some(statistics) = &self.statistics {
+                        statistics.acquired.fetch_add(1, Ordering::Relaxed);
+                    }
                     if suboptimal {
                         self.inner.lock().unwrap().dirty = true;
                     }
@@ -819,7 +889,10 @@ impl Surface {
                 }
                 Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => self.inner.lock().unwrap().dirty = true,
                 Err(vk::Result::TIMEOUT) | Err(vk::Result::NOT_READY) => {
-                    return Err("no drawable became free within a second".into())
+                    if let Some(statistics) = &self.statistics {
+                        statistics.acquire_timeouts.fetch_add(1, Ordering::Relaxed);
+                    }
+                    return Err("no drawable became free within a second".into());
                 }
                 Err(error) => return Err(format!("vkAcquireNextImageKHR: {error}")),
             }
@@ -845,6 +918,9 @@ impl Surface {
         };
         match result {
             Ok(false) => {
+                if let Some(statistics) = &self.statistics {
+                    statistics.presented.fetch_add(1, Ordering::Relaxed);
+                }
                 let count = self
                     .presented
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
@@ -854,6 +930,9 @@ impl Surface {
                 }
             }
             Ok(true) | Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
+                if let Some(statistics) = &self.statistics {
+                    statistics.out_of_date.fetch_add(1, Ordering::Relaxed);
+                }
                 let mut inner = self.inner.lock().unwrap();
                 if inner
                     .chain
@@ -863,7 +942,15 @@ impl Surface {
                     inner.dirty = true;
                 }
             }
-            Err(error) => log_once(&format!("[Quadra Metal] vkQueuePresentKHR: {error}")),
+            Err(error) => {
+                // A failed present can leave the acquisition and its signalled semaphore
+                // unconsumed. Do not repeatedly acquire from that exhausted image pool.
+                chain.abandoned.store(true, Ordering::Release);
+                if let Some(statistics) = &self.statistics {
+                    statistics.present_errors.fetch_add(1, Ordering::Relaxed);
+                }
+                log_once(&format!("[Quadra Metal] vkQueuePresentKHR: {error}"));
+            }
         }
     }
 }
@@ -874,6 +961,9 @@ impl Drop for Drawable {
         // its chain at the next acquisition; existing drawables can still finish on it.
         if !self.queued.load(Ordering::Acquire) {
             self.chain.abandoned.store(true, Ordering::Release);
+            if let Some(statistics) = &self.chain.statistics {
+                statistics.cancelled.fetch_add(1, Ordering::Relaxed);
+            }
         }
     }
 }
@@ -907,9 +997,16 @@ impl Drawable {
                 .add_scheduled_handler(Box::new(move |command| {
                     drawable.chain.owner.last_use.lock().unwrap()[drawable.index as usize] =
                         Some(command.clone());
+                    let queued = QueuedDrawable {
+                        drawable: drawable.clone(),
+                        ready: crate::diagnostics::enabled().then(std::time::Instant::now),
+                    };
                     if command.status() == metal2vulkan_runtime::CommandBufferStatus::Error
-                        || sender.send(drawable.clone()).is_err()
+                        || sender.try_send(queued).is_err()
                     {
+                        if let Some(statistics) = &drawable.chain.statistics {
+                            statistics.queue_rejections.fetch_add(1, Ordering::Relaxed);
+                        }
                         drawable.queued.store(false, Ordering::Release);
                         drawable.chain.abandoned.store(true, Ordering::Release);
                     }
@@ -938,5 +1035,59 @@ impl Drawable {
             .store(false, std::sync::atomic::Ordering::Release);
         self.encode_present(&buffer)?;
         buffer.commit().map_err(|error| format!("commit: {error}"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn display_sync_keeps_vblank_without_requiring_a_fifo_backlog() {
+        let modes = [
+            vk::PresentModeKHR::IMMEDIATE,
+            vk::PresentModeKHR::FIFO,
+            vk::PresentModeKHR::MAILBOX,
+        ];
+        assert!(select_present_mode(&modes, true, None) == vk::PresentModeKHR::MAILBOX);
+        assert!(select_present_mode(&modes, false, None) == vk::PresentModeKHR::IMMEDIATE);
+        assert!(select_present_mode(&modes, true, Some("fifo")) == vk::PresentModeKHR::FIFO);
+        assert!(
+            select_present_mode(&modes, true, Some("immediate")) == vk::PresentModeKHR::IMMEDIATE
+        );
+        // A driver without mailbox must retain a tear-free fallback when sync is enabled.
+        let limited = [vk::PresentModeKHR::IMMEDIATE, vk::PresentModeKHR::FIFO];
+        assert!(select_present_mode(&limited, true, None) == vk::PresentModeKHR::FIFO);
+        assert!(select_present_mode(&limited, false, Some("mailbox")) == vk::PresentModeKHR::FIFO);
+    }
+
+    #[test]
+    fn mailbox_provisions_the_drivers_minimum_plus_one_when_possible() {
+        for minimum in 1..8 {
+            for maximum in [0, minimum, minimum + 1, minimum + 4] {
+                for requested in [0, 2, 3, 10] {
+                    let actual =
+                        image_count(requested, minimum, maximum, vk::PresentModeKHR::MAILBOX);
+                    assert!(actual >= minimum);
+                    assert!(maximum == 0 || actual <= maximum);
+                    if maximum == 0 || maximum > minimum {
+                        assert!(actual > minimum);
+                    }
+                }
+            }
+        }
+        assert_eq!(image_count(2, 3, 0, vk::PresentModeKHR::MAILBOX), 4);
+        assert_eq!(image_count(2, 3, 0, vk::PresentModeKHR::FIFO), 3);
+    }
+
+    #[test]
+    fn composite_alpha_never_requests_an_unadvertised_mode() {
+        for bits in 1..16 {
+            let supported = vk::CompositeAlphaFlagsKHR::from_raw(bits);
+            let selected = composite_alpha(supported).unwrap();
+            assert!(supported.contains(selected));
+            assert_eq!(selected.as_raw().count_ones(), 1);
+        }
+        assert!(composite_alpha(vk::CompositeAlphaFlagsKHR::empty()).is_none());
     }
 }

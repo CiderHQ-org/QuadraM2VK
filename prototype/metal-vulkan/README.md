@@ -91,6 +91,26 @@ time spent by the caller; these observations are not a frame-time or FPS measure
 are separate. Vulkan driver allocations and wrapped external images are excluded.
 Working-set recommendations use device-local heap budgets where available.
 
+Presentation defaults to mailbox when the surface supports it, keeping vblank synchronization
+while replacing obsolete queued frames. It falls back to FIFO when mailbox is unavailable.
+`MACOBLOX_METAL_PRESENT_MODE=fifo` retains FIFO explicitly; `mailbox` and `immediate` select
+the other policies. Mailbox requests at least the surface's minimum image count plus one,
+within its advertised maximum. AppKit's layer mutex is released before image acquisition,
+with the layer retained across that wait. The presenter queue holds at most 16 pending
+drawables; a rejected enqueue retires its chain instead of blocking a runtime callback.
+
+Diagnostics include `presentation` counters for acquired images, timeouts, cancellations,
+swapchain rebuilds/modes and failed presents, plus `present_queue_delay` timings. These are
+host WSI observations, not proof of when pixels reached the display. A failed present retires
+its chain so an unconsumed acquisition cannot silently exhaust the image pool. Surface alpha
+mode and image count selection follow the driver's advertised capabilities.
+
+The policy follows [CAMetalLayer display synchronization](https://developer.apple.com/documentation/quartzcore/cametallayer/displaysyncenabled)
+and [Vulkan present modes](https://docs.vulkan.org/refpages/latest/refpages/source/VkPresentModeKHR.html).
+The authored `tests/metal_present_test.c` exercises a native Wayland render surface while
+visible, covered by an opaque sibling, restored and resized. Its native driver/compositor
+results must be collected separately from the software offscreen tests.
+
 Native helpers can call `quadra_metal_host_preload` and
 `quadra_metal_host_diagnostics`; these optional exports do not change guest ABI 2.
 

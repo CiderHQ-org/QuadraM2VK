@@ -25,9 +25,10 @@ pub enum Phase {
     Commit,
     Wait,
     GpuSpan,
+    PresentQueue,
 }
 
-const NAMES: [&str; 9] = [
+const NAMES: [&str; 10] = [
     "library",
     "render_pipeline",
     "compute_pipeline",
@@ -37,6 +38,7 @@ const NAMES: [&str; 9] = [
     "commit",
     "completion_wait",
     "command_buffer_gpu_span",
+    "present_queue_delay",
 ];
 
 pub fn enabled() -> bool {
@@ -88,10 +90,61 @@ impl Times {
 struct Trace {
     file: std::fs::File,
 }
+
+/// Numeric WSI counters shared by this device's surfaces, allocated only for diagnostics.
+#[derive(Default)]
+pub struct PresentationStatistics {
+    pub acquire_calls: AtomicU64,
+    pub acquired: AtomicU64,
+    pub acquire_timeouts: AtomicU64,
+    pub cancelled: AtomicU64,
+    pub presented: AtomicU64,
+    pub out_of_date: AtomicU64,
+    pub present_errors: AtomicU64,
+    pub queue_rejections: AtomicU64,
+    rebuilds: AtomicU64,
+    fifo_chains: AtomicU64,
+    mailbox_chains: AtomicU64,
+    immediate_chains: AtomicU64,
+    last_image_count: AtomicU64,
+}
+
+impl PresentationStatistics {
+    pub fn rebuilt(&self, mode: ash::vk::PresentModeKHR, images: u64) {
+        self.rebuilds.fetch_add(1, Ordering::Relaxed);
+        self.last_image_count.store(images, Ordering::Relaxed);
+        let counter = match mode {
+            ash::vk::PresentModeKHR::MAILBOX => &self.mailbox_chains,
+            ash::vk::PresentModeKHR::IMMEDIATE => &self.immediate_chains,
+            _ => &self.fifo_chains,
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn value(&self) -> Value {
+        json!({
+            "acquire_calls":self.acquire_calls.load(Ordering::Relaxed),
+            "acquired":self.acquired.load(Ordering::Relaxed),
+            "acquire_timeouts":self.acquire_timeouts.load(Ordering::Relaxed),
+            "cancelled":self.cancelled.load(Ordering::Relaxed),
+            "presented":self.presented.load(Ordering::Relaxed),
+            "out_of_date":self.out_of_date.load(Ordering::Relaxed),
+            "present_errors":self.present_errors.load(Ordering::Relaxed),
+            "queue_rejections":self.queue_rejections.load(Ordering::Relaxed),
+            "rebuilds":self.rebuilds.load(Ordering::Relaxed),
+            "fifo_chains":self.fifo_chains.load(Ordering::Relaxed),
+            "mailbox_chains":self.mailbox_chains.load(Ordering::Relaxed),
+            "immediate_chains":self.immediate_chains.load(Ordering::Relaxed),
+            "last_image_count":self.last_image_count.load(Ordering::Relaxed)
+        })
+    }
+}
+
 struct Stats {
     started: Instant,
     last_sample: AtomicU64,
-    phases: [Mutex<Times>; 9],
+    phases: [Mutex<Times>; 10],
+    presentation: Arc<PresentationStatistics>,
     trace: Mutex<Option<Trace>>,
 }
 
@@ -144,6 +197,7 @@ pub fn register(device: &Device) {
         started: Instant::now(),
         last_sample: AtomicU64::new(0),
         phases: std::array::from_fn(|_| Mutex::new(Times::new())),
+        presentation: Arc::default(),
         trace: Mutex::new(trace),
     });
     let mut devices = devices()
@@ -179,6 +233,25 @@ pub fn timer(device: &Device, phase: Phase) -> Option<Measurement> {
     })
 }
 
+pub fn duration(device: &Device, phase: Phase, elapsed: std::time::Duration) {
+    if !enabled() {
+        return;
+    }
+    if let Some(stats) = stats(device) {
+        stats.phases[phase as usize]
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(elapsed.as_nanos().min(u64::MAX as u128) as u64);
+    }
+}
+
+pub fn presentation(device: &Device) -> Option<Arc<PresentationStatistics>> {
+    enabled()
+        .then(|| stats(device))
+        .flatten()
+        .map(|stats| stats.presentation.clone())
+}
+
 pub fn gpu_span(device: &Device, seconds: f64) {
     if !gpu_timestamps() || !seconds.is_finite() || seconds <= 0.0 {
         return;
@@ -212,7 +285,8 @@ pub fn snapshot(device: &Device) -> Value {
                 .collect()
         })
         .unwrap_or_default();
-    json!({"schema":1,"device":device.name(),"timing_enabled":enabled(),"gpu_timestamp_queries_requested":gpu_timestamps(),"phases":phases,
+    let presentation = presentation(device).map(|value| value.value());
+    json!({"schema":1,"device":device.name(),"timing_enabled":enabled(),"gpu_timestamp_queries_requested":gpu_timestamps(),"phases":phases,"presentation":presentation,
         "memory":{"live_bytes":memory.live_bytes,"reserved_bytes":memory.reserved_bytes,"imported_bytes":memory.imported_bytes},
         "work":{"draws":work.draw_states_recorded,"draw_shapes_made":work.draw_shapes_made,"draw_shapes_found":work.draw_shapes_found,"table_reads":work.stage_tables_read,"pushed_draws":work.draws_pushing_set_zero,"pushed_writes":work.set_zero_writes_pushed,"submits":work.command_buffers_submitted,"submit_ns":work.batch_submit_nanos,"pipeline_jobs_busy":work.pipeline_pool_busy,"pipelines_made":work.variant_pipelines_made,"creation_pipelines_made":work.creation_pipelines_made,"creation_pipelines_drawn":work.creation_pipelines_drawn,"bc_cpu_decodes":work.cpu_block_decodes,"bc_gpu_decodes":work.block_decode_passes},
         "shader_cache":{"persistent":device.shader_cache_is_persistent(),"hits":cache.hits,"misses":cache.misses,"rejected":cache.rejected,"writes":cache.writes,"write_failures":cache.write_failures,"driver_loads":cache.driver_loads,"driver_hits":cache.driver_pipeline_hits,"driver_misses":cache.driver_pipeline_misses},
