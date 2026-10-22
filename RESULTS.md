@@ -20,7 +20,8 @@ The older benchmark and full RTX regression results below describe `c50214a` / `
 | Runtime cache version | `1499` |
 
 The repositories are `metal2vulkan/` and `integration/quadra/`. The original MacOBlox checkout
-is unchanged. The user installed `57af2fb` for gameplay testing. Matching candidate
+is unchanged. Bridge `146ad14` is installed in the user's Quadra installation, with a
+verified backup and isolated upgrade/rollback check. Matching
 binaries are in `build/metal/`; the guest
 framework was cross-built against CiderDarling `b0fcb070`. Both the framework and host require
 ABI 2. The release host has debug sections removed while retaining symbols.
@@ -45,6 +46,9 @@ The first observed pass using the existing cache took 19.905 seconds; the repeat
 seconds. The maximum child peak RSS across the two passes was 495,833,088 bytes. These are
 prelaunch call/file-cache observations, not a shader-semantic census or game FPS measurements.
 Only numeric summaries are retained in [the local preparation review](artifacts/launcher-preload-local-review.json).
+The installed launcher completed the same preparation in 1.211 seconds with zero library
+failures and the expected library → pipeline → resource progress order. Its child peak RSS
+was 448,425,984 bytes. This repeat used the existing local caches.
 
 Library preparation is limited to 4,096 unique pack ranges and 128 MiB of input. Local resource
 warming has a 128 MiB/three-second ceiling with a smaller memory-based budget. The launcher

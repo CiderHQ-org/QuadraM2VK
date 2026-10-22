@@ -72,6 +72,7 @@ if args.hardware_run:
         raise RuntimeError("packaged host differs from the reviewed hardware candidate")
 manifest = {
     "name": "QuadraM2VK experimental ABI 2",
+    "workspace_revision": command("git", "rev-parse", "HEAD"),
     "fork_revision": command("git", "-C", str(ROOT / "metal2vulkan"), "rev-parse", "HEAD"),
     "upstream_base": "a2c440b8bcdcf20d34aa1694b61ae22c2a7ea68b",
     "quadra_bridge_revision": command("git", "-C", str(ROOT / "integration/quadra"), "rev-parse", "HEAD"),
@@ -137,7 +138,8 @@ with tempfile.TemporaryDirectory(prefix="quadram2vk-package-", dir=ROOT) as temp
                      "presentation/baseline.json", "presentation/baseline.log",
                      "area-preload-baseline/results.json", "gameplay-review-0b73dd0.json",
                      "gameplay-numeric-analysis-0b73dd0.json", "area-upgrade-qualification.json",
-                     "launcher-preload-local-review.json", "launcher-preload-ui/review.json"]:
+                     "launcher-preload-local-review.json", "launcher-preload-ui/review.json",
+                     "launcher-upgrade-qualification.json"]:
         path = OUT / relative
         if path.is_file():
             destination = artifacts / relative

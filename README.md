@@ -24,9 +24,9 @@ remain open.
 See [RESULTS.md](RESULTS.md) for measurements, test evidence and remaining work. The
 original [plan](PLAN.md) and [deeper audit](PERFORMANCE-STABILITY-AUDIT.md) remain available.
 
-The [experimental build package](artifacts/QuadraM2VK-experimental-linux-x86_64.tar.gz)
+The [experimental build package](https://github.com/CiderHQ-org/QuadraM2VK/releases/tag/experimental-20261022-preload)
 contains matching binaries, source archives, patches, licenses and the qualification report.
-See [SHA256SUMS](artifacts/SHA256SUMS) and [build-manifest.json](artifacts/build-manifest.json).
+The release also provides `SHA256SUMS` and `build-manifest.json`.
 
 For the authorized real-GPU testing, see [HARDWARE-TESTING.md](HARDWARE-TESTING.md).
 The current agent-run RTX checks used the now-accessible GPU and desktop. The

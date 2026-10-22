@@ -15,8 +15,11 @@ and trace-reader checks. Native Wayland test code is also compiled with warnings
 
 APT jobs use LLVM's signed LLVM 23 repository for the IR tools and legacy AIR library;
 Fedora/Arch use their LLVM packages. The tested Rust 1.98.1 release and its format/clippy
-components are pinned in each container. The Vulkan loader, Mesa implementation and validation layers remain the
-distribution's own packages, so driver/package compatibility failures are visible.
+components are pinned in each container. The Vulkan loader and Mesa implementation remain
+the distribution's own packages. Ubuntu 24.04 uses the SHA-256-verified validation layer
+from LunarG SDK 1.4.363.0: its stock 1.3.275 validator predates extensions exposed by its
+updated Mesa driver. Other jobs use the distro's validation layer. Validation errors fail
+the checks on every distribution; none are filtered out.
 
 Jobs have a 45-minute timeout, keep running when another distro fails, use two build jobs,
 and upload the host binary plus numeric/authored test logs for 14 days. Client binaries,
@@ -35,4 +38,5 @@ bash scripts/ci-distro.sh check
 
 The dependency step requires a root container. `check` does not install OS packages.
 GitHub documents the [job container behavior](https://docs.github.com/en/actions/how-tos/write-workflows/choose-where-workflows-run/run-jobs-in-a-container);
-LLVM documents its [Debian/Ubuntu package repository](https://apt.llvm.org/).
+LLVM documents its [Debian/Ubuntu package repository](https://apt.llvm.org/), and LunarG
+documents the [SDK layout and checksum verification](https://vulkan.lunarg.com/doc/view/1.4.363.0/linux/getting_started.html).
