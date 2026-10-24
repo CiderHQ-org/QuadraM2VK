@@ -15,7 +15,7 @@ use std::sync::{Mutex, OnceLock};
 const CAPACITY: u64 = 512 << 20;
 const MAX_RECORDS: usize = 4096;
 const MAX_RECIPE: u64 = 64 << 10;
-const MAX_RESIDENT: usize = 256;
+use crate::tuning::{Tuning, MAX_WARM_STATES};
 const UNKNOWN_MEMORY_RESIDENT: usize = 64;
 // Driver allocations are not exposed by the runtime allocator. This estimate bounds the
 // count rather than promising an exact byte cap; also recheck actual pressure between calls.
@@ -352,11 +352,11 @@ pub fn run(
     run_inner(device, progress, context, maximum, false).map(|(count, _)| count)
 }
 
-pub fn warm_live(device: &Device) -> WarmStates {
+pub fn warm_live(device: &Device, tuning: &Tuning) -> WarmStates {
     if std::env::var("MACOBLOX_METAL_PRELOAD_IN_PROCESS").as_deref() != Ok("1") {
         return WarmStates::default();
     }
-    let maximum = resident_limit(crate::limits::available_memory());
+    let maximum = resident_limit(crate::limits::available_memory(), tuning.warm_states);
     match run_inner(device, None, std::ptr::null_mut(), maximum as u32, true) {
         Ok((count, states)) => {
             crate::util::log_once(&format!(
@@ -373,10 +373,14 @@ pub fn warm_live(device: &Device) -> WarmStates {
     }
 }
 
-fn resident_limit(available: Option<u64>) -> usize {
-    available.map_or(UNKNOWN_MEMORY_RESIDENT, |bytes| {
+/// The states kept warm: a quarter of the memory available, less the reserve, at the estimated
+/// bytes each, never above `ceiling` (the user's setting, at most [`MAX_WARM_STATES`]); with the
+/// memory unknown, the smaller of that and the small default.
+fn resident_limit(available: Option<u64>, ceiling: usize) -> usize {
+    let ceiling = ceiling.min(MAX_WARM_STATES);
+    available.map_or(UNKNOWN_MEMORY_RESIDENT.min(ceiling), |bytes| {
         let budget = (bytes / 4).min(bytes.saturating_sub(MEMORY_RESERVE));
-        (budget / ESTIMATED_STATE_BYTES).min(MAX_RESIDENT as u64) as usize
+        (budget / ESTIMATED_STATE_BYTES).min(ceiling as u64) as usize
     })
 }
 
@@ -390,7 +394,7 @@ fn run_inner(
     let mut states = WarmStates {
         states: BTreeMap::new(),
         limit: if retain {
-            (maximum as usize).min(MAX_RESIDENT)
+            (maximum as usize).min(MAX_WARM_STATES)
         } else {
             0
         },
@@ -507,13 +511,26 @@ mod tests {
 
     #[test]
     fn residency_preserves_headroom_on_small_and_memory_limited_hosts() {
-        assert_eq!(resident_limit(Some(0)), 0);
-        assert_eq!(resident_limit(Some(768 << 20)), 0);
-        assert_eq!(resident_limit(Some(1 << 30)), 32);
-        assert_eq!(resident_limit(Some(2 << 30)), 64);
-        assert_eq!(resident_limit(Some(3 << 30)), 96);
-        assert_eq!(resident_limit(Some(8 << 30)), 256);
-        assert_eq!(resident_limit(Some(u64::MAX)), 256);
-        assert_eq!(resident_limit(None), 64);
+        let default = crate::tuning::DEFAULT_WARM_STATES;
+        assert_eq!(resident_limit(Some(0), default), 0);
+        assert_eq!(resident_limit(Some(768 << 20), default), 0);
+        assert_eq!(resident_limit(Some(1 << 30), default), 32);
+        assert_eq!(resident_limit(Some(2 << 30), default), 64);
+        assert_eq!(resident_limit(Some(3 << 30), default), 96);
+        assert_eq!(resident_limit(Some(8 << 30), default), 256);
+        assert_eq!(resident_limit(Some(u64::MAX), default), 256);
+        assert_eq!(resident_limit(None, default), 64);
+    }
+
+    #[test]
+    fn the_warm_state_setting_lowers_or_raises_the_ceiling_within_memory() {
+        // A lower ceiling binds even with plenty of memory, and 0 keeps nothing.
+        assert_eq!(resident_limit(Some(64 << 30), 128), 128);
+        assert_eq!(resident_limit(Some(64 << 30), 0), 0);
+        assert_eq!(resident_limit(None, 32), 32);
+        // A higher one still stops at a quarter of the memory less the reserve.
+        assert_eq!(resident_limit(Some(64 << 30), 1024), 1024);
+        assert_eq!(resident_limit(Some(8 << 30), 1024), 256);
+        assert_eq!(resident_limit(Some(u64::MAX), 100_000), 1024);
     }
 }
