@@ -194,6 +194,23 @@ leaving a game. What was run, what it showed, and what it did not:
   the middle of each freeze no eventfd, socket or pipe held an unconsumed byte except one transient pipe, and the only
   timer armed was the 30 s tick, as in the earlier captures. The first cycle's leave stopped half way (the Enter that
   confirms the Leave dialog arrived before a freshly started game accepted input); it needs a wait of about 2 s after L.
+- **Opt-in polling of idle kqueue loops (`kevent_poll_ms`, 2026-10-24).** `net_trace.c`'s `kevent` hook, which polls
+  kqueues with UDP watches in 50 ms slices, can now also cut a wait on any other kqueue to N ms and return no events
+  (`MACOBLOX_KEVENT_POLL_MS`, off by default). A Mach-O fixture (`tests/darling_kevent_wake_test.c`, run by
+  `tests/run_darling_kevent_wake.py` in a disposable prefix) shows: with the cap off every wake-up case takes what it
+  takes on stock Darling (201, 200, 500 and 301 ms) and an idle 1000 ms wait lasts 1001 ms; with 100 ms the same four cases
+  are unchanged and the idle wait ends after 100 ms with no events. Installed on this computer's branch, set to 100, and
+  tried on freshly started games: the game was running at full speed 2 s after each leave in 3 of 3 cycles (18 s in 9 of
+  9 without it), and the game's I/O loops waited 100 ms instead of 10,000. A probe that clicks Play once a second after
+  a leave found it working 2.8 s after the first leave with polling on and 18.2 s after the first leave with it off. Idle
+  CPU on the home page was 73% of a core with it on and 86% off (separate runs; no sign of added cost). Limits of this
+  evidence: the first-leave probe is one measurement per setting; the later leaves of both probe runs are not usable,
+  because my helper took the first leave's marker from the log for every leave and the log is written in buffered
+  blocks, so a join line can reach the file many seconds late (one run reported "never worked in 60 s" while the game was
+  in the experience); the game was not played for long with polling on; only this experience and this renderer
+  (Zink, VR on, Wayland) were tried. What the fix does not explain: the work the loops were not woken for, which becomes
+  ready about 8.5 s after the leave, is still not identified. The launcher reads settings at start and writes its own
+  copy back at exit, so the file must be edited while it is closed (an edit made while it ran was lost once).
 - **Camera lock (a community report on Hyprland).** The default X11 window backend takes raw motion from
   XInput2 and, when none arrives within 100 ms, falls back to pointer deltas that stop at the screen edge
   unless the compositor locks the pointer. That matches "lift the mouse and restart the turn". It could
