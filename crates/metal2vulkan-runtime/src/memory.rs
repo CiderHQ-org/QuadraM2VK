@@ -534,6 +534,11 @@ pub struct MemoryStatistics {
     pub reserved_bytes: u64,
     /// Bytes of imported host-memory blocks, reported separately from runtime allocations.
     pub imported_bytes: u64,
+    /// The part of [`live_bytes`](Self::live_bytes) in device-local memory types; the rest is
+    /// host memory the GPU reaches across the bus on a discrete GPU (`Shared` storage).
+    pub device_local_live_bytes: u64,
+    /// The part of [`reserved_bytes`](Self::reserved_bytes) in device-local memory types.
+    pub device_local_reserved_bytes: u64,
 }
 
 /// A host pointer the runtime may send between threads: the mapping of a block it owns.
@@ -954,6 +959,17 @@ impl Memory {
             } else {
                 result.live_bytes += block.ranges.used();
                 result.reserved_bytes += block.payload.size;
+                let local = self
+                    .types
+                    .get(block.payload.type_index as usize)
+                    .is_some_and(|ty| {
+                        ty.property_flags
+                            .contains(vk::MemoryPropertyFlags::DEVICE_LOCAL)
+                    });
+                if local {
+                    result.device_local_live_bytes += block.ranges.used();
+                    result.device_local_reserved_bytes += block.payload.size;
+                }
             }
         }
         result

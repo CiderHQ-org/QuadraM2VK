@@ -57,3 +57,34 @@ fn live_memory_follows_releases_and_keeps_device_totals_separate() {
     assert_eq!(first.statistics().imported_bytes, 16384);
     assert_eq!(first.statistics().live_bytes, 0, "imports are separate");
 }
+
+#[test]
+fn live_bytes_are_split_by_whether_their_memory_type_is_device_local() {
+    use vk::MemoryPropertyFlags as P;
+    let mut properties = vk::PhysicalDeviceMemoryProperties {
+        memory_type_count: 2,
+        ..Default::default()
+    };
+    properties.memory_types[0] = vk::MemoryType {
+        property_flags: P::DEVICE_LOCAL,
+        heap_index: 0,
+    };
+    properties.memory_types[1] = vk::MemoryType {
+        property_flags: P::HOST_VISIBLE | P::HOST_COHERENT | P::HOST_CACHED,
+        heap_index: 1,
+    };
+    let mut memory = Memory::new(&properties, BLOCK_BYTES, false, false, vec![0], None, None);
+    let host_block = Block {
+        type_index: 1,
+        ..block(8192, false)
+    };
+    memory.pools[0].add(4096, false, block(4096, false), 1024);
+    memory.pools[1].add(8192, false, host_block, 3000);
+    let statistics = memory.statistics();
+    assert_eq!(
+        (statistics.live_bytes, statistics.reserved_bytes),
+        (4024, 12288)
+    );
+    assert_eq!(statistics.device_local_live_bytes, 1024);
+    assert_eq!(statistics.device_local_reserved_bytes, 4096);
+}
