@@ -211,6 +211,16 @@ leaving a game. What was run, what it showed, and what it did not:
   (Zink, VR on, Wayland) were tried. What the fix does not explain: the work the loops were not woken for, which becomes
   ready about 8.5 s after the leave, is still not identified. The launcher reads settings at start and writes its own
   copy back at exit, so the file must be edited while it is closed (an edit made while it ran was lost once).
+- **Released as Quadra 0.36 (2026-10-24).** The polling is on by default (`kevent_poll_ms` 100, 0 turns it off) and
+  only caps threads named "RBX IoEvLoop ..." (the only ones seen making timed waits over 100 ms in that day's
+  captures). The thread-restricted build was tried on a freshly started game before release: the game was at full
+  speed 2.0 s after the leave in 3 of 3 cycles and the loops waited 100 ms; the Mach-O fixture shows the named
+  thread's idle wait cut to 101 ms, another thread's left at 1001 ms and the wake-up cases unchanged. The release
+  gate (`tests/run.sh` in an isolated environment, as the release workflow runs it) passed with 320 tests.
+  `CiderHQ-org/Cider` `main` went from `3c4f3cb` (0.35.p2) to `65d9dea` and the annotated tag `v0.36` points at it;
+  the release workflow (Arch, Ubuntu and Fedora packages, then publication) was started by the tag push. The Metal host
+  it builds is the pinned fork revision `f44f1b2`, already on `runtime-development`. This workspace's `integration/quadra`
+  branch is the older 0.34-based companion and keeps its own version; the same changes are in it as commits.
 - **Camera lock (a community report on Hyprland).** The default X11 window backend takes raw motion from
   XInput2 and, when none arrives within 100 ms, falls back to pointer deltas that stop at the screen edge
   unless the compositor locks the pointer. That matches "lift the mouse and restart the turn". It could
