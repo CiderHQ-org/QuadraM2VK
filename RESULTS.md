@@ -170,6 +170,25 @@ leaving a game. What was run, what it showed, and what it did not:
   interval of zero: 2,501 stops a second before the guard, 40 after). The same file also shows that with no socket
   holding unread bytes and no unconsumed eventfd, the wake sources in an idle menu are a 30 s timer on one epoll set
   and nothing else.
+- **Automated join/leave cycles (with the user's permission; 2026-10-24, Zink, VR on).** Join was clicked and
+  the leave was Esc, L, Enter, with ydotool input sent only while niri reported the Roblox window focused. The game
+  joins "Write a Letter" about 2 s after the click (the log file is written in buffered blocks, so wall-clock waits on
+  it overstated this as 72 to 84 s at first). With nothing done after the leave, the frame loop idles (about 10% of a core, the
+  page without its thumbnails) and the game is running at full rate again **18 or 19 s** after the leave in 9 of 9
+  control cycles (the 14 and 15 s of the first two controls came after long stays in the game). Writing
+  one to each eventfd the kqueue loops watch (borrowed with pidfd_getfd) at time t after the leave gives:
+  t = 0.5 s, 11 s; 2.7 s, 13 s; 6 s, 16 s; 7 s, 17 s; 7.5 and 8 s, 18 s; 8.5 s, 19 s once and 9 s once; 9 s, 9 s in
+  three of three. So the work the game waits for is ready about 8.5 s after the leave and is not noticed until
+  the I/O loop next wakes (a wake before that only makes the loop sleep its 10 s again). Nothing in the game's descriptors
+  shows the missing signal: no eventfd count, pipe or socket held a byte through a freeze, no thread shows activity at
+  +8.5 s, and the long-lived unread pipe in the census (one pipe, both ends) is in no kqueue. Waking the loops every
+  100 ms for 14 s made the frame loop run again after 2 s, but the page never loaded its thumbnails afterwards
+  (and a Play click did nothing), so that is not an improvement: the frame loop speed is not the page being usable,
+  and 570 spurious eventfd writes probably broke something. After about 25 automated sessions the game process held
+  24 HTTP connections in `CLOSE_WAIT` (closed by the server, not by the game, none in a kqueue) and one `IoEvLoop` thread per
+  session, and showed no thumbnails on any page; that state is the result of the testing, not a finding about normal play.
+  Not tested: a real polling change in the shim's `traced_kevent` for kqueues without UDP watches (it must not use
+  extra eventfd writes), and what happens at +8.5 s.
 - **Camera lock (a community report on Hyprland).** The default X11 window backend takes raw motion from
   XInput2 and, when none arrives within 100 ms, falls back to pointer deltas that stop at the screen edge
   unless the compositor locks the pointer. That matches "lift the mouse and restart the turn". It could
