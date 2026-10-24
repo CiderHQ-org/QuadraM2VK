@@ -160,6 +160,16 @@ leaving a game. What was run, what it showed, and what it did not:
   game has four epoll sets (Darling's kqueues), six eventfds and two timerfds; one epoll set watches a timerfd that
   was armed for 10.3 s and an eventfd, so the loop's wake sources are timers and user events, which the
   watcher now also reads (eventfd counts, timerfd time to fire, epoll members) and lists in the lull report.
+- **A capture to disregard (08:08 to 08:10, 135 s).** A bug in the watcher's wake-source census (it reused the name
+  `interval`, so the sampling interval became a timerfd's zero repeat time) made its loop run about 1,200 times a
+  second and stop the game's main thread each time. The game ran at under 30% of a core for the whole capture
+  (idle menu, a game, and after the leave), against 80% and 150 to 180% normally, and returned to 70% as soon as the watcher
+  stopped. The "freezes" in that capture were caused by the watcher, so it says nothing about the real ones. The unit
+  tests used a toy process without a timerfd and did not catch it; a test now watches a process that holds one, the
+  loop's interval has a floor of 50 ms, and the game is never stopped more than 60 times a second (driven with an
+  interval of zero: 2,501 stops a second before the guard, 40 after). The same file also shows that with no socket
+  holding unread bytes and no unconsumed eventfd, the wake sources in an idle menu are a 30 s timer on one epoll set
+  and nothing else.
 - **Camera lock (a community report on Hyprland).** The default X11 window backend takes raw motion from
   XInput2 and, when none arrives within 100 ms, falls back to pointer deltas that stop at the screen edge
   unless the compositor locks the pointer. That matches "lift the mouse and restart the turn". It could
