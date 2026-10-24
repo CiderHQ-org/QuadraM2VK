@@ -139,7 +139,8 @@ Vulkan-side choices Metal has no counterpart for:
 | `kinds` | Which `DeviceKind`s qualify; empty admits every kind. |
 | `loader` | A Vulkan loader library to open instead of the default ones (the platform's loader by name, then on macOS `$VULKAN_SDK/lib`, `/opt/homebrew/lib` and `/usr/local/lib`). If none opens, `Error::LoaderNotFound` lists each path tried. |
 | `layers`, `layer_settings` | Instance layers, in order, and their settings. |
-| `instance_extensions`, `device_extensions` | Extensions beyond those the runtime enables (a swapchain, for example). |
+| `instance_extensions`, `device_extensions` | Extensions beyond those the runtime enables (a swapchain, for example). A device that lacks a listed device extension, or a feature of one the runtime knows, is refused. |
+| `optional_device_extensions` | Device extensions each device takes where it can and goes without otherwise (swapchain maintenance, memory priority): never a reason to refuse a device. `Device::extension_enabled` states what a device took. |
 | `instance_api_version` | The instance's `apiVersion` (1.2 when unset); a version outside 1.2 to the loader's is refused, never clamped. |
 | `withheld_features`, `withheld_extensions`, `withhold_generated_commands`, `withhold_view_reinterpretation` | Parts of the recommended enables to leave off; the device then compiles for what is enabled. |
 | `messages` | A `MessageSink` for the validation layer's messages and the runtime's notices; without one, notices go to stderr. |

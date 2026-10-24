@@ -34,7 +34,9 @@ use super::keeper::keep_drivers_loaded;
 use super::properties::DeviceKind;
 use super::{device_error, lock, Device, DeviceShared, InstanceShared, Parts};
 use crate::degradation::{Degradation, DegradeNotice};
-use crate::enables::{host_image_copy_names, listed_reported, listed_structures, Enables};
+use crate::enables::{
+    host_image_copy_names, listed_reported, listed_structures, optional_taken, Enables,
+};
 use crate::error::{vulkan, Error, InstanceApiVersion, LoaderNotFound};
 use crate::exit_guard;
 use crate::gpu_time;
@@ -83,6 +85,17 @@ pub struct DeviceOptions {
     /// `instance_extensions`, for example) refuses the options before the instance is made
     /// ([`Error::InstanceExtensionRequired`](crate::Error::InstanceExtensionRequired)).
     pub device_extensions: Vec<CString>,
+    /// Device extensions enabled on each device that can take them, and left out of any that
+    /// cannot: a device that does not list one, whose instance does not enable the instance
+    /// extensions the registry says it requires, or that lacks a feature of one whose structure
+    /// the runtime knows (`VK_KHR_` or `VK_EXT_swapchain_maintenance1`, `VK_KHR_` or
+    /// `VK_EXT_present_mode_fifo_latest_ready`, `VK_EXT_memory_priority`,
+    /// `VK_EXT_pageable_device_local_memory`), goes without it and is not refused, where
+    /// [`device_extensions`](Self::device_extensions) refuses it. For one whose structure the
+    /// runtime knows, the device enables the structure's features with it, and of the names of
+    /// one extension it takes the first listed. [`Device::extension_enabled`] states
+    /// what a device took.
+    pub optional_device_extensions: Vec<CString>,
     /// Features of the recommended enables a created device leaves disabled (the robustness
     /// features, for a run of the in-shader containment encoding, for example). The compile
     /// device is made from what is enabled, so it compiles for that. Withholding a feature another
@@ -633,6 +646,7 @@ fn create_instance(options: &DeviceOptions) -> Result<Arc<InstanceShared>, Error
         messenger,
         relay,
         settings,
+        extensions: extensions.iter().map(|&name| name.to_owned()).collect(),
     }))
 }
 
@@ -1117,10 +1131,32 @@ fn create_on(
     // The runtime's own needs, outside the vocabulary, where listed (`dma_buf.rs`).
     let dma_buf = dma_buf_names(&listed);
     let dma_buf_images = dma_buf_image_names(&listed);
+    // The optional extensions this device can take: listed, with the instance extensions they
+    // require enabled, and with every feature of those whose structure the runtime knows.
+    let candidates = optional_candidates(&options.optional_device_extensions, &listed, instance);
+    let asked: Vec<CString> = options
+        .device_extensions
+        .iter()
+        .chain(&candidates)
+        .cloned()
+        .collect();
+    let structures: Vec<_> = listed_structures(&asked)
+        .into_iter()
+        .filter(|(name, _)| listed.contains(*name))
+        .collect();
+    let reported: Box<dyn Fn(&'static str) -> bool> = if structures.is_empty() {
+        Box::new(|_| false)
+    } else {
+        // SAFETY: `physical` was enumerated from the instance, made at Vulkan 1.2, and lists
+        // each extension `structures` names.
+        Box::new(unsafe { listed_reported(&instance.raw, physical, &structures) })
+    };
+    let taken = optional_taken(&candidates, &*reported);
     let extra: Vec<CString> = options
         .device_extensions
         .iter()
         .cloned()
+        .chain(taken.iter().cloned())
         .chain(calibration.map(|extension| extension.name().to_owned()))
         .chain((creation_feedback && !feedback_asked).then(|| feedback_name.to_owned()))
         .chain(dma_buf.into_iter().flatten().map(CStr::to_owned))
@@ -1130,15 +1166,19 @@ fn create_on(
     // The features of the caller's extensions whose structures the runtime knows, as the device
     // has them: one it lacks refuses the device.
     // An extension the device does not list is not asked about: the create call refuses it.
-    let caller: Vec<_> = listed_structures(&options.device_extensions)
-        .into_iter()
-        .filter(|(name, _)| listed.contains(*name))
-        .collect();
+    let caller: Vec<_> = listed_structures(
+        &options
+            .device_extensions
+            .iter()
+            .chain(&taken)
+            .cloned()
+            .collect::<Vec<_>>(),
+    )
+    .into_iter()
+    .filter(|(name, _)| listed.contains(*name))
+    .collect();
     if !caller.is_empty() {
-        // SAFETY: `physical` was enumerated from the instance, made at Vulkan 1.2, and lists
-        // each extension `caller` names.
-        let reported = unsafe { listed_reported(&instance.raw, physical, &caller) };
-        enables.enable_listed(&caller, reported)?;
+        enables.enable_listed(&caller, &*reported)?;
     }
     // The runtime's own need, outside the vocabulary: Metal's views of another component layout
     // (`view_plan.rs`), which a portability subset allows only with
@@ -1246,6 +1286,7 @@ fn create_on(
         primary.map_or(vk::QueueFlags::empty(), |family| family.queue_flags),
         enables.names(),
     );
+    let extensions: Vec<CString> = enables.names().map(CStr::to_owned).collect();
     let parts = Parts {
         instance: Arc::clone(instance),
         physical,
@@ -1257,6 +1298,7 @@ fn create_on(
         staging: plan.staging,
         compile,
         description: enabled,
+        extensions,
         enabled: set,
         calibration,
         gpu_times_from_host: options.gpu_times_from_host,
@@ -1296,6 +1338,23 @@ fn create_on(
         }
     }
     Ok(device)
+}
+
+/// The names of `optional` (`DeviceOptions::optional_device_extensions`) that a device listing
+/// `listed` on `instance` can enable: listed, and with every instance extension the registry says
+/// they require enabled on the instance.
+fn optional_candidates(
+    optional: &[CString],
+    listed: &BTreeSet<CString>,
+    instance: &InstanceShared,
+) -> Vec<CString> {
+    let enabled: Vec<&CStr> = instance.extensions.iter().map(CString::as_c_str).collect();
+    optional
+        .iter()
+        .filter(|name| listed.contains(*name))
+        .filter(|name| instance_requirements_met(std::slice::from_ref(*name), &enabled).is_ok())
+        .cloned()
+        .collect()
 }
 
 /// The id name of the informational message a device whose driver keeps its internal pipeline
@@ -1357,6 +1416,7 @@ fn same_options(a: &DeviceOptions, b: &DeviceOptions) -> bool {
         layer_settings,
         instance_extensions,
         device_extensions,
+        optional_device_extensions,
         withheld_features,
         withheld_extensions,
         messages: _,
@@ -1376,6 +1436,7 @@ fn same_options(a: &DeviceOptions, b: &DeviceOptions) -> bool {
         && *layer_settings == b.layer_settings
         && *instance_extensions == b.instance_extensions
         && *device_extensions == b.device_extensions
+        && *optional_device_extensions == b.optional_device_extensions
         && *withheld_features == b.withheld_features
         && *withheld_extensions == b.withheld_extensions
         && *loader == b.loader

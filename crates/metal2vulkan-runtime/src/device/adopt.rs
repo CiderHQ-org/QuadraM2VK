@@ -245,6 +245,7 @@ impl Device {
             .flat_map(|&extension| crate::enables::names_of(extension))
             .collect();
         named.extend(raw.device_extensions.iter().map(CString::as_c_str));
+        let extensions: Vec<CString> = named.iter().map(|&name| name.to_owned()).collect();
         let memory_reads = MemoryReads::of(family, named);
         let parts = Parts {
             instance: Arc::new(InstanceShared {
@@ -255,6 +256,7 @@ impl Device {
                 messenger: None,
                 relay: None,
                 settings: [0; 32],
+                extensions: Vec::new(),
             }),
             physical: raw.physical_device,
             raw: device,
@@ -265,6 +267,7 @@ impl Device {
             staging: None,
             compile,
             description: enabled,
+            extensions,
             enabled: raw.enabled,
             creation_feedback: raw
                 .device_extensions

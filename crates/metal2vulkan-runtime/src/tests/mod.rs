@@ -120,6 +120,8 @@ mod nan_signs;
 mod native_block_decode;
 mod noted_apart;
 mod numbered_samplers;
+#[cfg(any(m2v_gpu, m2v_cpu_icd))]
+mod optional_extensions;
 mod options;
 mod own;
 #[cfg(any(m2v_gpu, m2v_cpu_icd))]

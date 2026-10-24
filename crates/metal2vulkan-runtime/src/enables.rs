@@ -392,6 +392,12 @@ pub(super) enum Structure {
     /// `VkPhysicalDevicePresentModeFifoLatestReadyFeaturesKHR`, outside the vocabulary: linked
     /// only by [`Enables::enable_listed`], where the caller lists its extension.
     FifoLatestReady,
+    /// `VkPhysicalDeviceMemoryPriorityFeaturesEXT`, outside the vocabulary: linked only by
+    /// [`Enables::enable_listed`], where the caller lists its extension.
+    MemoryPriority,
+    /// `VkPhysicalDevicePageableDeviceLocalMemoryFeaturesEXT`, outside the vocabulary: linked only
+    /// by [`Enables::enable_listed`], where the caller lists its extension.
+    PageableDeviceLocalMemory,
     /// `VkPhysicalDeviceLinearColorAttachmentFeaturesNV`, outside the vocabulary: linked only by
     /// [`Enables::enable_linear_color_attachment`].
     LinearColorAttachment,
@@ -474,6 +480,8 @@ impl Structure {
             | Structure::GeneratedCommands
             | Structure::SwapchainMaintenance1
             | Structure::FifoLatestReady
+            | Structure::MemoryPriority
+            | Structure::PageableDeviceLocalMemory
             | Structure::LinearColorAttachment
             | Structure::PipelineBinary
             | Structure::InternalCacheControl
@@ -529,6 +537,8 @@ impl Structure {
             Structure::GeneratedCommands
             | Structure::SwapchainMaintenance1
             | Structure::FifoLatestReady
+            | Structure::MemoryPriority
+            | Structure::PageableDeviceLocalMemory
             | Structure::LinearColorAttachment
             | Structure::PipelineBinary
             | Structure::InternalCacheControl
@@ -589,6 +599,8 @@ struct FeatureChain {
     generated_commands: GeneratedCommandsFeatures,
     swapchain_maintenance1: vk::PhysicalDeviceSwapchainMaintenance1FeaturesEXT<'static>,
     fifo_latest_ready: FifoLatestReadyFeatures,
+    memory_priority: vk::PhysicalDeviceMemoryPriorityFeaturesEXT<'static>,
+    pageable_device_local_memory: vk::PhysicalDevicePageableDeviceLocalMemoryFeaturesEXT<'static>,
     linear_color_attachment: vk::PhysicalDeviceLinearColorAttachmentFeaturesNV<'static>,
     pipeline_binary: PipelineBinaryFeatures,
     internal_cache_control: InternalCacheControl,
@@ -966,7 +978,7 @@ struct ListedFeature {
 /// Each name of an extension outside the vocabulary whose features the runtime enables where
 /// the caller lists it, with its feature structure (the `KHR` and `EXT` names of one extension
 /// share one).
-const LISTED: [(&CStr, Structure); 4] = [
+const LISTED: [(&CStr, Structure); 6] = [
     (
         c"VK_KHR_swapchain_maintenance1",
         Structure::SwapchainMaintenance1,
@@ -983,10 +995,15 @@ const LISTED: [(&CStr, Structure); 4] = [
         c"VK_EXT_present_mode_fifo_latest_ready",
         Structure::FifoLatestReady,
     ),
+    (c"VK_EXT_memory_priority", Structure::MemoryPriority),
+    (
+        c"VK_EXT_pageable_device_local_memory",
+        Structure::PageableDeviceLocalMemory,
+    ),
 ];
 
 /// Every feature of [`LISTED`]'s structures.
-const LISTED_FEATURES: [ListedFeature; 2] = [
+const LISTED_FEATURES: [ListedFeature; 4] = [
     ListedFeature {
         structure: Structure::SwapchainMaintenance1,
         name: "swapchainMaintenance1",
@@ -996,6 +1013,20 @@ const LISTED_FEATURES: [ListedFeature; 2] = [
         structure: Structure::FifoLatestReady,
         name: "presentModeFifoLatestReady",
         member: |chain| &mut chain.fifo_latest_ready.present_mode_fifo_latest_ready,
+    },
+    ListedFeature {
+        structure: Structure::MemoryPriority,
+        name: "memoryPriority",
+        member: |chain| &mut chain.memory_priority.memory_priority,
+    },
+    ListedFeature {
+        structure: Structure::PageableDeviceLocalMemory,
+        name: "pageableDeviceLocalMemory",
+        member: |chain| {
+            &mut chain
+                .pageable_device_local_memory
+                .pageable_device_local_memory
+        },
     },
 ];
 
@@ -1012,6 +1043,38 @@ pub(super) fn listed_structures(names: &[CString]) -> Vec<(&'static CStr, Struct
         }
     }
     listed
+}
+
+/// The extensions of `candidates` (optional extensions the device lists, with the instance
+/// extensions they require enabled) it takes, in order: one whose structure the runtime knows
+/// only if `reported` says the device has every feature of it, and only the first name of each
+/// such structure (`VK_KHR_` and `VK_EXT_` names of one extension are one). An extension whose
+/// structure the runtime does not know is taken as listed.
+pub(super) fn optional_taken(
+    candidates: &[CString],
+    reported: &dyn Fn(&'static str) -> bool,
+) -> Vec<CString> {
+    let mut taken: Vec<CString> = Vec::new();
+    let mut structures: Vec<Structure> = Vec::new();
+    for name in candidates {
+        match LISTED.iter().find(|(known, _)| *known == name.as_c_str()) {
+            Some(&(_, structure)) => {
+                if structures.contains(&structure) {
+                    continue;
+                }
+                let complete = LISTED_FEATURES
+                    .iter()
+                    .filter(|feature| feature.structure == structure)
+                    .all(|feature| reported(feature.name));
+                if complete {
+                    structures.push(structure);
+                    taken.push(name.clone());
+                }
+            }
+            None => taken.push(name.clone()),
+        }
+    }
+    taken
 }
 
 /// Which features of `listed`'s structures the device `physical` of `instance` has
@@ -1036,6 +1099,12 @@ pub(super) unsafe fn listed_reported(
         }
         if has(Structure::FifoLatestReady) {
             features = features.push_next(&mut c.fifo_latest_ready);
+        }
+        if has(Structure::MemoryPriority) {
+            features = features.push_next(&mut c.memory_priority);
+        }
+        if has(Structure::PageableDeviceLocalMemory) {
+            features = features.push_next(&mut c.pageable_device_local_memory);
         }
         // SAFETY: the caller's contract; the chain lives for the call, of structures the listed
         // extensions define.
@@ -1097,6 +1166,8 @@ macro_rules! link_extensions {
             GeneratedCommands => generated_commands,
             SwapchainMaintenance1 => swapchain_maintenance1,
             FifoLatestReady => fifo_latest_ready,
+            MemoryPriority => memory_priority,
+            PageableDeviceLocalMemory => pageable_device_local_memory,
             LinearColorAttachment => linear_color_attachment,
             PipelineBinary => pipeline_binary,
             InternalCacheControl => internal_cache_control,

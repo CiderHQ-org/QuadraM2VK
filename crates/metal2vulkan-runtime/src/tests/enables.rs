@@ -535,3 +535,48 @@ fn a_listed_extension_s_features_are_enabled_or_the_device_refused() {
     // Another extension takes no structure.
     assert!(listed_structures(&names(&[c"VK_KHR_swapchain"])).is_empty());
 }
+
+/// An optional extension whose structure the runtime knows is taken only with every feature the
+/// device reports, once for both of its names; one the runtime knows no structure of is taken as
+/// listed; a device without the feature goes without it, and is not refused.
+#[test]
+fn an_optional_extension_is_taken_only_with_its_features() {
+    use crate::enables::optional_taken;
+    let names =
+        |names: &[&CStr]| -> Vec<CString> { names.iter().map(|&name| name.to_owned()).collect() };
+    let candidates = names(&[
+        c"VK_KHR_swapchain_maintenance1",
+        c"VK_EXT_swapchain_maintenance1",
+        c"VK_EXT_memory_priority",
+        c"VK_EXT_pageable_device_local_memory",
+        c"VK_EXT_something_unknown",
+    ]);
+    let everything = |_: &'static str| true;
+    assert_eq!(
+        optional_taken(&candidates, &everything),
+        names(&[
+            c"VK_KHR_swapchain_maintenance1",
+            c"VK_EXT_memory_priority",
+            c"VK_EXT_pageable_device_local_memory",
+            c"VK_EXT_something_unknown",
+        ]),
+        "one name per structure, the first listed"
+    );
+    let no_priority = |feature: &'static str| feature != "memoryPriority";
+    assert_eq!(
+        optional_taken(&candidates, &no_priority),
+        names(&[
+            c"VK_KHR_swapchain_maintenance1",
+            c"VK_EXT_pageable_device_local_memory",
+            c"VK_EXT_something_unknown",
+        ]),
+        "a device lacking memoryPriority goes without the extension"
+    );
+    let nothing = |_: &'static str| false;
+    assert_eq!(
+        optional_taken(&candidates, &nothing),
+        names(&[c"VK_EXT_something_unknown"]),
+        "only the extension with no known structure remains"
+    );
+    assert!(optional_taken(&[], &everything).is_empty());
+}
