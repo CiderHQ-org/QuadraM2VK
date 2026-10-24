@@ -26,6 +26,8 @@ mod blit;
 #[cfg(any(m2v_gpu, m2v_cpu_icd))]
 mod blit_holds;
 mod blit_plan;
+#[cfg(any(m2v_gpu, m2v_cpu_icd))]
+mod buffer_creation_time;
 mod buffer_texture;
 mod capabilities;
 mod color_reformat;
@@ -140,6 +142,8 @@ mod queue;
 mod range;
 mod rate_map;
 mod reader_sizes;
+#[cfg(any(m2v_gpu, m2v_cpu_icd))]
+mod release_storm;
 mod render;
 mod replays;
 mod resource;
@@ -166,6 +170,8 @@ mod surface_depth;
 mod surface_two_planes;
 #[cfg(any(m2v_gpu, m2v_cpu_icd))]
 mod teardown_threads;
+#[cfg(any(m2v_gpu, m2v_cpu_icd))]
+mod terrain_array;
 mod texture;
 mod texture_descriptor;
 #[cfg(any(m2v_gpu, m2v_cpu_icd))]
