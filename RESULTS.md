@@ -127,6 +127,32 @@ leaving a game. What was run, what it showed, and what it did not:
   `RBX Worker A` and `B`), with nothing visible before it. The wake came from outside what was recorded;
   an input or compositor event is untested. Open question for the next freeze: does a mouse movement or key
   press end it at once?
+- **Moving the mouse does not end a long freeze** (user test during a 16 s lull), and the main thread's CPU stays
+  flat through it. A fifth capture was made with the verbose darlingserver log on (a 19 s freeze, 25.0 to
+  44.0 s): the log matches every call to its reply, and in the whole freeze no game thread other than the
+  main thread makes a single call to the server. The first one is `RBX IoEvLoop 0` signalling a semaphore at
+  44.223 s, after which Workers A, E and B wake in the same millisecond. The main thread is not idle: it runs
+  its run loop about 330 times a second (1,347 `mk_timer_arm` calls a second, four per iteration, each
+  `mach_msg` receive timing out at once), the same rate before and after the freeze, so that is baseline.
+- **The freeze ends at the I/O loop's second 10 s timeout.** In the three freezes with decoded waits, the
+  IoEvLoop thread's `epoll_wait` timeout is 50 ms while a game runs and 10,000 ms from about 24.2 s (this
+  capture), 343 s and 598 s; the freezes end at 44.2 s, 363.3 s and 618.2 s, i.e. at that thread's second
+  10 s wake after the leave (the first, 34.2 s, 353 s and 608 s, ends nothing). Measured from the leave the
+  four long freezes last 15.3, 16.2, 16.8 and 20.0 s, which fits a timeout of about 15 s that is noticed at
+  the loop's next wake. Nothing else lines up: no expiring timed wait, not the 15 s storage-clean tick, not a
+  log line, not darlingserver load (36% of a core in healthy menu time, 17.5% in a freeze).
+- **Why that points at a lost kqueue event.** The shim's `net_trace.c` says Roblox's network threads wait on
+  edge-triggered (`EV_CLEAR`) kqueue events, Darling emulates kqueue on epoll, and a lost "data arrived" edge
+  leaves the reader asleep; its workaround (50 ms slices and a direct poll) covers UDP sockets only, which is why
+  the loop's timeout is 50 ms in a game and 10 s once those sockets are closed. A fixture on stock Darling in a
+  throwaway prefix showed ordinary wake-ups working (a pipe write, `EVFILT_USER`, a timer and a read
+  registration added from another thread: 200, 200, 500 and 301 ms), and a UDP stress run (416 datagrams in 6 s,
+  with edge-triggered reads) lost no edge. A TCP stress fixture could not be run: its process dies at `socket()`
+  in a throwaway prefix, cause not found. So the model (a non-UDP socket loses an edge; the game waits for it
+  until its own timeout of about 15 s, which the loop notices at its next 10 s wake) is consistent with every
+  capture but not proven. The watcher now reads each socket's receive queue every second; a lost edge shows as
+  unread bytes in a socket in the middle of a freeze. If it does, the fix is to extend the shim's missed-event
+  check from UDP to the other socket types.
 - **Camera lock (a community report on Hyprland).** The default X11 window backend takes raw motion from
   XInput2 and, when none arrives within 100 ms, falls back to pointer deltas that stop at the screen edge
   unless the compositor locks the pointer. That matches "lift the mouse and restart the turn". It could
