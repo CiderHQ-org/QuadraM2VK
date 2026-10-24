@@ -120,10 +120,10 @@ additionally requests GPU spans while diagnostics is enabled. Encoder lifetime i
 time spent by the caller; these observations are not a frame-time or FPS measurement.
 `currentAllocatedSize` now uses per-device live allocator bytes; reserved/imported bytes
 are separate. Vulkan driver allocations and wrapped external images are excluded.
-Working-set recommendations use device-local heap budgets where available: a discrete card's
-largest device-local heap counts once (without Resizable BAR the driver lists a 256 MiB window
-onto VRAM as a heap beside it), and a unified-memory GPU's heaps all count (an APU's small VRAM
-carve-out beside the system memory it also maps). `MACOBLOX_VRAM_BYTES` can only lower the answer.
+Working-set recommendations use device-local heap budgets where available. Quadra 0.35 replaced this
+code with its own `memory.rs` (a one-second poll of the budget, the largest device-local heap for a
+discrete card, a low cap for APUs); this tree's earlier version of that change was reverted in its favor.
+`MACOBLOX_VRAM_BYTES` can only lower the answer.
 
 Presentation defaults to mailbox when the surface supports it, keeping vblank synchronization
 while replacing obsolete queued frames. It falls back to FIFO when mailbox is unavailable.
