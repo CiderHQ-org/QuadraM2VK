@@ -90,14 +90,29 @@ leaving a game. What was run, what it showed, and what it did not:
   Metal calls), so a gap in it means only that the game made no Metal calls. On the runtime side, dropping
   3,000 textures and 20,000 buffers took 15 ms with a concurrent statistics reader waiting at most
   0.4 ms, and creating and filling the 36-layer 512 x 512 terrain array with 10 mips took 9 to 17 ms, so
-  neither release nor that creation explains seconds. The cause is not found.
+  neither release nor that creation explains seconds. The cause is below.
 - **Finding it.** `quadrahq --watch-stalls` records each thread's CPU use ten times a second, reads the
-  frame chains of the busy ones and the stacks of blocked ones, and lines them up with the launch log's
-  join and leave markers. It was checked on a Mach-O fixture in a disposable Darling prefix (the report
-  named the spinning function, its callers to the thread start and the thread waiting on a pipe; stacks
-  need `MACOBLOX_ALLOW_DEBUGGER=1`, which this computer's settings already have) and costs 2% of one core
-  with 121 threads. It is running on this computer and waiting for the next game; no capture of a real
-  leave exists yet.
+  frame chains of the busy ones and of the main thread while it waits, decodes what blocked threads wait
+  on, and lines it all up with the launch log's join and leave markers. It was checked on a Mach-O
+  fixture in a disposable Darling prefix (the report named the spinning function, its callers to the
+  thread start, the thread waiting on a pipe, and the sleeping main thread; stacks need
+  `MACOBLOX_ALLOW_DEBUGGER=1`, which this computer's settings have) and costs 2% of one core with 121
+  threads. The fixture runner's disposable prefix sometimes fails to start on this computer (the Darling
+  client exits with status 1 before running anything; runs that start pass; cause not found).
+- **The first real capture of a leave** (Zink renderer with VR on, not M2VK; join at 6.5 s, leave at
+  23.2 s into the capture). From 23.5 s to 39.0 s, 15.5 s, the game used under 15% of one core and no
+  thread was busy: the process total was 9 to 13% (the main thread 3%, a second thread named Main 4.5%, the
+  HTTP thread 2%), against 80 to 90% before and after. The game's main thread sat in the same place
+  throughout, waiting on darlingserver in `recvmsg` inside Darling's run-loop timer code (about 30 ms of
+  CPU a second, the 50 Hz web-bridge timer), and the worker pool and the dispatch workers were parked in
+  futex waits. The first thread to use CPU again was `RBX Worker C` at 39.37 s, followed by workers A and
+  B and the main thread; the HTTP thread's telemetry retries also fell silent for 14.8 s and resumed
+  after. The roblox log has nothing from any thread in the interval, and the shim's watchdog logged no
+  long mutex wait (it does not cover ulock or condition waits). So the 12 to 20 s frameless
+  intervals recorded in Quadra's notes are a stretch in which nothing runs, not slow work. What the
+  threads waited for, and what ended the wait, was not recorded: the wait records had no arguments and
+  darlingserver was not watched. The tool now records both, and a second capture is needed. M2VK is not
+  involved: this session did not use it.
 - **Camera lock (a community report on Hyprland).** The default X11 window backend takes raw motion from
   XInput2 and, when none arrives within 100 ms, falls back to pointer deltas that stop at the screen edge
   unless the compositor locks the pointer. That matches "lift the mouse and restart the turn". It could
