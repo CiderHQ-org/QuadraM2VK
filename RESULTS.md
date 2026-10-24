@@ -113,6 +113,20 @@ leaving a game. What was run, what it showed, and what it did not:
   threads waited for, and what ended the wait, was not recorded: the wait records had no arguments and
   darlingserver was not watched. The tool now records both, and a second capture is needed. M2VK is not
   involved: this session did not use it.
+- **Two more leaves with the extended tool** (same session as above: Zink, VR on, Wayland backend). The first
+  lasted 3.0 s and ended exactly when the network teardown finished (the second `Client:Disconnect` to
+  `NetworkClient:Remove` took 3.09 s); the second lasted 14.5 s (348.5 s to 363.0 s) and its teardown took
+  0.06 s, so the two have different causes. In the 14.5 s lull nothing ran (the game used 7 to 13% of one
+  core), the pool threads were parked, and the main thread sat in the AppKit event loop: `mach_msg` in
+  `CFRunLoopServiceMachPort` under `-[NSRunLoop runMode:beforeDate:]`, called from the shim's
+  `hooked_display_next_event` (`-[MacOBloxWaylandDisplay nextEventMatchingMask:...]`), 113 of 127 samples. It
+  was not a timeout (none of the decoded timed waits expired at the end), not darlingserver (36% of a core in
+  healthy menu time, 17.5% in the lull), not a log event (a settings fetch finished in one lull and in none of the others)
+  and not stuck waiters (the 13 threads in server waits are idle pool threads that accumulate with each
+  game: 7 before the second join, 13 after). Every busy thread woke within the same 0.1 s (main thread,
+  `RBX Worker A` and `B`), with nothing visible before it. The wake came from outside what was recorded;
+  an input or compositor event is untested. Open question for the next freeze: does a mouse movement or key
+  press end it at once?
 - **Camera lock (a community report on Hyprland).** The default X11 window backend takes raw motion from
   XInput2 and, when none arrives within 100 ms, falls back to pointer deltas that stop at the screen edge
   unless the compositor locks the pointer. That matches "lift the mouse and restart the turn". It could
