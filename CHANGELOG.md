@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Add `quadrahq --watch-stalls`, which records the game's per-thread CPU use,
+  stacks of busy threads and the places blocked threads wait while a hang
+  happens, and reports them against the launch log's join and leave markers.
 - Add verified RakNet compatibility for Roblox **0.744.0.7441080**
   (`version-546c6da637854de3`). Inspect the relocated transport selection,
   fallback and shared/legacy dummy-connection paths, and recognize the new
