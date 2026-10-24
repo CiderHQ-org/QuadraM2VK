@@ -20,10 +20,10 @@ item says what was run; none is a gameplay frame-time measurement.
   first made here was reverted in its favor; everything else was replayed onto 0.35.p2 (branch
   `quadram2vk-followup`, the installed one) with two real conflicts, both in the warm-state limit.
 - **Installed.** On this computer's Quadra 0.35.p2 checkout (`~/.local/share/QuadraHQ`) as local branch
-  `quadram2vk-followup` (11 commits over `main` at `3c4f3cb`), with the host library and framework
+  `quadram2vk-followup` (commits over `main` at `3c4f3cb`), with the host library and framework
   built in place by the launcher's own routine against fork `f44f1b2`. Its probe returns the RTX 3060 Ti with
   a passing test copy, and Quadra 0.35's C ABI host test (including its budget checks) passes on the GPU
-  against the installed library. The renderer setting was left as it was (Vulkan/Zink). Return with `git checkout main`; the
+  against the installed library. The renderer setting was later switched to Quadra M2VK at the user's request. Return with `git checkout main`; the
   launcher then rebuilds Metal from `main`, or restore `build/metal` from the backup under
   `artifacts/install-backups-followup/`.
 - **Memory pressure.** On the 8 GiB card, 256 MiB `Private` buffers were made until the device-local
@@ -64,6 +64,46 @@ item says what was run; none is a gameplay frame-time measurement.
   tests 261 with one failure (`session_housekeeping_test` trace file) that also fails on the previous
   commit here because this computer's runtime is CiderDarling; two settings UI regressions under Xvfb.
   Not run: the benchmark comparison, gameplay, any GPU but this one, LLVM 15 to 17.
+
+## 2026-10-24: stalls at start, join and leave
+
+Same computer and driver. The user reported a stall at start, a spike on joining and a bad lag spike on
+leaving a game. What was run, what it showed, and what it did not:
+
+- **Start.** A session logged `nextDrawable timed out: 3 images, 0 held by the game, 0 queued for the
+  presenter, swapchain 1500 ms old`: every image was with the compositor, nothing of ours could free one,
+  and the game's thread (which pumps Wayland events) sat in the one-second acquire wait. The wait is now
+  100 ms when no image is held or queued and one second otherwise, and the log says how long it waited.
+  The native Wayland test passed three times with no timeout (longest acquire 4.5 ms). That test is not
+  gameplay: whether the start stall is gone is not known until a real start is logged.
+- **Join.** Host-cached Vulkan memory costs real RAM when allocated (2 GiB took 2 GiB of RAM, about 9 ms per
+  64 MiB allocated and 4 ms freed; device-local memory about 1 ms). A runtime `Shared` buffer costs about
+  200 ms per GiB, a quarter of it the clearing memset. The recorded join froze about 2.5 s, of which
+  buffer creation took 1.45 s over 1,857 calls with about 2.5 GiB host-only live (588 MiB device-local),
+  followed by a 66-pipeline compile burst. About 90% of live memory is device-local in normal play, so this
+  is the game's own large shared buffers, not a general cost. Nothing was capped. The bridge now logs each
+  buffer of 16 MiB or more, or one that took 50 ms or more, with its size and options, to name the
+  2.5 GiB in the next log.
+- **Leave.** Not specific to M2VK: Zink sessions show the same multi-second silence of the game's main
+  thread after leaving (6 to 10 s), and Quadra's own notes record 12 to 20 s frameless intervals with the
+  event loop and timers still running. The performance trace has no writer thread (rows are written by
+  Metal calls), so a gap in it means only that the game made no Metal calls. On the runtime side, dropping
+  3,000 textures and 20,000 buffers took 15 ms with a concurrent statistics reader waiting at most
+  0.4 ms, and creating and filling the 36-layer 512 x 512 terrain array with 10 mips took 9 to 17 ms, so
+  neither release nor that creation explains seconds. The cause is not found.
+- **Finding it.** `quadrahq --watch-stalls` records each thread's CPU use ten times a second, reads the
+  frame chains of the busy ones and the stacks of blocked ones, and lines them up with the launch log's
+  join and leave markers. It was checked on a Mach-O fixture in a disposable Darling prefix (the report
+  named the spinning function, its callers to the thread start and the thread waiting on a pipe; stacks
+  need `MACOBLOX_ALLOW_DEBUGGER=1`, which this computer's settings already have) and costs 2% of one core
+  with 121 threads. It is running on this computer and waiting for the next game; no capture of a real
+  leave exists yet.
+- **Camera lock (a community report on Hyprland).** The default X11 window backend takes raw motion from
+  XInput2 and, when none arrives within 100 ms, falls back to pointer deltas that stop at the screen edge
+  unless the compositor locks the pointer. That matches "lift the mouse and restart the turn". It could
+  not be reproduced here (niri, and this computer's sessions use the Wayland backend, whose SDL
+  relative mode locks the pointer). The hardware report now records session, desktop, Xwayland, window
+  backend and raw-mouse setting, and the launch log has distinct `[Quadra Input]` lines.
 
 ## Revisions and outputs
 
