@@ -189,6 +189,11 @@ leaving a game. What was run, what it showed, and what it did not:
   session, and showed no thumbnails on any page; that state is the result of the testing, not a finding about normal play.
   Not tested: a real polling change in the shim's `traced_kevent` for kqueues without UDP watches (it must not use
   extra eventfd writes), and what happens at +8.5 s.
+- **Baseline on a freshly started game (3 cycles, same place, hands off).** After each leave the game was back at full
+  speed after 18, 18 and 18 s (the capture's lulls: 11.5 to 17.5 s long), with the page loading its thumbnails afterwards. In
+  the middle of each freeze no eventfd, socket or pipe held an unconsumed byte except one transient pipe, and the only
+  timer armed was the 30 s tick, as in the earlier captures. The first cycle's leave stopped half way (the Enter that
+  confirms the Leave dialog arrived before a freshly started game accepted input); it needs a wait of about 2 s after L.
 - **Camera lock (a community report on Hyprland).** The default X11 window backend takes raw motion from
   XInput2 and, when none arrives within 100 ms, falls back to pointer deltas that stop at the screen edge
   unless the compositor locks the pointer. That matches "lift the mouse and restart the turn". It could
