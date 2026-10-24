@@ -14,6 +14,18 @@ The older benchmark and full RTX regression results below describe `c50214a` / `
 Measured on this computer's RTX 3060 Ti (NVIDIA 615.78.08, Linux 7.3.0, Wayland) unless noted. Each
 item says what was run; none is a gameplay frame-time measurement.
 
+- **Base.** Quadra 0.35.p2, the version installed on this computer, is ahead of this workspace's 0.34-based
+  bridge tree and has its own graphics memory budget (`memory.rs`: a one-second poll, the largest
+  device-local heap for a discrete card, a low cap for APUs after a real report). The working-set change
+  first made here was reverted in its favor; everything else was replayed onto 0.35.p2 (branch
+  `quadram2vk-followup`, the installed one) with two real conflicts, both in the warm-state limit.
+- **Installed.** On this computer's Quadra 0.35.p2 checkout (`~/.local/share/QuadraHQ`) as local branch
+  `quadram2vk-followup` (11 commits over `main` at `3c4f3cb`), with the host library and framework
+  built in place by the launcher's own routine against fork `f44f1b2`. Its probe returns the RTX 3060 Ti with
+  a passing test copy, and Quadra 0.35's C ABI host test (including its budget checks) passes on the GPU
+  against the installed library. The renderer setting was left as it was (Vulkan/Zink). Return with `git checkout main`; the
+  launcher then rebuilds Metal from `main`, or restore `build/metal` from the backup under
+  `artifacts/install-backups-followup/`.
 - **Memory pressure.** On the 8 GiB card, 256 MiB `Private` buffers were made until the device-local
   heap plus 1 GiB. With the runtime's memory priority and pageable device-local memory (now default):
   9,216 MiB made, no refusal, 0.31 s. With them withheld: the allocation past 7,168 MiB failed with the

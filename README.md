@@ -45,8 +45,8 @@ The current agent-run RTX checks used the now-accessible GPU and desktop. The
   you change it. See the [bridge guide](integration/quadra/prototype/metal-vulkan/README.md#tuning-memory-pressure-and-hardware-reports).
 - **Memory.** Where a driver has `VK_EXT_memory_priority` and `VK_EXT_pageable_device_local_memory`,
   the runtime enables them and gives its blocks priorities. On the RTX 3060 Ti it made 9 GiB of device
-  buffers on an 8 GiB card, where without them it failed at 7 GiB. The graphics memory budget no longer
-  counts a BAR window twice or under-reports an APU.
+  buffers on an 8 GiB card, where without them it failed at 7 GiB. The graphics memory budget itself is
+  Quadra 0.35's own (`memory.rs`); an earlier version of that change here was dropped in its favor.
 - **Before launch.** The probe now also copies data through the GPU and reads it back; if that or opening a
   device fails, the launch plays with OpenGL once and says why, and a missing driver names what to install.
 - **Reports.** The launch log has a `[Quadra Metal] gpu:` line (driver, whether the runtime measured that
