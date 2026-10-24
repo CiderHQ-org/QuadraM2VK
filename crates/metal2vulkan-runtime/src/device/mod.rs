@@ -1370,6 +1370,14 @@ impl Device {
             properties.description.driver_id,
         );
         memory.log_to(MemoryLog::new(instance.sink()));
+        // An adopted device enabled no feature the runtime can tell: only its own blocks carry
+        // priorities, on a device that took the extension (`create.rs`).
+        memory.prioritize(
+            owned
+                && extensions
+                    .iter()
+                    .any(|name| name.as_c_str() == c"VK_EXT_memory_priority"),
+        );
         // SAFETY: as above.
         let physical_properties = unsafe { instance.raw.get_physical_device_properties(physical) };
         let limits = physical_properties.limits;

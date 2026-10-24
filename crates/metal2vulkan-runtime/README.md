@@ -142,6 +142,7 @@ Vulkan-side choices Metal has no counterpart for:
 | `instance_extensions`, `device_extensions` | Extensions beyond those the runtime enables (a swapchain, for example). A device that lacks a listed device extension, or a feature of one the runtime knows, is refused. |
 | `optional_device_extensions` | Device extensions each device takes where it can and goes without otherwise (swapchain maintenance, memory priority): never a reason to refuse a device. `Device::extension_enabled` states what a device took. |
 | `instance_api_version` | The instance's `apiVersion` (1.2 when unset); a version outside 1.2 to the loader's is refused, never clamped. |
+| `withhold_memory_priority` | Leave `VK_EXT_memory_priority` and `VK_EXT_pageable_device_local_memory` off a device that has them. By default the runtime enables both and gives its memory blocks priorities (render targets and buffers above pooled textures), so a driver short of device memory demotes textures first. |
 | `withheld_features`, `withheld_extensions`, `withhold_generated_commands`, `withhold_view_reinterpretation` | Parts of the recommended enables to leave off; the device then compiles for what is enabled. |
 | `messages` | A `MessageSink` for the validation layer's messages and the runtime's notices; without one, notices go to stderr. |
 | `shader_cache` | Where translated shaders are kept, and how much. |

@@ -425,3 +425,19 @@ fn short_buffers_are_placed_without_gaps() {
         end = offset + requirements.size;
     }
 }
+
+/// A block's priority orders what a driver short of device memory demotes: a pooled block of
+/// textures first, then per-frame buffers, then a render target's block of its own; all within
+/// Vulkan's 0 to 1.
+#[test]
+fn block_priorities_demote_pooled_textures_first() {
+    use crate::memory::{priority, Holds};
+    let textures = priority(Holds::Images, false);
+    let buffers = priority(Holds::Buffers, false);
+    let targets = priority(Holds::Images, true);
+    assert!(textures < buffers && buffers < targets);
+    assert_eq!(priority(Holds::Buffers, true), buffers);
+    for value in [textures, buffers, targets] {
+        assert!((0.0..=1.0).contains(&value));
+    }
+}

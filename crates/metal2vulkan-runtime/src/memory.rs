@@ -824,6 +824,9 @@ pub(super) struct Memory {
     /// ([`binds_wait`]), so an image bound while such work may be queued takes a block of its own
     /// ([`allocate_image_while_queued`]).
     binds_wait: bool,
+    /// Blocks are allocated with a `VkMemoryPriorityAllocateInfoEXT` ([`priority`]): the device
+    /// enabled `VK_EXT_memory_priority` and its `memoryPriority` feature.
+    prioritized: bool,
 }
 
 impl Memory {
@@ -858,7 +861,15 @@ impl Memory {
             parked_count: 0,
             log: None,
             binds_wait: binds_wait(driver),
+            prioritized: false,
         }
+    }
+
+    /// Give the blocks made from now on a priority ([`priority`]), where the device enabled
+    /// `VK_EXT_memory_priority` and its feature: a driver short of device memory demotes the
+    /// lowest first.
+    pub(super) fn prioritize(&mut self, enabled: bool) {
+        self.prioritized = enabled;
     }
 
     /// Log each `VkDeviceMemory` allocated, imported or freed from now on to `log`
@@ -1081,6 +1092,7 @@ impl Memory {
             host_visible,
             device_address: self.device_address,
             families: self.families.clone(),
+            prioritized: self.prioritized,
         }
     }
 
@@ -1505,6 +1517,22 @@ struct BlockMaker {
     device_address: bool,
     /// As [`Memory`]'s.
     families: Vec<u32>,
+    /// As [`Memory`]'s.
+    prioritized: bool,
+}
+
+/// The priority of a block that holds `holds`, in a block of its own or pooled
+/// (`VkMemoryPriorityAllocateInfoEXT`, 0 to 1, the default 0.5): what a driver short of device
+/// memory demotes last has the highest. Buffers are the per-frame constants, vertices and
+/// staging every frame reads, so they stay; a block of its own for an image is a render target
+/// or an atlas, large and read every frame; a pooled block of images is textures, most of
+/// which a frame does not touch, and are the first to go.
+pub(super) fn priority(holds: Holds, dedicated: bool) -> f32 {
+    match (holds, dedicated) {
+        (Holds::Images, true) => 0.9,
+        (Holds::Buffers, _) => 0.75,
+        (Holds::Images, false) => 0.5,
+    }
 }
 
 impl BlockMaker {
@@ -1517,6 +1545,8 @@ impl BlockMaker {
         type_index: u32,
         size: u64,
         addressed: Option<&Counters>,
+        holds: Holds,
+        dedicated: bool,
     ) -> Result<Block, Error> {
         let addresses = if addressed.is_some() && self.device_address {
             Some(address_buffer(device, size, Sharing::new(&self.families))?)
@@ -1536,6 +1566,11 @@ impl BlockMaker {
             .memory_type_index(type_index);
         if self.device_address {
             info = info.push_next(&mut flags);
+        }
+        let mut priority =
+            vk::MemoryPriorityAllocateInfoEXT::default().priority(priority(holds, dedicated));
+        if self.prioritized {
+            info = info.push_next(&mut priority);
         }
         // SAFETY: `info` and its chain live for the call; the type index is the device's.
         let memory = match unsafe { device.allocate_memory(&info, None) } {
@@ -1782,9 +1817,9 @@ fn place(
             }
         }
         // The type's kept empty blocks go before a block of it fails to be made.
-        let made = match maker.make(device, type_index, block_size, addressed) {
+        let made = match maker.make(device, type_index, block_size, addressed, holds, dedicated) {
             Err(Error::OutOfMemory(_)) if lock(memory).release_kept(device, type_index) > 0 => {
-                maker.make(device, type_index, block_size, addressed)
+                maker.make(device, type_index, block_size, addressed, holds, dedicated)
             }
             made => made,
         };
@@ -1824,7 +1859,8 @@ pub(super) fn keep_room(memory: &Mutex<Memory>, device: &ash::Device, counts: &C
     };
     for pool in lacking {
         let addressed = (pool.0 == Holds::Buffers).then_some(counts);
-        let Ok(block) = maker.make(device, pool.1, maker.block_bytes, addressed) else {
+        let Ok(block) = maker.make(device, pool.1, maker.block_bytes, addressed, pool.0, false)
+        else {
             continue;
         };
         let mut memory = lock(memory);

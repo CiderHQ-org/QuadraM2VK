@@ -122,6 +122,12 @@ pub struct DeviceOptions {
     /// Where the devices keep translated shaders: by default, the platform's per-user cache
     /// directory.
     pub shader_cache: ShaderCacheOptions,
+    /// Leave `VK_EXT_memory_priority` and `VK_EXT_pageable_device_local_memory` disabled on a
+    /// device that has them. The runtime enables both otherwise: its memory blocks then carry
+    /// priorities (buffers and render targets above textures), and a driver short of device
+    /// memory demotes the lowest first, to host memory where the driver pages, rather than
+    /// failing an allocation.
+    pub withhold_memory_priority: bool,
     /// Leave `VK_EXT_device_generated_commands` disabled on a device that has it. The runtime
     /// enables it otherwise (with `VK_KHR_maintenance5`, which it requires), and runs an
     /// execution of commands a kernel writes on the GPU alone where every record it may hold is
@@ -1133,7 +1139,21 @@ fn create_on(
     let dma_buf_images = dma_buf_image_names(&listed);
     // The optional extensions this device can take: listed, with the instance extensions they
     // require enabled, and with every feature of those whose structure the runtime knows.
-    let candidates = optional_candidates(&options.optional_device_extensions, &listed, instance);
+    // The runtime's own, beside the caller's: blocks carry priorities where the device takes both.
+    let own: &[CString] = match options.withhold_memory_priority {
+        true => &[],
+        false => &[
+            CString::from(c"VK_EXT_memory_priority"),
+            CString::from(c"VK_EXT_pageable_device_local_memory"),
+        ],
+    };
+    let optional: Vec<CString> = options
+        .optional_device_extensions
+        .iter()
+        .chain(own)
+        .cloned()
+        .collect();
+    let candidates = optional_candidates(&optional, &listed, instance);
     let asked: Vec<CString> = options
         .device_extensions
         .iter()
@@ -1424,6 +1444,7 @@ fn same_options(a: &DeviceOptions, b: &DeviceOptions) -> bool {
         kinds,
         shader_cache,
         withhold_generated_commands,
+        withhold_memory_priority,
         withhold_view_reinterpretation,
         instance_api_version,
         gpu_times_from_host,
@@ -1443,6 +1464,7 @@ fn same_options(a: &DeviceOptions, b: &DeviceOptions) -> bool {
         && *kinds == b.kinds
         && *shader_cache == b.shader_cache
         && *withhold_generated_commands == b.withhold_generated_commands
+        && *withhold_memory_priority == b.withhold_memory_priority
         && *withhold_view_reinterpretation == b.withhold_view_reinterpretation
         && *instance_api_version == b.instance_api_version
         && *gpu_times_from_host == b.gpu_times_from_host
