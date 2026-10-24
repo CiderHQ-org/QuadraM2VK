@@ -21,6 +21,12 @@ from LunarG SDK 1.4.363.0: its stock 1.3.275 validator predates extensions expos
 updated Mesa driver. Other jobs use the distro's validation layer. Validation errors fail
 the checks on every distribution; none are filtered out.
 
+The legacy shader upgrader loads whichever libLLVM (15 or newer) a computer has, so each job
+also runs its authored tests against every libLLVM installed in the container (`scripts/test-llvm-matrix.sh`):
+the distribution's own, which is what Mesa links there, and the LLVM 23 packages the APT jobs add.
+A locally measured pass on LLVM 18, 19 and 23 loaded all 2,275 libraries of an installed client's shader pack
+with no failure; that run reads a private pack and is not part of CI.
+
 Jobs have a 45-minute timeout, keep running when another distro fails, use two build jobs,
 and upload the host binary plus numeric/authored test logs for 14 days. Client binaries,
 shaders, caches, account data and the Darling SDK are not CI inputs. Live compositor tests,

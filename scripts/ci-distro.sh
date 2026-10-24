@@ -122,6 +122,8 @@ PY
   cargo "+$rust_toolchain" fetch --locked --manifest-path integration/quadra/prototype/metal-vulkan/host/Cargo.toml
   bash scripts/build.sh host > "$out/build.log" 2>&1
   bash scripts/test-bridge.sh --offscreen > "$out/bridge.log" 2>&1
+  # The upgrader loads whichever libLLVM 15 or newer a user has, so every installed one runs it.
+  bash scripts/test-llvm-matrix.sh > "$out/llvm-matrix.log" 2>&1
   python3 -m unittest discover -s scripts/tests -v > "$out/trace-analysis-tests.log" 2>&1
   bash scripts/test-presentation.sh --compile-only > "$out/presentation-compile.log" 2>&1
   python3 - "$out" <<'PY'
@@ -133,6 +135,7 @@ summary={'status':'PASS','distro':os.environ.get('QM_CI_DISTRO','local'),
          'scope':'Linux host build, authored offscreen lavapipe correctness, launcher/preload controls and Wayland test compilation',
          'not_executed':['physical GPU tests','native presentation','Darling guest framework','actual Roblox gameplay'],
          'host_sha256':hashlib.file_digest(library.open('rb'),'sha256').hexdigest(),
+         'llvm':json.loads((out/'llvm-matrix.json').read_text()),
          'preload':json.loads((out/'preload/results.json').read_text())}
 (out/'results.json').write_text(json.dumps(summary,indent=2)+'\n')
 PY
