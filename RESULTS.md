@@ -9,6 +9,50 @@ as companion `4430bd2`. The user reports persistent home/minimum-graphics slowdo
 with `57af2fb`. Gameplay verification of the additional launcher stages remains open.
 The older benchmark and full RTX regression results below describe `c50214a` / `5cbc9fb`.
 
+## 2026-10-23 follow-up: hardware compatibility
+
+Measured on this computer's RTX 3060 Ti (NVIDIA 615.78.08, Linux 7.3.0, Wayland) unless noted. Each
+item says what was run; none is a gameplay frame-time measurement.
+
+- **Memory pressure.** On the 8 GiB card, 256 MiB `Private` buffers were made until the device-local
+  heap plus 1 GiB. With the runtime's memory priority and pageable device-local memory (now default):
+  9,216 MiB made, no refusal, 0.31 s. With them withheld: the allocation past 7,168 MiB failed with the
+  typed out-of-device-memory error. A bare Vulkan program gave the same two numbers. The runtime test is
+  `memory_pressure` (ignored; it fills the device on purpose).
+- **Recorded sessions.** Four real sessions on this computer (30 s to 1,177 s; 2,715 to 107,195
+  drawable acquisitions) had `cancelled` 0 in all four, so releasing unused drawables through swapchain
+  maintenance would fix a case that did not occur and was not built. Each had acquire timeouts of one
+  second (1, 1, 1 and 5 in the order 1,177 s, 446 s, 39 s, 30 s): one at 2.1 s, one at 14 s and one at 2.1 s
+  in the first three, and in the 30 s session five after the swapchain was remade for the 954x1032 to
+  1912x1032 resize (5.1 s of the 30.4 s inside acquire; from about 160 acquisitions a second to about 9 a
+  second for the next 6 s). The cause is not known. The presenter now logs,
+  per distinct state, the images, those held by the game, those queued, the swapchain's age and the time
+  since a present returned.
+- **Same sessions, memory.** The 30 s session's live allocator bytes rose from 540 MiB to 7,672 MiB
+  (8,432 MiB reserved, host and device memory together) within about two seconds, then fell to 886 MiB;
+  what the game was doing, and how much of it lay in device-local memory, is not recorded (the diagnostics now split live bytes that way).
+- **Shader upgrader and LLVM.** The authored legacy-AIR tests pass on LLVM 18.1.8, 19.1.7 (Debian
+  packages unpacked in a scratch directory) and 23.1, and the installed client's shader pack (2,275
+  libraries) upgrades and loads with no failure on each. A Debian-style `libLLVM.so.1` in
+  `llvm-N/lib` had been read as version 1 and discarded; it now takes N from its directory. LLVM 15 to
+  17 were not run.
+- **Not changed, with reasons.** Automatic GPU choice stays in loader order (a user's `DRI_PRIME` or
+  Mesa device-select order is that order). The RTX 3060 Ti is not added to the runtime's measured
+  identities: that table holds GPUs and driver releases its author captured and ran the lanes on, as an
+  exact match, and the 3060 Ti at 615.78.08 is not among them. The cost of being unmeasured is that the
+  runtime withholds eight driver answers measured elsewhere (for example `RowCopiesDispatchFaster` and
+  `SemaphoreOperationsStallSubmits`) and assumes `MultisampledStencilColourCopies`; its effect on frame
+  time was not measured.
+- **Checks.** The fork's full gate at `8624a3b`: 1,328 validation tests passed (4 skipped), 1,006 runtime
+  and devtools tests passed (2 skipped), and format, clippy in every configuration, rustdoc, doctests and
+  the API reference passed; the memory split after it has a unit test, a clean clippy and the runtime
+  source record. On the RTX under the Khronos validation layer: 17 runtime GPU tests with no validation
+  errors, the C ABI, X11 presentation, preload and host suite (30 host tests, 2 of which need a device),
+  and the native Wayland test (1,192 frames presented, no acquire timeout, 3 mailbox swapchains). Launcher
+  tests 261 with one failure (`session_housekeeping_test` trace file) that also fails on the previous
+  commit here because this computer's runtime is CiderDarling; two settings UI regressions under Xvfb.
+  Not run: the benchmark comparison, gameplay, any GPU but this one, LLVM 15 to 17.
+
 ## Revisions and outputs
 
 | Component | Revision |

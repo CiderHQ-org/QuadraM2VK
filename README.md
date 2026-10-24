@@ -37,6 +37,26 @@ For the authorized real-GPU testing, see [HARDWARE-TESTING.md](HARDWARE-TESTING.
 The current agent-run RTX checks used the now-accessible GPU and desktop. The
 [distribution workflow](CI.md) covers Debian, Fedora, Arch and Ubuntu using software Vulkan.
 
+## Hardware compatibility and settings
+
+- **Settings.** Settings → Environment → Quadra M2VK adds accuracy (fast, exact textures, exact), frame
+  presentation, memory priority, a graphics memory limit, shader compile threads and the number of
+  learned shaders kept ready, with a reset row. Each applies at the next launch and changes nothing until
+  you change it. See the [bridge guide](integration/quadra/prototype/metal-vulkan/README.md#tuning-memory-pressure-and-hardware-reports).
+- **Memory.** Where a driver has `VK_EXT_memory_priority` and `VK_EXT_pageable_device_local_memory`,
+  the runtime enables them and gives its blocks priorities. On the RTX 3060 Ti it made 9 GiB of device
+  buffers on an 8 GiB card, where without them it failed at 7 GiB. The graphics memory budget no longer
+  counts a BAR window twice or under-reports an APU.
+- **Before launch.** The probe now also copies data through the GPU and reads it back; if that or opening a
+  device fails, the launch plays with OpenGL once and says why, and a missing driver names what to install.
+- **Reports.** The launch log has a `[Quadra Metal] gpu:` line (driver, whether the runtime measured that
+  exact GPU and driver, assumed defects, heaps, extensions), and `quadrahq --hardware-report --graphics`
+  includes the same under `m2vk`. See [HARDWARE-TESTING.md](HARDWARE-TESTING.md#testing-another-gpu).
+- **Shader upgrader.** It prefers a libLLVM the game already maps and reads Debian's `libLLVM.so.1`
+  layout. It was run on LLVM 18, 19 and 23; distribution CI now runs it against every installed libLLVM.
+- **CiderDarling.** [CIDERDARLING-INTEGRATION.md](CIDERDARLING-INTEGRATION.md) lists what must change to
+  ship Quadra M2VK inside CiderDarling.
+
 ## Included changes
 
 - Client-scoped shader preloading learns successful pipelines locally and replays them on
