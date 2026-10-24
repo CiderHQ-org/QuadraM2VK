@@ -150,9 +150,16 @@ leaving a game. What was run, what it showed, and what it did not:
   with edge-triggered reads) lost no edge. A TCP stress fixture could not be run: its process dies at `socket()`
   in a throwaway prefix, cause not found. So the model (a non-UDP socket loses an edge; the game waits for it
   until its own timeout of about 15 s, which the loop notices at its next 10 s wake) is consistent with every
-  capture but not proven. The watcher now reads each socket's receive queue every second; a lost edge shows as
-  unread bytes in a socket in the middle of a freeze. If it does, the fix is to extend the shim's missed-event
-  check from UDP to the other socket types.
+  capture but not proven. The watcher now reads each socket's receive queue every second, and the next freeze
+  (12.5 s, 16.0 to 28.5 s after a leave at 15.9 s) refuted the socket version of the model: in the middle of
+  it no socket held unread bytes (every TCP connection established, receive queues empty) and the socket
+  table did not change between 19 s and 29 s. It also ended at the I/O loop's first 10 s wake, not its second
+  (the loop's waits turned from 50 ms to 10,000 ms between 16.0 and 19.0 s; the freeze ended at 28.65 s),
+  so "the second wake" is not a rule; the end of every freeze still falls on a wake of that loop, which is
+  expected by chance about one time in three per capture, so four in four is suggestive, not conclusive. The
+  game has four epoll sets (Darling's kqueues), six eventfds and two timerfds; one epoll set watches a timerfd that
+  was armed for 10.3 s and an eventfd, so the loop's wake sources are timers and user events, which the
+  watcher now also reads (eventfd counts, timerfd time to fire, epoll members) and lists in the lull report.
 - **Camera lock (a community report on Hyprland).** The default X11 window backend takes raw motion from
   XInput2 and, when none arrives within 100 ms, falls back to pointer deltas that stop at the screen edge
   unless the compositor locks the pointer. That matches "lift the mouse and restart the turn". It could
